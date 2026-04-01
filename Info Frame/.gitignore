@@ -1,0 +1,31 @@
+# Unity generated
+/Library/
+/Temp/
+/obj/
+/Logs/
+/UserSettings/
+
+# Build output
+/Build/
+/Builds/
+
+# Visual Studio / Rider
+*.csproj
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Unity crash reports
+sysinfo.txt
+*.stackdump
+
+# Crashlytics
+crashlytics-build.properties
