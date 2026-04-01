@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- SEO -->
+  <title>Into Frame — Generative AI 3D Environments</title>
+  <meta name="description" content="Into Frame transforms still images into interactive 3D environments using generative AI." />
+
+  <!-- Open Graph -->
+  <meta property="og:title"       content="Into Frame" />
+  <meta property="og:description" content="Transforming images into interactive 3D environments with generative AI." />
+  <meta property="og:type"        content="website" />
+  <!-- <meta property="og:image" content="assets/images/og-image.jpg" /> -->
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
+
+  <!-- Stylesheet -->
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+  <!-- ======================================================
+       Navigation
+  ======================================================= -->
+  <header>
+    <nav class="nav" aria-label="Main navigation">
+      <div class="container">
+        <div class="nav__inner">
+
+          <a href="#" class="nav__logo">Into Frame</a>
+
+          <ul class="nav__links" role="list">
+            <li><a href="#about"  class="nav__link">About</a></li>
+            <li><a href="#how"    class="nav__link">How it works</a></li>
+            <li><a href="#team"   class="nav__link">Team</a></li>
+            <li><a href="#papers" class="nav__link">Papers</a></li>
+            <li><a href="#contact" class="nav__link">Contact</a></li>
+          </ul>
+
+          <button class="nav__toggle" aria-label="Open menu" aria-expanded="false">
+            <span></span>
+            <span></span>
+            <span></span>
+          </button>
+
+        </div>
+      </div>
+    </nav>
+  </header>
+
+
+  <!-- ======================================================
+       Hero
+  ======================================================= -->
+  <section class="hero">
+
+    <!-- Background: replace with your canvas / video when ready -->
+    <div class="hero__bg" aria-hidden="true"></div>
+
+    <div class="container">
+      <div class="hero__content stagger">
+
+        <p class="label hero__eyebrow animate-fade-up">Research Project</p>
+
+        <h1 class="hero__title animate-fade-up">
+          Step inside<br>any image.
+        </h1>
+
+        <p class="hero__description animate-fade-up">
+          Into Frame uses generative AI to turn a single photograph
+          into a navigable, interactive 3D environment.
+        </p>
+
+        <div class="hero__actions animate-fade-up">
+          <a href="#how" class="btn btn--primary btn--lg">See how it works</a>
+          <a href="#papers" class="btn btn--secondary btn--lg">Read the paper</a>
+        </div>
+
+      </div>
+    </div>
+
+    <div class="hero__scroll" aria-hidden="true">
+      <span class="hero__scroll-line"></span>
+    </div>
+
+  </section>
+
+
+  <!-- ======================================================
+       About
+  ======================================================= -->
+  <section id="about" class="section">
+    <div class="container container--narrow">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">About</p>
+        <h2 class="section-heading__title">What is Into Frame?</h2>
+      </div>
+
+      <!-- Replace the placeholder text below with your real project description -->
+      <p class="section-intro__text" data-animate>
+        Into Frame is a research project exploring how <strong>generative AI</strong>
+        can reconstruct spatial depth and geometry from a flat image —
+        allowing users to explore a scene as if they were inside it.
+      </p>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       How it works
+  ======================================================= -->
+  <section id="how" class="section">
+    <div class="container">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Process</p>
+        <h2 class="section-heading__title">How it works</h2>
+        <p class="section-heading__sub">
+          A brief overview of the pipeline — expand each step as the project develops.
+        </p>
+      </div>
+
+      <div class="how-steps">
+
+        <div class="how-step" data-animate>
+          <span class="how-step__number"></span>
+          <div>
+            <h3 class="how-step__title">Image input</h3>
+            <p class="how-step__desc">
+              A single image is uploaded and pre-processed for the generative pipeline.
+              <!-- Add more detail here as the project matures -->
+            </p>
+          </div>
+        </div>
+
+        <div class="how-step" data-animate>
+          <span class="how-step__number"></span>
+          <div>
+            <h3 class="how-step__title">Depth & geometry estimation</h3>
+            <p class="how-step__desc">
+              The model infers a dense depth map and reconstructs 3D geometry from the 2D scene.
+            </p>
+          </div>
+        </div>
+
+        <div class="how-step" data-animate>
+          <span class="how-step__number"></span>
+          <div>
+            <h3 class="how-step__title">Environment generation</h3>
+            <p class="how-step__desc">
+              Generative techniques fill in occluded regions and produce a complete, navigable 3D scene.
+            </p>
+          </div>
+        </div>
+
+        <div class="how-step" data-animate>
+          <span class="how-step__number"></span>
+          <div>
+            <h3 class="how-step__title">Interactive exploration</h3>
+            <p class="how-step__desc">
+              Users can move freely through the reconstructed environment in real time.
+            </p>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       Media / Demo (placeholder)
+       Uncomment and populate when you have screenshots or video
+  ======================================================= -->
+  <!--
+  <section id="demo" class="section section--sm">
+    <div class="container">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Demo</p>
+        <h2 class="section-heading__title">See it in action</h2>
+      </div>
+
+      <div class="media-grid">
+        <div class="media-item">
+          <img src="assets/images/demo-1.jpg" alt="Demo scene 1" />
+        </div>
+        <div class="media-item">
+          <img src="assets/images/demo-2.jpg" alt="Demo scene 2" />
+        </div>
+        <div class="media-item">
+          <img src="assets/images/demo-3.jpg" alt="Demo scene 3" />
+        </div>
+      </div>
+
+    </div>
+  </section>
+  -->
+
+
+  <!-- ======================================================
+       Team (placeholder)
+  ======================================================= -->
+  <section id="team" class="section">
+    <div class="container">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Team</p>
+        <h2 class="section-heading__title">The people behind it</h2>
+      </div>
+
+      <!-- Replace with real team cards -->
+      <div class="grid grid-auto" data-animate>
+
+        <div class="card card--person">
+          <div class="card__avatar">
+            <!-- <img src="assets/images/person-1.jpg" alt="Name" /> -->
+          </div>
+          <p class="card__name">Name</p>
+          <p class="card__role">Role / Institution</p>
+        </div>
+
+        <div class="card card--person">
+          <div class="card__avatar"></div>
+          <p class="card__name">Name</p>
+          <p class="card__role">Role / Institution</p>
+        </div>
+
+        <div class="card card--person">
+          <div class="card__avatar"></div>
+          <p class="card__name">Name</p>
+          <p class="card__role">Role / Institution</p>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       Papers / Publications
+  ======================================================= -->
+  <section id="papers" class="section">
+    <div class="container container--narrow">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Publications</p>
+        <h2 class="section-heading__title">Papers</h2>
+      </div>
+
+      <!-- Replace with real paper entries -->
+      <div class="flex flex-col gap-4" data-animate>
+
+        <div class="card card--paper">
+          <div>
+            <p class="label mb-4">Preprint · 2024</p>
+            <h3 class="card__title">Paper title goes here</h3>
+            <p class="card__body">Author One, Author Two, Author Three</p>
+            <p class="card__meta">arXiv:0000.00000</p>
+          </div>
+          <div class="flex flex-col gap-2 mt-auto">
+            <a href="#" class="btn btn--secondary btn--sm">PDF</a>
+            <a href="#" class="btn btn--ghost btn--sm">arXiv ↗</a>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       Contact
+  ======================================================= -->
+  <section id="contact" class="section">
+    <div class="container container--narrow text-center">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Contact</p>
+        <h2 class="section-heading__title">Get in touch</h2>
+        <p class="section-heading__sub">
+          Questions, collaborations, or just want to say hello?
+        </p>
+      </div>
+
+      <div data-animate>
+        <!-- Replace with your email or contact form -->
+        <a href="mailto:hello@example.com" class="btn btn--primary btn--lg">
+          hello@example.com
+        </a>
+      </div>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       Footer
+  ======================================================= -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer__inner">
+
+        <span class="footer__logo">Into Frame</span>
+
+        <nav aria-label="Footer links">
+          <ul class="footer__links" role="list">
+            <li><a href="#about"   class="footer__link">About</a></li>
+            <li><a href="#papers"  class="footer__link">Papers</a></li>
+            <li><a href="#contact" class="footer__link">Contact</a></li>
+          </ul>
+        </nav>
+
+        <p class="footer__copy">© 2024 Into Frame Research</p>
+
+      </div>
+    </div>
+  </footer>
+
+
+  <!-- Scripts -->
+  <script src="js/main.js" defer></script>
+
+</body>
+</html>
