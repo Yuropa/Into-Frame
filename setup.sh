@@ -1,26 +1,37 @@
 #!/bin/bash
 set -e
 
-# 1. Create a fresh environment with Python
-echo "Creating Conda environment 'frame'..."
-conda create -y -n frame python=3.10 pip setuptools wheel
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 
-# 2. Activate the environment (the hook makes it work inside a script)
+echo "Creating Conda environment 'frame'..."
+conda create -y -n frame python=3.12 pip setuptools wheel
+
 eval "$(conda shell.bash hook)"
 conda activate frame
 
-# 3. Install the correct PyTorch
+# Install PyTorch with MPS support (standard pip build includes MPS)
 echo "Installing PyTorch..."
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cpu
-else
-    pip install torch==2.2.0 torchvision==0.17.0 torchaudio==2.2.0 --index-url https://download.pytorch.org/whl/cu121
-fi
+pip install torch torchvision
 
-# 4. Install standard pip packages
+# Install standard pip packages
 echo "Installing pip requirements..."
-pip install -r requirements.txt
+pip install -r "$SCRIPT_DIR/requirements.txt"
 
+# SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
+echo "Installing SAM 3 via transformers..."
+pip install git+https://github.com/huggingface/transformers
+
+# Fix MPS pin_memory bug in transformers SAM3 video processor
+echo "Patching MPS compatibility bug..."
+PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
+sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
+
+# Hugging Face auth for gated checkpoints
+echo ""
+echo "⚠️  SAM 3 checkpoints require Hugging Face access."
+echo "   Request access at: https://huggingface.co/facebook/sam3"
+pip install huggingface_hub
+python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
 echo ""
 echo "Setup complete! To start:"
