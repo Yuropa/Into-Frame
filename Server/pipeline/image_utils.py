@@ -2,10 +2,19 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 import numpy as np
+import cv2
+import torchvision.transforms.functional as F
 
 class InputImage:
     def __init__(self, path):
         self.image = Image.open(path).convert("RGB")
+        self.canny = self.generate_canny(self.image)
+
+    def generate_canny(self, img):
+        img = np.array(img)
+        img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        return Image.fromarray(cv2.Canny(img, 100, 200))
+
 
     def _show_image(self, image):
         plt.imshow(image)

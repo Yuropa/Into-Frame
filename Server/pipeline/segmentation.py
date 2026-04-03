@@ -15,7 +15,7 @@ class ImageSeg:
         self.processor = Sam3Processor.from_pretrained("facebook/sam3")
 
 
-    def segment(self, input: InputImage, prompt: str = "water"):
+    def segment(self, input: InputImage, prompt: str= "all objects"):
         inputs = self.processor(images=input.image, text=prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():

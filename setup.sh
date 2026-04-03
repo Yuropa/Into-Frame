@@ -22,9 +22,11 @@ echo "Installing SAM 3 via transformers..."
 pip install git+https://github.com/huggingface/transformers
 
 # Fix MPS pin_memory bug in transformers SAM3 video processor
-echo "Patching MPS compatibility bug..."
-PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
-sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
+if [[ "$(uname)" == "Darwin" ]]; then
+    echo "Patching MPS compatibility bug..."
+    PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
+    sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
+fi
 
 # Hugging Face auth for gated checkpoints
 echo ""
