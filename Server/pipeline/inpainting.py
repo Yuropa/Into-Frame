@@ -12,7 +12,7 @@ class InPainting:
         self.height = 1024
 
         self.pipeline = StableDiffusion3Pipeline.from_pretrained(
-            "stabilityai/stable-diffusion-3.5-large", 
+            "stabilityai/stable-diffusion-3.5-medium", 
             torch_dtype=torch_dtype
         )
         self.pipeline = self.pipeline.to(device)
