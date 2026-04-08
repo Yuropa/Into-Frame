@@ -1,5 +1,5 @@
-from .image_utils import InputImage
-from .sd3_impls import SD3LatentFormat
+from util.image_utils import InputImage
+from pipeline.inpainting.sd3_impls import SD3LatentFormat
 import torch
 import numpy as np
 from diffusers import StableDiffusion3Pipeline
@@ -54,9 +54,8 @@ class InPainting:
             ).images[0]
         else:
             return self.pipeline(
-                prompt_embeds=self.remote_text_encoder(prompt),
+                prompt,
                 image=[input.image],
-                generator=torch.Generator(device=self.device).manual_seed(42),
                 num_inference_steps=num_inference_steps,
                 guidance_scale=guidance_scale,
             ).images[0]
