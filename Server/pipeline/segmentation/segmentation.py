@@ -17,7 +17,9 @@ class SegementationStage(PipelineStage):
             context.add_image(f"crop_{i}", crop)
 
         return context
-    
+
+    def model_names(self) -> list[str]:
+        return ImageSeg.model_names()
 
     def clean_up(self):
         super().clean_up()
