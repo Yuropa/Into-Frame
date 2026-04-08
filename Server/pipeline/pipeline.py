@@ -4,6 +4,7 @@ from typing import Optional
 import logging
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
+from huggingface_hub import snapshot_download
 
 from pipeline.segmentation.segmentation import SegementationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -73,6 +74,18 @@ class Pipeline:
         self.config.log.info(msg)
 
     def run(self):
+        self._download_models()
+        self._run_pipeline()
+
+    def _download_models(self):
+        for stage in self.stages:
+            for model in stage.model_names():
+                self.log_info(f"Checking for model: {model}")
+                snapshot_download(repo_id=repo_id)
+
+        self.log_info("All models present")
+
+    def _run_pipeline(self):
         self.log_info(f"Running with input: {self.config.input}")
         context = PipelineContext(self.config.input)
 
@@ -86,7 +99,7 @@ class Pipeline:
             task = progress.add_task("Processing...", total=len(self.stages))
 
             for stage in self.stages:
-                self.log_info(f"Handling stagge {stage.name}")   # scrolls normally above the bar
+                self.log_info(f"Handling stagge {stage.name}")
                 stage._set_progress(progress)
 
                 context = stage.run(context)

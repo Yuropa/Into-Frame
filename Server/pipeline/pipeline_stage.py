@@ -39,6 +39,9 @@ class PipelineStage:
         self.device = config.device
         self.torch_dtype = config.torch_dtype
 
+    def model_names(self) -> list[str]:
+        return []
+
     def clean_up(self):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()

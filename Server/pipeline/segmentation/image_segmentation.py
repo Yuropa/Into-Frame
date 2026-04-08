@@ -34,6 +34,10 @@ class ImageSeg:
         self.model = Sam3Model.from_pretrained("facebook/sam3").to(device)
         self.processor = Sam3Processor.from_pretrained("facebook/sam3")
 
+    @classmethod
+    def model_names(cls) -> list[str]:
+        return ["facebook/sam3"]
+
     def segment(self, input: Image, prompt: str= "all objects"):
         inputs = self.processor(images=input.image, text=prompt, return_tensors="pt").to(self.device)
 
