@@ -7,11 +7,12 @@ import torch
 from typing import Generator
 
 class CroppedImage:
-    def __init__(self, image, box, mask, score) -> None:
+    def __init__(self, image, box, mask, cropped_image, score) -> None:
         self.image = image
         self.box = box
         self.score = score
         self.mask = mask
+        self.cropped_image = cropped_image
 
 class SegmentationResult:
     def __init__(self, results):
@@ -33,7 +34,8 @@ class SegmentationResult:
             bbox = alpha.getbbox()
             if bbox:
                 rgba = rgba.crop(bbox)
-                yield CroppedImage(Image(rgba), self.boxes[idx], alpha, self.scores[idx])
+                cropped_image = Image(source.image.crop(bbox))
+                yield CroppedImage(Image(rgba), self.boxes[idx], alpha, cropped_image, self.scores[idx])
 
 
 class ImageSeg:

@@ -26,9 +26,7 @@ class SegmentationStage(PipelineStage):
         captioning_task = self.create_progress(len(result.masks), "Captioning...")
         for i, crop in enumerate(result.masked_images(context.input_image)):
             context.add_image(f"crop_{i}", crop.image)
-
-            captioning_image = self._create_captioning_image(context.input_image, crop.mask, crop.box)
-            label = self._captioning.caption(captioning_image)
+            label = self._captioning.caption(crop.cropped_image)
 
             metadata = {
                 "box": [float(x) for x in crop.box],
@@ -36,7 +34,7 @@ class SegmentationStage(PipelineStage):
                 "label": label
             }
             context.add_object(f"metadata_{i}", metadata)
-            context.add_image(f"masked_{i}", captioning_image)
+            context.add_image(f"masked_{i}", crop.cropped_image)
             self.advance_progress(captioning_task)
 
         context.add_object("count", len(result.masks))
@@ -50,17 +48,3 @@ class SegmentationStage(PipelineStage):
         super().clean_up()
         self._seg = None
         self._captioning = None
-
-    def _create_captioning_image(self, original, mask, box):
-        x1, y1, x2, y2 = [int(x) for x in box]
-        if x1 > x2:
-            x1, x2 = x2, x1
-        if y1 > y2:
-            y1, y2 = y2, y1
-
-        original = original.image
-        background = original.copy().point(lambda p: p * 0.3)
-        result = background.copy()
-        result.paste(original, mask=mask)
-        result = result.crop((x1, y1, x2, y2))
-        return Image(result)
