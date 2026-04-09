@@ -17,20 +17,26 @@ pip install torch torchvision
 echo "Installing pip requirements..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
 
-# SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
-echo "Installing SAM 3 via transformers..."
-pip install git+https://github.com/huggingface/transformers
+## SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
+#echo "Installing SAM 3 via transformers..."
+#pip install git+https://github.com/huggingface/transformers
 
 # Fix MPS pin_memory bug in transformers SAM3 video processor
-if [[ "$(uname)" == "Darwin" ]]; then
-    echo "Patching MPS compatibility bug..."
-    PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
-    sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
-fi
+#if [[ "$(uname)" == "Darwin" ]]; then
+#    echo "Patching MPS compatibility bug..."
+#    PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
+#    sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
+#fi
+
+mkdir "$SCRIPT_DIR/lib"
+
+echo "Installing SAM 2"
+git clone https://github.com/facebookresearch/sam2.git "$SCRIPT_DIR/lib/sam2"
+pip install -e "$SCRIPT_DIR/lib/sam2"
 
 # Hugging Face auth for gated checkpoints
 echo ""
-echo "⚠️  SAM 3 checkpoints require Hugging Face access."
+echo "⚠️  SAM checkpoints require Hugging Face access."
 echo "   Request access at: https://huggingface.co/facebook/sam3"
 pip install huggingface_hub
 python -c "from huggingface_hub import interpreter_login; interpreter_login()"

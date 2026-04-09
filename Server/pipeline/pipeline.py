@@ -81,7 +81,7 @@ class Pipeline:
         for stage in self.stages:
             for model in stage.model_names():
                 self.log_info(f"Checking for model: {model}")
-                snapshot_download(repo_id=repo_id)
+                snapshot_download(repo_id=model)
 
         self.log_info("All models present")
 
