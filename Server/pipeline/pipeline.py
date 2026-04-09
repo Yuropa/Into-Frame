@@ -7,7 +7,7 @@ from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
 from huggingface_hub import snapshot_download
 
-from pipeline.segmentation.segmentation import SegementationStage
+from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext
 
@@ -22,8 +22,9 @@ class PipelineConfiguration:
         self.temp = Path(output + "/build")
 
         self.output.mkdir(parents=True, exist_ok=True)
+        self._clear_directory(self.output)
+
         self.temp.mkdir(parents=True, exist_ok=True) 
-        self._clear_directory(self.temp)
 
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -76,7 +77,7 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
-            SegementationStage(config=config.stage_config("Object Segementation"))
+            SegmentationStage(config=config.stage_config("Object Segementation"))
         ]
 
     def log_info(self, msg):

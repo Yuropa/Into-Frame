@@ -1,5 +1,19 @@
 from util.image_utils import Image
 from pathlib import Path
+import json
+import numpy as np
+
+class JSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        return super().default(obj)
 
 class ContextValue():
     def __init__(self, name) -> None:
@@ -11,8 +25,18 @@ class ContextValue():
         self.type = "image"
         self.value = Image(image)
 
+    def set_object(self, obj):
+        self.type = "obj"
+        self.value = obj
+
     def image(self):
         if self.type == "image":
+            return self.value
+        else:
+            return None
+        
+    def object(self):
+        if self.type == "obj":
             return self.value
         else:
             return None
@@ -20,6 +44,9 @@ class ContextValue():
     def write(self, path):
         if self.type == "image":
             self.image().save(path=str(path / (self.name + ".png")))
+        elif self.type == "obj":
+            with open(str(path / (self.name + ".json")), "w") as f:
+                json.dump(self.object(), f, indent=4, cls=JSONEncoder)
 
 class PipelineContext():
     def __init__(self, input: any) -> None:
@@ -63,11 +90,18 @@ class PipelineContext():
 
     def image(self, name: str):
         return self._value(name).image()
+    
+    def add_object(self, name: str, input: any):
+        value = ContextValue(name=name)
+        value.set_object(input)
+        self._set_value(name, value)
+
+    def object(self, name: str):
+        return self._value(name).object()
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True) 
         self.input_image.save(path=str(path / "input.png"))
-
         for value in self._state.values():
             value.write(path)
 

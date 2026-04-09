@@ -69,6 +69,12 @@ class PipelineStage:
 
         return self.progress.add_task("  " + label, total=count)
 
+    def advance_progress(self, task):
+        self.progress.advance(task)
+
+    def finish_progress(self, task):
+        self.progress.remove_task(task)
+
     def _set_progress(self, progress: Progress):
         self.progress = progress
 
