@@ -7,8 +7,8 @@ from transformers import Swin2SRForImageSuperResolution, Swin2SRImageProcessor
 class SuperSample:
     def __init__(self, device) -> None:
         self.device = device
-        self.processor = Swin2SRImageProcessor.from_pretrained("caidas/swin2SR-realworld-sr-x4-64-bsrgan-finetune")
-        self.model = Swin2SRForImageSuperResolution.from_pretrained("caidas/swin2SR-realworld-sr-x4-64-bsrgan-finetune").to(device)
+        self.processor = Swin2SRImageProcessor.from_pretrained("caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr")
+        self.model = Swin2SRForImageSuperResolution.from_pretrained("caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr").to(device)
 
     def supersample(self, image: Image) -> Image:
         inputs = self.processor(image.image, return_tensors="pt").to(self.device)
@@ -24,4 +24,4 @@ class SuperSample:
     
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["caidas/swin2SR-realworld-sr-x4-64-bsrgan-finetune"]
+        return ["caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr"]

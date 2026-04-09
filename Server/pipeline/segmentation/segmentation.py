@@ -17,14 +17,15 @@ class SegmentationStage(PipelineStage):
             self._seg = ImageSeg(self.device)
         self.advance_progress(segmenting_task)
 
-        result = self._seg.segment(context.input_image)
+        input_image = context.input_image("image")
+        result = self._seg.segment(input_image)
 
         self._captioning = ImageCaptioning(self.device)
         self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)
 
         captioning_task = self.create_progress(len(result.masks), "Captioning...")
-        for i, crop in enumerate(result.masked_images(context.input_image)):
+        for i, crop in enumerate(result.masked_images(input_image)):
             context.add_image(f"crop_{i}", crop.image)
             label = self._captioning.caption(crop.cropped_image)
 
