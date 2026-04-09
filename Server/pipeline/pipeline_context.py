@@ -49,27 +49,30 @@ class ContextValue():
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
 
 class PipelineContext():
-    def __init__(self, input: any) -> None:
-        self.input_image = Image(input) 
+    def __init__(self) -> None:
         self._stage_state = {}
         self._state = {}
         self._current_stage = ""
+        self._previous_stage = ""
 
     def push_stage(self, name: str):
         self._current_stage = name
 
     def pop_stage(self):
+        self._previous_stage = self._current_stage
         self._current_stage = ""
 
-    def _value(self, name):
-        if len(self._current_stage) == 0:
+    def _value(self, name, search_stage = None):
+        if search_stage is None:
+            search_stage = self._current_stage
+
+        if len(search_stage) == 0:
             return self._state[name]
     
-        if self._current_stage in self._stage_state:
-            return self._stage_state[self._current_stage][name]
+        if search_stage in self._stage_state:
+            return self._stage_state[search_stage][name]
         
-        self._stage_state[self._current_stage] = {}
-        return self._stage_state[self._current_stage][name]
+        return None
 
     def _set_value(self, name, value):
         if len(self._current_stage) == 0:
@@ -91,6 +94,9 @@ class PipelineContext():
     def image(self, name: str):
         return self._value(name).image()
     
+    def input_image(self, name: str):
+        return self._value(name, self._previous_stage).image()
+    
     def add_object(self, name: str, input: any):
         value = ContextValue(name=name)
         value.set_object(input)
@@ -98,10 +104,12 @@ class PipelineContext():
 
     def object(self, name: str):
         return self._value(name).object()
+    
+    def input_object(self, name: str):
+        return self._value(name, self._previous_stage).object()
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True) 
-        self.input_image.save(path=str(path / "input.png"))
         for value in self._state.values():
             value.write(path)
 

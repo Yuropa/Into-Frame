@@ -16,7 +16,8 @@ class SupersamplingStage(PipelineStage):
             self._samp = SuperSample(self.device)
         self.advance_progress(segmenting_task)
 
-        result = self._samp.supersample(context.input_image)
+        input_image = context.input_image("image")
+        result = self._samp.supersample(input_image)
 
         context.add_image("image", result)
         self.finish_progress(segmenting_task)

@@ -8,6 +8,7 @@ from rich.logging import RichHandler
 from huggingface_hub import snapshot_download
 
 from pipeline.segmentation.segmentation import SegmentationStage
+from pipeline.supersamlping.supersampling import SupersamplingStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext
 
@@ -77,6 +78,7 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
+            SupersamplingStage(config=config.stage_config("Supersampling")),
             SegmentationStage(config=config.stage_config("Object Segementation"))
         ]
 
@@ -97,7 +99,8 @@ class Pipeline:
 
     def _run_pipeline(self):
         self.log_info(f"Running with input: {self.config.input}")
-        context = PipelineContext(self.config.input)
+        context = PipelineContext()
+        context.add_image("image", self.config.input)
 
         with Progress(
             SpinnerColumn(),
