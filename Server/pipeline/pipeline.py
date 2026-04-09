@@ -24,13 +24,13 @@ class PipelineConfiguration:
         self.temp.mkdir(parents=True, exist_ok=True)    
 
         if torch.cuda.is_available():
-            self.device = "cuda"
+            self.device = torch.device("cuda")
             self.torch_dtype = torch.bfloat16
         elif torch.mps.is_available():
-            self.device = "mps"
+            self.device = torch.device("mps")
             self.torch_dtype = torch.float
         else:
-            self.device = "cpu"
+            self.device = torch.device("cpu")
             self.torch_dtype = torch.bfloat16
 
         logging.basicConfig(
