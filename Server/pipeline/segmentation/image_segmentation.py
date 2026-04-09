@@ -6,6 +6,12 @@ import numpy as np
 import torch
 from typing import Generator
 
+class CroppedImage:
+    def __init__(self, image, box, mask, score) -> None:
+        self.image = image
+        self.box = box
+        self.score = score
+        self.mask = mask
 
 class SegmentationResult:
     def __init__(self, results):
@@ -14,11 +20,12 @@ class SegmentationResult:
         self.boxes = [r['bbox'] for r in results]
         self.scores = [r['predicted_iou'] for r in results]
 
-    def masked_images(self, source: Image) -> Generator[Image, None, None]:
+    def masked_images(self, source: Image) -> Generator[CroppedImage, None, None]:
         """Yield a masked RGBA crop for each segmented object."""
         source_rgba = source.image.convert("RGBA")
 
-        for mask in self.masks:
+        for idx in range(len(self.masks)):
+            mask = self.masks[idx]
             rgba = source_rgba.copy()
             alpha = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
             rgba.putalpha(alpha)
@@ -26,14 +33,13 @@ class SegmentationResult:
             bbox = alpha.getbbox()
             if bbox:
                 rgba = rgba.crop(bbox)
-                yield Image(rgba)
+                yield CroppedImage(Image(rgba), self.boxes[idx], alpha, self.scores[idx])
 
 
 class ImageSeg:
     def __init__(self, device):
         self.device = device
 
-        # build_sam2_hf pulls the model from HuggingFace — no local checkpoint needed
         self.model = build_sam2_hf(
             "facebook/sam2.1-hiera-large",
             device=device
