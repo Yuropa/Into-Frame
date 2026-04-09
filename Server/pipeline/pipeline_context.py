@@ -13,7 +13,7 @@ class PipelineContext():
         return self._images[name]
 
     def save(self, path: Path):
-        self.input_image.save(path=str(path / "input.jpeg"))
+        self.input_image.save(path=str(path / "input.png"))
 
         for name, image in self._images.items(): 
-            image.save(path=str(path / (name + ".jpeg")))
+            image.save(path=str(path / (name + ".png")))

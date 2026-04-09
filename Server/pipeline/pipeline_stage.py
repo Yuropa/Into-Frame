@@ -43,9 +43,13 @@ class PipelineStage:
         return []
 
     def clean_up(self):
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        torch.cuda.synchronize()  
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            torch.cuda.synchronize()
+        elif self.device.type == "mps":
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
 
     def log_info(self, message):
         self.config.log.info(message)
