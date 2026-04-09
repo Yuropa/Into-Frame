@@ -2,6 +2,7 @@ from pathlib import Path
 import torch
 from typing import Optional
 import logging
+import shutil
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
 from huggingface_hub import snapshot_download
@@ -21,7 +22,8 @@ class PipelineConfiguration:
         self.temp = Path(output + "/build")
 
         self.output.mkdir(parents=True, exist_ok=True)
-        self.temp.mkdir(parents=True, exist_ok=True)    
+        self.temp.mkdir(parents=True, exist_ok=True) 
+        self._clear_directory(self.temp)
 
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -39,6 +41,13 @@ class PipelineConfiguration:
             handlers=[RichHandler(rich_tracebacks=True)]
         )
         self.log = logging.getLogger("rich")
+
+    def _clear_directory(self, path: Path):
+        for item in path.iterdir():
+            if item.is_file():
+                item.unlink()
+            elif item.is_dir():
+                shutil.rmtree(item)
 
     def stage_config(self, name: str, input: Optional[Path] = None) -> PipelineStageConfiguration:
         if input is None:
@@ -102,7 +111,9 @@ class Pipeline:
                 self.log_info(f"Handling stagge {stage.name}")
                 stage._set_progress(progress)
 
+                context.push_stage(stage.name)
                 context = stage.run(context)
+                context.pop_stage()
 
                 stage.clean_up()
                 progress.advance(task)
