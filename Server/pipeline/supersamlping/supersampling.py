@@ -11,15 +11,19 @@ class SupersamplingStage(PipelineStage):
         self._samp = None
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        segmenting_task = self.create_progress(2, "Supersampling...")
+        count = context.input_object("count")
+
+        segmenting_task = self.create_progress(count + 1, "Supersampling...")
         if self._samp is None:
             self._samp = SuperSample(self.device)
         self.advance_progress(segmenting_task)
 
-        input_image = context.input_image("image")
-        result = self._samp.supersample(input_image)
+        for i in range(count):
+            input_image = context.input_image(f"crop_{i}")
+            result = self._samp.supersample(input_image)
 
-        context.add_image("image", result)
+            context.add_image(f"crop_{i}", result)
+            self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)
         return context
 

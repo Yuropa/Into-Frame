@@ -25,6 +25,10 @@ class ContextValue():
         self.type = "image"
         self.value = Image(image)
 
+    def set_mesh(self, mesh):
+        self.type = "mesh"
+        self.value = mesh
+
     def set_object(self, obj):
         self.type = "obj"
         self.value = obj
@@ -41,9 +45,17 @@ class ContextValue():
         else:
             return None
         
+    def mesh(self):
+        if self.type == "mesh":
+            return self.value
+        else:
+            return None
+        
     def write(self, path):
         if self.type == "image":
             self.image().save(path=str(path / (self.name + ".png")))
+        elif self.type == "mesh":
+            self.mesh().save(str(path / (self.name + ".glb")))
         elif self.type == "obj":
             with open(str(path / (self.name + ".json")), "w") as f:
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
@@ -97,6 +109,7 @@ class PipelineContext():
     def input_image(self, name: str):
         return self._value(name, self._previous_stage).image()
     
+
     def add_object(self, name: str, input: any):
         value = ContextValue(name=name)
         value.set_object(input)
@@ -107,6 +120,19 @@ class PipelineContext():
     
     def input_object(self, name: str):
         return self._value(name, self._previous_stage).object()
+
+
+    def add_mesh(self, name: str, input: any):
+        value = ContextValue(name=name)
+        value.set_mesh(input)
+        self._set_value(name, value)
+
+    def mesh(self, name: str):
+        return self._value(name).mesh()
+    
+    def input_mesh(self, name: str):
+        return self._value(name, self._previous_stage).mesh()
+    
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True) 

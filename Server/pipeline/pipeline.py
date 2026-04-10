@@ -78,22 +78,27 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
-            SupersamplingStage(config=config.stage_config("Supersampling")),
-            SegmentationStage(config=config.stage_config("Object Segementation"))
+            SegmentationStage(config=config.stage_config("Object Segementation")),
+            SupersamplingStage(config=config.stage_config("Supersampling"))
         ]
 
     def log_info(self, msg):
         self.config.log.info(msg)
 
     def run(self):
-        self._download_models()
+        self.download_models()
         self._run_pipeline()
 
-    def _download_models(self):
+    def download_models(self):
+        all_models = set()
+
         for stage in self.stages:
             for model in stage.model_names():
-                self.log_info(f"Checking for model: {model}")
-                snapshot_download(repo_id=model)
+                all_models.add(model)
+
+        for model in all_models:
+            self.log_info(f"Checking for model: {model}")
+            snapshot_download(repo_id=model)
 
         self.log_info("All models present")
 
@@ -122,4 +127,4 @@ class Pipeline:
                 stage.clean_up()
                 progress.advance(task)
 
-        context.save(self.config.output)
+                context.save(self.config.output)
