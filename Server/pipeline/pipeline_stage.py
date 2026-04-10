@@ -22,11 +22,17 @@ class PipelineStageConfiguration:
             ):
         self.name = name
         self.input = input
-        self.output = output_root / name
-        self.temp = temp / name
+        if output_root is not None:
+            self.output = output_root / name
+            self.output.mkdir(parents=True, exist_ok=True)
+        else:
+            self.output = None
 
-        self.output.mkdir(parents=True, exist_ok=True)
-        self.temp.mkdir(parents=True, exist_ok=True)    
+        if temp is not None:
+            self.temp = temp / name
+            self.temp.mkdir(parents=True, exist_ok=True)    
+        else:
+            self.temp = None
 
         self.device = device
         self.torch_dtype = torch_dtype
@@ -41,6 +47,12 @@ class PipelineStage:
 
     def model_names(self) -> list[str]:
         return []
+
+    def log_memory_usage(self):
+        if self.device.type == "cuda":
+            print("Peak Memory:", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
+        elif self.device.type == "mps":
+            print("Peak Memory:", torch.mps.driver_allocated_memory() / 1024 / 1024, "MB")
 
     def clean_up(self):
         if self.device.type == "cuda":

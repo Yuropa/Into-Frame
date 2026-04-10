@@ -13,19 +13,27 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext
 
 class PipelineConfiguration:
-    input: Path
-    output: Path
-    input: Path
+    input: Optional[Path]
+    output: Optional[Path]
+    input: Optional[Path]
 
-    def __init__(self, input: str, output: str):
-        self.input = Path(input)
-        self.output = Path(output)
-        self.temp = Path(output + "/build")
+    def __init__(self, input: Optional[str], output: Optional[str]):
+        if input is not None:
+            self.input = Path(input)
+        else:
+            self.input = None
 
-        self.output.mkdir(parents=True, exist_ok=True)
-        self._clear_directory(self.output)
+        if output is not None:
+            self.output = Path(output)
+            self.temp = Path(output + "/build")
 
-        self.temp.mkdir(parents=True, exist_ok=True) 
+            self.output.mkdir(parents=True, exist_ok=True)
+            self._clear_directory(self.output)
+
+            self.temp.mkdir(parents=True, exist_ok=True) 
+        else:
+            self.output = None
+            self.temp = None
 
         if torch.cuda.is_available():
             self.device = torch.device("cuda")
@@ -124,6 +132,7 @@ class Pipeline:
                 context = stage.run(context)
                 context.pop_stage()
 
+                stage.log_memory_usage()
                 stage.clean_up()
                 progress.advance(task)
 

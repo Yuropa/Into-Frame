@@ -73,8 +73,8 @@ def handle_run(args):
 
 def handle_download(args):
     config = PipelineConfiguration(
-        input=args.input,
-        output=args.output
+        input=None,
+        output=None
     )
 
     pipeline = Pipeline(
