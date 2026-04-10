@@ -10,7 +10,7 @@ def create_parser():
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # ---- server command ----
+    # server
     server_parser = subparsers.add_parser(
         "server",
         help="Start the generation server"
@@ -28,7 +28,7 @@ def create_parser():
         help="Port to run the server on"
     )
 
-    # ---- run command ----
+    # run
     run_parser = subparsers.add_parser(
         "run",
         help="Run pipeline on an image"
@@ -43,6 +43,12 @@ def create_parser():
         type=str,
         default="./output",
         help="Output directory"
+    )
+
+    # download
+    download_parser = subparsers.add_parser(
+        "download",
+        help="Download all the models needed for the pipeline"
     )
 
     return parser
@@ -65,6 +71,18 @@ def handle_run(args):
 
     pipeline.run()
 
+def handle_download(args):
+    config = PipelineConfiguration(
+        input=args.input,
+        output=args.output
+    )
+
+    pipeline = Pipeline(
+        config=config
+    )
+
+    pipeline.download_models()
+
 def main():
     parser = create_parser()
     try:
@@ -77,6 +95,8 @@ def main():
         handle_server(args)
     elif args.command == "run":
         handle_run(args)
+    elif args.command == "download":
+        handle_download(args)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,23 @@
 #!/bin/bash
 set -e
 
+cat << 'EOF'
+
+
+ ___  ________   ________ ________          ________ ________  ________  _____ ______   _______       
+|\  \|\   ___  \|\  _____\\   __  \        |\  _____\\   __  \|\   __  \|\   __  \|\   _ \  _   \|\  ___ \      
+\ \  \ \  \\ \  \ \  \__/\ \  \|\  \       \ \  \__/\ \  \|\  \ \  \|\  \ \  \\\__\ \  \ \   __/|     
+ \ \  \ \  \\ \  \ \   __\\ \  \\\  \       \ \   __\\ \   _  _\ \   __  \ \  \\|__| \  \ \  \_|/__   
+  \ \  \ \  \\ \  \ \  \_| \ \  \\\  \       \ \  \_| \ \  \\  \\ \  \ \  \ \  \    \ \  \ \  \_|\ \  
+   \ \__\ \__\\ \__\ \__\   \ \_______\       \ \__\   \ \__\\ _\\ \__\ \__\ \__\    \ \__\ \_______\ 
+    \|__|\|__| \|__|\|__|    \|_______|        \|__|    \|__|\|__|\|__|\|__|\|__|     \|__|\|_______| 
+
+
+ ** Installation can take a while to complete. Please be patient...
+
+
+EOF 
+
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 
 echo "Creating Conda environment 'frame'..."
@@ -28,18 +45,37 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 #    sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
 #fi
 
-mkdir "$SCRIPT_DIR/lib"
+LIB_DIR="$SCRIPT_DIR/lib"
+mkdir -p "$LIB_DIR"
 
 echo "Installing SAM 2"
-git clone https://github.com/facebookresearch/sam2.git "$SCRIPT_DIR/lib/sam2"
-pip install -e "$SCRIPT_DIR/lib/sam2"
+if [ ! -d "$LIB_DIR/sam2" ]; then
+    git clone https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
+fi
+pip install -e "$LIB_DIR/sam2"
+
+echo "Installing Trellis"
+if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
+    git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$LIB_DIR/TRELLIS.2"
+fi
+
+TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
+chmod +x "$TRELLIS_SETUP"
+bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 
 # Hugging Face auth for gated checkpoints
 echo ""
-echo "⚠️  SAM checkpoints require Hugging Face access."
-echo "   Request access at: https://huggingface.co/facebook/sam3"
+echo "⚠️  Model checkpoints require Hugging Face access."
 pip install huggingface_hub
 python -c "from huggingface_hub import interpreter_login; interpreter_login()"
+
+echo "Downloading models..."
+python3 "$SCRIPT_DIR/Server/main.py" download
+
+if [ $? -ne 0 ]; then
+    echo "Error: failed to download models. Access may be required on Hugging Face" >&2
+    echo "Models will be downloaded later when running pipeline" >&2
+fi
 
 echo ""
 echo "Setup complete! To start:"
