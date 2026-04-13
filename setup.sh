@@ -133,7 +133,6 @@ if [[ "$(uname)" == "Darwin" ]]; then
     warn "Removing xformers for MPS"
     sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
     sed -i '' '/"xformers"/d' "$LIB_DIR/depth-anything-3/pyproject.toml"
-    sed -i '' 's/from xformers.ops import SwiGLU/try:\n    from xformers.ops import SwiGLU\nexcept ImportError:\n    SwiGLU = None/' "$LIB_DIR/depth-anything-3/src/depth_anything_3/model/dinov2/layers/swiglu_ffn.py"
 fi
 
 pip install -e "$LIB_DIR/depth-anything-3"

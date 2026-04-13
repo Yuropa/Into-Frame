@@ -23,5 +23,5 @@ class ImageDepth:
     def depth(self, input: Image) -> DepthResult:
         image = input.image.convert("RGB")
         with torch.no_grad():
-            result = self.model.inference(image)
-        return DepthResult(result)
+            result = self.model.inference([image])
+        return DepthResult(result.depth)
