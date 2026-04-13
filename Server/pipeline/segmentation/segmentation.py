@@ -26,16 +26,16 @@ class SegmentationStage(PipelineStage):
 
         captioning_task = self.create_progress(len(result.masks), "Captioning...")
         for i, crop in enumerate(result.masked_images(input_image)):
-            context.add_image(f"crop_{i}", crop.image)
-            label = self._captioning.caption(crop.cropped_image)
+            # context.add_image(f"crop_{i}", crop.image)
+            # label = self._captioning.caption(crop.cropped_image)
 
-            metadata = {
-                "box": [float(x) for x in crop.box],
-                "score": float(crop.score),
-                "label": label
-            }
-            context.add_object(f"metadata_{i}", metadata)
-            context.add_image(f"masked_{i}", crop.cropped_image)
+            # metadata = {
+            #     "box": [float(x) for x in crop.box],
+            #     "score": float(crop.score),
+            #     "label": label
+            # }
+            # context.add_object(f"metadata_{i}", metadata)
+            # context.add_image(f"masked_{i}", crop.cropped_image)
             self.advance_progress(captioning_task)
 
         context.add_object("count", len(result.masks))

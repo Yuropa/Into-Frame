@@ -17,7 +17,11 @@ class DepthStage(PipelineStage):
         input_image = context.input_image(ContextKey.INPUT)
         if input_image is not None:
             result = self._depth.depth(input_image)
-            context.add_depth(ContextKey.DEPTH, Depth(result))
+            depth = Depth(result.depth)
+
+            self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
+
+            context.add_depth(ContextKey.DEPTH, depth)
 
         self.advance_progress(depth_task)
         self.finish_progress(depth_task)
