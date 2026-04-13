@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Optional, Any
 from logging import Logger
 from pathlib import Path
 from rich.progress import Progress
@@ -16,8 +16,8 @@ class PipelineStageConfiguration:
             input: Path, 
             output_root: Path, 
             temp: Path, 
-            device: str, 
-            torch_dtype: any,
+            device: torch.device, 
+            torch_dtype: Any,
             log: Logger
             ):
         self.name = name
@@ -72,8 +72,8 @@ class PipelineStage:
     def log_error(self, message):
         self.config.log.error(message)
 
-    def run(self, input: PipelineContext) -> PipelineContext:
-        return input
+    def run(self, context: PipelineContext) -> PipelineContext:
+        return context
 
     def create_progress(self, count: int, label: Optional[str] = None):
         if label is None:

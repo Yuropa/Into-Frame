@@ -27,6 +27,13 @@ def create_parser():
         default=8000,
         help="Port to run the server on"
     )
+    server_parser.add_argument(
+        '-d',
+        '--debug',
+        help="Saves intermediate files for debugg",
+        default=False,
+        type=bool
+    )
 
     # run
     run_parser = subparsers.add_parser(
@@ -44,6 +51,13 @@ def create_parser():
         default="./output",
         help="Output directory"
     )
+    run_parser.add_argument(
+        '-d',
+        '--debug',
+        help="Saves intermediate files for debugg",
+        default=True,
+        type=bool
+    )
 
     # download
     download_parser = subparsers.add_parser(
@@ -53,20 +67,25 @@ def create_parser():
 
     return parser
 
-
-def handle_server(args):
-    print(f"Starting server on {args.host}:{args.port}")
-    # TODO: add actual server logic here
-
-
-def handle_run(args):
+def _create_pipeline_config(args):
     config = PipelineConfiguration(
         input=args.input,
         output=args.output
     )
 
+    config.save_files = args.debug
+
+    return config
+
+def handle_server(args):
+    print(f"Starting server on {args.host}:{args.port}")
+    configuration = _create_pipeline_config(args=args)
+    # TODO: add actual server logic here
+
+
+def handle_run(args):
     pipeline = Pipeline(
-        config=config
+        config=_create_pipeline_config(args=args)
     )
 
     pipeline.run()

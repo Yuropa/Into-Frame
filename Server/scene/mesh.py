@@ -1,7 +1,7 @@
 import trimesh
 
 class Mesh:
-    def __init__(self, mesh) -> None:
+    def __init__(self, mesh: trimesh.Trimesh) -> None:
         # trimesh.Trimesh
         self.mesh = mesh
 
