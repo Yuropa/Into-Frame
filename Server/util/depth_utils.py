@@ -21,12 +21,19 @@ class Depth:
             raise TypeError(f"Unsupported type: {type(obj)}")
 
         self.depth = self.depth.astype(np.float32)
+        if self.depth.ndim == 3 and self.depth.shape[0] == 1:
+            self.depth = self.depth.squeeze(0)
 
     def save(self, path, scale=None):
         depth = self.depth.copy()
 
         if scale is not None:
             depth = depth * scale
+        else:
+            # Normalize to full uint16 range
+            dmin, dmax = depth.min(), depth.max()
+            if dmax > dmin:
+                depth = (depth - dmin) / (dmax - dmin) * 65535.0
 
         depth = np.clip(depth, 0, np.iinfo(np.uint16).max)
         depth_16 = depth.astype(np.uint16)

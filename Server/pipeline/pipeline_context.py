@@ -93,7 +93,7 @@ class PipelineContext():
     # Depth
     def add_depth(self, name: ContextKeyName, input: Any):
         value = ContextValue(name=name)
-        value.set_mesh(input)
+        value.set_depth(input)
         self._set_value(name, value)
 
     def depth(self, name: ContextKeyName) -> Optional[Depth]:

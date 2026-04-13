@@ -48,11 +48,27 @@ class PipelineStage:
     def model_names(self) -> list[str]:
         return []
 
+    def _log_memory_usage(self, value):
+        mb = value / 1024 / 1024
+
+        if mb < 2048:  # less than 2GB
+            formatted = f"{mb:.0f} MB"
+        else:
+            gb = mb / 1024.0
+            formatted = f"{gb:.1f} GB"
+
+
+        BOLD = "\033[1m"
+        BLUE = "\033[94m"
+        RESET = "\033[0m"
+        
+        print(f"{BLUE}Peak Memory({self.name}): {BOLD}{formatted}{RESET}")
+
     def log_memory_usage(self):
         if self.device.type == "cuda":
-            print("Peak Memory:", torch.cuda.max_memory_allocated() / 1024 / 1024, "MB")
+            self._log_memory_usage(torch.cuda.max_memory_allocated())
         elif self.device.type == "mps":
-            print("Peak Memory:", torch.mps.driver_allocated_memory() / 1024 / 1024, "MB")
+            self._log_memory_usage(torch.mps.driver_allocated_memory())
 
     def clean_up(self):
         if self.device.type == "cuda":
