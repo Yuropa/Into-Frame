@@ -8,14 +8,16 @@ from rich.logging import RichHandler
 from huggingface_hub import snapshot_download
 
 from pipeline.segmentation.segmentation import SegmentationStage
-from pipeline.supersamlping.supersampling import SupersamplingStage
+from pipeline.supersampling.supersampling import SupersamplingStage
+from pipeline.depth.depth import DepthStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
-from pipeline.pipeline_context import PipelineContext
+from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class PipelineConfiguration:
     input: Optional[Path]
     output: Optional[Path]
     input: Optional[Path]
+    save_files: bool = False
 
     def __init__(self, input: Optional[str], output: Optional[str]):
         if input is not None:
@@ -87,7 +89,8 @@ class Pipeline:
 
         self.stages = [
             SegmentationStage(config=config.stage_config("Object Segementation")),
-            SupersamplingStage(config=config.stage_config("Supersampling"))
+            # SupersamplingStage(config=config.stage_config("Supersampling")),
+            DepthStage(config=config.stage_config("Depth Generation")),
         ]
 
     def log_info(self, msg):
@@ -113,7 +116,7 @@ class Pipeline:
     def _run_pipeline(self):
         self.log_info(f"Running with input: {self.config.input}")
         context = PipelineContext()
-        context.add_image("image", self.config.input)
+        context.add_image(ContextKey.INPUT, self.config.input)
 
         with Progress(
             SpinnerColumn(),
@@ -136,4 +139,5 @@ class Pipeline:
                 stage.clean_up()
                 progress.advance(task)
 
-                context.save(self.config.output)
+        if self.config.save_files:
+            context.save(self.config.output)

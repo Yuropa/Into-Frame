@@ -1,5 +1,5 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
-from pipeline.supersamlping.image_supersampling import SuperSample
+from pipeline.supersampling.image_supersampling import SuperSample
 from pipeline.pipeline_context import PipelineContext
 from util.image_utils import Image
 import numpy as np

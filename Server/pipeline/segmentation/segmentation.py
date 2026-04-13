@@ -1,7 +1,7 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.captioning.image_captioning import ImageCaptioning
-from pipeline.pipeline_context import PipelineContext
+from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.image_utils import Image
 import numpy as np
 import PIL
@@ -17,7 +17,7 @@ class SegmentationStage(PipelineStage):
             self._seg = ImageSeg(self.device)
         self.advance_progress(segmenting_task)
 
-        input_image = context.input_image("image")
+        input_image = context.input_image(ContextKey.INPUT)
         result = self._seg.segment(input_image)
 
         self._captioning = ImageCaptioning(self.device)
