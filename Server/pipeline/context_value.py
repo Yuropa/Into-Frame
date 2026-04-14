@@ -112,22 +112,46 @@ class ContextValue():
         else:
             return None
         
-    def write(self, path: Path):
+    def write(self, path: Path) -> Path:
         if self.type == ValueKeys.IMAGE:
-            self.image().save(path=str(path / (self.name + ".png")))
+            save_path = str(path / (self.name + ".png"))
+            self.image().save(path=save_path)
+            return Path(save_path)
+        
         elif self.type == ValueKeys.MESH:
-            self.mesh().save(str(path / (self.name + ".glb")))
+            save_path = str(path / (self.name + ".glb"))
+            self.mesh().save(path=save_path)
+            return Path(save_path)
+
         elif self.type == ValueKeys.OBJECT:
-            with open(str(path / (self.name + ".json")), "w") as f:
+            save_path = str(path / (self.name + ".json"))
+            with open(save_path, "w") as f:
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
+            
+            return Path(save_path)
+
         elif self.type == ValueKeys.DEPTH:
-            self.depth().save(path=str(path / (self.name + ".png")))
+            save_path = str(path / (self.name + ".png"))
+            self.depth().save(path=save_path)
+            return Path(save_path)
+
         elif self.type == ValueKeys.OBJECT3D:
-            with open(str(path / (self.name + ".json")), "w") as f:
+            save_path = str(path / (self.name + ".json"))
+            with open(save_path, "w") as f:
                 json.dump(self.object3d().encode(), f, indent=4, cls=JSONEncoder)
+
+            return Path(save_path)
+
         elif self.type == ValueKeys.SCENE:
-            with open(str(path / (self.name + ".json")), "w") as f:
+            save_path = str(path / (self.name + ".json"))
+            with open(save_path, "w") as f:
                 json.dump(self.scene().encode(), f, indent=4, cls=JSONEncoder)
+
+            return Path(save_path)
+
         elif self.type == ValueKeys.INTRINSICS:
-            with open(str(path / (self.name + ".json")), "w") as f:
+            save_path = str(path / (self.name + ".json"))
+            with open(save_path, "w") as f:
                 json.dump(self.intrinsics().encode(), f, indent=4, cls=JSONEncoder)
+
+            return Path(save_path)

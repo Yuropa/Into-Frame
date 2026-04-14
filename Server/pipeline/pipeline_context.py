@@ -164,3 +164,8 @@ class PipelineContext():
 
             for value in values.values():
                 value.write(new_path)
+
+    def save(self, name: ContextKeyName, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True) 
+        return self._value(name).write(path=path)
+        
