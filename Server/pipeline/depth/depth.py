@@ -2,6 +2,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.depth.image_depth import ImageDepth
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
+from scene.camera import CameraIntrinsics
 
 class DepthStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -19,9 +20,18 @@ class DepthStage(PipelineStage):
             result = self._depth.depth(input_image)
             depth = Depth(result.depth)
 
+            intrinsics = CameraIntrinsics.from_depth_anything(
+                result.intrinsics, 
+                color_width=input_image.width, 
+                color_height=input_image.height,
+                depth_width=depth.width,
+                depth_height=depth.height
+            )
+
             self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
             context.add_depth(ContextKey.DEPTH, depth)
+            context.add_intrinsics(ContextKey.INTRINSICS, intrinsics)
 
         self.advance_progress(depth_task)
         self.finish_progress(depth_task)

@@ -24,6 +24,21 @@ class Depth:
         if self.depth.ndim == 3 and self.depth.shape[0] == 1:
             self.depth = self.depth.squeeze(0)
 
+    @property
+    def width(self):
+        return self.depth.shape[1]
+
+    @property
+    def height(self):
+        return self.depth.shape[0]
+
+    @property
+    def size(self):
+        return (self.depth.shape[1], self.depth.shape[0])
+    
+    def __getitem__(self, key):
+        return self.depth[key]
+
     def save(self, path, scale=None):
         depth = self.depth.copy()
 

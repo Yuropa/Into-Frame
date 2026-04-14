@@ -32,6 +32,21 @@ class Image:
     def show(self):
         self._show_image(self.image)
 
+    @property
+    def width(self):
+        return self.image.width
+
+    @property
+    def height(self):
+        return self.image.height
+
+    @property
+    def size(self):
+        return (self.image.width, self.image.height)
+    
+    def __getitem__(self, key):
+        return self.image[key]
+
     def show_masks(self, masks):
         image = self.image.convert("RGBA")
 
