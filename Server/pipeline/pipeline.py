@@ -11,6 +11,7 @@ from huggingface_hub import snapshot_download
 from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
+from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 
@@ -79,6 +80,7 @@ class Pipeline:
             SegmentationStage(config=config.stage_config("Object Segementation")),
             # SupersamplingStage(config=config.stage_config("Supersampling")),
             DepthStage(config=config.stage_config("Depth Generation")),
+            SceneGenerationStage(config=config.stage_config("Scene Generation")),
         ]
 
     def log_info(self, msg):
@@ -87,9 +89,9 @@ class Pipeline:
     def set_input(self, input):
         self.input = input
 
-    def run(self, progress_queue: Optional[queue.SimpleQueue] = None):
+    def run(self, progress_queue: Optional[queue.SimpleQueue] = None) -> PipelineContext:
         self.download_models()
-        self._run_pipeline(progress_queue)
+        return self._run_pipeline(progress_queue)
 
     def download_models(self):
         all_models = set()
@@ -104,7 +106,7 @@ class Pipeline:
 
         self.log_info("All models present")
 
-    def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]):
+    def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
         context.add_image(ContextKey.INPUT, self.input)
@@ -114,7 +116,6 @@ class Pipeline:
         def post_progress():
                 if progress_queue is not None:
                     progress_queue.put({"step": current_step, "percent": current_step_index / float(len(self.stages))})
-
 
         with Progress(
             SpinnerColumn(),
@@ -144,4 +145,7 @@ class Pipeline:
                 post_progress()
 
         if self.config.save_files:
-            context.save(self.config.output)
+            if self.config.output is not None:
+                context.save(self.config.output)
+
+        return context

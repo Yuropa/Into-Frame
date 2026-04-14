@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Optional, Any
 from enum import StrEnum
 from scene.mesh import Mesh
+from scene.scene import Scene
+from scene.object import Object3D
+from scene.camera import CameraIntrinsics
 
 class ValueKeys(StrEnum):
     NONE = "none"
@@ -13,6 +16,9 @@ class ValueKeys(StrEnum):
     MESH = "mesh"
     OBJECT = "object"
     DEPTH = "depth"
+    OBJECT3D = "object_3d"
+    SCENE = "scene"
+    INTRINSICS = "intrinsics"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -52,6 +58,18 @@ class ContextValue():
         self.type = ValueKeys.DEPTH
         self.value = Depth(obj)
 
+    def set_object3d(self, obj: Object3D):
+        self.type = ValueKeys.OBJECT3D
+        self.value = obj
+
+    def set_scene(self, obj: Scene):  
+        self.type = ValueKeys.SCENE
+        self.value = obj  
+
+    def set_intrinsics(self, obj: CameraIntrinsics):  
+        self.type = ValueKeys.INTRINSICS
+        self.value = obj
+
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
             return self.value
@@ -76,6 +94,24 @@ class ContextValue():
         else:
             return None
         
+    def object3d(self) -> Optional[Object3D]:
+        if self.type == ValueKeys.OBJECT3D:
+            return self.value
+        else:
+            return None
+        
+    def scene(self) -> Optional[Scene]:
+        if self.type == ValueKeys.SCENE:
+            return self.value
+        else:
+            return None
+        
+    def intrinsics(self) -> Optional[CameraIntrinsics]:
+        if self.type == ValueKeys.INTRINSICS:
+            return self.value
+        else:
+            return None
+        
     def write(self, path: Path):
         if self.type == ValueKeys.IMAGE:
             self.image().save(path=str(path / (self.name + ".png")))
@@ -86,3 +122,12 @@ class ContextValue():
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
         elif self.type == ValueKeys.DEPTH:
             self.depth().save(path=str(path / (self.name + ".png")))
+        elif self.type == ValueKeys.OBJECT3D:
+            with open(str(path / (self.name + ".json")), "w") as f:
+                json.dump(self.object3d().encode(), f, indent=4, cls=JSONEncoder)
+        elif self.type == ValueKeys.SCENE:
+            with open(str(path / (self.name + ".json")), "w") as f:
+                json.dump(self.scene().encode(), f, indent=4, cls=JSONEncoder)
+        elif self.type == ValueKeys.INTRINSICS:
+            with open(str(path / (self.name + ".json")), "w") as f:
+                json.dump(self.intrinsics().encode(), f, indent=4, cls=JSONEncoder)

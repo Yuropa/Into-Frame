@@ -10,7 +10,7 @@ from typing import Any
 from pipeline.pipeline import Pipeline
 from server.messages import ServerMessages, ClientMessages
 from scene.scene import Scene
-from scene.object import Object
+from scene.object import Object3D
 
 import websockets
 
