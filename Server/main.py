@@ -26,8 +26,14 @@ def create_parser():
     server_parser.add_argument(
         "--port",
         type=int,
-        default=8000,
+        default=8080,
         help="Port to run the server on"
+    )
+    server_parser.add_argument(
+        "--asset-port",
+        type=int,
+        default=3000,
+        help="Port to run the asset server on"
     )
     server_parser.add_argument(
         '-d',

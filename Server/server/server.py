@@ -4,10 +4,13 @@ import math
 import uuid
 import threading
 import queue
+import os
+from aiohttp import web
 from copy import deepcopy
+from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import Any
-from pipeline.pipeline import Pipeline
+from typing import Any, Optional
+from pipeline.pipeline import Pipeline, PipelineContext, ContextKey
 from server.messages import ServerMessages, ClientMessages
 from scene.scene import Scene
 from scene.object import Object3D
@@ -18,19 +21,27 @@ class SimulationServerConfiguration():
     def __init__(self) -> None:
         self.address = "localhost"
         self.port = 8080
+        self.asset_port = 3000
         self.log = None
 
 class SimulationServer():
+    _context: Optional[PipelineContext]
+
     def __init__(self, config: SimulationServerConfiguration, pipeline: Pipeline) -> None:
         self.config = config
         self.pipeline = pipeline
         self.log = config.log
         self.clients: set = set()
 
+        self.asset_dir = pipeline.config.temp / "assets"
+
         self.scene = Scene()
 
         self._pipeline_task: asyncio.Task | None = None
         self._client_connected = asyncio.Event()
+
+        self._asset_server = web.Application()
+        self._context = None
 
     def port(self):
         return self.config.port
@@ -45,6 +56,41 @@ class SimulationServer():
         else:
             return addr
         
+    def asset_port(self):
+        return self.config.asset_port
+        
+    def _find_asset(self, filename) -> Optional[Path]:
+        matches = list(self.asset_dir.glob(f"{filename}.*"))
+        if not matches:
+            return None
+        if len(matches) > 0:
+            return matches[0]
+        
+        return None
+
+    async def _serve_assets(self):
+        async def serve_asset(request):
+            filename = request.match_info["filename"]
+
+            match = self._find_asset(filename)
+            if not match:
+                if self._context is not None:
+                    match = self._context.save(filename, self.asset_dir)
+
+            if not match:
+                # Coulnd't write the file out either
+                return web.Response(status=404)
+
+            return web.FileResponse(str(match))
+
+        self._asset_server.router.add_get("/assets/{filename}", serve_asset)
+
+        runner = web.AppRunner(self._asset_server)
+        await runner.setup()
+        site = web.TCPSite(runner, self.host(), self.asset_port())
+        await site.start()
+        self.log.info(f"*  Asset server running on http://{self.address()}:{self.asset_port()}/assets/")
+        
     async def _start(self):
         self.log.info("Waiting for a client to connect…")
         await self._client_connected.wait()
@@ -52,6 +98,7 @@ class SimulationServer():
 
     async def run(self):
         asyncio.ensure_future(self._start())
+        asyncio.ensure_future(self._serve_assets())
         async with websockets.serve(self._handler, self.host(), self.port()):
             self.log.info(f"*  Scene server running on ws://{self.address()}:{self.port()}")
             await asyncio.Future()
@@ -160,7 +207,9 @@ class SimulationServer():
         self.pipeline.set_input("../input.jpeg")
 
         try:
-            await asyncio.get_running_loop().run_in_executor(None, self.pipeline.run, progress_queue)
+            context_result = await asyncio.get_running_loop().run_in_executor(None, self.pipeline.run, progress_queue)
+            self.scene = context_result.scene(ContextKey.SCENE)
+            self._context = context_result
         except asyncio.CancelledError:
             progress_queue.put(None)   # unblock drain
             await drain_task
