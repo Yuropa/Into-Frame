@@ -36,6 +36,12 @@ def create_parser():
         default=False,
         type=bool
     )
+    server_parser.add_argument(
+        "-o", "--output",
+        type=str,
+        default="./output",
+        help="Output directory"
+    )
 
     # run
     run_parser = subparsers.add_parser(
@@ -71,7 +77,6 @@ def create_parser():
 
 def _create_pipeline_config(args):
     config = PipelineConfiguration(
-        input=args.input,
         output=args.output
     )
 
@@ -104,11 +109,11 @@ def handle_run(args):
         config=_create_pipeline_config(args=args)
     )
 
+    pipeline.set_input(args.input)
     pipeline.run()
 
 def handle_download(args):
     config = PipelineConfiguration(
-        input=None,
         output=None
     )
 

@@ -6,14 +6,12 @@ from rich.progress import Progress
 from pipeline.pipeline_context import PipelineContext
 
 class PipelineStageConfiguration:
-    input: Path
     output: Path
     temp: Path
 
     def __init__(
             self,
             name: str, 
-            input: Path, 
             output_root: Path, 
             temp: Path, 
             device: torch.device, 
@@ -21,7 +19,6 @@ class PipelineStageConfiguration:
             log: Logger
             ):
         self.name = name
-        self.input = input
         if output_root is not None:
             self.output = output_root / name
             self.output.mkdir(parents=True, exist_ok=True)

@@ -7,15 +7,6 @@ using UnityEngine;
 /// </summary>
 public class SceneObjectManager : MonoBehaviour
 {
-    [Header("Prefabs (map server type → prefab)")]
-    public GameObject cubePrefab;
-    public GameObject spherePrefab;
-    public GameObject capsulePrefab;
-    public GameObject cylinderPrefab;
-
-    [Header("Named Prefabs (for type = 'prefab')")]
-    public PrefabEntry[] namedPrefabs;
-
     [Header("Interpolation")]
     [Tooltip("Smooth out position/rotation updates from server")]
     public float lerpSpeed = 10f;

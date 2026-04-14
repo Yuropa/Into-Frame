@@ -15,17 +15,10 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class PipelineConfiguration:
-    input: Optional[Path]
     output: Optional[Path]
-    input: Optional[Path]
     save_files: bool = False
 
-    def __init__(self, input: Optional[str], output: Optional[str]):
-        if input is not None:
-            self.input = Path(input)
-        else:
-            self.input = None
-
+    def __init__(self, output: Optional[str]):
         if output is not None:
             self.output = Path(output)
             self.temp = Path(output + "/build")
@@ -62,15 +55,9 @@ class PipelineConfiguration:
             elif item.is_dir():
                 shutil.rmtree(item)
 
-    def stage_config(self, name: str, input: Optional[Path] = None) -> PipelineStageConfiguration:
-        if input is None:
-            target_path = self.input
-        else:
-            target_path = input
-
+    def stage_config(self, name: str) -> PipelineStageConfiguration:
         new_config = PipelineStageConfiguration(
-            name=name, 
-            input=target_path, 
+            name=name,
             output_root=self.output, 
             temp=self.temp, 
             device=self.device, 
@@ -97,6 +84,9 @@ class Pipeline:
     def log_info(self, msg):
         self.config.log.info(msg)
 
+    def set_input(self, input):
+        self.input = input
+
     def run(self, progress_queue: Optional[queue.SimpleQueue] = None):
         self.download_models()
         self._run_pipeline(progress_queue)
@@ -115,9 +105,9 @@ class Pipeline:
         self.log_info("All models present")
 
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]):
-        self.log_info(f"Running with input: {self.config.input}")
+        self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
-        context.add_image(ContextKey.INPUT, self.config.input)
+        context.add_image(ContextKey.INPUT, self.input)
 
         with Progress(
             SpinnerColumn(),

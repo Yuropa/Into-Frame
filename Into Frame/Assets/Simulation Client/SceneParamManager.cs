@@ -86,8 +86,7 @@ public class SceneParamManager : MonoBehaviour
         // Physics gravity
         Vector3 currentG = Physics.gravity;
         Physics.gravity = new Vector3(currentG.x, Mathf.Lerp(currentG.y, _targetGravity, ft), currentG.z);
-
-        // Time scale (applied immediately — lerping time scale gets weird)
+        
         Time.timeScale = _targetTimeScale;
     }
 }
