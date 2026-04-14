@@ -3,6 +3,7 @@ import torch
 from typing import Optional
 import logging
 import shutil
+import queue
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
 from huggingface_hub import snapshot_download
@@ -96,9 +97,9 @@ class Pipeline:
     def log_info(self, msg):
         self.config.log.info(msg)
 
-    def run(self):
+    def run(self, progress_queue: Optional[queue.SimpleQueue] = None):
         self.download_models()
-        self._run_pipeline()
+        self._run_pipeline(progress_queue)
 
     def download_models(self):
         all_models = set()
@@ -113,7 +114,7 @@ class Pipeline:
 
         self.log_info("All models present")
 
-    def _run_pipeline(self):
+    def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]):
         self.log_info(f"Running with input: {self.config.input}")
         context = PipelineContext()
         context.add_image(ContextKey.INPUT, self.config.input)
