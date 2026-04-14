@@ -146,6 +146,6 @@ class Pipeline:
 
         if self.config.save_files:
             if self.config.output is not None:
-                context.save(self.config.output)
+                context.save(path=self.config.output)
 
         return context

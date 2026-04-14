@@ -12493,6 +12493,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 7e386991fddd7437b998616e331f0d73, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SceneParamManager
+  directionalLight: {fileID: 0}
 --- !u!114 &1862969861
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -12505,6 +12506,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: a0adb3a808e7442a9aa3094c8be7a072, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SceneObjectManager
+  billboardPrefab: {fileID: 0}
+  assetBaseUrl: http://localhost:3000/assets/
   lerpSpeed: 10
 --- !u!114 &1862969862
 MonoBehaviour:
@@ -12518,7 +12521,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: c66b17594de15472c92c9350d678b80e, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::SceneClient
-  serverUrl: ws://localhost:8000
+  serverUrl: ws://localhost:8080
   reconnectDelay: 3
   objectManager: {fileID: 1862969861}
   paramManager: {fileID: 1862969860}
