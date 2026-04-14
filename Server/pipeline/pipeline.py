@@ -109,6 +109,13 @@ class Pipeline:
         context = PipelineContext()
         context.add_image(ContextKey.INPUT, self.input)
 
+        current_step = ""
+        current_step_index = 0
+        def post_progress():
+                if progress_queue is not None:
+                    progress_queue.put({"step": current_step, "percent": current_step_index / float(len(self.stages))})
+
+
         with Progress(
             SpinnerColumn(),
             "[progress.description]{task.description}",
@@ -122,6 +129,9 @@ class Pipeline:
                 self.log_info(f"Handling stagge {stage.name}")
                 stage._set_progress(progress)
 
+                current_step = stage.name
+                post_progress()
+
                 context.push_stage(stage.name)
                 context = stage.run(context)
                 context.pop_stage()
@@ -129,6 +139,9 @@ class Pipeline:
                 stage.log_memory_usage()
                 stage.clean_up()
                 progress.advance(task)
+        
+                current_step_index += 1
+                post_progress()
 
         if self.config.save_files:
             context.save(self.config.output)

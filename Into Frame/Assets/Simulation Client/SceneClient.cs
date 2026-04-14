@@ -56,10 +56,17 @@ public class SceneClient : MonoBehaviour
         await _ws.Connect();
     }
 
+    [Serializable]
+    private class TypeOnlyMessage
+    {
+        public string type;
+        public TypeOnlyMessage(string type) { this.type = type; }
+    }
+
     private void OnOpen()
     {
         Debug.Log("[SceneClient] Connected!");
-        Send(new { type = "CLIENT_READY" });
+        Send(new TypeOnlyMessage("CLIENT_READY"));
     }
 
     private void OnError(string error)
@@ -105,9 +112,11 @@ public class SceneClient : MonoBehaviour
         switch (type)
         {
             case "SCENE_INIT":
-                var init = JsonUtility.FromJson<SceneInitPayload>(ExtractPayload(fullJson));
+                string initPayload = ExtractPayload(fullJson);
+                Debug.Log($"[SceneClient] SCENE_INIT payload: {initPayload}");
+                var init = JsonUtility.FromJson<SceneInitPayload>(initPayload);
                 objectManager.ApplySceneInit(init);
-                paramManager.ApplyParams(init.@params);
+                paramManager.ApplyParams(init.scene);
                 break;
 
             case "OBJECT_SPAWN":
@@ -125,9 +134,9 @@ public class SceneClient : MonoBehaviour
                 objectManager.Destroy(destroy.id);
                 break;
 
-            case "SCENE_PARAM":
-                var param = JsonUtility.FromJson<SceneParamPayload>(ExtractPayload(fullJson));
-                paramManager.ApplyParam(param.key, param.value);
+            case "PROGRESS":
+                var progress = JsonUtility.FromJson<SceneProgressPayload>(ExtractPayload(fullJson));
+                Debug.Log($"[SceneClient] Progress {progress.step} at {progress.percent * 100.0}%");
                 break;
 
             default:
@@ -182,6 +191,8 @@ public class SceneClient : MonoBehaviour
 [Serializable] public class SceneParamPayload { public string key; public string value; }
 [Serializable] public class ObjectDestroyPayload { public string id; }
 
+[Serializable] public class SceneProgressPayload { public string step; public string detail; public float percent; }
+
 [Serializable]
 public class Vec3 { public float x, y, z; }
 
@@ -209,9 +220,6 @@ public class ObjectUpdatePayload
 public class SceneParams
 {
     public string ambientColor;
-    public bool   fogEnabled;
-    public float  fogDensity;
-    public string fogColor;
     public float  gravity;
     public float  timeScale;
 }
@@ -219,6 +227,6 @@ public class SceneParams
 [Serializable]
 public class SceneInitPayload
 {
-    public SceneParams   @params;
+    public SceneParams   scene;
     public SceneObject[] objects;
 }

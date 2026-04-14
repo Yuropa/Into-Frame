@@ -30,36 +30,36 @@ public class SceneObjectManager : MonoBehaviour
 
     public void Spawn(SceneObject data)
     {
-        if (_tracked.ContainsKey(data.id))
-        {
-            // Already exists — treat as update
-            ApplyUpdate(new ObjectUpdatePayload { id = data.id, changes = data });
-            return;
-        }
+        // if (_tracked.ContainsKey(data.id))
+        // {
+        //     // Already exists — treat as update
+        //     ApplyUpdate(new ObjectUpdatePayload { id = data.id, changes = data });
+        //     return;
+        // }
 
-        GameObject prefab = ResolvePrefab(data);
-        if (prefab == null)
-        {
-            Debug.LogWarning($"[SceneObjectManager] No prefab for type '{data.type}' / prefabName '{data.prefabName}'");
-            return;
-        }
+        // GameObject prefab = ResolvePrefab(data);
+        // if (prefab == null)
+        // {
+        //     Debug.LogWarning($"[SceneObjectManager] No prefab for type '{data.type}' / prefabName '{data.prefabName}'");
+        //     return;
+        // }
 
-        GameObject go = Instantiate(prefab, ToVec3(data.position), ToQuat(data.rotation));
-        go.name = $"[server] {data.type}_{data.id[..6]}";
-        go.transform.localScale = ToVec3(data.scale);
-        ApplyColor(go, data.color);
+        // GameObject go = Instantiate(prefab, ToVec3(data.position), ToQuat(data.rotation));
+        // go.name = $"[server] {data.type}_{data.id[..6]}";
+        // go.transform.localScale = ToVec3(data.scale);
+        // ApplyColor(go, data.color);
 
-        // Tag with server ID for easy lookup
-        var tag = go.AddComponent<ServerObjectTag>();
-        tag.serverId = data.id;
+        // // Tag with server ID for easy lookup
+        // var tag = go.AddComponent<ServerObjectTag>();
+        // tag.serverId = data.id;
 
-        _tracked[data.id] = new TrackedObject
-        {
-            go      = go,
-            data    = data,
-            targetPos = ToVec3(data.position),
-            targetRot = ToQuat(data.rotation),
-        };
+        // _tracked[data.id] = new TrackedObject
+        // {
+        //     go      = go,
+        //     data    = data,
+        //     targetPos = ToVec3(data.position),
+        //     targetRot = ToQuat(data.rotation),
+        // };
     }
 
     public void ApplyUpdate(ObjectUpdatePayload update)
@@ -109,25 +109,6 @@ public class SceneObjectManager : MonoBehaviour
             tracked.go.transform.rotation = Quaternion.Slerp(
                 tracked.go.transform.rotation, tracked.targetRot, t);
         }
-    }
-
-    // ── Helpers ────────────────────────────────────────────────────────────
-
-    private GameObject ResolvePrefab(SceneObject data)
-    {
-        if (data.type == "prefab" && !string.IsNullOrEmpty(data.prefabName))
-        {
-            foreach (var entry in namedPrefabs)
-                if (entry.name == data.prefabName) return entry.prefab;
-            return null;
-        }
-        return data.type switch
-        {
-            "sphere"   => spherePrefab,
-            "capsule"  => capsulePrefab,
-            "cylinder" => cylinderPrefab,
-            _          => cubePrefab,   // default: cube
-        };
     }
 
     private static Vector3    ToVec3(Vec3 v) => v != null ? new Vector3(v.x, v.y, v.z) : Vector3.zero;
