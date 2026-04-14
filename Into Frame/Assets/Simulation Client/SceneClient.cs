@@ -200,13 +200,11 @@ public class Vec3 { public float x, y, z; }
 public class SceneObject
 {
     public string id;
-    public string type;        // "cube", "sphere", "capsule", "cylinder", "prefab"
-    public string prefabName;
+    public string type;
+    public string texture;
     public Vec3   position;
     public Vec3   rotation;
     public Vec3   scale;
-    public string color;       // hex e.g. "#ff0000"
-    // params is free-form JSON — handle manually if needed
 }
 
 [Serializable]
@@ -222,11 +220,12 @@ public class SceneParams
     public string ambientColor;
     public float  gravity;
     public float  timeScale;
+    
+    public SceneObject[] objects;
 }
 
 [Serializable]
 public class SceneInitPayload
 {
     public SceneParams   scene;
-    public SceneObject[] objects;
 }

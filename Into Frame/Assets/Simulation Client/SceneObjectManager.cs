@@ -1,5 +1,7 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.Networking;
 
 /// <summary>
 /// Manages all server-driven GameObjects in the scene.
@@ -7,12 +9,24 @@ using UnityEngine;
 /// </summary>
 public class SceneObjectManager : MonoBehaviour
 {
+    [Header("Prefabs")]
+    public GameObject billboardPrefab;  // drag your "Billboard" prefab here
+
+    [Header("Asset Server")]
+    public string assetBaseUrl = "http://localhost:3000/assets/";
+
     [Header("Interpolation")]
     [Tooltip("Smooth out position/rotation updates from server")]
     public float lerpSpeed = 10f;
 
-    // id → wrapper holding the GameObject + server target state
+    // id → tracked object
     private readonly Dictionary<string, TrackedObject> _tracked = new();
+
+    // textureId → cached texture (so we don't re-download the same texture)
+    private readonly Dictionary<string, Texture2D> _textureCache = new();
+
+    // textureId → list of GameObjects waiting on that texture to download
+    private readonly Dictionary<string, List<GameObject>> _textureWaiters = new();
 
     // ── Public API ─────────────────────────────────────────────────────────
 
@@ -23,43 +37,49 @@ public class SceneObjectManager : MonoBehaviour
             if (t.go != null) Destroy(t.go);
         _tracked.Clear();
 
-        if (init.objects == null) return;
-        foreach (var obj in init.objects)
+        if (init.scene.objects == null) return;
+        foreach (var obj in init.scene.objects)
             Spawn(obj);
     }
 
     public void Spawn(SceneObject data)
     {
-        // if (_tracked.ContainsKey(data.id))
-        // {
-        //     // Already exists — treat as update
-        //     ApplyUpdate(new ObjectUpdatePayload { id = data.id, changes = data });
-        //     return;
-        // }
+        if (_tracked.ContainsKey(data.id))
+        {
+            ApplyUpdate(new ObjectUpdatePayload { id = data.id, changes = data });
+            return;
+        }
 
-        // GameObject prefab = ResolvePrefab(data);
-        // if (prefab == null)
-        // {
-        //     Debug.LogWarning($"[SceneObjectManager] No prefab for type '{data.type}' / prefabName '{data.prefabName}'");
-        //     return;
-        // }
+        if (data.type != "billboard")
+        {
+            Debug.LogWarning($"[SceneObjectManager] Unsupported type '{data.type}' — only 'billboard' is handled");
+            return;
+        }
 
-        // GameObject go = Instantiate(prefab, ToVec3(data.position), ToQuat(data.rotation));
-        // go.name = $"[server] {data.type}_{data.id[..6]}";
-        // go.transform.localScale = ToVec3(data.scale);
-        // ApplyColor(go, data.color);
+        if (billboardPrefab == null)
+        {
+            Debug.LogError("[SceneObjectManager] billboardPrefab is not assigned in the Inspector");
+            return;
+        }
 
-        // // Tag with server ID for easy lookup
-        // var tag = go.AddComponent<ServerObjectTag>();
-        // tag.serverId = data.id;
+        GameObject go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
+        go.name = $"[billboard] {data.id[..6]}";
+        go.transform.localScale = ToVec3(data.scale);
 
-        // _tracked[data.id] = new TrackedObject
-        // {
-        //     go      = go,
-        //     data    = data,
-        //     targetPos = ToVec3(data.position),
-        //     targetRot = ToQuat(data.rotation),
-        // };
+        var tag = go.AddComponent<ServerObjectTag>();
+        tag.serverId = data.id;
+
+        _tracked[data.id] = new TrackedObject
+        {
+            go        = go,
+            data      = data,
+            targetPos = ToVec3(data.position),
+            targetRot = ToQuat(data.rotation),
+        };
+
+        // Apply texture — from cache or kick off download
+        if (!string.IsNullOrEmpty(data.texture))
+            StartCoroutine(ApplyTexture(go, data.texture));
     }
 
     public void ApplyUpdate(ObjectUpdatePayload update)
@@ -69,7 +89,6 @@ public class SceneObjectManager : MonoBehaviour
         var changes = update.changes;
         if (changes == null) return;
 
-        // Update target state for smooth lerping
         if (changes.position != null)
             tracked.targetPos = ToVec3(changes.position);
 
@@ -79,14 +98,15 @@ public class SceneObjectManager : MonoBehaviour
         if (changes.scale != null && tracked.go != null)
             tracked.go.transform.localScale = ToVec3(changes.scale);
 
-        if (!string.IsNullOrEmpty(changes.color))
-            ApplyColor(tracked.go, changes.color);
+        if (!string.IsNullOrEmpty(changes.texture) && changes.texture != tracked.data.texture)
+        {
+            tracked.data.texture = changes.texture;
+            StartCoroutine(ApplyTexture(tracked.go, changes.texture));
+        }
 
-        // Merge changed data fields
         if (changes.position != null) tracked.data.position = changes.position;
         if (changes.rotation != null) tracked.data.rotation = changes.rotation;
         if (changes.scale    != null) tracked.data.scale    = changes.scale;
-        if (!string.IsNullOrEmpty(changes.color)) tracked.data.color = changes.color;
     }
 
     public void Destroy(string id)
@@ -94,6 +114,61 @@ public class SceneObjectManager : MonoBehaviour
         if (!_tracked.TryGetValue(id, out var tracked)) return;
         if (tracked.go != null) Destroy(tracked.go);
         _tracked.Remove(id);
+    }
+
+    // ── Texture Loading ────────────────────────────────────────────────────
+
+    private IEnumerator ApplyTexture(GameObject go, string textureId)
+    {
+        // Already cached — apply immediately
+        if (_textureCache.TryGetValue(textureId, out Texture2D cached))
+        {
+            SetTexture(go, cached);
+            yield break;
+        }
+
+        // Download already in flight — join the waitlist
+        if (_textureWaiters.ContainsKey(textureId))
+        {
+            _textureWaiters[textureId].Add(go);
+            yield break;
+        }
+
+        // Start a new download
+        _textureWaiters[textureId] = new List<GameObject> { go };
+
+        string url = assetBaseUrl + textureId;
+        Debug.Log($"[SceneObjectManager] Downloading texture: {url}");
+
+        using var req = UnityWebRequestTexture.GetTexture(url);
+        yield return req.SendWebRequest();
+
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Debug.LogError($"[SceneObjectManager] Failed to download '{textureId}': {req.error}");
+            _textureWaiters.Remove(textureId);
+            yield break;
+        }
+
+        Texture2D tex = DownloadHandlerTexture.GetContent(req);
+        _textureCache[textureId] = tex;
+
+        // Apply to all objects that were waiting on this texture
+        foreach (var waiter in _textureWaiters[textureId])
+            if (waiter != null) SetTexture(waiter, tex);
+
+        _textureWaiters.Remove(textureId);
+    }
+
+    private static void SetTexture(GameObject go, Texture2D tex)
+    {
+        var renderer = go.GetComponentInChildren<Renderer>();
+        if (renderer == null) return;
+
+        var mpb = new MaterialPropertyBlock();
+        renderer.GetPropertyBlock(mpb);
+        mpb.SetTexture("_BaseMap", tex);  // URP Lit shader — change to "_MainTex" for Built-in
+        renderer.SetPropertyBlock(mpb);
     }
 
     // ── Smooth Interpolation ────────────────────────────────────────────────
@@ -104,30 +179,15 @@ public class SceneObjectManager : MonoBehaviour
         foreach (var tracked in _tracked.Values)
         {
             if (tracked.go == null) continue;
-            tracked.go.transform.position = Vector3.Lerp(
-                tracked.go.transform.position, tracked.targetPos, t);
-            tracked.go.transform.rotation = Quaternion.Slerp(
-                tracked.go.transform.rotation, tracked.targetRot, t);
+            tracked.go.transform.position = Vector3.Lerp(tracked.go.transform.position, tracked.targetPos, t);
+            tracked.go.transform.rotation = Quaternion.Slerp(tracked.go.transform.rotation, tracked.targetRot, t);
         }
     }
+
+    // ── Helpers ────────────────────────────────────────────────────────────
 
     private static Vector3    ToVec3(Vec3 v) => v != null ? new Vector3(v.x, v.y, v.z) : Vector3.zero;
     private static Quaternion ToQuat(Vec3 e) => e != null ? Quaternion.Euler(e.x, e.y, e.z) : Quaternion.identity;
-
-    private static void ApplyColor(GameObject go, string hex)
-    {
-        if (go == null || string.IsNullOrEmpty(hex)) return;
-        if (!ColorUtility.TryParseHtmlString(hex, out Color color)) return;
-
-        foreach (var renderer in go.GetComponentsInChildren<Renderer>())
-        {
-            // Use MaterialPropertyBlock to avoid creating material instances
-            var mpb = new MaterialPropertyBlock();
-            renderer.GetPropertyBlock(mpb);
-            mpb.SetColor("_Color", color);
-            renderer.SetPropertyBlock(mpb);
-        }
-    }
 
     // ── Inner Types ────────────────────────────────────────────────────────
 
@@ -137,13 +197,6 @@ public class SceneObjectManager : MonoBehaviour
         public SceneObject data;
         public Vector3     targetPos;
         public Quaternion  targetRot;
-    }
-
-    [System.Serializable]
-    public class PrefabEntry
-    {
-        public string     name;
-        public GameObject prefab;
     }
 }
 
