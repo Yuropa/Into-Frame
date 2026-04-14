@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 
+import asyncio
 import argparse
 from pipeline.pipeline import Pipeline, PipelineConfiguration
+from server.server import SimulationServerConfiguration, SimulationServer
 
 def create_parser():
     parser = argparse.ArgumentParser(
@@ -18,7 +20,7 @@ def create_parser():
     server_parser.add_argument(
         "--host",
         type=str,
-        default="127.0.0.1",
+        default="localhost",
         help="Host to bind the server"
     )
     server_parser.add_argument(
@@ -78,9 +80,23 @@ def _create_pipeline_config(args):
     return config
 
 def handle_server(args):
-    print(f"Starting server on {args.host}:{args.port}")
     configuration = _create_pipeline_config(args=args)
-    # TODO: add actual server logic here
+
+    simulation_config = SimulationServerConfiguration()
+    simulation_config.log = configuration.log
+    simulation_config.address = args.host
+    simulation_config.port = args.port
+
+    pipeline = Pipeline(
+        config=_create_pipeline_config(args=args)
+    )
+
+    # Ensure all the models are downloaded
+    pipeline.download_models()
+
+    # Run the server!
+    server = SimulationServer(simulation_config, pipeline)
+    asyncio.run(server.run())
 
 
 def handle_run(args):
