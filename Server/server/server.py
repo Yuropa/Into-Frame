@@ -75,7 +75,7 @@ class SimulationServer():
             match = self._find_asset(filename)
             if not match:
                 if self._context is not None:
-                    match = self._context.save(filename, self.asset_dir)
+                    match = self._context.save_object(filename, self.asset_dir)
 
             if not match:
                 # Coulnd't write the file out either

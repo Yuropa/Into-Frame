@@ -33,13 +33,15 @@ public class SceneObjectManager : MonoBehaviour
     public void ApplySceneInit(SceneInitPayload init)
     {
         // Destroy any previously tracked objects (reconnect scenario)
-        foreach (var t in _tracked.Values)
+        foreach (var t in _tracked.Values) {
             if (t.go != null) Destroy(t.go);
+        }
         _tracked.Clear();
 
         if (init.scene.objects == null) return;
-        foreach (var obj in init.scene.objects)
+        foreach (var obj in init.scene.objects) {
             Spawn(obj);
+        }
     }
 
     public void Spawn(SceneObject data)
