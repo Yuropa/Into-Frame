@@ -1,5 +1,6 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.segmentation.image_segmentation import ImageSeg
+from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.image_utils import Image
@@ -40,7 +41,7 @@ class SegmentationStage(PipelineStage):
         return context
 
     def model_names(self) -> list[str]:
-        return ImageSeg.model_names() + ImageCaptioning.model_names()
+        return ImageSeg.model_names() + ImageCaptioning.model_names() + ForegroundSeg.model_names()
 
     def clean_up(self):
         super().clean_up()
