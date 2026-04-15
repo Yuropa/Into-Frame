@@ -2,7 +2,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from scene.scene import Scene
 from scene.object import Object3D
-from scene.camera import CameraIntrinsics
+from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 import numpy as np
 
@@ -25,7 +25,7 @@ class SceneGenerationStage(PipelineStage):
             texture_name = f"crop_{idx}"
             metadata = context.input_object(f"metadata_{idx}")
 
-            result = self.unproject_bbox(metadata["box"], depth_map=depth, intrinsics=intrinsics)
+            result = self.unproject_bbox(metadata["box"], depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
             if result is None:
                 self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                 self.advance_progress(generation_task)
@@ -49,7 +49,7 @@ class SceneGenerationStage(PipelineStage):
         context.add_scene(ContextKey.SCENE, scene)
         return context
     
-    def unproject_bbox(self, bbox, depth_map: Depth, intrinsics: CameraIntrinsics):
+    def unproject_bbox(self, bbox, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
         bx, by, bw, bh = bbox
         x1, y1, x2, y2 = bx, by, bx + bw, by + bh
 
@@ -70,11 +70,10 @@ class SceneGenerationStage(PipelineStage):
         if len(valid) == 0:
             return None
         depth = float(np.median(valid))
-        position = intrinsics.unproject(cx, cy, depth)
-
-        left   = intrinsics.unproject(x1, cy, depth)
-        right  = intrinsics.unproject(x2, cy, depth)
-        top    = intrinsics.unproject(cx, y1, depth)
-        bottom = intrinsics.unproject(cx, y2, depth)
+        position = extrinsics.transform(intrinsics.unproject(cx, cy, depth))
+        left     = extrinsics.transform(intrinsics.unproject(x1, cy, depth))
+        right    = extrinsics.transform(intrinsics.unproject(x2, cy, depth))
+        top      = extrinsics.transform(intrinsics.unproject(cx, y1, depth))
+        bottom   = extrinsics.transform(intrinsics.unproject(cx, y2, depth))
 
         return position, abs(right[0] - left[0]), abs(bottom[1] - top[1])

@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 using NativeWebSocket; // https://github.com/endel/NativeWebSocket
 
 /// <summary>
@@ -18,6 +19,12 @@ public class SceneClient : MonoBehaviour
     [Header("References")]
     public SceneObjectManager objectManager;
     public SceneParamManager paramManager;
+
+    [Header("UI")]
+    public TMPro.TextMeshProUGUI statusLabel;
+    public Toggle statusToggle;
+    public TMPro.TextMeshProUGUI progressLabel;
+    public Slider progressSlider;
 
     private WebSocket _ws;
     private bool _reconnecting = false;
@@ -67,16 +74,24 @@ public class SceneClient : MonoBehaviour
     {
         Debug.Log("[SceneClient] Connected!");
         Send(new TypeOnlyMessage("CLIENT_READY"));
+
+        statusLabel.text = "Connected";
+        statusToggle.isOn = true;
     }
 
     private void OnError(string error)
     {
         Debug.LogWarning($"[SceneClient] Error: {error}");
+        statusLabel.text = $"Error ({error})";
+        statusToggle.isOn = false;
     }
 
     private void OnClose(WebSocketCloseCode code)
     {
         Debug.Log($"[SceneClient] Disconnected ({code})");
+        statusLabel.text = "Disconnected";
+        statusToggle.isOn = false;
+
         if (!_reconnecting) StartCoroutine(Reconnect());
     }
 
@@ -84,6 +99,8 @@ public class SceneClient : MonoBehaviour
     {
         _reconnecting = true;
         Debug.Log($"[SceneClient] Reconnecting in {reconnectDelay}s…");
+        statusLabel.text = $"Reconnecting...";
+        statusToggle.isOn = false;
         yield return new WaitForSeconds(reconnectDelay);
         _reconnecting = false;
         ConnectAsync();
@@ -137,6 +154,9 @@ public class SceneClient : MonoBehaviour
             case "PROGRESS":
                 var progress = JsonUtility.FromJson<SceneProgressPayload>(ExtractPayload(fullJson));
                 Debug.Log($"[SceneClient] Progress {progress.step} at {progress.percent * 100.0}%");
+
+                progressLabel.text = progress.step;
+                progressSlider.value = progress.percent;
                 break;
 
             default:
