@@ -1,42 +1,9 @@
-from PIL import Image as PILImage
 from util.image_utils import Image
 from sam2.build_sam import build_sam2_hf
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+from pipeline.segmentation.segmentation_result import SegmentationResult
 import numpy as np
 import torch
-from typing import Generator
-
-class CroppedImage:
-    def __init__(self, image, box, mask, cropped_image, score) -> None:
-        self.image = image
-        self.box = box
-        self.score = score
-        self.mask = mask
-        self.cropped_image = cropped_image
-
-class SegmentationResult:
-    def __init__(self, results):
-        # results is a list of dicts, not a single dict
-        self.masks = [r['segmentation'] for r in results]   # list of (H,W) bool np arrays
-        self.boxes = [r['bbox'] for r in results]
-        self.scores = [r['predicted_iou'] for r in results]
-
-    def masked_images(self, source: Image) -> Generator[CroppedImage, None, None]:
-        """Yield a masked RGBA crop for each segmented object."""
-        source_rgba = source.image.convert("RGBA")
-
-        for idx in range(len(self.masks)):
-            mask = self.masks[idx]
-            rgba = source_rgba.copy()
-            alpha = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
-            rgba.putalpha(alpha)
-
-            bbox = alpha.getbbox()
-            if bbox:
-                rgba = rgba.crop(bbox)
-                cropped_image = Image(source.image.crop(bbox))
-                yield CroppedImage(Image(rgba), self.boxes[idx], alpha, cropped_image, self.scores[idx])
-
 
 class ImageSeg:
     def __init__(self, device):
@@ -60,8 +27,8 @@ class ImageSeg:
     def model_names(cls) -> list[str]:
         return ["facebook/sam2.1-hiera-large"]
 
-    def segment(self, input: Image, prompt: str = "all objects") -> SegmentationResult:
+    def segment(self, input: Image) -> SegmentationResult:
         image_np = np.array(input.image.convert("RGB"))
         with torch.no_grad():
             results = self.mask_generator.generate(image_np)
-        return SegmentationResult(results)
+        return SegmentationResult.from_results(results)
