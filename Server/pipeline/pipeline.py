@@ -127,7 +127,7 @@ class Pipeline:
             task = progress.add_task("Processing...", total=len(self.stages))
 
             for stage in self.stages:
-                self.log_info(f"Handling stagge {stage.name}")
+                self.log_info(f"Handling stage: {stage.name}")
                 stage._set_progress(progress)
 
                 current_step = stage.name
