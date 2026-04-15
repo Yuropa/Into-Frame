@@ -46,3 +46,32 @@ class CameraIntrinsics:
         obj.fov = math.degrees(2.0 * math.atan(depth_width / (2.0 * obj.fx)))
         return obj
 
+class CameraExtrinsics:
+    def __init__(self, rotation: np.ndarray, translation: np.ndarray):
+        self.rotation    = rotation
+        self.translation = translation
+
+    def transform(self, point: tuple[float, float, float]) -> tuple[float, float, float]:
+        p      = np.array(point, dtype=np.float64)
+        result = self.rotation @ p + self.translation
+        return (float(result[0]), float(result[1]), float(result[2]))
+
+    def encode(self) -> dict:
+        return {
+            "rotation":    self.rotation.flatten().tolist(),
+            "translation": self.translation.tolist(),
+        }
+
+    @classmethod
+    def identity(cls):
+        return cls.from_depth_anything(np.eye(3, 4))
+
+    @classmethod
+    def from_depth_anything(cls, m: np.ndarray):
+        # Accept (1, 3, 4) or (3, 4) or (4, 4)
+        m = np.array(m, dtype=np.float64)  # fix: was `matrix`
+        if m.ndim == 3:
+            m = m[0]        # strip batch dim → (3, 4)
+        R = m[:3, :3]       # rotation    (3x3)
+        t = m[:3,  3]       # translation (3,)
+        return cls(R, t)    # fix: missing return

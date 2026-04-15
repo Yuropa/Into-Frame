@@ -6,13 +6,14 @@ from util.depth_utils import Depth
 from util.image_utils import Image
 from scene.scene import Scene
 from scene.object import Object3D
-from scene.camera import CameraIntrinsics
+from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class ContextKey:
     INPUT = "input"
     DEPTH = "depth"
     SCENE = "scene"
     INTRINSICS = "intrinsics"
+    EXTRINSICS = "extrinsics"
     Type = Literal["input", "depth", "scene", "intrinsics"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
@@ -151,6 +152,18 @@ class PipelineContext():
     
     def input_intrinsics(self, name: ContextKeyName) -> Optional[CameraIntrinsics]:
         return self._value(name, self._previous_stage).intrinsics()
+    
+    # Extrinsics
+    def add_extrinsics(self, name: ContextKeyName, input: CameraExtrinsics):
+        value = ContextValue(name=name)
+        value.set_extrinsics(input)
+        self._set_value(name, value)
+
+    def extrinsics(self, name: ContextKeyName) -> Optional[CameraExtrinsics]:
+        return self._value(name).extrinsics()
+    
+    def input_extrinsics(self, name: ContextKeyName) -> Optional[CameraExtrinsics]:
+        return self._value(name, self._previous_stage).extrinsics()
     
     # Persistence
     def save(self, path: Path):
