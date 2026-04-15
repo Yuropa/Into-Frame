@@ -15,6 +15,9 @@ public class SceneParamManager : MonoBehaviour
 
     private Color _targetColor = Color.white;
 
+    [Header("Camera")]
+    public GameObject camera;
+
     public void ApplyParams(SceneParams p)
     {
         if (p == null) return;
@@ -24,6 +27,25 @@ public class SceneParamManager : MonoBehaviour
             ColorUtility.TryParseHtmlString(p.ambientColor, out Color c))
         {
             _targetColor = c;
+        }
+
+
+        if (p.extrinsics != null)
+        {
+            float[] r = p.extrinsics.rotation;     // 9 floats, row-major
+            float[] t = p.extrinsics.translation;  // 3 floats
+
+            Vector3 position = new Vector3(t[0], t[1], t[2]);
+
+            Matrix4x4 m = new Matrix4x4();
+            m.SetRow(0, new Vector4(r[0], r[1], r[2], 0));
+            m.SetRow(1, new Vector4(r[3], r[4], r[5], 0));
+            m.SetRow(2, new Vector4(r[6], r[7], r[8], 0));
+            m.SetRow(3, new Vector4(0,    0,    0,    1));
+
+            Quaternion rotation = m.rotation;
+
+            camera.transform.SetPositionAndRotation(position, rotation);
         }
     }
 

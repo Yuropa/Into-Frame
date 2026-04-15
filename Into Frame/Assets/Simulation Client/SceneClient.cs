@@ -215,6 +215,13 @@ public class ObjectUpdatePayload
 }
 
 [Serializable]
+public class ExtrinsicsParams
+{
+    public float[] rotation;     // 9
+    public float[]   translation;  // 3
+}
+
+[Serializable]
 public class SceneParams
 {
     public string ambientColor;
@@ -222,6 +229,7 @@ public class SceneParams
     public float  timeScale;
     
     public SceneObject[] objects;
+    public ExtrinsicsParams extrinsics;
 }
 
 [Serializable]

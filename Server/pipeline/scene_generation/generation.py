@@ -14,9 +14,12 @@ class SceneGenerationStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         object_count = context.input_object("count")
         intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        extrinsics = context.input_extrinsics(ContextKey.EXTRINSICS)
         depth = context.input_depth(ContextKey.DEPTH)
 
         scene = Scene()
+        scene.extrinsics = extrinsics
+
         generation_task = self.create_progress(object_count, "Creating Objects...")
         for idx in range(object_count):
             texture_name = f"crop_{idx}"

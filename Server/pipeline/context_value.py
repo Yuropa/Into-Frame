@@ -8,7 +8,7 @@ from enum import StrEnum
 from scene.mesh import Mesh
 from scene.scene import Scene
 from scene.object import Object3D
-from scene.camera import CameraIntrinsics
+from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class ValueKeys(StrEnum):
     NONE = "none"
@@ -19,6 +19,7 @@ class ValueKeys(StrEnum):
     OBJECT3D = "object_3d"
     SCENE = "scene"
     INTRINSICS = "intrinsics"
+    EXTRINSICS = "extrinsics"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -70,6 +71,10 @@ class ContextValue():
         self.type = ValueKeys.INTRINSICS
         self.value = obj
 
+    def set_extrinsics(self, obj: CameraExtrinsics):  
+        self.type = ValueKeys.EXTRINSICS
+        self.value = obj
+
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
             return self.value
@@ -108,6 +113,12 @@ class ContextValue():
         
     def intrinsics(self) -> Optional[CameraIntrinsics]:
         if self.type == ValueKeys.INTRINSICS:
+            return self.value
+        else:
+            return None
+        
+    def extrinsics(self) -> Optional[CameraExtrinsics]:
+        if self.type == ValueKeys.EXTRINSICS:
             return self.value
         else:
             return None
@@ -153,5 +164,12 @@ class ContextValue():
             save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.intrinsics().encode(), f, indent=4, cls=JSONEncoder)
+
+            return Path(save_path)
+
+        elif self.type == ValueKeys.EXTRINSICS:
+            save_path = str(path / (self.name + ".json"))
+            with open(save_path, "w") as f:
+                json.dump(self.extrinsics().encode(), f, indent=4, cls=JSONEncoder)
 
             return Path(save_path)
