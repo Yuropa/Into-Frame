@@ -67,6 +67,8 @@ public class SceneObjectManager : MonoBehaviour
         GameObject go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
         go.name = $"[billboard] {data.id[..6]}";
         go.transform.localScale = ToVec3(data.scale);
+        go.transform.position = ToVec3(data.position);
+        go.transform.rotation = ToQuat(data.rotation);
 
         var tag = go.AddComponent<ServerObjectTag>();
         tag.serverId = data.id;
@@ -177,13 +179,13 @@ public class SceneObjectManager : MonoBehaviour
 
     private void Update()
     {
-        float t = Time.deltaTime * lerpSpeed;
-        foreach (var tracked in _tracked.Values)
-        {
-            if (tracked.go == null) continue;
-            tracked.go.transform.position = Vector3.Lerp(tracked.go.transform.position, tracked.targetPos, t);
-            tracked.go.transform.rotation = Quaternion.Slerp(tracked.go.transform.rotation, tracked.targetRot, t);
-        }
+        // float t = Time.deltaTime * lerpSpeed;
+        // foreach (var tracked in _tracked.Values)
+        // {
+        //     if (tracked.go == null) continue;
+        //     tracked.go.transform.position = Vector3.Lerp(tracked.go.transform.position, tracked.targetPos, t);
+        //     tracked.go.transform.rotation = Quaternion.Slerp(tracked.go.transform.rotation, tracked.targetRot, t);
+        // }
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────

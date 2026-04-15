@@ -47,10 +47,12 @@ class SceneGenerationStage(PipelineStage):
         return context
     
     def unproject_bbox(self, bbox, depth_map: Depth, intrinsics: CameraIntrinsics):
+        bx, by, bw, bh = bbox
+        x1, y1, x2, y2 = bx, by, bx + bw, by + bh
+
         sx = intrinsics.width  / intrinsics.color_width
         sy = intrinsics.height / intrinsics.color_height
 
-        x1, y1, x2, y2 = bbox
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
 
         dx, dy = cx * sx, cy * sy
@@ -65,7 +67,6 @@ class SceneGenerationStage(PipelineStage):
         if len(valid) == 0:
             return None
         depth = float(np.median(valid))
-
         position = intrinsics.unproject(cx, cy, depth)
 
         left   = intrinsics.unproject(x1, cy, depth)

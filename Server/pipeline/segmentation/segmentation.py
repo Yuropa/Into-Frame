@@ -20,7 +20,7 @@ class SegmentationStage(PipelineStage):
         input_image = context.input_image(ContextKey.INPUT)
         result = self._seg.segment(input_image)
 
-        self._captioning = ImageCaptioning(self.device)
+        # self._captioning = ImageCaptioning(self.device)
         self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)
 
