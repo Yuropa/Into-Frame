@@ -1,3 +1,4 @@
+from __future__ import annotations
 import PIL
 from pathlib import Path
 import numpy as np
@@ -35,6 +36,9 @@ class Depth:
     @property
     def size(self):
         return (self.depth.shape[1], self.depth.shape[0])
+    
+    def copy(self) -> Depth:
+        return Depth(self.depth.copy())
     
     def __getitem__(self, key):
         return self.depth[key]

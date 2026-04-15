@@ -1,3 +1,4 @@
+from __future__ import annotations
 from PIL import Image as PILImage
 from util.image_utils import Image
 import numpy as np
@@ -14,8 +15,14 @@ class CroppedImage:
 class SegmentationResult:
     def __init__(self, masks, boxes, scores):
         self.masks = masks if isinstance(masks, list) else [masks]
-        self.boxes = boxes if isinstance(boxes, list) else [boxes]
+        self.boxes  = [self._to_box(b) for b in (boxes if isinstance(boxes, list) else [boxes])]
         self.scores = scores if isinstance(scores, list) else [scores]
+
+    @staticmethod
+    def _to_box(b) -> list[float]:
+        if isinstance(b, dict):
+            return [b["x"], b["y"], b["w"], b["h"]]
+        return list(b)
 
     @classmethod
     def from_results(cls, results):
@@ -23,6 +30,28 @@ class SegmentationResult:
             masks=[r['segmentation'] for r in results],
             boxes=[r['bbox'] for r in results],
             scores=[r['predicted_iou'] for r in results],
+        )
+    
+    @classmethod
+    def empty(cls):
+        return cls(
+            masks=[],
+            boxes=[],
+            scores=[],
+        )
+    
+    @property
+    def length(self):
+        return len(self.masks)
+
+    def is_empty(self):
+        return len(self.masks) == 0
+    
+    def formUnion(self, result: SegmentationResult) -> SegmentationResult:
+        SegmentationResult(
+            masks=self.masks + result.masks,
+            boxes=self.boxes + result.boxes,
+            scores=self.scores + result.scores,
         )
 
     def masked_images(self, source: Image) -> Generator[CroppedImage, None, None]:

@@ -1,3 +1,4 @@
+from __future__ import annotations
 import PIL
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
@@ -7,6 +8,8 @@ import cv2
 import torchvision.transforms.functional as F
 
 class Image:
+    image: PIL.Image.Image
+
     def __init__(self, obj):
         if isinstance(obj, str):
             self.image = PIL.Image.open(obj).convert("RGB")
@@ -31,6 +34,9 @@ class Image:
 
     def show(self):
         self._show_image(self.image)
+
+    def copy(self) -> Image:
+        return Image(self.image.copy())
 
     @property
     def width(self):

@@ -1,4 +1,4 @@
-from util.image_utils import InputImage
+from util.image_utils import Image
 from pipeline.inpainting.sd3_impls import SD3LatentFormat
 import torch
 import numpy as np
@@ -19,6 +19,10 @@ class InPainting:
 
     # python sd3_infer.py --controlnet_ckpt models/sd3.5_large_controlnet_canny.safetensors 
     # --controlnet_cond_image input/canny.png --prompt "An adorable fluffy pastel creature"
+
+    @classmethod
+    def model_names(cls) -> list[str]:
+        return ["stabilityai/stable-diffusion-3.5-medium"]
 
     def _vae_encode(
         self, image, using_2b_controlnet: bool = False, controlnet_type: int = 0
@@ -45,7 +49,7 @@ class InPainting:
         latent = self._vae_encode(image, using_2b_controlnet=False, controlnet_type=1)
         latent = SD3LatentFormat().process_in(latent)
 
-    def inpaint(self, input: InputImage, prompt: str, num_inference_steps = 28, guidance_scale = 3.5):
+    def inpaint(self, input: Image, prompt: str, num_inference_steps = 28, guidance_scale = 3.5):
         if input is None:
             return self.pipeline(
                 prompt,

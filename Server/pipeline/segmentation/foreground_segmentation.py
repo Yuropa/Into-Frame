@@ -15,11 +15,13 @@ class ForegroundSeg:
         self.device = device
 
         self.birefnet = AutoModelForImageSegmentation.from_pretrained(
-            'ZhengPeng7/BiRefNet'
+            'ZhengPeng7/BiRefNet',
+            trust_remote_code=True
         )
 
         torch.set_float32_matmul_precision(['high', 'highest'][0])
         self.birefnet.to(device)
+        self.birefnet.half()
         self.birefnet.eval()
 
         image_size = (1024, 1024)
@@ -35,7 +37,7 @@ class ForegroundSeg:
 
     def segment(self, input: Image) -> SegmentationResult:
         image = input.image.convert("RGB")
-        input_images = self.transform_image(image).unsqueeze(0).to(self.device)
+        input_images = self.transform_image(image).unsqueeze(0).to(self.device).half()
 
         with torch.no_grad():
             preds = self.birefnet(input_images)[-1].sigmoid().cpu()
