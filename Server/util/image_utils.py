@@ -17,17 +17,49 @@ class Image:
             self.image = obj.image
         elif isinstance(obj, PIL.Image.Image):
             self.image = obj
+        elif isinstance(obj, np.ndarray):
+            self.image = PIL.Image.fromarray(obj).convert("RGB")
         elif isinstance(obj, Path):
             self.image = PIL.Image.open(str(obj)).convert("RGB")
         else:
             raise TypeError(f"Unsupported type: {type(obj)}")
         
         self._canny = None 
+        self._rgb = None
+        self._rgba = None
+        self._L = None
 
     def canny(self):
         if self._canny is None:
             self._canny = self._generate_canny(self.image)
         return self._canny
+
+    def rgb(self, copy: bool = False) -> PIL.Image.Image:
+        if self._rgb is None:
+            self._rgb = self.image.convert("RGB")
+        
+        if copy:
+            return self._rgb.copy()
+        else:
+            return self._rgb
+        
+    def rgba(self, copy: bool = False) -> PIL.Image.Image:
+        if self._rgba is None:
+            self._rgba = self.image.convert("RGBA")
+        
+        if copy:
+            return self._rgba.copy()
+        else:
+            return self._rgba
+
+    def L(self, copy: bool = False) -> PIL.Image.Image:
+        if self._L is None:
+            self._L = self.image.convert("L")
+        
+        if copy:
+            return self._L.copy()
+        else:
+            return self._L
 
     def save(self, path):
         self.image.save(path)

@@ -12,6 +12,7 @@ __pycache__/
 .Python
 build/
 output/
+checkpoints/
 mnt/
 src/
 ckpt/checkpoint_000500_Video2RMS.pt

@@ -11,7 +11,7 @@ class SuperSample:
         self.model = Swin2SRForImageSuperResolution.from_pretrained("caidas/swin2SR-classical-sr-x4-64").to(device)
 
     def supersample(self, image: Image) -> Image:
-        inputs = self.processor(image.image.convert("RGB"), return_tensors="pt").to(self.device)
+        inputs = self.processor(image.rgb(), return_tensors="pt").to(self.device)
         with torch.no_grad():
             output = self.model(**inputs).reconstruction
 
