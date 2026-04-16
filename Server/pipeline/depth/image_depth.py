@@ -21,7 +21,7 @@ class ImageDepth:
         return ["depth-anything/da3nested-giant-large"]
 
     def depth(self, input: Image) -> DepthResult:
-        image = input.image.convert("RGB")
+        image = input.rgb()
         with torch.no_grad():
             result = self.model.inference([image])
         return DepthResult(result)

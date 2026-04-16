@@ -65,6 +65,7 @@ sleep 5
 CONDA_NAME="frame"
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
+CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 
 if [ "$FORCE" = true ]; then
     warn "Removing old Conda environment '$CONDA_NAME'..."
@@ -108,6 +109,7 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 #fi
 
 mkdir -p "$LIB_DIR"
+mkdir -p "$CHECKPOINT_DIR"
 
 info "Installing SAM 2"
 if [ ! -d "$LIB_DIR/sam2" ]; then
@@ -123,6 +125,12 @@ fi
 TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
 chmod +x "$TRELLIS_SETUP"
 bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+
+info "Downloading SAM 3D"
+
+hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
+mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
+rm -rf "$CHECKPOINT_DIR/hf-download"
 
 info "Installing Depth Anything"
 if [ ! -d "$LIB_DIR/depth-anything-3" ]; then

@@ -56,7 +56,7 @@ class SegmentationResult:
 
     def masked_images(self, source: Image) -> Generator[CroppedImage, None, None]:
         """Yield a masked RGBA crop for each segmented object."""
-        source_rgba = source.image.convert("RGBA")
+        source_rgba = source.rgba()
 
         for idx in range(len(self.masks)):
             mask = self.masks[idx]

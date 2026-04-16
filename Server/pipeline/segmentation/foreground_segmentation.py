@@ -36,7 +36,7 @@ class ForegroundSeg:
         return ['ZhengPeng7/BiRefNet']
 
     def segment(self, input: Image) -> SegmentationResult:
-        image = input.image.convert("RGB")
+        image = input.rgb()
         input_images = self.transform_image(image).unsqueeze(0).to(self.device).half()
 
         with torch.no_grad():
@@ -44,7 +44,7 @@ class ForegroundSeg:
         
         pred = preds[0].squeeze()
         pred_pil = transforms.ToPILImage()(pred)
-        mask = pred_pil.resize(image.size)
+        mask = pred_pil.resize(input.size)
 
         # Convert mask to boolean numpy array
         mask_np = np.array(mask) > 127  # (H, W) bool
