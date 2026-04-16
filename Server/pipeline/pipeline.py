@@ -12,8 +12,10 @@ from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
 from pipeline.scene_generation.generation import SceneGenerationStage
+from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.device_utils import preferred_device
 
 class PipelineConfiguration:
     output: Optional[Path]
@@ -32,15 +34,7 @@ class PipelineConfiguration:
             self.output = None
             self.temp = None
 
-        if torch.cuda.is_available():
-            self.device = torch.device("cuda")
-            self.torch_dtype = torch.bfloat16
-        elif torch.mps.is_available():
-            self.device = torch.device("mps")
-            self.torch_dtype = torch.float
-        else:
-            self.device = torch.device("cpu")
-            self.torch_dtype = torch.bfloat16
+        self.device, self.torch_dtype = preferred_device()
 
         logging.basicConfig(
             level=logging.INFO,
@@ -81,6 +75,7 @@ class Pipeline:
             # SupersamplingStage(config=config.stage_config("Supersampling")),
             DepthStage(config=config.stage_config("Depth Generation")),
             SceneGenerationStage(config=config.stage_config("Scene Generation")),
+            ModelGenerationStage(config=config.stage_config("Mesh Generation"))
         ]
 
     def log_info(self, msg):
@@ -106,6 +101,17 @@ class Pipeline:
 
         self.log_info("All models present")
 
+    def _print_total_allocations(self):
+        if torch.backends.mps.is_available():
+            print("MPS Allocated:", torch.mps.current_allocated_memory() / 1e9, "GB")
+            print("MPS Driver:", torch.mps.driver_allocated_memory() / 1e9, "GB")
+            print("MPS Cap:", torch.mps.recommended_max_memory() / 1e9, "GB")
+        elif torch.cuda.is_available():
+            print("CUDA Allocated:", torch.cuda.memory_allocated() / 1e9, "GB")
+            print("CUDA Reserved:", torch.cuda.memory_reserved() / 1e9, "GB")
+            print("CUDA Max Allocated:", torch.cuda.max_memory_allocated() / 1e9, "GB")
+
+
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
@@ -127,22 +133,26 @@ class Pipeline:
             task = progress.add_task("Processing...", total=len(self.stages))
 
             for stage in self.stages:
-                self.log_info(f"Handling stage: {stage.name}")
-                stage._set_progress(progress)
+                try:
+                    self.log_info(f"Handling stage: {stage.name}")
+                    stage._set_progress(progress)
 
-                current_step = stage.name
-                post_progress()
+                    current_step = stage.name
+                    post_progress()
 
-                context.push_stage(stage.name)
-                context = stage.run(context)
-                context.pop_stage()
+                    context.push_stage(stage.name)
+                    context = stage.run(context)
+                    context.pop_stage()
 
-                stage.log_memory_usage()
-                stage.clean_up()
-                progress.advance(task)
-        
-                current_step_index += 1
-                post_progress()
+                    stage.log_memory_usage()
+                    stage.clean_up()
+                    progress.advance(task)
+            
+                    current_step_index += 1
+                    post_progress()
+                except RuntimeError as e:
+                    self._print_total_allocations()
+                    raise
 
         if self.config.save_files:
             if self.config.output is not None:

@@ -40,33 +40,39 @@ class SegmentationStage(PipelineStage):
             total_crops += result.length
 
         # Foreground Segmentation
-        foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting...")
-        if self._foreground_seg is None:
-            self._foreground_seg = ForegroundSeg(self.device)
-        self.advance_progress(foreground_segmenting_task)
+        # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting...")
+        # self.advance_progress(foreground_segmenting_task)
 
-        infill_count = 0
-        while True:
-            result = self._foreground_seg.segment(input_image)
-            if result.is_empty():
-                break
+        # infill_count = 0
+        # while True:
+        #     if self._foreground_seg is None:
+        #         self._foreground_seg = ForegroundSeg(self.device)
+        #     result = self._foreground_seg.segment(input_image)
 
-            store_segmentation_result(result)
+        #     if result.is_empty():
+        #         break
 
-            if self._mask_inpainting is None:
-                self._mask_inpainting = MaskInPainting(
-                    self.device,
-                    self.torch_dtype
-                )
+        #     store_segmentation_result(result)
 
-            for idx in range(result.length):
-                full_mask = self._prepare_mask_and_image(input_image, result.masks[idx], result.boxes[idx])
-                input_image = self._mask_inpainting.inpaint(input_image, mask_image=full_mask)
-                context.add_image(f"infill_img_{infill_count}", input_image)
-                infill_count += 1
+        #     if self._mask_inpainting is None:
+        #         self._mask_inpainting = MaskInPainting(
+        #             self.device,
+        #             self.torch_dtype
+        #         )
 
-        self.advance_progress(foreground_segmenting_task)
-        self.finish_progress(foreground_segmenting_task)
+        #     for idx in range(result.length):
+        #         full_mask = Image(result.masks[idx]) # self._prepare_mask_and_image(input_image, result.masks[idx], result.boxes[idx])
+        #         input_image = self._mask_inpainting.inpaint_crop(input_image, mask_image=full_mask, box=result.boxes[idx])
+        #         context.add_image(f"infill_img_{infill_count}", input_image)
+        #         infill_count += 1
+
+        #         print(f"Ran in-fill {idx}")
+        #         self.log_memory_usage()
+
+        #     break
+
+        # self.advance_progress(foreground_segmenting_task)
+        # self.finish_progress(foreground_segmenting_task)
 
         #Segmentation
         segmenting_task = self.create_progress(2, "Segmenting...")
@@ -83,11 +89,14 @@ class SegmentationStage(PipelineStage):
         context.add_object("count", total_crops)
         return context
     
-    def _prepare_mask_and_image(self, original_image: Image, small_mask: Image, box, radius: float = 5):
+    def _prepare_mask_and_image(self, original_image: Image, small_mask: np.ndarray, box, radius: float = 5):
         x, y, w, h = box
+
+        print(f"Shape mask {small_mask.shape}")
+        print(f"Box {box}")
         
-        full_mask = PILImage.new("L", original_image.size, 0)
-        small_mask = small_mask.image.convert("L")
+        full_mask = PILImage.new("L", original_image.size, 0)    
+        small_mask_pil = Image(small_mask).L(copy=True).resize((w, h))
         full_mask.paste(small_mask, (x, y))    
         full_mask = full_mask.filter(ImageFilter.GaussianBlur(radius=radius))
     
@@ -97,7 +106,7 @@ class SegmentationStage(PipelineStage):
         return ImageSeg.model_names() + ForegroundSeg.model_names() + MaskInPainting.model_names()
 
     def clean_up(self):
-        super().clean_up()
         self._seg = None
         self._foreground_seg = None
         self._mask_inpainting = None
+        super().clean_up()

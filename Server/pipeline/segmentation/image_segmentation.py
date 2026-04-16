@@ -28,7 +28,7 @@ class ImageSeg:
         return ["facebook/sam2.1-hiera-large"]
 
     def segment(self, input: Image) -> SegmentationResult:
-        image_np = np.array(input.image.convert("RGB"))
+        image_np = np.array(input.rgb())
         with torch.no_grad():
             results = self.mask_generator.generate(image_np)
         return SegmentationResult.from_results(results)
