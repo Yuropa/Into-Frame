@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+import os
+# Setting in case we run on macOS
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import asyncio
 import argparse
