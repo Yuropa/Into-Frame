@@ -63,21 +63,25 @@ info "** Installation can take a while to complete. Please be patient... **"
 sleep 5
 
 CONDA_NAME="frame"
+CONDA_ENVS=("$CONDA_NAME" "stablepoint")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
+PACKAGES_DIR="$LIB_DIR/packages"
 
 if [ "$FORCE" = true ]; then
-    warn "Removing old Conda environment '$CONDA_NAME'..."
+    warn "Removing old Conda environments..."
     if [ -d "$LIB_DIR" ]; then
         rm -rf "$LIB_DIR"
     fi
 
     conda init
     source ~/.bash_profile
-    conda deactivate
 
-    conda env remove --name "$CONDA_NAME" --yes 
+    conda deactivate
+    for env in "${CONDA_ENVS[@]}"; do
+        conda env remove --name "$env" --yes
+    done
 fi
 
 conda init
@@ -96,6 +100,7 @@ pip install torch torchvision
 # Install standard pip packages
 info "Installing pip requirements..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
+pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
 ## SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
 #info "Installing SAM 3 via transformers..."
@@ -110,6 +115,7 @@ pip install -r "$SCRIPT_DIR/requirements.txt"
 
 mkdir -p "$LIB_DIR"
 mkdir -p "$CHECKPOINT_DIR"
+mkdir -p "$PACKAGES_DIR"
 
 info "Installing SAM 2"
 if [ ! -d "$LIB_DIR/sam2" ]; then
@@ -128,9 +134,11 @@ bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o
 
 info "Downloading SAM 3D"
 
-hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
-mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
-rm -rf "$CHECKPOINT_DIR/hf-download"
+if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
+    hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
+    mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
+    rm -rf "$CHECKPOINT_DIR/hf-download"
+fi
 
 info "Installing Depth Anything"
 if [ ! -d "$LIB_DIR/depth-anything-3" ]; then
@@ -158,6 +166,26 @@ if [ $? -ne 0 ]; then
     error "Error: failed to download models. Access may be required on Hugging Face" >&2
     error "Models will be downloaded later when running pipeline" >&2
 fi
+
+conda deactivate
+conda create -n stablepoint python=3.12 -y
+conda run -n stablepoint pip install transformers==4.42.3
+
+info "Installing Stable Point 3D"
+if [ ! -d "$LIB_DIR/StablePoint" ]; then
+    git clone https://github.com/Stability-AI/stable-point-aware-3d --recursive "$LIB_DIR/StablePoint"
+fi
+conda run -n stablepoint pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
+conda run -n stablepoint pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
+conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
+conda run -n stablepoint pip install --upgrade transparent-background flet
+ln -s  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
+
+conda deactivate
+
+eval "$(conda shell.bash hook)"
+conda activate "$CONDA_NAME"
 
 success ""
 success "Setup complete! To start:"
