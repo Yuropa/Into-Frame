@@ -62,6 +62,27 @@ info "** Installation can take a while to complete. Please be patient... **"
 # Give some time to read the comment
 sleep 5
 
+require_command() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    error "Error: '$1' is not installed or not in PATH."
+    exit 1
+  fi
+}
+
+echo "Checking required dependencies..."
+
+require_command python3
+require_command pip3
+
+if ! command -v conda >/dev/null 2>&1; then
+  error "Error: 'conda' is required."
+  exit 1
+fi
+
+echo "All required tools are available."
+
+
+
 CONDA_NAME="frame"
 CONDA_ENVS=("$CONDA_NAME" "stablepoint")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
