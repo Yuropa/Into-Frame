@@ -16,15 +16,14 @@ from spar3d.utils import foreground_crop, remove_background
 class ModelGenerator():
     def __init__(self, device, temp_path) -> None:
         self.device = device
-        self.temp_path = Path(temp_path)
-        self.temp_path.mkdir(parents=True, exist_ok=True) 
-        self.image_resolution = 512
+        self.temp_path = temp_path
+        self.image_resolution = 1024
         self.foreground_ratio = 1.3
         self.model = SPAR3D.from_pretrained(
             "stabilityai/stable-point-aware-3d",
             config_name="config.yaml",
             weight_name="model.safetensors",
-            low_vram_mode=True
+            low_vram_mode=False
         )
         self.model.to(device)
         self.model.eval()
@@ -45,7 +44,7 @@ class ModelGenerator():
             mesh, glob_dict = self.model.run_image(
                 cleaned_image,
                 bake_resolution=self.image_resolution,
-                remesh="triangle",
+                remesh="quad",
                 vertex_count=-1,
                 return_points=True
             )
@@ -58,6 +57,8 @@ class ModelGenerator():
             "has_faces": hasattr(mesh, "faces"),
             "vertex_count": len(mesh.vertices) if hasattr(mesh, "vertices") else None,
             "face_count": len(mesh.faces) if hasattr(mesh, "faces") else None,
+            "pointcloud_size": len(glob_dict["pointcloud"].points) if "pointcloud" in glob_dict else None,
+            "point_clouds_size": len(glob_dict["point_clouds"][0].points) if "point_clouds" in glob_dict else None,
         }
         with open(str(self.temp_path / "debug.json"), "w") as f:
             json.dump(debug, f, indent=2)
@@ -71,7 +72,12 @@ class ModelGenerator():
 if __name__ == "__main__":
     device = sys.argv[1] if len(sys.argv) > 1 else "cpu"    
     sock_path = sys.argv[2]
-    temp_path = sys.argv[3]
+
+    temp_path = Path(sys.argv[3])
+    temp_path.mkdir(parents=True, exist_ok=True) 
+
+    sys.stdout = open(str(temp_path / "stdout.log"), "w", buffering=1)
+    sys.stderr = open(str(temp_path / "stderr.log"), "w", buffering=1)
 
     generator = ModelGenerator(device, temp_path)
 
