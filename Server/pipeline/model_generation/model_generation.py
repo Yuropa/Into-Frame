@@ -23,7 +23,7 @@ class ModelGenerator():
         for line in stream:
             print(f"[spar3d] {line}", end="", flush=True)
     
-    def __init__(self, device) -> None:
+    def __init__(self, device, temp_path) -> None:
         clip.load('ViT-L/14@336px')
 
         self.device = device
@@ -36,7 +36,7 @@ class ModelGenerator():
         self.server_sock.listen(1)
 
         self.process = subprocess.Popen(
-            ["conda", "run", "-n", "stablepoint", "python", str(script_path), str(device), self.sock_path],
+            ["conda", "run", "-n", "stablepoint", "python", str(script_path), str(device), self.sock_path, str(temp_path)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE,
@@ -85,6 +85,8 @@ class ModelGenerator():
         self.json_out.flush()
 
         response = json.loads(self.json_pipe.readline())
+        print(f"Generated mesh vertices={len(response["vertices"])} faces={len(response["faces"])}")
+
         mesh = trimesh.Trimesh(
             vertices=np.array(response["vertices"]),
             faces=np.array(response["faces"])
