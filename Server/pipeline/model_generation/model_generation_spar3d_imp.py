@@ -57,8 +57,6 @@ class ModelGenerator():
             "has_faces": hasattr(mesh, "faces"),
             "vertex_count": len(mesh.vertices) if hasattr(mesh, "vertices") else None,
             "face_count": len(mesh.faces) if hasattr(mesh, "faces") else None,
-            "pointcloud_size": len(glob_dict["pointcloud"].points) if "pointcloud" in glob_dict else None,
-            "point_clouds_size": len(glob_dict["point_clouds"][0].points) if "point_clouds" in glob_dict else None,
         }
         with open(str(self.temp_path / "debug.json"), "w") as f:
             json.dump(debug, f, indent=2)
