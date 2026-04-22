@@ -74,10 +74,25 @@ echo "Checking required dependencies..."
 require_command python3
 require_command pip3
 
-if ! command -v conda >/dev/null 2>&1; then
-  error "Error: 'conda' is required."
-  exit 1
-fi
+require_conda() {
+  if ! command -v conda >/dev/null 2>&1; then
+    error "Conda not installed"
+    return 0
+  fi
+
+  local unaccepted
+  unaccepted=$(conda tos 2>/dev/null | awk 'NR>2 && $3=="-" {count++} END {print count}')
+
+  if [[ "${unaccepted:-0}" -gt 0 ]]; then
+    error "Conda Terms of Service not accepted."
+    info "Run: conda tos accept --all-channels"
+    exit 1
+  fi
+
+  info "✅ Conda TOS accepted"
+}
+
+require_conda
 
 echo "All required tools are available."
 
@@ -114,14 +129,19 @@ conda create -y -n "$CONDA_NAME" python=3.12 pip setuptools wheel
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_NAME"
 
-# Install PyTorch with MPS support (standard pip build includes MPS)
 info "Installing PyTorch..."
-pip install torch torchvision
+if [[ "$(uname)" == "Darwin" ]]; then
+  # Install PyTorch with MPS support (standard pip build includes MPS)
+  pip install torch torchvision torchaudio
+else
+  conda install -y pytorch torchvision torchaudio pytorch-cuda=12.4 -c pytorch -c nvidia
+fi
 
 # Install standard pip packages
 info "Installing pip requirements..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
-pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+pip install --upgrade pip setuptools wheel
+pip install git+https://github.com/SunzeY/AlphaCLIP.git
 
 ## SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
 #info "Installing SAM 3 via transformers..."
@@ -151,7 +171,7 @@ fi
 
 TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
 chmod +x "$TRELLIS_SETUP"
-bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+conda run -n "$CONDA_NAME" bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 
 info "Downloading SAM 3D"
 
@@ -173,6 +193,9 @@ if [[ "$(uname)" == "Darwin" ]]; then
 fi
 
 pip install -e "$LIB_DIR/depth-anything-3"
+
+info "Pinning numpy..."
+pip install "numpy>=1.26,<3" --force-reinstall
 
 # Hugging Face auth for gated checkpoints
 warn ""

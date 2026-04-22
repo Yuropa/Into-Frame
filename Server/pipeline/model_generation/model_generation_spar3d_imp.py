@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 sys.path.append(str(Path(__file__).parent / ".." / ".." / ".." / "lib" / "packages"))
 
+import torch
 import socket
 import sys
 import json
@@ -24,8 +25,21 @@ class ModelGenerator():
             weight_name="model.safetensors",
             low_vram_mode=False
         )
-        self.model.to(device)
+        self.model.to(device)        
+        self.model.image_estimator.model.visual.half()
         self.model.eval()
+
+        ie = self.model.image_estimator
+        print('image_estimator type:', type(ie))
+        print('image_estimator.model type:', type(ie.model))
+        print('image_estimator.model.visual type:', type(ie.model.visual))
+
+        # Check dtypes of visual submodules
+        for name, mod in ie.model.visual.named_modules():
+            params = list(mod.parameters(recurse=False))
+            if params:
+                print(f'  {name}: {params[0].dtype}')
+
         self.bg_remove = Remover(device=device)
 
     def meshify(self, image_b64: str):
