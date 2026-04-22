@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Networking;
+using GLTFast;
 
 /// <summary>
 /// Manages all server-driven GameObjects in the scene.
@@ -52,38 +53,18 @@ public class SceneObjectManager : MonoBehaviour
             return;
         }
 
-        if (data.type != "billboard")
+        switch (data.type)
         {
-            Debug.LogWarning($"[SceneObjectManager] Unsupported type '{data.type}' — only 'billboard' is handled");
-            return;
+            case "billboard":
+                SpawnBillboard(data);
+                break;
+            case "mesh":
+                StartCoroutine(SpawnMesh(data));
+                break;
+            default:
+                Debug.LogWarning($"[SceneObjectManager] Unsupported type '{data.type}'");
+                break;
         }
-
-        if (billboardPrefab == null)
-        {
-            Debug.LogError("[SceneObjectManager] billboardPrefab is not assigned in the Inspector");
-            return;
-        }
-
-        GameObject go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
-        go.name = $"[billboard] {data.id[..6]}";
-        go.transform.localScale = ToVec3(data.scale);
-        go.transform.position = ToVec3(data.position);
-        go.transform.rotation = ToQuat(data.rotation);
-
-        var tag = go.AddComponent<ServerObjectTag>();
-        tag.serverId = data.id;
-
-        _tracked[data.id] = new TrackedObject
-        {
-            go        = go,
-            data      = data,
-            targetPos = ToVec3(data.position),
-            targetRot = ToQuat(data.rotation),
-        };
-
-        // Apply texture — from cache or kick off download
-        if (!string.IsNullOrEmpty(data.texture))
-            StartCoroutine(ApplyTexture(go, data.texture));
     }
 
     public void ApplyUpdate(ObjectUpdatePayload update)
@@ -108,6 +89,13 @@ public class SceneObjectManager : MonoBehaviour
             StartCoroutine(ApplyTexture(tracked.go, changes.texture));
         }
 
+        // If the mesh asset changed, re-download and replace
+        if (!string.IsNullOrEmpty(changes.mesh) && changes.mesh != tracked.data.mesh)
+        {
+            tracked.data.mesh = changes.mesh;
+            StartCoroutine(ReloadMesh(tracked, changes.mesh));
+        }
+
         if (changes.position != null) tracked.data.position = changes.position;
         if (changes.rotation != null) tracked.data.rotation = changes.rotation;
         if (changes.scale    != null) tracked.data.scale    = changes.scale;
@@ -120,25 +108,122 @@ public class SceneObjectManager : MonoBehaviour
         _tracked.Remove(id);
     }
 
+    // ── Spawn Helpers ──────────────────────────────────────────────────────
+
+    private void SpawnBillboard(SceneObject data)
+    {
+        if (billboardPrefab == null)
+        {
+            Debug.LogError("[SceneObjectManager] billboardPrefab is not assigned in the Inspector");
+            return;
+        }
+
+        GameObject go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
+        go.name = $"[billboard] {data.id[..6]}";
+        go.transform.localScale = ToVec3(data.scale);
+
+        var tag = go.AddComponent<ServerObjectTag>();
+        tag.serverId = data.id;
+
+        _tracked[data.id] = new TrackedObject
+        {
+            go        = go,
+            data      = data,
+            targetPos = ToVec3(data.position),
+            targetRot = ToQuat(data.rotation),
+        };
+
+        if (!string.IsNullOrEmpty(data.texture))
+            StartCoroutine(ApplyTexture(go, data.texture));
+    }
+
+    private IEnumerator SpawnMesh(SceneObject data)
+    {
+        // Register a placeholder so updates aren't lost while downloading
+        var container = new GameObject($"[mesh] {data.id[..6]}");
+        container.transform.position   = ToVec3(data.position);
+        container.transform.rotation   = ToQuat(data.rotation);
+        container.transform.localScale = ToVec3(data.scale);
+
+        var tag = container.AddComponent<ServerObjectTag>();
+        tag.serverId = data.id;
+
+        _tracked[data.id] = new TrackedObject
+        {
+            go        = container,
+            data      = data,
+            targetPos = ToVec3(data.position),
+            targetRot = ToQuat(data.rotation),
+        };
+
+        yield return LoadGlbInto(container, data.mesh);
+    }
+
+    private IEnumerator ReloadMesh(TrackedObject tracked, string meshId)
+    {
+        // Destroy existing child mesh content, keep the container
+        foreach (Transform child in tracked.go.transform)
+            Destroy(child.gameObject);
+
+        yield return LoadGlbInto(tracked.go, meshId);
+    }
+
+    // ── GLB Loading ────────────────────────────────────────────────────────
+
+    private IEnumerator LoadGlbInto(GameObject container, string meshId)
+    {
+        if (string.IsNullOrEmpty(meshId)) yield break;
+
+        string url = assetBaseUrl + meshId;
+        Debug.Log($"[SceneObjectManager] Downloading mesh: {url}");
+
+        using var req = UnityWebRequest.Get(url);
+        yield return req.SendWebRequest();
+
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Debug.LogError($"[SceneObjectManager] Failed to download mesh '{meshId}': {req.error}");
+            yield break;
+        }
+
+        byte[] glbBytes = req.downloadHandler.data;
+
+        var gltf = new GltfImport();
+        var glbTask = gltf.LoadGltfBinary(glbBytes, new System.Uri(url));
+
+        // Spin until the async task completes
+        while (!glbTask.IsCompleted)
+            yield return null;
+
+        if (!glbTask.Result)
+        {
+            Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'");
+            yield break;
+        }
+
+        var instantiateTask = gltf.InstantiateMainSceneAsync(container.transform);
+        while (!instantiateTask.IsCompleted)
+            yield return null;
+
+        Debug.Log($"[SceneObjectManager] Mesh '{meshId}' loaded into {container.name}");
+    }
+
     // ── Texture Loading ────────────────────────────────────────────────────
 
     private IEnumerator ApplyTexture(GameObject go, string textureId)
     {
-        // Already cached — apply immediately
         if (_textureCache.TryGetValue(textureId, out Texture2D cached))
         {
             SetTexture(go, cached);
             yield break;
         }
 
-        // Download already in flight — join the waitlist
         if (_textureWaiters.ContainsKey(textureId))
         {
             _textureWaiters[textureId].Add(go);
             yield break;
         }
 
-        // Start a new download
         _textureWaiters[textureId] = new List<GameObject> { go };
 
         string url = assetBaseUrl + textureId;
@@ -157,7 +242,6 @@ public class SceneObjectManager : MonoBehaviour
         Texture2D tex = DownloadHandlerTexture.GetContent(req);
         _textureCache[textureId] = tex;
 
-        // Apply to all objects that were waiting on this texture
         foreach (var waiter in _textureWaiters[textureId])
             if (waiter != null) SetTexture(waiter, tex);
 
@@ -171,7 +255,7 @@ public class SceneObjectManager : MonoBehaviour
 
         var mpb = new MaterialPropertyBlock();
         renderer.GetPropertyBlock(mpb);
-        mpb.SetTexture("_BaseMap", tex);  // URP Lit shader — change to "_MainTex" for Built-in
+        mpb.SetTexture("_BaseMap", tex);
         renderer.SetPropertyBlock(mpb);
     }
 
