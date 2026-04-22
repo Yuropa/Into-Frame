@@ -222,6 +222,7 @@ public class SceneObject
     public string id;
     public string type;
     public string texture;
+    public string mesh;
     public Vec3   position;
     public Vec3   rotation;
     public Vec3   scale;
