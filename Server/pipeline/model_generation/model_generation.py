@@ -2,7 +2,6 @@ import torch
 import trimesh
 import numpy as np
 import subprocess
-import json
 import base64
 from io import BytesIO
 import time
@@ -17,6 +16,7 @@ import tempfile
 
 from scene.mesh import Mesh
 from util.image_utils import Image
+from util.json_utils import parse_json
 
 class ModelGenerator():
     def _pipe_stream(self, stream, prefix):

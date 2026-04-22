@@ -5,13 +5,13 @@ sys.path.append(str(Path(__file__).parent / ".." / ".." / ".." / "lib" / "packag
 
 import torch
 import socket
-import json
 import base64
 from io import BytesIO
 from PIL import Image
 from transparent_background import Remover
 from spar3d.system import SPAR3D
 from spar3d.utils import foreground_crop, remove_background
+from util.json_utils import parse_json
 
 class ModelGenerator():
     def __init__(self, device, temp_path) -> None:
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     print(json.dumps({"status": "ready"}), file=json_out, flush=True)
 
     for line in json_in:
-        request = json.loads(line.strip())
+        request = parse_json(line.strip())
         if request["action"] == "meshify":
             result = generator.meshify(request["image_b64"])
             print(json.dumps(result), file=json_out, flush=True)
