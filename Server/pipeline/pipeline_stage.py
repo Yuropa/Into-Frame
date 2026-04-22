@@ -4,6 +4,7 @@ from logging import Logger
 from pathlib import Path
 from rich.progress import Progress
 from pipeline.pipeline_context import PipelineContext
+from util.device_utils import clean_device_cache
 
 class PipelineStageConfiguration:
     output: Path
@@ -69,13 +70,7 @@ class PipelineStage:
             self._log_memory_usage(torch.mps.driver_allocated_memory())
 
     def clean_up(self):
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
-            torch.cuda.reset_peak_memory_stats()
-            torch.cuda.synchronize()
-        elif self.device.type == "mps":
-            torch.mps.empty_cache()
-            torch.mps.synchronize()
+        clean_device_cache(self.device)
 
     def log_info(self, message):
         self.config.log.info(message)
@@ -101,12 +96,19 @@ class PipelineStage:
     def advance_progress(self, sub_task):
         self.progress.advance(sub_task)
         
-        #task = self.progress.tasks[sub_task]
-        #sub_total = task.total
-        #total_tasks = self.total_tasks if self.total_tasks is not None else 1
-        #self.progress.advance(self.main_task, 1 / (sub_total * total_tasks))
+        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        sub_total = task.total if task.total is not None else task.completed + 1
+        total_tasks = self.total_tasks if self.total_tasks is not None else 1
+        self.progress.advance(self.main_task, 1 / (sub_total * total_tasks))
 
     def finish_progress(self, task):
+        # Snap main task forward by whatever fraction this stage didn't account for
+        t = next(t for t in self.progress.tasks if t.id == task)
+        sub_total = t.total if t.total is not None else 1
+        total_tasks = self.total_tasks if self.total_tasks is not None else 1
+        remaining = (sub_total - t.completed) / (sub_total * total_tasks)
+        if remaining > 0:
+            self.progress.advance(self.main_task, remaining)
         self.progress.remove_task(task)
 
     def _set_progress(self, progress: Progress, main_task):
