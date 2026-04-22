@@ -146,7 +146,6 @@ class Pipeline:
 
                     stage.log_memory_usage()
                     stage.clean_up()
-                    progress.advance(task)
             
                     current_step_index += 1
                     post_progress()

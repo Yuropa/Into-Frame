@@ -6,6 +6,14 @@ def offload_pipeline(device: torch.device, pipeline):
     elif device.type == "mps":
         pipeline.enable_sequential_cpu_offload()
 
+def clean_device_cache(device):
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        torch.cuda.synchronize()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
+        torch.mps.synchronize()
 
 def preferred_device() -> tuple[torch.device, torch.dtype]:
     if torch.cuda.is_available():
