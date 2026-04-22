@@ -128,9 +128,9 @@ if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
     git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$LIB_DIR/TRELLIS.2"
 fi
 
-TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
-chmod +x "$TRELLIS_SETUP"
-bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+#TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
+#chmod +x "$TRELLIS_SETUP"
+#bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 
 info "Downloading SAM 3D"
 
