@@ -43,9 +43,6 @@ class ModelGenerator():
             text=False
         )
 
-        threading.Thread(target=self._pipe_stream, args=(self.process.stdout, "[spar3d stdout]"), daemon=True).start()
-        threading.Thread(target=self._pipe_stream, args=(self.process.stderr, "[spar3d stderr]"), daemon=True).start()
-
         self.server_sock.settimeout(60)
         conn, _ = self.server_sock.accept()
         self.json_pipe = conn.makefile('r')
@@ -85,7 +82,6 @@ class ModelGenerator():
         self.json_out.flush()
 
         response = json.loads(self.json_pipe.readline())
-        print(f"Generated mesh vertices={len(response["vertices"])} faces={len(response["faces"])}")
 
         mesh = trimesh.Trimesh(
             vertices=np.array(response["vertices"]),

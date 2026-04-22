@@ -14,6 +14,7 @@ class Object3D():
 
         self.type = ""
         self.texture = ""
+        self.mesh = ""
         self.position = vec3()
         self.rotation = vec3()
         self.scale = vec3(1.0, 1.0, 1.0)
@@ -34,10 +35,10 @@ class Object3D():
             "rotation": self.rotation,
             "scale":    self.scale,
             "type":     self.type,
-            "texture":  self.texture
+            "texture":  self.texture,
+            "mesh":     self.mesh
         }
     
-
     @classmethod
     def billboard(cls, texture: str, width: float, height: float, x: float, y: float, z: float):
         obj = cls()
@@ -46,5 +47,15 @@ class Object3D():
         obj.texture = texture
         obj.set_position(x, y, z)
         obj.set_scale(width, height, 1.0)
+
+        return obj
+
+    @classmethod
+    def mesh(cls, mesh: str, x: float, y: float, z: float):
+        obj = cls()
+
+        obj.type = ObjectType.MESH
+        obj.mesh = mesh
+        obj.set_position(x, y, z)
 
         return obj
