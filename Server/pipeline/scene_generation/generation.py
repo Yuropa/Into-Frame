@@ -23,6 +23,8 @@ class SceneGenerationStage(PipelineStage):
         generation_task = self.create_progress(object_count, "Creating Objects...")
         for idx in range(object_count):
             texture_name = f"crop_{idx}"
+            mesh_name = f"mesh_{idx}"
+
             metadata = context.input_object(f"metadata_{idx}")
 
             result = self.unproject_bbox(metadata["box"], depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
@@ -33,15 +35,24 @@ class SceneGenerationStage(PipelineStage):
 
             position, width, height = result
 
-            billboard = Object3D.billboard(
-                texture_name, 
-                width=width,
-                height=height,
-                x=position[0],
-                y=position[1],
-                z=position[2],
-            )
-            scene.add_object(billboard)
+            if context.input_object3d(mesh_name) is not None:
+                mesh_obj = Object3D.mesh(
+                    mesh_name,
+                    x=position[0],
+                    y=position[1],
+                    z=position[2],
+                )
+                scene.add_object(mesh_obj)
+            else:
+                billboard = Object3D.billboard(
+                    texture_name, 
+                    width=width,
+                    height=height,
+                    x=position[0],
+                    y=position[1],
+                    z=position[2],
+                )
+                scene.add_object(billboard)
             self.advance_progress(generation_task)
 
         self.finish_progress(generation_task)

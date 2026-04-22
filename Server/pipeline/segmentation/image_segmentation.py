@@ -19,7 +19,7 @@ class ImageSeg:
             points_per_side=32,
             pred_iou_thresh=0.8,
             stability_score_thresh=0.9,
-            min_mask_region_area=500,
+            min_mask_region_area=100,
             box_nms_thresh=0.7,
         )
 

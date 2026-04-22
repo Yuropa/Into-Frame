@@ -8,18 +8,22 @@ class ModelGenerationStage(PipelineStage):
         super().__init__(config)
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        generation_task = self.create_progress(2, "Meshifying...")
-        self.advance_progress(generation_task)
+        count = context.input_object("count")
 
-        image_name = "crop_3"
-        input_image = context.input_image(image_name)
-        gen = ModelGenerator(self.device, self.config.temp / image_name)
-        mesh = gen.meshify(input_image)
+        generation_task = self.create_progress(count, "Meshifying...")
+        for idx in range(count):
+            image_name = f"crop_{idx}"
+            input_image = context.input_image(image_name)
+            gen = ModelGenerator(self.device, self.config.temp / image_name)
+            mesh = gen.meshify(input_image)
 
-        self.advance_progress(generation_task)
+            self.advance_progress(generation_task)
+            context.add_mesh(f"mesh_{idx}", mesh)
+            gen.close()
+
+            print(f"Generated mesh for {image_name} vertices={mesh.vertex_count} faces={mesh.face_count}")
         self.finish_progress(generation_task)
 
-        context.add_mesh("mesh", mesh)
         return context
 
     def model_names(self) -> list[str]:
