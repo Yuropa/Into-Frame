@@ -41,6 +41,7 @@ class PipelineStage:
         self.config = config
         self.device = config.device
         self.torch_dtype = config.torch_dtype
+        self.total_tasks = None
 
     def model_names(self) -> list[str]:
         return []
@@ -88,20 +89,29 @@ class PipelineStage:
     def run(self, context: PipelineContext) -> PipelineContext:
         return context
 
+    def set_total_tasks(self, count: int):
+        self.total_tasks = count
+
     def create_progress(self, count: int, label: Optional[str] = None):
         if label is None:
             label = self.name
 
         return self.progress.add_task("  " + label, total=count)
 
-    def advance_progress(self, task):
-        self.progress.advance(task)
+    def advance_progress(self, sub_task):
+        self.progress.advance(sub_task)
+        
+        #task = self.progress.tasks[sub_task]
+        #sub_total = task.total
+        #total_tasks = self.total_tasks if self.total_tasks is not None else 1
+        #self.progress.advance(self.main_task, 1 / (sub_total * total_tasks))
 
     def finish_progress(self, task):
         self.progress.remove_task(task)
 
-    def _set_progress(self, progress: Progress):
+    def _set_progress(self, progress: Progress, main_task):
         self.progress = progress
+        self.main_task = main_task
 
     
     

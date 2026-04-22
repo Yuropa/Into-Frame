@@ -74,8 +74,8 @@ class Pipeline:
             SegmentationStage(config=config.stage_config("Object Segementation")),
             # SupersamplingStage(config=config.stage_config("Supersampling")),
             DepthStage(config=config.stage_config("Depth Generation")),
-            SceneGenerationStage(config=config.stage_config("Scene Generation")),
-            ModelGenerationStage(config=config.stage_config("Mesh Generation"))
+            ModelGenerationStage(config=config.stage_config("Mesh Generation")),
+            SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
     def log_info(self, msg):
@@ -135,7 +135,7 @@ class Pipeline:
             for stage in self.stages:
                 try:
                     self.log_info(f"Handling stage: {stage.name}")
-                    stage._set_progress(progress)
+                    stage._set_progress(progress, task)
 
                     current_step = stage.name
                     post_progress()

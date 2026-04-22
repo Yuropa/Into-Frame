@@ -35,7 +35,8 @@ class SceneGenerationStage(PipelineStage):
 
             position, width, height = result
 
-            if context.input_object3d(mesh_name) is not None:
+            if context.input_mesh(mesh_name) is not None:
+                self.log_info(f"Creating mesh for {idx}")
                 mesh_obj = Object3D.mesh(
                     mesh_name,
                     x=position[0],
@@ -44,6 +45,7 @@ class SceneGenerationStage(PipelineStage):
                 )
                 scene.add_object(mesh_obj)
             else:
+                self.log_info(f"Creating billboard for {idx}")
                 billboard = Object3D.billboard(
                     texture_name, 
                     width=width,
