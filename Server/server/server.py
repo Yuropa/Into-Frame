@@ -1,4 +1,5 @@
 import asyncio
+import json
 import math
 import uuid
 import threading
@@ -13,7 +14,6 @@ from pipeline.pipeline import Pipeline, PipelineContext, ContextKey
 from server.messages import ServerMessages, ClientMessages
 from scene.scene import Scene
 from scene.object import Object3D
-from util.json_utils import parse_json
 
 import websockets
 
@@ -144,7 +144,7 @@ class SimulationServer():
             async for raw in ws:
                 self.log.info(f"Raw message: {repr(raw)}")  # add this temporarily
                 try:
-                    msg = parse_json(raw)
+                    msg = json.loads(raw)
                 except json.JSONDecodeError:
                     self.log.warning(f"Bad JSON from {client_id}")
                     continue
