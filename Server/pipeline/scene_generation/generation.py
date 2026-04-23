@@ -36,6 +36,10 @@ class SceneGenerationStage(PipelineStage):
             position, width, height = result
 
             if context.input_mesh(mesh_name) is not None:
+                updated_mesh = context.input_mesh(mesh_name)
+                updated_mesh.fit_to_box(width=width, height=height)
+                context.add_mesh(mesh_name, updated_mesh)
+
                 self.log_info(f"Creating mesh for {idx}")
                 mesh_obj = Object3D.mesh(
                     mesh_name,
