@@ -1,23 +1,23 @@
 import sys
-import os
 from pathlib import Path
+from typing import Any
 sys.path.append(str(Path(__file__).parent / ".." / ".." / ".." / "lib" / "packages"))
 sys.path.append(str(Path(__file__).parent / ".." / ".."))
 
 import torch
-import socket
 import base64
 from io import BytesIO
 from PIL import Image
 from transparent_background import Remover
 from spar3d.system import SPAR3D
 from spar3d.utils import foreground_crop, remove_background
-from util.json_utils import parse_json, write_json
-from util.device_utils import clean_device_cache
+from util.json_utils import write_json
+from remote_connection.remote_server import RemoteServer
 
-class ModelGenerator():
-    def __init__(self, device) -> None:
-        self.device = device
+class ModelGenerator(RemoteServer):
+    def __init__(self) -> None:
+        super().__init__()
+
         self.image_resolution = 1024
         self.foreground_ratio = 1.3
         self.model = SPAR3D.from_pretrained(
@@ -26,15 +26,19 @@ class ModelGenerator():
             weight_name="model.safetensors",
             low_vram_mode=False
         )
-        self.model.to(device)
+        self.model.to(self.device)
         self.model.eval()
-        self.bg_remove = Remover(device=device)
+        self.bg_remove = Remover(device=self.device)
 
-    def meshify(self, image_b64: str, temp_path: Path):
-        image_data = base64.b64decode(image_b64)
+    def perform(self, action: str, temp_path: Path, input: Any) -> Any:
+        if action == "meshify":
+            return self._meshify(temp_path, input)
+        raise ValueError(f"Unknown action: {action}")
+    
+    def _meshify(self, temp_path: Path, input: Any) -> Any:
+        image_data = base64.b64decode(input)
         image = Image.open(BytesIO(image_data))
         
-        temp_path.mkdir(parents=True, exist_ok=True)
         image.save(str(temp_path / "output.png"))
 
         cleaned_image = remove_background(image, self.bg_remove)
@@ -68,29 +72,7 @@ class ModelGenerator():
         if "point_clouds" in glob_dict:
             glob_dict["point_clouds"][0].export(str(temp_path / "points.ply"))
         # Serialize mesh and return as JSON
-        return {"glb_path": str(mesh_path)}
+        return str(mesh_path)
 
 if __name__ == "__main__":
-    device = sys.argv[1] if len(sys.argv) > 1 else "cpu"    
-    sock_path = sys.argv[2]
-
-    device = torch.device(device)
-    generator = ModelGenerator(device)
-
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(sock_path)
-    json_in = sock.makefile('r')
-    json_out = sock.makefile('w')
-
-    print(write_json({"status": "ready"}), file=json_out, flush=True)
-
-    for line in json_in:
-        request = parse_json(line.strip())
-        if request["action"] == "meshify":
-            result = generator.meshify(request["image_b64"], Path(request["temp_path"]))
-            print(write_json(result), file=json_out, flush=True)
-            clean_device_cache(device)
-        elif request["action"] == "exit":
-            break
-
-    sock.close()
+    ModelGenerator.run()
