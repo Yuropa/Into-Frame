@@ -7,9 +7,7 @@ import tempfile
 import shutil
 
 from typing import Any
-from scene.mesh import Mesh
 from util.image_utils import Image
-from util.json_utils import parse_json, write_json
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status
 
 class RemoteClient():
@@ -84,7 +82,7 @@ class RemoteClient():
             stderr = self.process.stderr.read()
             raise RuntimeError(f"subprocess exited before running:\n{stderr}")
 
-    def send(self, action: str, input: Image, temp_path: Path) -> Any:
+    def send(self, action: str, input, temp_path: Path) -> Any:
         self._check_for_errors()
 
         request = RemoteInput(
