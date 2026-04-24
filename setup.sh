@@ -87,6 +87,19 @@ fi
 conda init
 source ~/.bash_profile
 
+# Detect OS and install accordingly
+if command -v apt &>/dev/null; then
+    sudo apt install -y libwebp-dev
+elif command -v dnf &>/dev/null; then
+    sudo dnf install -y libwebp-devel
+elif command -v pacman &>/dev/null; then
+    sudo pacman -S --noconfirm libwebp
+elif command -v brew &>/dev/null; then
+    brew install webp
+else
+    echo "WARNING: Could not install libwebp — unsupported package manager"
+fi
+
 info "Creating Conda environment '$CONDA_NAME'..."
 conda create -y -n "$CONDA_NAME" python=3.12 pip setuptools wheel
 
@@ -166,6 +179,8 @@ if [ $? -ne 0 ]; then
     error "Error: failed to download models. Access may be required on Hugging Face" >&2
     error "Models will be downloaded later when running pipeline" >&2
 fi
+
+conda run -n frame pip install --upgrade --force-reinstall Pillow
 
 conda deactivate
 conda create -n stablepoint python=3.12 -y
