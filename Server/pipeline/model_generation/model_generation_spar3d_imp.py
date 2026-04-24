@@ -1,8 +1,8 @@
-import sys
+from path_utils import add_project_paths
+add_project_paths()
+
 from pathlib import Path
 from typing import Any
-sys.path.append(str(Path(__file__).parent / ".." / ".." / ".." / "lib" / "packages"))
-sys.path.append(str(Path(__file__).parent / ".." / ".."))
 
 import torch
 import base64
