@@ -6,6 +6,7 @@ from scene.mesh import Mesh
 from util.image_utils import Image
 from pipeline.model_generation.model_generation_base import ModelGeneratorBase
 from pipeline.model_generation.model_generation_spar3d import ModelGeneratorSpar3D
+from pipeline.model_generation.model_generation_trellis import ModelGeneratorTrellis
 
 class ModelGeneratorType(Enum):
     SPAR3D = 1
@@ -25,7 +26,7 @@ class ModelGenerator():
                     device=device
                 )
             case ModelGeneratorType.TRELLIS:
-                self.generator = ModelGeneratorSpar3D(
+                self.generator = ModelGeneratorTrellis(
                     device=device
                 )
 
@@ -35,10 +36,13 @@ class ModelGenerator():
             case ModelGeneratorType.SPAR3D:
                 return ModelGeneratorSpar3D.model_names()
             case ModelGeneratorType.TRELLIS:
-                return ModelGeneratorSpar3D.model_names()
+                return ModelGeneratorTrellis.model_names()
     
     def meshify(self, image: Image, temp_path: Path) -> Mesh:
         return self.generator.meshify(
             image=image,
             temp_path=temp_path
         )
+
+    def close(self):
+        self.generator.close()
