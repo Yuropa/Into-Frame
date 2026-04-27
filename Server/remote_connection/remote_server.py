@@ -1,6 +1,9 @@
 import sys
 import torch
 import socket
+import base64
+from io import BytesIO
+from PIL import Image
 from abc import ABC, abstractmethod
 from typing import Any
 from pathlib import Path
@@ -28,7 +31,8 @@ class RemoteServer(ABC):
         self._send(status)
 
     def _send(self, obj: RemoteObject):
-        print(obj.encode(), file=self.json_out, flush=True)
+        encoded = obj.encode()
+        print(encoded, file=self.json_out, flush=True)
 
     def poll(self):
         for line in self.json_in:
@@ -59,6 +63,10 @@ class RemoteServer(ABC):
     @abstractmethod
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         return input
+
+    def decode_image(self, input: Any) -> Image:
+        image_data = base64.b64decode(input)
+        return Image.open(BytesIO(image_data))
 
     @classmethod
     def run(cls):

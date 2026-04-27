@@ -20,7 +20,12 @@ info()    { printf "${CYAN}%s${RESET}\n" "$*"; }
 success() { printf "${GREEN}%s${RESET}\n" "$*"; }
 warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
-
+section() {
+  local msg="$1"
+  info "========================================"
+  info "  $msg"
+  info "========================================"
+}
 
 echo ""
 
@@ -63,11 +68,49 @@ info "** Installation can take a while to complete. Please be patient... **"
 sleep 5
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
+
+create_env() {
+    local name="$1"
+    local version="$2"
+    conda deactivate
+    conda create -y -n "$name" python="$version" pip setuptools wheel
+    conda activate "$name" 
+}
+
+stop_env() {
+    conda deactivate
+    conda activate "$CONDA_NAME" 
+}
+
+source_shell_configs() {
+  local found=0
+  local file
+
+  for file in \
+    ~/.bash_profile \
+    ~/.bashrc \
+    ~/.zshrc \
+    ~/.zprofile
+  do
+    if [ -f "$file" ]; then
+      # shellcheck disable=SC1090
+      source "$file"
+      found=1
+    fi
+  done
+
+  if [ "$found" -eq 0 ]; then
+    warn "No shell configuration files found" >&2
+    return 1
+  fi
+
+  return 0
+}
 
 if [ "$FORCE" = true ]; then
     warn "Removing old Conda environments..."
@@ -76,7 +119,7 @@ if [ "$FORCE" = true ]; then
     fi
 
     conda init
-    source ~/.bash_profile
+    source_shell_configs
 
     conda deactivate
     for env in "${CONDA_ENVS[@]}"; do
@@ -85,7 +128,7 @@ if [ "$FORCE" = true ]; then
 fi
 
 conda init
-source ~/.bash_profile
+source_shell_configs
 
 # Detect OS and install accordingly
 if command -v apt &>/dev/null; then
@@ -100,18 +143,18 @@ else
     echo "WARNING: Could not install libwebp — unsupported package manager"
 fi
 
-info "Creating Conda environment '$CONDA_NAME'..."
-conda create -y -n "$CONDA_NAME" python=3.12 pip setuptools wheel
+section "Creating Conda environment '$CONDA_NAME'..."
+create_env "$CONDA_NAME" 3.12
 
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_NAME"
 
 # Install PyTorch with MPS support (standard pip build includes MPS)
-info "Installing PyTorch..."
-pip install torch torchvision
+section "Installing PyTorch..."
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # Install standard pip packages
-info "Installing pip requirements..."
+section "Installing pip requirements..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
 pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
@@ -130,22 +173,30 @@ mkdir -p "$LIB_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 mkdir -p "$PACKAGES_DIR"
 
-info "Installing SAM 2"
+section "Installing SAM 2"
 if [ ! -d "$LIB_DIR/sam2" ]; then
     git clone https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
 fi
 pip install -e "$LIB_DIR/sam2"
 
-info "Installing Trellis"
+section "Installing Trellis"
 if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
     git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$LIB_DIR/TRELLIS.2"
 fi
 
-TRELLIS_SETUP="$LIB_DIR/TRELLIS.2/setup.sh"
-chmod +x "$TRELLIS_SETUP"
-bash "$TRELLIS_SETUP" --new-env --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
+TRELLIS_SETUP="setup.sh"
+chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
 
-info "Downloading SAM 3D"
+pushd "$TRELLIS_DIR" > /dev/null || exit 1
+create_env "trellis2" 3.10
+pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+printf "Y\n" | bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+popd > /dev/null || exit 1
+ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
+stop_env
+
+section "Downloading SAM 3D"
 
 if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
     hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
@@ -153,18 +204,19 @@ if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
     rm -rf "$CHECKPOINT_DIR/hf-download"
 fi
 
-info "Installing Depth Anything"
+conda deactivate
+section "Installing Depth Anything"
 if [ ! -d "$LIB_DIR/depth-anything-3" ]; then
     git clone https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
 fi
 
-if [[ "$(uname)" == "Darwin" ]]; then
-    warn "Removing xformers for MPS"
-    sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
-    sed -i '' '/"xformers"/d' "$LIB_DIR/depth-anything-3/pyproject.toml"
-fi
+warn "Removing xformers"
+sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
+sed -i '' '/"xformers"/d' "$LIB_DIR/depth-anything-3/pyproject.toml"
 
+create_env "depthanything" 3.10
 pip install -e "$LIB_DIR/depth-anything-3"
+stop_env
 
 # Hugging Face auth for gated checkpoints
 warn ""
@@ -182,11 +234,11 @@ fi
 
 conda run -n frame pip install --upgrade --force-reinstall Pillow
 
-conda deactivate
-conda create -n stablepoint python=3.12 -y
+section "Installing Stable Point 3D"
+
+create_env "stablepoint" 3.12
 conda run -n stablepoint pip install transformers==4.42.3
 
-info "Installing Stable Point 3D"
 if [ ! -d "$LIB_DIR/StablePoint" ]; then
     git clone https://github.com/Stability-AI/stable-point-aware-3d --recursive "$LIB_DIR/StablePoint"
 fi
@@ -195,9 +247,9 @@ conda run -n stablepoint pip install --no-build-isolation git+https://github.com
 conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
 conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
 conda run -n stablepoint pip install --upgrade transparent-background flet
-ln -s  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
+ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 
-conda deactivate
+stop_env
 
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_NAME"
