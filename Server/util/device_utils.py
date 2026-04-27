@@ -20,6 +20,7 @@ def preferred_device() -> tuple[torch.device, torch.dtype]:
         # Select Cuda device with the most memory available
         best = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[1])
         device = torch.device(f"cuda:{best}")
+        device = torch.device("cuda")
         torch_dtype = torch.bfloat16
     elif torch.mps.is_available():
         device = torch.device("mps")

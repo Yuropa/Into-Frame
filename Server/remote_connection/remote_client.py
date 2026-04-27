@@ -5,10 +5,12 @@ import threading
 import socket
 import tempfile
 import shutil
+import base64
+from io import BytesIO
 
 from typing import Any
 from util.image_utils import Image
-from remote_connection.remote_types import RemoteInput, RemoteOutput, Status
+from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
 
 class RemoteClient():
     def _readline_json(self, pipe):
@@ -82,6 +84,12 @@ class RemoteClient():
             stderr = self.process.stderr.read()
             raise RuntimeError(f"subprocess exited before running:\n{stderr}")
 
+
+    def _send(self, obj: RemoteObject):
+        encoded = obj.encode()
+        self.json_out.write(encoded)
+        self.json_out.flush()
+
     def send(self, action: str, input, temp_path: Path) -> Any:
         self._check_for_errors()
 
@@ -90,13 +98,16 @@ class RemoteClient():
             temp_path=temp_path, 
             input=input
         )
-        self.json_out.write(request.encode())
-        self.json_out.flush()
+        self._send(request)
 
         response_line = self._readline_json(self.json_pipe)
         if response_line is None:
             raise RuntimeError("Subprocess closed connection unexpectedly")
         response = RemoteOutput.decode(response_line)
+
+        error = getattr(response, "error", None)
+        if error:
+            raise RuntimeError(f"Remote error: {error}")
 
         return response.output
     
@@ -105,8 +116,7 @@ class RemoteClient():
             try:
                 if hasattr(self, 'json_out'):
                     request = Status("exit")
-                    self.json_out.write(request.encode())
-                    self.json_out.flush()
+                    self._send(request)
             except (BrokenPipeError, OSError):
                 pass
             self.process.wait()
@@ -121,3 +131,9 @@ class RemoteClient():
             if hasattr(self, 'sock_dir'):
                 shutil.rmtree(self.sock_dir, ignore_errors=True)
             self.process = None
+
+    def encode_image(self, image: Image):
+        buffer = BytesIO()
+        image.image.save(buffer, format="PNG")
+        buffer.seek(0)
+        return base64.b64encode(buffer.getvalue()).decode()

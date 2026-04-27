@@ -17,7 +17,7 @@ class DepthStage(PipelineStage):
 
         input_image = context.input_image(ContextKey.INPUT)
         if input_image is not None:
-            result = self._depth.depth(input_image)
+            result = self._depth.depth(input_image, self.config.temp)
             depth = Depth(result.depth)
 
             intrinsics = CameraIntrinsics.from_depth_anything(

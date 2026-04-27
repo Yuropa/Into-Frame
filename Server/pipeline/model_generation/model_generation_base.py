@@ -1,7 +1,5 @@
 from pathlib import Path
 import trimesh
-import base64
-from io import BytesIO
 
 from scene.mesh import Mesh
 from util.image_utils import Image
@@ -13,11 +11,7 @@ class ModelGeneratorBase(RemoteClient):
         return []
     
     def meshify(self, image: Image, temp_path: Path) -> Mesh:
-        buffer = BytesIO()
-        image.image.save(buffer, format="PNG")
-        image_b64 = base64.b64encode(buffer.getvalue()).decode()
-        
-        response = self.send(action="meshify", input=image_b64, temp_path=temp_path)
+        response = self.send(action="meshify", input=self.encode_image(image), temp_path=temp_path)
         glb_path = Path(response)
 
         try:

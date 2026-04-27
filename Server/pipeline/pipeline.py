@@ -78,6 +78,8 @@ class Pipeline:
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
+        self.log_info(f"Device {self.device}")
+
     def log_info(self, msg):
         self.config.log.info(msg)
 
