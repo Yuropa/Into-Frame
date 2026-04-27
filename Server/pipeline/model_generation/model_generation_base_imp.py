@@ -12,7 +12,6 @@ class ModelGeneratorBase(RemoteServer, ABC):
         if action == "meshify":
             return self._run_meshify(temp_path, input)
         raise ValueError(f"Unknown action: {action}")
-
     
     @abstractmethod
     def meshify(self, temp_path: Path, input: Image) -> Any:

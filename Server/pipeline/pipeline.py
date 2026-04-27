@@ -15,7 +15,7 @@ from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from util.device_utils import preferred_device
+from util.device_utils import preferred_device, device_name
 
 class PipelineConfiguration:
     output: Optional[Path]
@@ -78,7 +78,7 @@ class Pipeline:
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
-        self.log_info(f"Device {self.device}")
+        self.log_info(f"Using device {device_name(self.device)}")
 
     def log_info(self, msg):
         self.config.log.info(msg)

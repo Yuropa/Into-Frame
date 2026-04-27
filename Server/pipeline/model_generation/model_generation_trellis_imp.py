@@ -10,9 +10,7 @@ from trellis2.pipelines import Trellis2ImageTo3DPipeline
 from pipeline.model_generation.model_generation_base_imp import ModelGeneratorBase
 
 class ModelGenerator(ModelGeneratorBase):
-    def __init__(self) -> None:
-        super().__init__()
-
+    def setup(self):
         self.pipeline = Trellis2ImageTo3DPipeline.from_pretrained(
             "microsoft/TRELLIS.2-4B"
         )

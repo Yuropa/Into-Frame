@@ -7,13 +7,13 @@ from PIL import Image
 from abc import ABC, abstractmethod
 from typing import Any
 from pathlib import Path
-from util.device_utils import clean_device_cache
+from util.device_utils import clean_device_cache, device_name, device_from_id
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
 
 class RemoteServer(ABC):
     def __init__(self) -> None:
         name_device = sys.argv[1] if len(sys.argv) > 1 else "cpu"   
-        self.device = torch.device(name_device) 
+        self.device = device_from_id(name_device) 
 
         sock_path = sys.argv[2]
         self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -29,6 +29,11 @@ class RemoteServer(ABC):
     def connect(self):
         status = Status("ready")
         self._send(status)
+
+        print(f"Using device {device_name(self.device)}")
+
+    def setup(self):
+        pass
 
     def _send(self, obj: RemoteObject):
         encoded = obj.encode()
@@ -72,5 +77,6 @@ class RemoteServer(ABC):
     def run(cls):
         server = cls()
         server.connect()
+        server.setup()
         server.poll()
         server.close()

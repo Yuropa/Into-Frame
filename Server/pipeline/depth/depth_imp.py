@@ -11,9 +11,7 @@ from depth_anything_3.api import DepthAnything3
 from remote_connection.remote_server import RemoteServer
 
 class DepthGenerator(RemoteServer):
-    def __init__(self) -> None:
-        super().__init__()
-
+    def setup(self):
         self.model = DepthAnything3.from_pretrained(
             "depth-anything/da3nested-giant-large"
         )
