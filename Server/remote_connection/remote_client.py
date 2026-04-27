@@ -10,6 +10,7 @@ from io import BytesIO
 
 from typing import Any
 from util.image_utils import Image
+from util.device_utils import device_id
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
 
 class RemoteClient():
@@ -26,10 +27,11 @@ class RemoteClient():
             prefix = ""
         else:
             prefix = f"[{prefix}]"
-
-        for line in stream:        
+        
+        for line in iter(stream.readline, b""):
             print(f"{prefix} {line.decode('utf-8', errors='replace')}", end="", flush=True)
 
+        stream.close()
     
     def __init__(self, device: torch.device, conda_env: str, script_path: Path) -> None:
         self.process = None
@@ -43,7 +45,7 @@ class RemoteClient():
         self.server_sock.listen(1)
 
         self.process = subprocess.Popen(
-            ["conda", "run", "--no-capture-output", "-n", conda_env, "python", str(script_path), str(device), self.sock_path],
+            ["conda", "run", "--no-capture-output", "-n", conda_env, "python", str(script_path), device_id(device), self.sock_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE,

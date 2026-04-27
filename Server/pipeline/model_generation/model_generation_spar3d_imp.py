@@ -11,9 +11,7 @@ from spar3d.utils import foreground_crop, remove_background
 from pipeline.model_generation.model_generation_base_imp import ModelGeneratorBase
 
 class ModelGenerator(ModelGeneratorBase):
-    def __init__(self) -> None:
-        super().__init__()
-
+    def setup(self):
         self.image_resolution = 1024
         self.foreground_ratio = 1.3
         self.model = SPAR3D.from_pretrained(
