@@ -2,6 +2,7 @@ import sys
 import torch
 import socket
 import base64
+import traceback
 from io import BytesIO
 from PIL import Image
 from abc import ABC, abstractmethod
@@ -59,7 +60,8 @@ class RemoteServer(ABC):
                     )
                     self._send(result)
                 except Exception as e:
-                    result = RemoteOutput(action=request.action, output=None, error=str(e))
+                    stack_text = traceback.format_exc()
+                    result = RemoteOutput(action=request.action, output=None, error=str(e), stack=stack_text)
                     self._send(result)
                     return
                 

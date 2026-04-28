@@ -73,8 +73,10 @@ class RemoteOutput(RemoteObject):
     action: str
     output: object
     error: object
+    stack: object
 
-    def __init__(self, action: str, output, error = "") -> None:
+    def __init__(self, action: str, output, error = "", stack="") -> None:
         self.action = action
         self.output = output
         self.error = error
+        self.stack = stack

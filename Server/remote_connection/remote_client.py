@@ -6,6 +6,7 @@ import socket
 import tempfile
 import shutil
 import base64
+import os
 from io import BytesIO
 
 from typing import Any
@@ -32,7 +33,16 @@ class RemoteClient():
             print(f"{prefix} {line.decode('utf-8', errors='replace')}", end="", flush=True)
 
         stream.close()
-    
+
+    def _cuda_env_for_device(self, device: torch.device) -> dict:
+        env = os.environ.copy()
+
+        if device.type == "cuda":
+            idx = device.index if device.index is not None else torch.cuda.current_device()
+            env["CUDA_VISIBLE_DEVICES"] = str(idx)
+
+        return env
+
     def __init__(self, device: torch.device, conda_env: str, script_path: Path) -> None:
         self.process = None
         self.device = device
@@ -44,12 +54,21 @@ class RemoteClient():
         self.server_sock.bind(self.sock_path)
         self.server_sock.listen(1)
 
+        env = self._cuda_env_for_device(device)
+
         self.process = subprocess.Popen(
-            ["conda", "run", "--no-capture-output", "-n", conda_env, "python", str(script_path), device_id(device), self.sock_path],
+            [
+                "conda", "run", "--no-capture-output",
+                "-n", conda_env,
+                "python", str(script_path),
+                device_id(device),
+                self.sock_path
+            ],
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, 
+            stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=False
+            text=False,
+            env=env
         )
 
         threading.Thread(target=self._pipe_stream, args=(self.process.stderr, "err"), daemon=True).start()
@@ -109,6 +128,9 @@ class RemoteClient():
 
         error = getattr(response, "error", None)
         if error:
+            stack = getattr(response, "stack", None)
+            print(f"Encountered error {error}")
+            print(f"{stack}")
             raise RuntimeError(f"Remote error: {error}")
 
         return response.output
