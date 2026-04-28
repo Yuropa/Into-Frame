@@ -1,3 +1,4 @@
+from enum import Enum
 import torch
 
 def offload_pipeline(device: torch.device, pipeline):
@@ -15,14 +16,23 @@ def clean_device_cache(device):
         torch.mps.empty_cache()
         torch.mps.synchronize()
 
-def preferred_device() -> tuple[torch.device, torch.dtype]:
+class DeviceStrategy(Enum):
+    AUTO = "auto"
+    MEMORY = "memory"
+
+def preferred_device(strategy: DeviceStrategy = DeviceStrategy.AUTO) -> tuple[torch.device, torch.dtype]:
     if torch.cuda.is_available():
-        # Select Cuda device with the most memory available
-        best = max(range(torch.cuda.device_count()), key=lambda i: torch.cuda.mem_get_info(i)[1])
-        device = torch.device(f"cuda:{best}")
-        device = torch.device("cuda")
+        if strategy == DeviceStrategy.MEMORY:
+            best = max(
+                range(torch.cuda.device_count()),
+                key=lambda i: torch.cuda.mem_get_info(i)[1]
+            )
+            device = torch.device(f"cuda:{best}")
+        else:
+            device = torch.device("cuda")
+
         torch_dtype = torch.bfloat16
-    elif torch.mps.is_available():
+    elif torch.backends.mps.is_available():
         device = torch.device("mps")
         torch_dtype = torch.float
     else:
@@ -44,17 +54,16 @@ def device_name(device) -> str:
     else:
         return str(device)
 
-def device_id(device) -> str:
+def device_id(device: torch.device) -> str:
     if device.type == "cuda":
         idx = device.index if device.index is not None else torch.cuda.current_device()
-        uuid = torch.cuda.get_device_properties(idx).uuid
-        return f"cuda:{uuid}"
+        props = torch.cuda.get_device_properties(idx)
+        return f"cuda:{str(props.uuid)}"
 
-    elif device.type == "mps":
+    if device.type == "mps":
         return "mps"
 
-    else:
-        return "cpu"
+    return "cpu"
 
 def device_from_id(s: str) -> torch.device:
     if s == "cpu":
@@ -64,12 +73,13 @@ def device_from_id(s: str) -> torch.device:
         return torch.device("mps")
 
     if s.startswith("cuda:"):
-        target_uuid = s.split(":", 1)[1]
+        target = s.split(":", 1)[1]
 
         for i in range(torch.cuda.device_count()):
-            if str(torch.cuda.get_device_properties(i).uuid) == target_uuid:
+            props = torch.cuda.get_device_properties(i)
+            if str(props.uuid) == target:
                 return torch.device(f"cuda:{i}")
 
-        raise RuntimeError(f"CUDA device with UUID {target_uuid} not found")
+        raise RuntimeError(f"CUDA device not found for UUID {target}")
 
     raise ValueError(f"Unknown device string: {s}")

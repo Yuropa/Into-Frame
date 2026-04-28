@@ -190,8 +190,27 @@ chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
 
 pushd "$TRELLIS_DIR" > /dev/null || exit 1
 create_env "trellis2" 3.10
-pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
-printf "Y\n" | bash "$TRELLIS_SETUP" --basic --flash-attn --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+conda run -n trellis2 pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+conda run -n trellis2 pip install transformers==4.57.6
+conda run -n trellis2 pip install psutil
+
+info "Checking for flash-attn"
+
+VER="2.7.3"
+DIR="$HOME/.cache/wheels/flash-attn"
+WHEEL="$DIR"/flash_attn-${VER}*.whl
+
+mkdir -p "$DIR"
+
+if ls $WHEEL 1> /dev/null 2>&1; then
+    conda run -n trellis2 pip install $WHEEL
+else
+    warn "Building flash-attn. This will take a while"
+    MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
+    conda run -n trellis2 pip install $(ls $WHEEL | head -n 1)
+fi
+
 popd > /dev/null || exit 1
 ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
 stop_env
