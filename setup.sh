@@ -143,6 +143,10 @@ else
     echo "WARNING: Could not install libwebp — unsupported package manager"
 fi
 
+## ===============
+##    Main ENV
+## ===============
+
 section "Creating Conda environment '$CONDA_NAME'..."
 create_env "$CONDA_NAME" 3.12
 
@@ -158,26 +162,23 @@ section "Installing pip requirements..."
 pip install -r "$SCRIPT_DIR/requirements.txt"
 pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
-## SAM 3 via Hugging Face transformers (MPS-compatible, no triton dependency)
-#info "Installing SAM 3 via transformers..."
-#pip install git+https://github.com/huggingface/transformers
-
-# Fix MPS pin_memory bug in transformers SAM3 video processor
-#if [[ "$(uname)" == "Darwin" ]]; then
-#    warn "Patching MPS compatibility bug..."
-#    PROCESSOR_FILE=$(python -c "import transformers.models.sam3_video.processing_sam3_video as m; print(m.__file__)")
-#    sed -i '' 's/keep_idx.pin_memory().to(device=out_binary_masks.device/keep_idx.to(device=out_binary_masks.device/' "$PROCESSOR_FILE"
-#fi
-
 mkdir -p "$LIB_DIR"
 mkdir -p "$CHECKPOINT_DIR"
 mkdir -p "$PACKAGES_DIR"
+
+## =============
+##    SAM 2
+## =============
 
 section "Installing SAM 2"
 if [ ! -d "$LIB_DIR/sam2" ]; then
     git clone https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
 fi
 pip install -e "$LIB_DIR/sam2"
+
+## =============
+##    TRELLIS
+## =============
 
 section "Installing Trellis"
 if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
@@ -215,6 +216,10 @@ popd > /dev/null || exit 1
 ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
 stop_env
 
+## =============
+##    SAM 3D
+## =============
+
 section "Downloading SAM 3D"
 
 if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
@@ -224,6 +229,11 @@ if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
 fi
 
 conda deactivate
+
+## ======================
+##    Depth Anything
+## ======================
+
 section "Installing Depth Anything"
 if [ ! -d "$LIB_DIR/depth-anything-3" ]; then
     git clone https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
@@ -236,6 +246,10 @@ sed -i '' '/"xformers"/d' "$LIB_DIR/depth-anything-3/pyproject.toml"
 create_env "depthanything" 3.10
 pip install -e "$LIB_DIR/depth-anything-3"
 stop_env
+
+## ======================
+##    Models Download
+## ======================
 
 # Hugging Face auth for gated checkpoints
 warn ""
@@ -253,6 +267,10 @@ fi
 
 conda run -n frame pip install --upgrade --force-reinstall Pillow
 
+## ======================
+##    Stable Point 3D
+## ======================
+
 section "Installing Stable Point 3D"
 
 create_env "stablepoint" 3.12
@@ -269,6 +287,26 @@ conda run -n stablepoint pip install --upgrade transparent-background flet
 ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 
 stop_env
+
+## ============
+##    Dit360
+## ============
+
+create_env "dit360" 3.12
+
+section "Installing DiT360"
+if [ ! -d "$LIB_DIR/DiT360" ]; then
+    git clone https://github.com/Insta360-Research-Team/DiT360.git --recursive "$LIB_DIR/DiT360"
+fi
+
+conda run -n dit360 pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n dit360 pip install -r "$LIB_DIR/DiT360/requirements.txt"
+
+stop_env
+
+## ============
+##    End
+## ============
 
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_NAME"
