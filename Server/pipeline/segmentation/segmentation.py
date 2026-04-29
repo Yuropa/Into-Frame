@@ -89,6 +89,9 @@ class SegmentationStage(PipelineStage):
         context.add_object("count", total_crops)
         return context
     
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        return context.object("count") is not None
+
     def _prepare_mask_and_image(self, original_image: Image, small_mask: np.ndarray, box, radius: float = 5):
         x, y, w, h = box
 

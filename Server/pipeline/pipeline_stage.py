@@ -84,6 +84,9 @@ class PipelineStage:
     def run(self, context: PipelineContext) -> PipelineContext:
         return context
 
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        return False
+
     def set_total_tasks(self, count: int):
         self.total_tasks = count
 

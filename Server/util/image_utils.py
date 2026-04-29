@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 import torchvision.transforms.functional as F
+from typing import Self
 
 class Image:
     image: PIL.Image.Image
@@ -28,6 +29,10 @@ class Image:
         self._rgb = None
         self._rgba = None
         self._L = None
+
+    @classmethod
+    def load(cls, path: Path) -> Image:
+        return cls(path)
 
     def canny(self):
         if self._canny is None:
@@ -84,6 +89,13 @@ class Image:
     
     def __getitem__(self, key):
         return self.image[key]
+
+    def equal_to(self, other: Image) -> bool:
+        if not isinstance(other, Image):
+            return False
+        if self.image.size != other.image.size:
+            return False
+        return np.array_equal(np.array(self.image), np.array(other.image))
 
     def show_masks(self, masks):
         image = self.image.convert("RGBA")

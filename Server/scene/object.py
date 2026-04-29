@@ -1,5 +1,6 @@
 import uuid
 from enum import StrEnum
+from typing import Self
 
 def vec3(x=0.0, y=0.0, z=0.0):
     return {"x": float(x), "y": float(y), "z": float(z)}
@@ -58,4 +59,16 @@ class Object3D():
         obj.mesh = mesh
         obj.set_position(x, y, z)
 
+        return obj
+
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        obj = cls()
+        obj.id = uuid.UUID(data["id"])
+        obj.type = data["type"]
+        obj.texture = data["texture"]
+        obj.mesh = data["mesh"]
+        obj.position = data["position"]
+        obj.rotation = data["rotation"]
+        obj.scale = data["scale"]
         return obj

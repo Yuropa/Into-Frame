@@ -16,6 +16,14 @@ from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import preferred_device, device_name
+from util.image_utils import Image
+
+def _clear_directory(path: Path):
+    for item in path.iterdir():
+        if item.is_file():
+            item.unlink()
+        elif item.is_dir():
+            shutil.rmtree(item)
 
 class PipelineConfiguration:
     output: Optional[Path]
@@ -27,9 +35,9 @@ class PipelineConfiguration:
             self.temp = Path(output + "/build")
 
             self.output.mkdir(parents=True, exist_ok=True)
-            self._clear_directory(self.output)
 
             self.temp.mkdir(parents=True, exist_ok=True) 
+            _clear_directory(self.temp)
         else:
             self.output = None
             self.temp = None
@@ -42,13 +50,6 @@ class PipelineConfiguration:
             handlers=[RichHandler(rich_tracebacks=True)]
         )
         self.log = logging.getLogger("rich")
-
-    def _clear_directory(self, path: Path):
-        for item in path.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
 
     def stage_config(self, name: str) -> PipelineStageConfiguration:
         new_config = PipelineStageConfiguration(
@@ -113,11 +114,33 @@ class Pipeline:
             print("CUDA Reserved:", torch.cuda.memory_reserved() / 1e9, "GB")
             print("CUDA Max Allocated:", torch.cuda.max_memory_allocated() / 1e9, "GB")
 
+    def _save_context(self, context: PipelineContext):
+        if self.config.save_files:
+            self.log_info("Writing context to disk")
+            if self.config.output is not None:
+                context.save(path=self.config.output)
 
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
-        context.add_image(ContextKey.INPUT, self.input)
+        input_image = Image(self.input)
+
+        if self.config.output is not None and self.config.output.exists():
+            self.log_info("Loading cached content")
+            stage_order = [stage.name for stage in self.stages]
+            context.load(self.config.output, stage_order)
+
+            orig_input_image = context.image(ContextKey.INPUT)
+            if not input_image.equal_to(orig_input_image):
+                self.log_info("New input image, purging stored content")
+                _clear_directory(self.config.output)
+                context = PipelineContext()
+                context.add_image(ContextKey.INPUT, input_image)
+            else:
+                self.log_info("Found cached content")
+                context.log_state()
+        else:
+            context.add_image(ContextKey.INPUT, input_image)
 
         current_step = ""
         current_step_index = 0
@@ -143,20 +166,20 @@ class Pipeline:
                     post_progress()
 
                     context.push_stage(stage.name)
-                    context = stage.run(context)
+                    if not stage.has_expected_output(context):
+                        context = stage.run(context)
+                        stage.log_memory_usage()
+                        stage.clean_up()
+            
                     context.pop_stage()
 
-                    stage.log_memory_usage()
-                    stage.clean_up()
-            
+                    self._save_context(context)
                     current_step_index += 1
                     post_progress()
                 except RuntimeError as e:
                     self._print_total_allocations()
                     raise
 
-        if self.config.save_files:
-            if self.config.output is not None:
-                context.save(path=self.config.output)
+        self._save_context(context)
 
         return context

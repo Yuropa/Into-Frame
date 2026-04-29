@@ -1,5 +1,6 @@
 import math
 import numpy as np
+from typing import Self
 
 class CameraIntrinsics:
     def __init__(self, width: int, height: int, fov_degrees: float = 60.0):
@@ -45,6 +46,20 @@ class CameraIntrinsics:
         obj.py = float(K[1, 2])
         obj.fov = math.degrees(2.0 * math.atan(depth_width / (2.0 * obj.fx)))
         return obj
+    
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        obj = cls.__new__(cls)
+        obj.width = data["width"]
+        obj.color_width = data["width"]
+        obj.height = data["height"]
+        obj.color_height = data["height"]
+        obj.fov = data["fov"]
+        obj.px = data["px"]
+        obj.py = data["py"]
+        obj.fx = data["fx"]
+        obj.fy = data["fy"]
+        return obj
 
 class CameraExtrinsics:
     def __init__(self, rotation: np.ndarray, translation: np.ndarray):
@@ -75,3 +90,9 @@ class CameraExtrinsics:
         R = m[:3, :3]       # rotation    (3x3)
         t = m[:3,  3]       # translation (3,)
         return cls(R, t)    # fix: missing return
+
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        rotation = np.array(data["rotation"], dtype=np.float64).reshape(3, 3)
+        translation = np.array(data["translation"], dtype=np.float64)
+        return cls(rotation, translation)

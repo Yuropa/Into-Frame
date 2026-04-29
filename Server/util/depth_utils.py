@@ -2,6 +2,7 @@ from __future__ import annotations
 import PIL
 from pathlib import Path
 import numpy as np
+from typing import Self
 
 class Depth:
     def __init__(self, obj):
@@ -24,6 +25,10 @@ class Depth:
         self.depth = self.depth.astype(np.float32)
         if self.depth.ndim == 3 and self.depth.shape[0] == 1:
             self.depth = self.depth.squeeze(0)
+
+    @classmethod
+    def load(cls, path: Path) -> Self:
+        return cls(path)
 
     @property
     def width(self):

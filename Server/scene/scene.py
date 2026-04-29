@@ -1,5 +1,6 @@
 from scene.object import Object3D
 from scene.camera import CameraExtrinsics
+from typing import Self
 
 class Scene:
     def __init__(self):
@@ -20,3 +21,13 @@ class Scene:
             "objects":      [obj.encode() for obj in self.objects],
             "extrinsics":   self.extrinsics.encode(),
         }
+
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        obj = cls()
+        obj.ambient_color = data["ambientColor"]
+        obj.gravity = data["gravity"]
+        obj.time_scale = data["timeScale"]
+        obj.extrinsics = CameraExtrinsics.decode(data["extrinsics"])
+        obj.objects = [Object3D.decode(o) for o in data["objects"]]
+        return obj
