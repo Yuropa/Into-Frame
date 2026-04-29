@@ -25,6 +25,8 @@ class PipelineContext():
         self._current_stage = ""
         self._previous_stage = ""
         self._stage_order = []
+        self._dirty_state: set[str] = set()
+        self._dirty_stage_state: dict[str, set[str]] = {}
 
     def push_stage(self, name: str):
         self._current_stage = name
@@ -60,14 +62,16 @@ class PipelineContext():
     def _set_value(self, name: ContextKeyName, value: ContextValue):
         if len(self._current_stage) == 0:
             self._state[name] = value
+            self._dirty_state.add(name)
             return
     
-        if self._current_stage in self._stage_state:
-            self._stage_state[self._current_stage][name] = value
-            return
-        
-        self._stage_state[self._current_stage] = {}
+        if self._current_stage not in self._stage_state:
+            self._stage_state[self._current_stage] = {}
+        if self._current_stage not in self._dirty_stage_state:
+            self._dirty_stage_state[self._current_stage] = set()
+
         self._stage_state[self._current_stage][name] = value
+        self._dirty_stage_state[self._current_stage].add(name)
 
     # Image
     def add_image(self, name: ContextKeyName, input: Any):
@@ -167,18 +171,64 @@ class PipelineContext():
     
     # Persistence
     def save(self, path: Path):
-        path.mkdir(parents=True, exist_ok=True) 
-        for value in self._state.values():
-            value.write(path)
+        path.mkdir(parents=True, exist_ok=True)
+        for name in self._dirty_state:
+            self._state[name].write(path)
+        self._dirty_state.clear()
 
-        for stage_name, values in self._stage_state.items():
-            new_path = path / stage_name
-            new_path.mkdir(parents=True, exist_ok=True) 
-
-            for value in values.values():
-                value.write(new_path)
+        for stage_name, dirty_keys in self._dirty_stage_state.items():
+            stage_path = path / stage_name
+            stage_path.mkdir(parents=True, exist_ok=True)
+            for name in dirty_keys:
+                self._stage_state[stage_name][name].write(stage_path)
+        self._dirty_stage_state.clear()                 
 
     def save_object(self, name: ContextKeyName, path: Path) -> Path:
         path.mkdir(parents=True, exist_ok=True) 
         return self._value(name).write(path=path)
+
+    def load(self, path: Path, stage_order: list[str]):
+        if not path.exists():
+            return
+
+        self._stage_order = stage_order
+        self._load_directory(path, self._state)
+
+        for stage_path in sorted(path.iterdir()):
+            if stage_path.is_dir():
+                stage_name = stage_path.name
+                if stage_name not in self._stage_state:
+                    self._stage_state[stage_name] = {}
+                if stage_name not in self._stage_order:
+                    self._stage_order.append(stage_name)
+                self._load_directory(stage_path, self._stage_state[stage_name])
+
+    def _load_directory(self, path: Path, target: dict):
+        for meta_file in path.glob("*.meta"):
+            name = meta_file.stem
+            value = ContextValue(name)
+            value.read(path)
+            target[name] = value
+
+    def log_state(self):
+        def _print_values(values: dict, indent: str):
+            items = sorted(values.items())
+            for i, (name, value) in enumerate(items):
+                connector = "└──" if i == len(items) - 1 else "├──"
+                print(f"{indent}{connector} {name}: {value.describe()}")
+
+        print("\n PipelineContext")
+        if self._state:
+            has_stages = bool(self._stage_state)
+            connector = "├──" if has_stages else "└──"
+            print(f" {connector} [global]")
+            _print_values(self._state, " │   " if has_stages else "     ")
+
+        stages = list(self._stage_state.items())
+        for i, (stage_name, values) in enumerate(stages):
+            connector = "└──" if i == len(stages) - 1 else "├──"
+            print(f" {connector} [{stage_name}]")
+            _print_values(values, "     " if i == len(stages) - 1 else " │   ")
+
+        print()
         

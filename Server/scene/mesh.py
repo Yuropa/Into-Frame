@@ -1,5 +1,6 @@
 import trimesh
 import numpy as np
+from typing import Self
 
 class Mesh:
     def __init__(self, mesh: trimesh.Trimesh) -> None:
@@ -29,3 +30,10 @@ class Mesh:
 
     def save(self, path):
         self.mesh.export(str(path), include_normals=True)
+
+    @classmethod
+    def load(cls, path) -> Self:
+        loaded = trimesh.load(str(path), force="mesh")
+        if not isinstance(loaded, trimesh.Trimesh):
+            raise ValueError(f"Expected a single Trimesh at {path}, got {type(loaded).__name__}")
+        return cls(loaded)

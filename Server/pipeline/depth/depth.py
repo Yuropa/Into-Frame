@@ -43,6 +43,13 @@ class DepthStage(PipelineStage):
 
         return context
 
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        return (
+            context.depth(ContextKey.DEPTH) is not None and
+            context.intrinsics(ContextKey.INTRINSICS) is not None and
+            context.extrinsics(ContextKey.EXTRINSICS) is not None
+        )
+
     def model_names(self) -> list[str]:
         return ImageDepth.model_names()
 

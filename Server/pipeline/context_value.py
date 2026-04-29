@@ -122,8 +122,44 @@ class ContextValue():
             return self.value
         else:
             return None
+
+    def read(self, path: Path):
+        meta_path = path / (self.name + ".meta")
+        if not meta_path.exists():
+            return
+        
+        with open(meta_path) as f:
+            meta = json.load(f)
+        
+        value_type = ValueKeys(meta["type"])
+
+        if value_type == ValueKeys.IMAGE:
+            self.set_image(Image.load(path / (self.name + ".png")))
+        elif value_type == ValueKeys.MESH:
+            self.set_mesh(Mesh.load(path / (self.name + ".glb")))
+        elif value_type == ValueKeys.DEPTH:
+            self.set_depth(Depth.load(path / (self.name + ".png")))
+        elif value_type == ValueKeys.OBJECT:
+            with open(path / (self.name + ".json")) as f:
+                self.set_object(json.load(f))
+        elif value_type == ValueKeys.OBJECT3D:
+            with open(path / (self.name + ".json")) as f:
+                self.set_object3d(Object3D.decode(json.load(f)))
+        elif value_type == ValueKeys.SCENE:
+            with open(path / (self.name + ".json")) as f:
+                self.set_scene(Scene.decode(json.load(f)))
+        elif value_type == ValueKeys.INTRINSICS:
+            with open(path / (self.name + ".json")) as f:
+                self.set_intrinsics(CameraIntrinsics.decode(json.load(f)))
+        elif value_type == ValueKeys.EXTRINSICS:
+            with open(path / (self.name + ".json")) as f:
+                self.set_extrinsics(CameraExtrinsics.decode(json.load(f)))
         
     def write(self, path: Path) -> Path:
+        meta_path = path / (self.name + ".meta")
+        with open(meta_path, "w") as f:
+            json.dump({"type": self.type}, f)
+        
         if self.type == ValueKeys.IMAGE:
             save_path = str(path / (self.name + ".png"))
             self.image().save(path=save_path)
@@ -173,3 +209,28 @@ class ContextValue():
                 json.dump(self.extrinsics().encode(), f, indent=4, cls=JSONEncoder)
 
             return Path(save_path)
+
+    
+    def describe(self) -> str:
+        if self.type == ValueKeys.IMAGE:
+            v = self.image()
+            return f"Image ({v.width}x{v.height})"
+        elif self.type == ValueKeys.DEPTH:
+            v = self.depth()
+            return f"Depth ({v.width}x{v.height}, {v.min():.2f}–{v.max():.2f})"
+        elif self.type == ValueKeys.MESH:
+            v = self.mesh()
+            return f"Mesh ({v.vertex_count} verts, {v.face_count} faces)"
+        elif self.type == ValueKeys.SCENE:
+            v = self.scene()
+            return f"Scene ({len(v.objects)} objects)"
+        elif self.type == ValueKeys.OBJECT3D:
+            return f"Object3D"
+        elif self.type == ValueKeys.INTRINSICS:
+            v = self.intrinsics()
+            return f"Intrinsics ({v.width}x{v.height}, fov={v.fov:.1f}°)"
+        elif self.type == ValueKeys.EXTRINSICS:
+            return f"Extrinsics"
+        elif self.type == ValueKeys.OBJECT:
+            return f"Object ({type(self.object()).__name__})"
+        return "None"

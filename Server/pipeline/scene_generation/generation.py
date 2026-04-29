@@ -65,6 +65,9 @@ class SceneGenerationStage(PipelineStage):
 
         context.add_scene(ContextKey.SCENE, scene)
         return context
+
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        return context.scene(ContextKey.SCENE) is not None
     
     def unproject_bbox(self, bbox, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
         bx, by, bw, bh = bbox
