@@ -68,7 +68,7 @@ info "** Installation can take a while to complete. Please be patient... **"
 sleep 5
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "dit360")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
