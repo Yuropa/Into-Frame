@@ -10,10 +10,6 @@ class ModelGenerationStage(PipelineStage):
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        print(f"Order {context._stage_order}")
-        print(f"Current {context._current_stage}")
-        print(f"Previous {context._previous_stage}")
-
         count = context.input_object("count")
 
         super().clean_up()
