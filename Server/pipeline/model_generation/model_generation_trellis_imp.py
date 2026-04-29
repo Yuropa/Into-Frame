@@ -16,9 +16,18 @@ class ModelGenerator(ModelGeneratorBase):
         )
         self.pipeline.to(self.device)
     
+    def pad_image(self, image: Image, padding: float = 0.15) -> Image:
+        w, h = image.size
+        pad_x = int(w * padding)
+        pad_y = int(h * padding)
+        padded = Image.new("RGBA", (w + pad_x * 2, h + pad_y * 2), (0, 0, 0, 0))
+        padded.paste(image.convert("RGBA"), (pad_x, pad_y))
+        return padded
+
     def meshify(self, temp_path: Path, input: Image) -> Any:
-        mesh = self.pipeline.run(input)[0]
-        mesh.simplify(16777216)
+        padded_image = self.pad_image(input)
+        mesh = self.pipeline.run(padded_image)[0]
+        mesh.simplify(500000)
 
         glb = o_voxel.postprocess.to_glb(
             vertices            =   mesh.vertices,
@@ -27,11 +36,11 @@ class ModelGenerator(ModelGeneratorBase):
             coords              =   mesh.coords,
             attr_layout         =   mesh.layout,
             voxel_size          =   mesh.voxel_size,
-            aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
-            decimation_target   =   1000000,
-            texture_size        =   4096,
+            aabb                =   [[-0.5, -0.5, -0.3], [0.5, 0.5, 0.5]],
+            decimation_target   =   50000,
+            texture_size        =   1024,
             remesh              =   True,
-            remesh_band         =   1,
+            remesh_band         =   0.5,
             remesh_project      =   0,
             verbose             =   True
         )

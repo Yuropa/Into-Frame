@@ -170,6 +170,8 @@ class Pipeline:
                         context = stage.run(context)
                         stage.log_memory_usage()
                         stage.clean_up()
+                    else:
+                        self.log_info(f"Skipping cached stage {stage.name}")
             
                     context.pop_stage()
 
