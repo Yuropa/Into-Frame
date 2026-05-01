@@ -48,6 +48,8 @@ class RemoteServer(ABC):
             else:
                 temp_path = Path(request.temp_path)
                 try:
+                    print(f"Got request {request.action} input {request.input}")
+
                     temp_path.mkdir(parents=True, exist_ok=True)
                     result_object = self.perform(
                         action=request.action, 
