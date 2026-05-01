@@ -11,6 +11,7 @@ from huggingface_hub import snapshot_download
 from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
+from pipeline.panorama.panorama import PanoramaStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -72,11 +73,15 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
-            SegmentationStage(config=config.stage_config("Object Segementation")),
+            #SegmentationStage(config=config.stage_config("Object Segementation")),
+            PanoramaStage(config=config.stage_config("Panorama")),
+
+
             # SupersamplingStage(config=config.stage_config("Supersampling")),
-            DepthStage(config=config.stage_config("Depth Generation")),
-            ModelGenerationStage(config=config.stage_config("Mesh Generation")),
-            SceneGenerationStage(config=config.stage_config("Scene Generation"))
+            
+            #DepthStage(config=config.stage_config("Depth Generation")),
+            #ModelGenerationStage(config=config.stage_config("Mesh Generation")),
+            #SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
         self.log_info(f"Using device {device_name(self.device)}")

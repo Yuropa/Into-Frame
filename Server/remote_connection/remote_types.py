@@ -36,6 +36,7 @@ def encode_value(v):
             "format": fmt,
             "base64": base64.b64encode(buf.getvalue()).decode("ascii")
         }
+    print(f"Unable to encode value {v}")
     return None
 
 def decode_value(v):

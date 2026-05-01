@@ -23,16 +23,15 @@ class RemoteClient():
             if line.strip():
                 return line.strip()
 
-    def _pipe_stream(self, stream, prefix = None):
-        if prefix is None:
-            prefix = ""
-        else:
-            prefix = f"[{prefix}]"
-        
-        for line in iter(stream.readline, b""):
-            print(f"{prefix} {line.decode('utf-8', errors='replace')}", end="", flush=True)
-
-        stream.close()
+    def _make_capture_thread(self, stream, lines, lock, prefix):
+        def _capture(stream):
+            for line in iter(stream.readline, b""):
+                decoded = line.decode('utf-8', errors='replace')
+                with lock:
+                    lines.append(decoded)
+                print(f"[{prefix}] {decoded}", end="", flush=True)
+            stream.close()
+        return threading.Thread(target=_capture, args=(stream,), daemon=True)
 
     def _cuda_env_for_device(self, device: torch.device) -> dict:
         env = os.environ.copy()
@@ -53,6 +52,7 @@ class RemoteClient():
         self.server_sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_sock.bind(self.sock_path)
         self.server_sock.listen(1)
+        self.conda_env = conda_env
 
         env = self._cuda_env_for_device(device)
 
@@ -60,7 +60,7 @@ class RemoteClient():
             [
                 "conda", "run", "--no-capture-output",
                 "-n", conda_env,
-                "python", str(script_path),
+                "python", "-u", str(script_path),
                 device_id(device),
                 self.sock_path
             ],
@@ -71,16 +71,20 @@ class RemoteClient():
             env=env
         )
 
-        threading.Thread(target=self._pipe_stream, args=(self.process.stderr, "err"), daemon=True).start()
-        threading.Thread(target=self._pipe_stream, args=(self.process.stdout, "out"), daemon=True).start()
+        self._stdout_lines = []
+        self._stdout_lock = threading.Lock()
+        self._stderr_lines = []
+        self._stderr_lock = threading.Lock()
+
+        self._make_capture_thread(self.process.stdout, self._stdout_lines, self._stdout_lock, "out").start()
+        self._make_capture_thread(self.process.stderr, self._stderr_lines, self._stderr_lock, "err").start()
 
         self.server_sock.settimeout(60)
         try:
             self.conn, _ = self.server_sock.accept()
         except socket.timeout:
             if self.process.poll() is not None:
-                stderr = self.process.stderr.read()
-                raise RuntimeError(f"Subprocess died while waiting:\n{stderr}")
+                raise RuntimeError(f"Subprocess died while waiting:\n{self._get_stderr()}")
             raise RuntimeError("Timed out waiting for subprocess to connect")
 
         self.json_pipe = self.conn.makefile('r')
@@ -99,12 +103,30 @@ class RemoteClient():
     def __del__(self):
         if self.process is not None:
             self.close()
-    
+
+    def _get_stdout(self) -> str:
+        with self._stdout_lock:
+            return "".join(self._stdout_lines)
+
+    def _get_stderr(self) -> str:
+        with self._stderr_lock:
+            return "".join(self._stderr_lines)
+
+    def dump_logs(self):
+        tag = f"[{self.conda_env}]"
+
+        stdout = self._get_stdout()
+        stderr = self._get_stderr()
+
+        if stdout:
+            print(f"{tag}[stdout] {stdout}")
+        if stderr:
+            print(f"{tag}[stderr] {stderr}")
+
     def _check_for_errors(self):
         if self.process.poll() is not None:
-            stderr = self.process.stderr.read()
-            raise RuntimeError(f"subprocess exited before running:\n{stderr}")
-
+            self.dump_logs()
+            raise RuntimeError(f"subprocess exited before running:\n{self._get_stderr()}")
 
     def _send(self, obj: RemoteObject):
         encoded = obj.encode()
@@ -120,6 +142,7 @@ class RemoteClient():
             input=input
         )
         self._send(request)
+        self.dump_logs()
 
         response_line = self._readline_json(self.json_pipe)
         if response_line is None:
@@ -133,6 +156,7 @@ class RemoteClient():
             print(f"{stack}")
             raise RuntimeError(f"Remote error: {error}")
 
+        self.dump_logs()
         return response.output
     
     def close(self):
