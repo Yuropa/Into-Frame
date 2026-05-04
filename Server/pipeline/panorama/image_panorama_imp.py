@@ -99,16 +99,16 @@ class PanoGenerator(RemoteServer):
         self.pipeline.vae.enable_tiling()
         self.pipeline.vae.enable_slicing()
     
-    def create_mask(self, input_image: Image.Image, packed_w: int, packed_h: int):
-        """
-        Creates a mask where the region corresponding to the input image's
-        aspect ratio (centered) is 1 (preserved) and outpainted areas are 0.
-        """
-        input_w, input_h = input_image.size
-
-        input_aspect = input_w / input_h
-        pano_aspect = 2.0
-        occupied_fraction = min(input_aspect / pano_aspect, 1.0)
+    def create_mask(self, input_image: Image.Image, packed_w: int, packed_h: int, fov_degrees: float = None):
+        if fov_degrees is not None:
+            # FOV tells us exactly what fraction of 360° the input spans
+            occupied_fraction = fov_degrees / 360.0
+        else:
+            # Fall back to aspect ratio heuristic
+            input_w, input_h = input_image.size
+            input_aspect = input_w / input_h
+            pano_aspect = 2.0
+            occupied_fraction = min(input_aspect / pano_aspect, 1.0)
 
         preserved_tokens = round(packed_w * occupied_fraction)
         margin = (packed_w - preserved_tokens) // 2
@@ -117,7 +117,7 @@ class PanoGenerator(RemoteServer):
         mask[:, margin : margin + preserved_tokens] = 1.0
         return mask
 
-    def pano(self, temp_path: Path, input_image: Image.Image) -> Any:
+    def pano(self, temp_path: Path, input_image: Image.Image, fov_degrees: float) -> Any:
         timestep = 50
         seed = 42
         guidance = 2.8
@@ -134,9 +134,25 @@ class PanoGenerator(RemoteServer):
 
         prompt = "This is a panorama image. The image depicts a view of paris from the river with the eiffle tour in the background. high resolution, 8k, seamless."
 
-        mask_2d = self.create_mask(input_image, packed_w, packed_h)
-        init_image = input_image.convert("RGB").resize((width, height))
+        # Calculate how wide the input should be in the panorama
+        if fov_degrees is not None:
+            occupied_fraction = fov_degrees / 360.0
+        else:
+            input_w, input_h = input_image.size
+            occupied_fraction = min((input_w / input_h) / 2.0, 1.0)
 
+        # Resize input to occupy the correct pixel width in the panorama
+        input_pano_w = round(width * occupied_fraction)
+        input_pano_h = height
+        resized_input = input_image.convert("RGB").resize((input_pano_w, input_pano_h))
+
+        # Paste it centered into a full panorama-sized canvas
+        init_image = Image.new("RGB", (width, height), (0, 0, 0))
+        paste_x = (width - input_pano_w) // 2
+        init_image.paste(resized_input, (paste_x, 0))
+
+        # Build mask from FOV
+        mask_2d = self.create_mask(input_image, packed_w, packed_h, fov_degrees)
         mask_padded = torch.cat(
             [mask_2d[:, :1], mask_2d, mask_2d[:, -1:]], dim=-1
         )
@@ -156,7 +172,7 @@ class PanoGenerator(RemoteServer):
             height=height,
             width=width,
             num_inversion_steps=timestep,
-            gamma=0.5,
+            gamma=0.2,
         )
 
         set_flux_transformer_attn_processor(
@@ -172,7 +188,7 @@ class PanoGenerator(RemoteServer):
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
 
-        result = self.pipeline(
+        results = self.pipeline(
             prompt=[prompt, prompt],
             inverted_latents=inverted_latents,
             image_latents=image_latents,
@@ -183,14 +199,30 @@ class PanoGenerator(RemoteServer):
             num_inference_steps=timestep,
             generator=generator,
             output_type="pil",
-            mask=latent_mask,       # pipeline's built-in latent blending
-            use_timestep=True,      # passes timestep to attention processor
-        ).images[1]
+            mask=latent_mask, 
+            use_timestep=True,  
+            start_timestep=0,
+            stop_timestep=0.5,
+            eta=1.0,
+        ).images
+
+        print(f"Generated images {results}")
+        open(str(temp_path / 'pano.log'), 'a').write(f"Generated images {results}\n")
+
+        for i, img in enumerate(results):
+            if isinstance(img, np.ndarray):
+                Image.fromarray(img).save(str(temp_path / f'pano_{i}.png'))
+            else:
+                img.save(str(temp_path / f'pano_{i}.png'))
+
+        return results[1]
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
             print(f"Got input image {input}")
-            return self.pano(temp_path, input)
+            image = input["image"]
+            fov = input.get("fov_degrees", 60.0)
+            return self.pano(temp_path, image, fov_degrees=fov)
         raise ValueError(f"Unknown action: {action}")
 
 

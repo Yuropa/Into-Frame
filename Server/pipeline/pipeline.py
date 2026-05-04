@@ -74,12 +74,10 @@ class Pipeline:
 
         self.stages = [
             #SegmentationStage(config=config.stage_config("Object Segementation")),
+            DepthStage(config=config.stage_config("Depth Generation")),
             PanoramaStage(config=config.stage_config("Panorama")),
-
-
             # SupersamplingStage(config=config.stage_config("Supersampling")),
             
-            #DepthStage(config=config.stage_config("Depth Generation")),
             #ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             #SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
