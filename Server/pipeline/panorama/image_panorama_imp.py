@@ -134,22 +134,24 @@ class PanoGenerator(RemoteServer):
 
         prompt = "This is a panorama image. The image depicts a view of paris from the river with the eiffle tour in the background. high resolution, 8k, seamless."
 
+        orig_w, orig_h = input_image.size
         # Calculate how wide the input should be in the panorama
         if fov_degrees is not None:
             occupied_fraction = fov_degrees / 360.0
         else:
-            input_w, input_h = input_image.size
-            occupied_fraction = min((input_w / input_h) / 2.0, 1.0)
+            occupied_fraction = min((orig_w / orig_h) / 2.0, 1.0)
 
-        # Resize input to occupy the correct pixel width in the panorama
-        input_pano_w = round(width * occupied_fraction)
-        input_pano_h = height
-        resized_input = input_image.convert("RGB").resize((input_pano_w, input_pano_h))
+        # Resize preserving aspect ratio, fitting within (input_pano_w, height)
+        scale = min(input_pano_w / orig_w, height / orig_h)
+        scaled_w = round(orig_w * scale)
+        scaled_h = round(orig_h * scale)
+        resized_input = input_image.convert("RGB").resize((scaled_w, scaled_h))
 
-        # Paste it centered into a full panorama-sized canvas
+        # Paste centered (both horizontally and vertically) into the panorama canvas
         init_image = Image.new("RGB", (width, height), (0, 0, 0))
-        paste_x = (width - input_pano_w) // 2
-        init_image.paste(resized_input, (paste_x, 0))
+        paste_x = (width - scaled_w) // 2
+        paste_y = (height - scaled_h) // 2
+        init_image.paste(resized_input, (paste_x, paste_y))
 
         # Build mask from FOV
         mask_2d = self.create_mask(input_image, packed_w, packed_h, fov_degrees)
