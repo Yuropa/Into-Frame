@@ -41,14 +41,25 @@ class RemoteServer(ABC):
         print(encoded, file=self.json_out, flush=True)
 
     def poll(self):
+        is_running = True
         for line in self.json_in:
             try:
                 request = RemoteInput.decode(line.strip())
             except Exception as e:
-                print(f"Failed to decode request, skipping: {e}")
-                continue
+                try:
+                    status = Status.decode(line.strip())
+                    if status.status == "exit":
+                        is_running = False  
+                        break
+                    else:
+                        continue
+                except Exception as e:
+                    print(f"Failed to decode request, skipping: {e}")
+                    is_running = False
+                    break
 
             if request.action == "exit":
+                is_running = False
                 break
             else:
                 temp_path = Path(request.temp_path)
@@ -73,6 +84,8 @@ class RemoteServer(ABC):
                     return
                 
                 clean_device_cache(self.device)
+            if is_running is False:
+                break
 
     @abstractmethod
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:

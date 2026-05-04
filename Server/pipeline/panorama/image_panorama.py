@@ -18,5 +18,9 @@ class ImagePanorama(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["black-forest-labs/FLUX.1-dev"]
 
-    def pano(self, input: Image, temp_path: Path) -> Image:
-        return self.send(action="pano", input=input, temp_path=temp_path)
+    def pano(self, input: Image, temp_path: Path, fov: float = 60.0) -> Image:
+        data = {
+            "image": input,
+            "fov_degrees": fov
+        }
+        return self.send(action="pano", input=data, temp_path=temp_path)
