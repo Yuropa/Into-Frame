@@ -64,11 +64,20 @@ EOF
 
 info "** Installation can take a while to complete. Please be patient... **"
 
-# Give some time to read the comment
-sleep 5
+if sudo -n true 2>/dev/null; then
+    # No password prompt
+    # Give some time to read the comment
+    sleep 5
+else
+    sudo -v
+fi
+
+# Keep sudo alive
+while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
+
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "dit360")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
@@ -289,20 +298,20 @@ ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 stop_env
 
 ## ============
-##    Dit360
+##    PanoDreamer
 ## ============
 
-create_env "dit360" 3.12
+create_env "pano" 3.12
 
-section "Installing DiT360"
-if [ ! -d "$LIB_DIR/DiT360" ]; then
-    git clone https://github.com/Insta360-Research-Team/DiT360.git --recursive "$LIB_DIR/DiT360"
+section "Installing PanoDreamer"
+if [ ! -d "$LIB_DIR/PanoDreamer" ]; then
+    git clone https://github.com/avinashpaliwal/PanoDreamer.git --recursive "$LIB_DIR/PanoDreamer"
 fi
 
-conda run -n dit360 pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
-conda run -n dit360 pip install -r "$LIB_DIR/DiT360/requirements.txt"
-conda run -n dit360 pip install bitsandbytes accelerate optimum
-ln -sf  "$LIB_DIR/DiT360/pa_src" "$PACKAGES_DIR/pa_src"
+conda run -n pano pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n pano pip install -r "$SCRIPT_DIR/requirements-panodreamer.txt"
+mkdir -p "$CHECKPOINT_DIR/panodreamer"
+ln -sf  "$LIB_DIR/PanoDreamer" "$PACKAGES_DIR/pano_dreamer"
 
 stop_env
 

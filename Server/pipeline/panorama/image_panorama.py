@@ -10,13 +10,13 @@ class ImagePanorama(RemoteClient):
 
         super().__init__(
             device=device, 
-            conda_env="dit360", 
+            conda_env="pano", 
             script_path=script_path
         )
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["black-forest-labs/FLUX.1-dev"]
+        return ["sd2-community/stable-diffusion-2-inpainting"]
 
     def pano(self, input: Image, temp_path: Path, fov: float = 60.0) -> Image:
         data = {
