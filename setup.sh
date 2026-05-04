@@ -301,7 +301,7 @@ fi
 
 conda run -n dit360 pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
 conda run -n dit360 pip install -r "$LIB_DIR/DiT360/requirements.txt"
-conda run -n dit360 pip install bitsandbytes accelerate
+conda run -n dit360 pip install bitsandbytes accelerate optimum
 ln -sf  "$LIB_DIR/DiT360/pa_src" "$PACKAGES_DIR/pa_src"
 
 stop_env

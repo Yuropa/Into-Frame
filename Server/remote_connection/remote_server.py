@@ -42,7 +42,12 @@ class RemoteServer(ABC):
 
     def poll(self):
         for line in self.json_in:
-            request = RemoteInput.decode(line.strip())
+            try:
+                request = RemoteInput.decode(line.strip())
+            except Exception as e:
+                print(f"Failed to decode request, skipping: {e}")
+                continue
+
             if request.action == "exit":
                 break
             else:
