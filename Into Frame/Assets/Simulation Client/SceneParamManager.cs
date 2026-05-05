@@ -16,7 +16,7 @@ public class SceneParamManager : MonoBehaviour
     private Color _targetColor = Color.white;
 
     [Header("Camera")]
-    public GameObject camera;
+    public new GameObject camera;
 
     [Header("Skybox")]
     public GameObject skybox;

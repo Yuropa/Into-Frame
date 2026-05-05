@@ -3,7 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
-using NativeWebSocket; // https://github.com/endel/NativeWebSocket
+using NativeWebSocket;
 
 /// <summary>
 /// Attach to a persistent GameObject (e.g. "SceneManager").
@@ -19,12 +19,7 @@ public class SceneClient : MonoBehaviour
     [Header("References")]
     public SceneObjectManager objectManager;
     public SceneParamManager paramManager;
-
-    [Header("UI")]
-    public TMPro.TextMeshProUGUI statusLabel;
-    public Toggle statusToggle;
-    public TMPro.TextMeshProUGUI progressLabel;
-    public Slider progressSlider;
+    public ProgressController progress;
 
     private WebSocket _ws;
     private bool _reconnecting = false;
@@ -33,14 +28,14 @@ public class SceneClient : MonoBehaviour
 
     private void Start()
     {
-        if (objectManager == null) objectManager = FindObjectOfType<SceneObjectManager>();
-        if (paramManager  == null) paramManager  = FindObjectOfType<SceneParamManager>();
+        if (objectManager == null) objectManager = FindAnyObjectByType<SceneObjectManager>();
+        if (paramManager  == null) paramManager  = FindAnyObjectByType<SceneParamManager>();
+        if (progress      == null) progress      = FindAnyObjectByType<ProgressController>();
         ConnectAsync();
     }
 
     private void Update()
     {
-        // NativeWebSocket requires this on all platforms except WebGL
 #if !UNITY_WEBGL || UNITY_EDITOR
         _ws?.DispatchMessageQueue();
 #endif
@@ -55,10 +50,10 @@ public class SceneClient : MonoBehaviour
         Debug.Log($"[SceneClient] Connecting to {serverUrl}…");
         _ws = new WebSocket(serverUrl);
 
-        _ws.OnOpen += OnOpen;
+        _ws.OnOpen    += OnOpen;
         _ws.OnMessage += OnMessage;
-        _ws.OnError += OnError;
-        _ws.OnClose += OnClose;
+        _ws.OnError   += OnError;
+        _ws.OnClose   += OnClose;
 
         await _ws.Connect();
     }
@@ -74,24 +69,20 @@ public class SceneClient : MonoBehaviour
     {
         Debug.Log("[SceneClient] Connected!");
         Send(new TypeOnlyMessage("CLIENT_READY"));
-
-        statusLabel.text = "Connected";
-        statusToggle.isOn = true;
+        progress?.SetConnected(true);
+        progress?.ReportServerProgress("", 0.0f);
     }
 
     private void OnError(string error)
     {
         Debug.LogWarning($"[SceneClient] Error: {error}");
-        statusLabel.text = $"Error ({error})";
-        statusToggle.isOn = false;
+        progress?.SetConnected(false, $"Error ({error})");
     }
 
     private void OnClose(WebSocketCloseCode code)
     {
         Debug.Log($"[SceneClient] Disconnected ({code})");
-        statusLabel.text = "Disconnected";
-        statusToggle.isOn = false;
-
+        progress?.SetConnected(false);
         if (!_reconnecting) StartCoroutine(Reconnect());
     }
 
@@ -99,8 +90,7 @@ public class SceneClient : MonoBehaviour
     {
         _reconnecting = true;
         Debug.Log($"[SceneClient] Reconnecting in {reconnectDelay}s…");
-        statusLabel.text = $"Reconnecting...";
-        statusToggle.isOn = false;
+        progress?.SetStatus("Reconnecting...");
         yield return new WaitForSeconds(reconnectDelay);
         _reconnecting = false;
         ConnectAsync();
@@ -120,7 +110,6 @@ public class SceneClient : MonoBehaviour
             return;
         }
 
-        // Route to the right handler on the main thread
         UnityMainThread.Call(() => Route(msg.type, msg.payload, json));
     }
 
@@ -152,11 +141,9 @@ public class SceneClient : MonoBehaviour
                 break;
 
             case "PROGRESS":
-                var progress = JsonUtility.FromJson<SceneProgressPayload>(ExtractPayload(fullJson));
-                Debug.Log($"[SceneClient] Progress {progress.step} at {progress.percent * 100.0}%");
-
-                progressLabel.text = progress.step;
-                progressSlider.value = progress.percent;
+                var prog = JsonUtility.FromJson<SceneProgressPayload>(ExtractPayload(fullJson));
+                Debug.Log($"[SceneClient] Progress '{prog.step}' at {prog.percent * 100f:0}%");
+                progress?.ReportServerProgress(prog.step, prog.percent);
                 break;
 
             default:
@@ -170,11 +157,10 @@ public class SceneClient : MonoBehaviour
     public async void Send(object data)
     {
         if (_ws?.State != WebSocketState.Open) return;
-        string json = JsonUtility.ToJson(data); // or use Newtonsoft for complex types
+        string json = JsonUtility.ToJson(data);
         await _ws.SendText(json);
     }
 
-    /// <summary>Report an in-game event back to the server.</summary>
     public void SendObjectEvent(string objectId, string eventName, object extraData = null)
     {
         Send(new {
@@ -185,9 +171,6 @@ public class SceneClient : MonoBehaviour
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
-    // JsonUtility doesn't support nested dynamic payloads well.
-    // This extracts the raw "payload" sub-object as a JSON string for
-    // a second-pass parse. For production, use Newtonsoft.Json instead.
     private static string ExtractPayload(string fullJson)
     {
         int idx = fullJson.IndexOf("\"payload\":", StringComparison.Ordinal);
@@ -205,10 +188,10 @@ public class SceneClient : MonoBehaviour
     }
 }
 
-// ── Data Models ────────────────────────────────────────────────────────────────
+// ── Data Models ───────────────────────────────────────────────────────────────
 
-[Serializable] public class ServerMessage   { public string type; public string payload; }
-[Serializable] public class SceneParamPayload { public string key; public string value; }
+[Serializable] public class ServerMessage        { public string type; public string payload; }
+[Serializable] public class SceneParamPayload    { public string key; public string value; }
 [Serializable] public class ObjectDestroyPayload { public string id; }
 
 [Serializable] public class SceneProgressPayload { public string step; public string detail; public float percent; }
@@ -231,15 +214,15 @@ public class SceneObject
 [Serializable]
 public class ObjectUpdatePayload
 {
-    public string    id;
-    public SceneObject changes; // partial — only changed fields
+    public string     id;
+    public SceneObject changes;
 }
 
 [Serializable]
 public class ExtrinsicsParams
 {
-    public float[] rotation;     // 9
-    public float[]   translation;  // 3
+    public float[] rotation;    // 9
+    public float[] translation; // 3
 }
 
 [Serializable]
@@ -249,13 +232,13 @@ public class SceneParams
     public float  gravity;
     public float  timeScale;
     public string skybox;
-    
-    public SceneObject[] objects;
+
+    public SceneObject[]    objects;
     public ExtrinsicsParams extrinsics;
 }
 
 [Serializable]
 public class SceneInitPayload
 {
-    public SceneParams   scene;
+    public SceneParams scene;
 }
