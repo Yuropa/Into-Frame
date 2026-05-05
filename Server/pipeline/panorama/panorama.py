@@ -30,7 +30,7 @@ class PanoramaStage(PipelineStage):
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return (
-            context.depth(ContextKey.PANORAMA) is not None
+            context.image(ContextKey.PANORAMA) is not None
         )
 
     def model_names(self) -> list[str]:
