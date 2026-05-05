@@ -28,7 +28,7 @@ class Depth:
 
     @classmethod
     def load(cls, path: Path) -> Self:
-        return cls(path)
+        return cls(np.load(path))
 
     @property
     def width(self):
@@ -48,25 +48,16 @@ class Depth:
     def __getitem__(self, key):
         return self.depth[key]
 
-    def save(self, path, scale=None):
-        depth = self.depth.copy()
-
-        if scale is not None:
-            depth = depth * scale
-        else:
-            # Normalize to full uint16 range
-            dmin, dmax = depth.min(), depth.max()
-            if dmax > dmin:
-                depth = (depth - dmin) / (dmax - dmin) * 65535.0
-
-        depth = np.clip(depth, 0, np.iinfo(np.uint16).max)
-        depth_16 = depth.astype(np.uint16)
-
-        img = PIL.Image.fromarray(depth_16, mode="I;16")
-        img.save(path)
-
-    def save_raw(self, path):
+    def save(self, path: Path):
         np.save(path, self.depth)
+
+    def save_debug_image(self, path: Path):
+        depth = self.depth.copy()
+        dmin, dmax = depth.min(), depth.max()
+        if dmax > dmin:
+            depth = (depth - dmin) / (dmax - dmin) * 65535.0
+        depth = np.clip(depth, 0, np.iinfo(np.uint16).max).astype(np.uint16)
+        PIL.Image.fromarray(depth, mode="I;16").save(path)
 
     def min(self):
         return self.depth.min()
