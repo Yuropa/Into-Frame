@@ -27,7 +27,7 @@ class ModelGenerator(ModelGeneratorBase):
     def meshify(self, temp_path: Path, input: Image) -> Any:
         padded_image = self.pad_image(input)
         mesh = self.pipeline.run(padded_image)[0]
-        mesh.simplify(500000)
+        mesh.simplify(1000000)
 
         glb = o_voxel.postprocess.to_glb(
             vertices            =   mesh.vertices,
@@ -36,11 +36,11 @@ class ModelGenerator(ModelGeneratorBase):
             coords              =   mesh.coords,
             attr_layout         =   mesh.layout,
             voxel_size          =   mesh.voxel_size,
-            aabb                =   [[-0.5, -0.5, -0.3], [0.5, 0.5, 0.5]],
-            decimation_target   =   50000,
+            aabb                =   [[-0.5, -0.5, -0.5], [0.5, 0.5, 0.5]],
+            decimation_target   =   100000,
             texture_size        =   1024,
             remesh              =   True,
-            remesh_band         =   0.5,
+            remesh_band         =   0.75,
             remesh_project      =   0,
             verbose             =   True
         )

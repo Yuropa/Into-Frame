@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import numpy as np
 from util.json_utils import parse_json, write_json
+from PIL import Image as PILImage
 
 def encode_value(v):
     if dataclasses.is_dataclass(v):
@@ -26,6 +27,16 @@ def encode_value(v):
             "__ndarray__": True,
             "base64": base64.b64encode(buf.getvalue()).decode("ascii")
         }
+    if isinstance(v, PILImage.Image):
+        buf = io.BytesIO()
+        fmt = v.format or "PNG"
+        v.save(buf, format=fmt)
+        return {
+            "__pil_image__": True,
+            "format": fmt,
+            "base64": base64.b64encode(buf.getvalue()).decode("ascii")
+        }
+    print(f"Unable to encode value {v}")
     return None
 
 def decode_value(v):
@@ -35,6 +46,9 @@ def decode_value(v):
         if v.get("__ndarray__") is True:
             buf = io.BytesIO(base64.b64decode(v["base64"]))
             return np.load(buf)
+        if v.get("__pil_image__") is True:
+            buf = io.BytesIO(base64.b64decode(v["base64"]))
+            return PILImage.open(buf).copy() 
         return {k: decode_value(val) for k, val in v.items()}
     if isinstance(v, list):
         return [decode_value(x) for x in v]

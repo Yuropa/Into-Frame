@@ -12,7 +12,7 @@ from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class ValueKeys(StrEnum):
     NONE = "none"
-    IMAGE = "input"
+    IMAGE = "image"
     MESH = "mesh"
     OBJECT = "object"
     DEPTH = "depth"

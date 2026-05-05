@@ -14,7 +14,8 @@ class ContextKey:
     SCENE = "scene"
     INTRINSICS = "intrinsics"
     EXTRINSICS = "extrinsics"
-    Type = Literal["input", "depth", "scene", "intrinsics"]
+    PANORAMA = "panorama"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
