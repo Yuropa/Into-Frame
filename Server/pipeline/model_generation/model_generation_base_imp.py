@@ -18,7 +18,7 @@ class ModelGeneratorBase(RemoteServer, ABC):
         pass
     
     def _run_meshify(self, temp_path: Path, input: Any) -> Any:
-        image = self.decode_image(input)
+        image = input
         image.save(str(temp_path / "output.png"))
 
         with torch.no_grad():

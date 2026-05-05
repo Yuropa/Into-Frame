@@ -16,9 +16,13 @@ class SceneGenerationStage(PipelineStage):
         intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
         extrinsics = context.input_extrinsics(ContextKey.EXTRINSICS)
         depth = context.input_depth(ContextKey.DEPTH)
+        input = context.input_image(ContextKey.INPUT)
 
         scene = Scene()
         scene.extrinsics = extrinsics
+
+        if context.image(ContextKey.PANORAMA) is not None:
+            scene.skybox = ContextKey.PANORAMA
 
         generation_task = self.create_progress(object_count, "Creating Objects...")
         for idx in range(object_count):
@@ -27,7 +31,7 @@ class SceneGenerationStage(PipelineStage):
 
             metadata = context.input_object(f"metadata_{idx}")
 
-            result = self.unproject_bbox(metadata["box"], depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
+            result = self.unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
             if result is None:
                 self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                 self.advance_progress(generation_task)
@@ -69,27 +73,32 @@ class SceneGenerationStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.scene(ContextKey.SCENE) is not None
     
-    def unproject_bbox(self, bbox, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
+    def unproject_bbox(self, bbox, image_width, image_height, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
         bx, by, bw, bh = bbox
         x1, y1, x2, y2 = bx, by, bx + bw, by + bh
 
-        sx = intrinsics.width  / intrinsics.color_width
-        sy = intrinsics.height / intrinsics.color_height
+        sx = depth_map.width  / image_width
+        sy = depth_map.height / image_height
 
         cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        dx, dy = int(round(cx * sx)), int(round(cy * sy))
 
-        dx, dy = cx * sx, cy * sy
+        # Sample a patch around the projected center in depth space
+        patch_radius = 5
+        patch_x1 = max(0, dx - patch_radius)
+        patch_x2 = min(depth_map.width,  dx + patch_radius)
+        patch_y1 = max(0, dy - patch_radius)
+        patch_y2 = min(depth_map.height, dy + patch_radius)
 
-        patch_x1 = max(0, int(dx) - 5)
-        patch_x2 = min(intrinsics.width,  int(dx) + 5)
-        patch_y1 = max(0, int(dy) - 5)
-        patch_y2 = min(intrinsics.height, int(dy) + 5)
-        patch = depth_map[patch_y1:patch_y2, patch_x1:patch_x2]
-
+        patch = depth_map.depth[patch_y1:patch_y2, patch_x1:patch_x2]
         valid = patch[(patch > 0) & np.isfinite(patch)]
+
         if len(valid) == 0:
             return None
+
         depth = float(np.median(valid))
+
+        # Unproject using color-space coordinates with color intrinsics
         position = extrinsics.transform(intrinsics.unproject(cx, cy, depth))
         left     = extrinsics.transform(intrinsics.unproject(x1, cy, depth))
         right    = extrinsics.transform(intrinsics.unproject(x2, cy, depth))

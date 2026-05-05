@@ -11,7 +11,7 @@ class ModelGeneratorBase(RemoteClient):
         return []
     
     def meshify(self, image: Image, temp_path: Path) -> Mesh:
-        response = self.send(action="meshify", input=self.encode_image(image), temp_path=temp_path)
+        response = self.send(action="meshify", input=image.image, temp_path=temp_path)
         glb_path = Path(response)
 
         try:

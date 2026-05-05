@@ -23,7 +23,7 @@ class DepthGenerator(RemoteServer):
         raise ValueError(f"Unknown action: {action}")
     
     def depth(self, temp_path: Path, input: Image) -> Any:
-        image = self.decode_image(input).convert("RGB")
+        image = input.convert("RGB")
         with torch.no_grad():
             result = self.model.inference([image])
 

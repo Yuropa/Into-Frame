@@ -11,10 +11,12 @@ from huggingface_hub import snapshot_download
 from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
+from pipeline.panorama.panorama import PanoramaStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.pipeline_monitor import PipelineMonitor
 from util.device_utils import preferred_device, device_name
 from util.image_utils import Image
 
@@ -73,8 +75,8 @@ class Pipeline:
 
         self.stages = [
             SegmentationStage(config=config.stage_config("Object Segementation")),
-            # SupersamplingStage(config=config.stage_config("Supersampling")),
             DepthStage(config=config.stage_config("Depth Generation")),
+            PanoramaStage(config=config.stage_config("Panorama")),
             ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
@@ -120,6 +122,37 @@ class Pipeline:
             if self.config.output is not None:
                 context.save(path=self.config.output)
 
+
+    def _post_progress(self, progress_queue: Optional[queue.SimpleQueue]):
+        if progress_queue is not None:
+            progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
+
+    def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task):
+        with monitor.stage(stage.name):    
+            try:
+                self.log_info(f"Handling stage: {stage.name}")
+                stage._set_progress(progress, task)
+
+                self.current_step = stage.name
+                self._post_progress(progress_queue)
+
+                context.push_stage(stage.name)
+                if not stage.has_expected_output(context):
+                    context = stage.run(context)
+                    stage.log_memory_usage()
+                    stage.clean_up()
+                else:
+                    self.log_info(f"Skipping cached stage {stage.name}")
+        
+                context.pop_stage()
+
+                self._save_context(context)
+                self.current_step_index += 1
+                self._post_progress(progress_queue)
+            except RuntimeError as e:
+                self._print_total_allocations()
+                raise
+
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
@@ -142,46 +175,32 @@ class Pipeline:
         else:
             context.add_image(ContextKey.INPUT, input_image)
 
-        current_step = ""
-        current_step_index = 0
-        def post_progress():
-                if progress_queue is not None:
-                    progress_queue.put({"step": current_step, "percent": current_step_index / float(len(self.stages))})
+        self.current_step = ""
+        self.current_step_index = 0
 
-        with Progress(
-            SpinnerColumn(),
-            "[progress.description]{task.description}",
-            BarColumn(),
-            "[progress.percentage]{task.percentage:>3.0f}%",
-            TimeElapsedColumn(),
-        ) as progress:
-            task = progress.add_task("Processing...", total=len(self.stages))
+        monitor = PipelineMonitor(interval=0.25)
 
-            for stage in self.stages:
-                try:
-                    self.log_info(f"Handling stage: {stage.name}")
-                    stage._set_progress(progress, task)
+        with monitor.stage("Full Pipeline"):
+            with Progress(
+                SpinnerColumn(),
+                "[progress.description]{task.description}",
+                BarColumn(),
+                "[progress.percentage]{task.percentage:>3.0f}%",
+                TimeElapsedColumn(),
+            ) as progress:
+                task = progress.add_task("Processing...", total=len(self.stages))
 
-                    current_step = stage.name
-                    post_progress()
-
-                    context.push_stage(stage.name)
-                    if not stage.has_expected_output(context):
-                        context = stage.run(context)
-                        stage.log_memory_usage()
-                        stage.clean_up()
-                    else:
-                        self.log_info(f"Skipping cached stage {stage.name}")
-            
-                    context.pop_stage()
-
-                    self._save_context(context)
-                    current_step_index += 1
-                    post_progress()
-                except RuntimeError as e:
-                    self._print_total_allocations()
-                    raise
+                for stage in self.stages:
+                    self._run_stage(
+                        stage=stage,
+                        context=context,
+                        progress_queue=progress_queue,
+                        monitor=monitor,
+                        progress=progress,
+                        task=task
+                    )                    
 
         self._save_context(context)
+        monitor.print_summary()
 
         return context
