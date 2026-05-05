@@ -9,6 +9,7 @@ class Scene:
         self.time_scale = 1.0
         self.extrinsics = CameraExtrinsics.identity()
         self.objects = []
+        self.skybox = ""
 
     def add_object(self, object: Object3D):
         self.objects.append(object)
@@ -20,6 +21,7 @@ class Scene:
             "timeScale":    self.time_scale,    
             "objects":      [obj.encode() for obj in self.objects],
             "extrinsics":   self.extrinsics.encode(),
+            "skybox":       self.skybox,
         }
 
     @classmethod
@@ -30,4 +32,5 @@ class Scene:
         obj.time_scale = data["timeScale"]
         obj.extrinsics = CameraExtrinsics.decode(data["extrinsics"])
         obj.objects = [Object3D.decode(o) for o in data["objects"]]
+        obj.skybox = data["skybox"]
         return obj
