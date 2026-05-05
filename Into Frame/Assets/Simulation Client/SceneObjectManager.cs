@@ -13,12 +13,12 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Prefabs")]
     public GameObject billboardPrefab;  // drag your "Billboard" prefab here
 
-    [Header("Asset Server")]
-    public string assetBaseUrl = "http://localhost:3000/assets/";
-
     [Header("Interpolation")]
     [Tooltip("Smooth out position/rotation updates from server")]
     public float lerpSpeed = 10f;
+
+    [Header("Assets")]
+    public GameObject server;
 
     // id → tracked object
     private readonly Dictionary<string, TrackedObject> _tracked = new();
@@ -43,6 +43,11 @@ public class SceneObjectManager : MonoBehaviour
         foreach (var obj in init.scene.objects) {
             Spawn(obj);
         }
+    }
+
+    private AssetServer assetServer()
+    {
+        return server.GetComponent<AssetServer>();
     }
 
     public void Spawn(SceneObject data)
@@ -174,10 +179,7 @@ public class SceneObjectManager : MonoBehaviour
     {
         if (string.IsNullOrEmpty(meshId)) yield break;
 
-        string url = assetBaseUrl + meshId;
-        Debug.Log($"[SceneObjectManager] Downloading mesh: {url}");
-
-        using var req = UnityWebRequest.Get(url);
+        using var req = assetServer().GetResource(meshId);
         yield return req.SendWebRequest();
 
         if (req.result != UnityWebRequest.Result.Success)
@@ -189,7 +191,7 @@ public class SceneObjectManager : MonoBehaviour
         byte[] glbBytes = req.downloadHandler.data;
 
         var gltf = new GltfImport();
-        var glbTask = gltf.LoadGltfBinary(glbBytes, new System.Uri(url));
+        var glbTask = gltf.LoadGltfBinary(glbBytes, new System.Uri(req.url));
 
         // Spin until the async task completes
         while (!glbTask.IsCompleted)
@@ -226,10 +228,7 @@ public class SceneObjectManager : MonoBehaviour
 
         _textureWaiters[textureId] = new List<GameObject> { go };
 
-        string url = assetBaseUrl + textureId;
-        Debug.Log($"[SceneObjectManager] Downloading texture: {url}");
-
-        using var req = UnityWebRequestTexture.GetTexture(url);
+        using var req = assetServer().GetTexture(textureId);
         yield return req.SendWebRequest();
 
         if (req.result != UnityWebRequest.Result.Success)

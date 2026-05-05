@@ -18,6 +18,9 @@ public class SceneParamManager : MonoBehaviour
     [Header("Camera")]
     public GameObject camera;
 
+    [Header("Skybox")]
+    public GameObject skybox;
+
     public void ApplyParams(SceneParams p)
     {
         if (p == null) return;
@@ -46,6 +49,11 @@ public class SceneParamManager : MonoBehaviour
             Quaternion rotation = m.rotation;
 
             camera.transform.SetPositionAndRotation(position, rotation);
+        }
+
+        if (p.skybox != null)
+        {
+            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox);
         }
     }
 
