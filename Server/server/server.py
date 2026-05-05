@@ -60,13 +60,10 @@ class SimulationServer():
         return self.config.asset_port
         
     def _find_asset(self, filename) -> Optional[Path]:
-        matches = list(self.asset_dir.glob(f"{filename}.*"))
+        matches = [p for p in self.asset_dir.glob(f"{filename}.*") if p.suffix != ".meta"]
         if not matches:
             return None
-        if len(matches) > 0:
-            return matches[0]
-        
-        return None
+        return matches[0]
 
     async def _serve_assets(self):
         async def serve_asset(request):
