@@ -191,10 +191,8 @@ class PipelineContext():
     def load(self, path: Path, stage_order: list[str]):
         if not path.exists():
             return
-
         self._stage_order = stage_order
         self._load_directory(path, self._state)
-
         for stage_path in sorted(path.iterdir()):
             if stage_path.is_dir():
                 stage_name = stage_path.name
@@ -207,9 +205,12 @@ class PipelineContext():
     def _load_directory(self, path: Path, target: dict):
         for meta_file in path.glob("*.meta"):
             name = meta_file.stem
-            value = ContextValue(name)
-            value.read(path)
-            target[name] = value
+            try:
+                value = ContextValue(name)
+                value.read(path)
+                target[name] = value
+            except Exception as e:
+                print(f"Skipping '{name}' in {path}: {e}")
 
     def log_state(self):
         def _print_values(values: dict, indent: str):

@@ -32,6 +32,8 @@ class DepthStage(PipelineStage):
                 result.extrinsics
             )
 
+            depth.save_debug_image(self.config.temp / "depth.png")
+
             self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
             context.add_depth(ContextKey.DEPTH, depth)

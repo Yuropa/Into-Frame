@@ -138,7 +138,7 @@ class ContextValue():
         elif value_type == ValueKeys.MESH:
             self.set_mesh(Mesh.load(path / (self.name + ".glb")))
         elif value_type == ValueKeys.DEPTH:
-            self.set_depth(Depth.load(path / (self.name + ".png")))
+            self.set_depth(Depth.load(path / (self.name + ".npy")))
         elif value_type == ValueKeys.OBJECT:
             with open(path / (self.name + ".json")) as f:
                 self.set_object(json.load(f))
@@ -178,7 +178,7 @@ class ContextValue():
             return Path(save_path)
 
         elif self.type == ValueKeys.DEPTH:
-            save_path = str(path / (self.name + ".png"))
+            save_path = str(path / (self.name + ".npy"))
             self.depth().save(path=save_path)
             return Path(save_path)
 
