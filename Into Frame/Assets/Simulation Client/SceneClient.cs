@@ -248,6 +248,7 @@ public class SceneParams
     public string ambientColor;
     public float  gravity;
     public float  timeScale;
+    public string skybox;
     
     public SceneObject[] objects;
     public ExtrinsicsParams extrinsics;
