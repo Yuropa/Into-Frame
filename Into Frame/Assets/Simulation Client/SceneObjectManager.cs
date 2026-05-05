@@ -1,5 +1,7 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEngine;
 using UnityEngine.Networking;
 using GLTFast;
@@ -11,7 +13,10 @@ using GLTFast;
 public class SceneObjectManager : MonoBehaviour
 {
     [Header("Prefabs")]
-    public GameObject billboardPrefab;  // drag your "Billboard" prefab here
+    public GameObject billboardPrefab;
+
+    [Header("Scene")]
+    public GameObject sceneRoot;
 
     [Header("Interpolation")]
     [Tooltip("Smooth out position/rotation updates from server")]
@@ -20,34 +25,41 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Assets")]
     public GameObject server;
 
-    // id → tracked object
+    [Header("UI")]
+    public ProgressController progress;
+
     private readonly Dictionary<string, TrackedObject> _tracked = new();
-
-    // textureId → cached texture (so we don't re-download the same texture)
     private readonly Dictionary<string, Texture2D> _textureCache = new();
-
-    // textureId → list of GameObjects waiting on that texture to download
     private readonly Dictionary<string, List<GameObject>> _textureWaiters = new();
 
     // ── Public API ─────────────────────────────────────────────────────────
 
     public void ApplySceneInit(SceneInitPayload init)
     {
-        // Destroy any previously tracked objects (reconnect scenario)
-        foreach (var t in _tracked.Values) {
+        _queueGeneration++;
+        _taskQueue.Clear();
+        _totalTasks = 0;
+        _completedTasks = 0;
+
+        foreach (var t in _tracked.Values)
             if (t.go != null) Destroy(t.go);
-        }
         _tracked.Clear();
 
-        if (init.scene.objects == null) return;
-        foreach (var obj in init.scene.objects) {
-            Spawn(obj);
-        }
-    }
+        if (sceneRoot != null) sceneRoot.SetActive(false); // hide at start
 
-    private AssetServer assetServer()
-    {
-        return server.GetComponent<AssetServer>();
+        if (init.scene.objects == null) return;
+
+        foreach (var obj in init.scene.objects)
+            SpawnImmediate(obj);
+
+        if (!_isProcessingQueue && _taskQueue.Count > 0)
+            StartCoroutine(ProcessQueue());
+        else if (_taskQueue.Count == 0)
+        {
+            // No meshes to load (e.g. billboards only) — reveal immediately
+            if (sceneRoot != null) sceneRoot.SetActive(true);
+            progress?.ReportSceneComplete();
+        }
     }
 
     public void Spawn(SceneObject data)
@@ -64,7 +76,7 @@ public class SceneObjectManager : MonoBehaviour
                 SpawnBillboard(data);
                 break;
             case "mesh":
-                StartCoroutine(SpawnMesh(data));
+                SpawnMeshImmediate(data);
                 break;
             default:
                 Debug.LogWarning($"[SceneObjectManager] Unsupported type '{data.type}'");
@@ -94,11 +106,12 @@ public class SceneObjectManager : MonoBehaviour
             StartCoroutine(ApplyTexture(tracked.go, changes.texture));
         }
 
-        // If the mesh asset changed, re-download and replace
         if (!string.IsNullOrEmpty(changes.mesh) && changes.mesh != tracked.data.mesh)
         {
             tracked.data.mesh = changes.mesh;
-            StartCoroutine(ReloadMesh(tracked, changes.mesh));
+            var capturedTracked = tracked;
+            var capturedMesh = changes.mesh;
+            EnqueueTask(() => ReloadMesh(capturedTracked, capturedMesh));
         }
 
         if (changes.position != null) tracked.data.position = changes.position;
@@ -113,7 +126,65 @@ public class SceneObjectManager : MonoBehaviour
         _tracked.Remove(id);
     }
 
+    // ── Async Task Queue ───────────────────────────────────────────────────
+
+    private readonly Queue<Func<IEnumerator>> _taskQueue = new();
+    private bool _isProcessingQueue = false;
+    private int _queueGeneration = 0;
+    private int _totalTasks = 0;
+    private int _completedTasks = 0;
+
+    private void EnqueueTask(Func<IEnumerator> task)
+    {
+        _totalTasks++;
+        _taskQueue.Enqueue(task);
+        if (!_isProcessingQueue)
+            StartCoroutine(ProcessQueue());
+    }
+
+
+    private IEnumerator ProcessQueue()
+    {
+        _isProcessingQueue = true;
+
+        while (_taskQueue.Count > 0)
+        {
+            var task = _taskQueue.Dequeue();
+            yield return StartCoroutine(task());
+
+            _completedTasks++;
+            progress?.ReportSceneProgress(_completedTasks, _totalTasks);
+
+            yield return null;
+        }
+
+        // Only reveal once the queue is fully drained
+        if (sceneRoot != null) sceneRoot.SetActive(true);
+        progress?.ReportSceneComplete();
+
+        _isProcessingQueue = false;
+        Debug.Log("[SceneObjectManager] Scene ready");
+    }
+
     // ── Spawn Helpers ──────────────────────────────────────────────────────
+
+    private void SpawnImmediate(SceneObject data)
+    {
+        switch (data.type)
+        {
+            case "billboard": SpawnBillboard(data); break;
+            case "mesh":      SpawnMeshImmediate(data); break;
+            default:
+                Debug.LogWarning($"[SceneObjectManager] Unsupported type '{data.type}'");
+                break;
+        }
+    }
+
+    private AssetServer _assetServer;
+    private AssetServer assetServer()
+    {
+        return _assetServer ??= server.GetComponent<AssetServer>();
+    }
 
     private void SpawnBillboard(SceneObject data)
     {
@@ -123,12 +194,12 @@ public class SceneObjectManager : MonoBehaviour
             return;
         }
 
-        GameObject go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
+        var go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
         go.name = $"[billboard] {data.id[..6]}";
         go.transform.localScale = ToVec3(data.scale);
-
-        var tag = go.AddComponent<ServerObjectTag>();
-        tag.serverId = data.id;
+        if (sceneRoot != null)
+            go.transform.SetParent(sceneRoot.transform, worldPositionStays: true);
+        go.AddComponent<ServerObjectTag>().serverId = data.id;
 
         _tracked[data.id] = new TrackedObject
         {
@@ -142,16 +213,15 @@ public class SceneObjectManager : MonoBehaviour
             StartCoroutine(ApplyTexture(go, data.texture));
     }
 
-    private IEnumerator SpawnMesh(SceneObject data)
+    private void SpawnMeshImmediate(SceneObject data)
     {
-        // Register a placeholder so updates aren't lost while downloading
         var container = new GameObject($"[mesh] {data.id[..6]}");
         container.transform.position   = ToVec3(data.position);
         container.transform.rotation   = ToQuat(data.rotation);
         container.transform.localScale = ToVec3(data.scale);
-
-        var tag = container.AddComponent<ServerObjectTag>();
-        tag.serverId = data.id;
+        if (sceneRoot != null)
+            container.transform.SetParent(sceneRoot.transform, worldPositionStays: true);
+        container.AddComponent<ServerObjectTag>().serverId = data.id;
 
         _tracked[data.id] = new TrackedObject
         {
@@ -161,51 +231,73 @@ public class SceneObjectManager : MonoBehaviour
             targetRot = ToQuat(data.rotation),
         };
 
-        yield return LoadGlbInto(container, data.mesh);
+        var capturedContainer = container;
+        var capturedMesh = data.mesh;
+        var capturedGeneration = _queueGeneration;
+        EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
     }
 
     private IEnumerator ReloadMesh(TrackedObject tracked, string meshId)
     {
-        // Destroy existing child mesh content, keep the container
         foreach (Transform child in tracked.go.transform)
             Destroy(child.gameObject);
 
-        yield return LoadGlbInto(tracked.go, meshId);
+        yield return LoadGlbInto(tracked.go, meshId, _queueGeneration);
     }
 
     // ── GLB Loading ────────────────────────────────────────────────────────
 
-    private IEnumerator LoadGlbInto(GameObject container, string meshId)
+    private IEnumerator LoadGlbInto(GameObject container, string meshId, int generation)
     {
         if (string.IsNullOrEmpty(meshId)) yield break;
 
         using var req = assetServer().GetResource(meshId);
         yield return req.SendWebRequest();
 
-        if (req.result != UnityWebRequest.Result.Success)
+        if (generation != _queueGeneration)
         {
-            Debug.LogError($"[SceneObjectManager] Failed to download mesh '{meshId}': {req.error}");
+            Debug.Log($"[SceneObjectManager] Discarding stale load for '{meshId}'");
             yield break;
         }
 
-        byte[] glbBytes = req.downloadHandler.data;
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Debug.LogError($"[SceneObjectManager] Failed to download '{meshId}': {req.error}");
+            yield break;
+        }
 
-        var gltf = new GltfImport();
-        var glbTask = gltf.LoadGltfBinary(glbBytes, new System.Uri(req.url));
+        byte[] glbBytes = req.downloadHandler.data.ToArray();
+        var logger = new GLTFastLogger();
+        var gltf = new GltfImport(logger: logger);
+        var glbTask = gltf.Load(glbBytes, new System.Uri(req.url));
 
-        // Spin until the async task completes
         while (!glbTask.IsCompleted)
             yield return null;
 
+        if (generation != _queueGeneration) yield break;
+
+        if (glbTask.IsFaulted)
+        {
+            Debug.LogError($"[SceneObjectManager] GLTFast exception on '{meshId}': {glbTask.Exception}");
+            yield break;
+        }
+
         if (!glbTask.Result)
         {
-            Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'");
+            Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'. " +
+                           $"Errors: {string.Join(" | ", logger.Errors)}");
             yield break;
         }
 
         var instantiateTask = gltf.InstantiateMainSceneAsync(container.transform);
         while (!instantiateTask.IsCompleted)
             yield return null;
+
+        if (instantiateTask.IsFaulted)
+        {
+            Debug.LogError($"[SceneObjectManager] Instantiation failed for '{meshId}': {instantiateTask.Exception}");
+            yield break;
+        }
 
         Debug.Log($"[SceneObjectManager] Mesh '{meshId}' loaded into {container.name}");
     }
@@ -233,7 +325,7 @@ public class SceneObjectManager : MonoBehaviour
 
         if (req.result != UnityWebRequest.Result.Success)
         {
-            Debug.LogError($"[SceneObjectManager] Failed to download '{textureId}': {req.error}");
+            Debug.LogError($"[SceneObjectManager] Failed to download texture '{textureId}': {req.error}");
             _textureWaiters.Remove(textureId);
             yield break;
         }
@@ -258,7 +350,7 @@ public class SceneObjectManager : MonoBehaviour
         renderer.SetPropertyBlock(mpb);
     }
 
-    // ── Smooth Interpolation ────────────────────────────────────────────────
+    // ── Smooth Interpolation ───────────────────────────────────────────────
 
     private void Update()
     {
@@ -276,8 +368,6 @@ public class SceneObjectManager : MonoBehaviour
     private static Vector3    ToVec3(Vec3 v) => v != null ? new Vector3(v.x, v.y, v.z) : Vector3.zero;
     private static Quaternion ToQuat(Vec3 e) => e != null ? Quaternion.Euler(e.x, e.y, e.z) : Quaternion.identity;
 
-    // ── Inner Types ────────────────────────────────────────────────────────
-
     private class TrackedObject
     {
         public GameObject go;
@@ -287,8 +377,32 @@ public class SceneObjectManager : MonoBehaviour
     }
 }
 
-/// <summary>Component added to every server-spawned object for identification.</summary>
 public class ServerObjectTag : MonoBehaviour
 {
     public string serverId;
+}
+
+class GLTFastLogger : GLTFast.Logging.ICodeLogger
+{
+    public readonly List<string> Errors = new();
+
+    public void Error(GLTFast.Logging.LogCode code, params string[] messages)
+    {
+        var msg = $"[GLTFast ERROR {code}] {string.Join(", ", messages)}";
+        Errors.Add(msg);
+        Debug.LogError(msg);
+    }
+    public void Warning(GLTFast.Logging.LogCode code, params string[] messages) =>
+        Debug.LogWarning($"[GLTFast WARN {code}] {string.Join(", ", messages)}");
+    public void Info(GLTFast.Logging.LogCode code, params string[] messages) =>
+        Debug.Log($"[GLTFast INFO {code}] {string.Join(", ", messages)}");
+    public void Error(string message)
+    {
+        Errors.Add(message);
+        Debug.LogError($"[GLTFast ERROR] {message}");
+    }
+    public void Warning(string message) =>
+        Debug.LogWarning($"[GLTFast WARN] {message}");
+    public void Info(string message) =>
+        Debug.Log($"[GLTFast INFO] {message}");
 }

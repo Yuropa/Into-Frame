@@ -16,17 +16,32 @@ public class PanoramaSkybox : MonoBehaviour
     void Start()
     {
         if (!string.IsNullOrEmpty(imageName))
-            StartCoroutine(LoadAndApplySkybox(imageName));
+            LoadFromName(imageName);
     }
 
     public void LoadFromName(string name)
     {
+        if (gameObject.activeInHierarchy)
+            StartCoroutine(LoadAndApplySkybox(name));
+        else
+            StartCoroutine(WaitThenLoad(name));
+    }
+
+    private IEnumerator WaitThenLoad(string name)
+    {
+        yield return new WaitUntil(() => gameObject.activeInHierarchy);
         StartCoroutine(LoadAndApplySkybox(name));
     }
 
+    private AssetServer _assetServer = null;
     private AssetServer assetServer()
     {
-        return server.GetComponent<AssetServer>();
+        if (_assetServer != null) {
+            return _assetServer;
+        }
+
+        _assetServer = server.GetComponent<AssetServer>();
+        return _assetServer;
     }
 
     private IEnumerator LoadAndApplySkybox(string name)
@@ -59,10 +74,10 @@ public class PanoramaSkybox : MonoBehaviour
         skyboxMaterial.SetFloat("_Exposure", exposure);
 
         // Apply to the scene
-        // RenderSettings.skybox = skyboxMaterial;
+        RenderSettings.skybox = skyboxMaterial;
 
         // Force skybox to update
-        // DynamicGI.UpdateEnvironment();
+        DynamicGI.UpdateEnvironment();
 
         Debug.Log("[Skybox] Panorama applied successfully");
     }
