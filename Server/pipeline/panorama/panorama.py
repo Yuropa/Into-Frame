@@ -17,10 +17,11 @@ class PanoramaStage(PipelineStage):
             self._pano = ImagePanorama(self.preferred_device)
         self.advance_progress(pano_task)
         intrinsics = context.intrinsics(ContextKey.INTRINSICS)
+        caption = context.object(ContextKey.INPUT_CAPTION)
 
         input_image = context.input_image(ContextKey.INPUT)
         if input_image is not None:
-            pano = self._pano.pano(input_image.rgb(), self.temp, intrinsics.fov)
+            pano = self._pano.pano(input_image.rgb(), self.temp, intrinsics.fov, caption)
             context.add_image(ContextKey.PANORAMA, pano)
 
         self.advance_progress(pano_task)
