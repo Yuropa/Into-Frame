@@ -181,7 +181,8 @@ class Pipeline:
         if self.config.output is not None and self.config.output.exists():
             self.log_info("Loading cached content")
             stage_order = [stage.name for stage in self.stages]
-            context.load(self.config.output, stage_order)
+            output, _ = self._create_output_directories()
+            context.load(output, stage_order)
 
             orig_input_image = context.image(ContextKey.INPUT)
             if not input_image.equal_to(orig_input_image):
