@@ -7,31 +7,14 @@ from pipeline.pipeline_context import PipelineContext
 from util.device_utils import clean_device_cache
 
 class PipelineStageConfiguration:
-    output: Path
-    temp: Path
-
     def __init__(
             self,
             name: str, 
-            output_root: Path, 
-            temp: Path, 
             device: torch.device, 
             torch_dtype: Any,
             log: Logger
             ):
         self.name = name
-        if output_root is not None:
-            self.output = output_root / name
-            self.output.mkdir(parents=True, exist_ok=True)
-        else:
-            self.output = None
-
-        if temp is not None:
-            self.temp = temp / name
-            self.temp.mkdir(parents=True, exist_ok=True)    
-        else:
-            self.temp = None
-
         self.device = device
         self.torch_dtype = torch_dtype
         self.log = log
@@ -43,6 +26,19 @@ class PipelineStage:
         self.device = config.device
         self.torch_dtype = config.torch_dtype
         self.total_tasks = None
+
+    def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
+        if output_root is not None:
+            self.output = output_root / self.name
+            self.output.mkdir(parents=True, exist_ok=True)
+        else:
+            self.output = None
+
+        if temp is not None:
+            self.temp = temp / self.name
+            self.temp.mkdir(parents=True, exist_ok=True)    
+        else:
+            self.temp = None
 
     def model_names(self) -> list[str]:
         return []

@@ -6,6 +6,8 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 import asyncio
 import argparse
 from pipeline.pipeline import Pipeline, PipelineConfiguration
+from pipeline.pipeline_input import PipelineInput
+from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
 
 def create_parser():
@@ -60,7 +62,8 @@ def create_parser():
     run_parser.add_argument(
         "input",
         type=str,
-        help="Input image"
+        default="",
+        help="Input image or directory of images"
     )
     run_parser.add_argument(
         "-o", "--output",
@@ -118,8 +121,9 @@ def handle_run(args):
         config=_create_pipeline_config(args=args)
     )
 
-    pipeline.set_input(args.input)
-    pipeline.run()
+    input = PipelineInput(args.input)
+    runner = PipelineRunner(pipeline)
+    runner.run(input)
 
 def handle_download(args):
     config = PipelineConfiguration(

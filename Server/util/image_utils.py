@@ -6,7 +6,6 @@ from pathlib import Path
 import numpy as np
 import cv2
 import torchvision.transforms.functional as F
-from typing import Self
 
 class Image:
     image: PIL.Image.Image

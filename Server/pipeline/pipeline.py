@@ -18,6 +18,7 @@ from pipeline.captioning.captioning import CaptioningStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.pipeline_monitor import PipelineMonitor
+from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name
 from util.image_utils import Image
 
@@ -57,8 +58,6 @@ class PipelineConfiguration:
     def stage_config(self, name: str) -> PipelineStageConfiguration:
         new_config = PipelineStageConfiguration(
             name=name,
-            output_root=self.output, 
-            temp=self.temp, 
             device=self.device, 
             torch_dtype=self.torch_dtype,
             log=self.log
@@ -68,6 +67,7 @@ class PipelineConfiguration:
 
 class Pipeline:
     stages: list[PipelineStage]
+    input: PipelineInputItem
 
     def __init__(self, config: PipelineConfiguration):
         self.config = config
@@ -85,13 +85,27 @@ class Pipeline:
 
         self.log_info(f"Using device {device_name(self.device)}")
 
+    def _create_output_directories(self) -> tuple[Optional[Path], Optional[Path]]:
+        input_name = self.input.uuid_string()
+        if self.config.output is not None:
+            output = self.config.output / input_name
+            output.mkdir(parents=True, exist_ok=True)
+        else:
+            output = None
+
+        if self.config.temp is not None:
+            temp = self.config.temp / input_name
+            temp.mkdir(parents=True, exist_ok=True)
+        else:
+            temp = None
+
+        return output, temp
+
     def log_info(self, msg):
         self.config.log.info(msg)
 
-    def set_input(self, input):
+    def run(self, input: PipelineInputItem, progress_queue: Optional[queue.SimpleQueue] = None) -> PipelineContext:
         self.input = input
-
-    def run(self, progress_queue: Optional[queue.SimpleQueue] = None) -> PipelineContext:
         self.download_models()
         return self._run_pipeline(progress_queue)
 
@@ -121,8 +135,9 @@ class Pipeline:
     def _save_context(self, context: PipelineContext):
         if self.config.save_files:
             self.log_info("Writing context to disk")
-            if self.config.output is not None:
-                context.save(path=self.config.output)
+            output, _ = self._create_output_directories()
+            if output is not None:
+                context.save(path=output)
 
 
     def _post_progress(self, progress_queue: Optional[queue.SimpleQueue]):
@@ -130,6 +145,9 @@ class Pipeline:
             progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
 
     def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task):
+        output_root, temp_root = self._create_output_directories()
+        stage.set_output(output_root, temp_root)
+        
         with monitor.stage(stage.name):    
             try:
                 self.log_info(f"Handling stage: {stage.name}")
@@ -158,7 +176,7 @@ class Pipeline:
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
-        input_image = Image(self.input)
+        input_image = self.input.image
 
         if self.config.output is not None and self.config.output.exists():
             self.log_info("Loading cached content")

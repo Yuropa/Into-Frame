@@ -28,7 +28,7 @@ class ModelGenerationStage(PipelineStage):
 
             super().clean_up()
             input_image = context.input_image(image_name)
-            mesh = gen.meshify(input_image, self.config.temp / image_name)
+            mesh = gen.meshify(input_image, self.temp / image_name)
 
             self.advance_progress(generation_task)
             context.add_mesh(mesh_name, mesh)

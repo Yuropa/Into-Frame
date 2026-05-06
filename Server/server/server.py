@@ -14,6 +14,9 @@ from pipeline.pipeline import Pipeline, PipelineContext, ContextKey
 from server.messages import ServerMessages, ClientMessages
 from scene.scene import Scene
 from scene.object import Object3D
+from util.path_utils import resource_directory
+from pipeline.pipeline_input import PipelineInput
+from pipeline.pipeline_runner import PipelineRunner
 
 import websockets
 
@@ -201,10 +204,15 @@ class SimulationServer():
 
         drain_task = asyncio.ensure_future(drain())
 
-        self.pipeline.set_input("../input.jpeg")
+        # TODO: Allow dynamic images
+        input = PipelineInput(resource_directory() / "Paris.jpg")
+        runner = PipelineRunner(self.pipeline)
+
+        def run_pipeline():
+            runner.run(input)
 
         try:
-            context_result = await asyncio.get_running_loop().run_in_executor(None, self.pipeline.run, progress_queue)
+            context_result = await asyncio.get_running_loop().run_in_executor(None, run_pipeline, progress_queue)
             self.scene = context_result.scene(ContextKey.SCENE)
             self._context = context_result
         except asyncio.CancelledError:
