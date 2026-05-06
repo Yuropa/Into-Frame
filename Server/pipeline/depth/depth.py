@@ -17,7 +17,7 @@ class DepthStage(PipelineStage):
 
         input_image = context.input_image(ContextKey.INPUT)
         if input_image is not None:
-            result = self._depth.depth(input_image, self.config.temp)
+            result = self._depth.depth(input_image, self.temp)
             depth = Depth(result.depth)
 
             intrinsics = CameraIntrinsics.from_depth_anything(
@@ -32,7 +32,7 @@ class DepthStage(PipelineStage):
                 result.extrinsics
             )
 
-            depth.save_debug_image(self.config.temp / "depth.png")
+            depth.save_debug_image(self.temp / "depth.png")
 
             self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
