@@ -16,7 +16,7 @@ class FovCylindricalPanorama(pano_module.CylindricalPanorama):
     def image_to_cylindrical_panorama(self, scene, input_image, prompt,
                                        negative_prompt='', height=512, width=3912,
                                        num_inference_steps=50, guidance_scale=7.5,
-                                       num_iterations=15, save_dir='output',
+                                       num_iterations=7, save_dir='output',
                                        debug=False, fov_degrees=44.701948991275390):
         # The base class calls fov2focal(input_fov * math.pi / 180, ...)
         # We patch the module-level fov2focal so our FOV is used instead
@@ -50,9 +50,9 @@ class PanoGenerator(RemoteServer):
         pano_module.seed_everything(42)
         self.model = FovCylindricalPanorama(self.device)
 
-    def pano(self, temp_path: Path, input_image: Image.Image, fov_degrees: float = 60.0) -> Image.Image:
-        prompt = "A seamless 360 degree panorama. High resolution, 8k, photorealistic."
-        negative_prompt = "caption, subtitle, text, blur, lowres, bad anatomy, bad hands, cropped, worst quality, watermark"
+    def pano(self, temp_path: Path, input_image: Image.Image, fov_degrees: float = 60.0, caption: str = "") -> Image.Image:
+        prompt = "A seamless 360 degree panorama. Consistent throughout. High resolution, 8k, photorealistic. " + caption
+        negative_prompt = "caption, subtitle, text, blur, lowres, bad anatomy, bad hands, cropped, worst quality, watermark, messy geometry, multiple suns, inconsistent environment"
 
         return self.model.image_to_cylindrical_panorama(
             scene="pano",
@@ -68,7 +68,8 @@ class PanoGenerator(RemoteServer):
             print(f"Got input image {input}")
             image = input["image"]
             fov = input.get("fov_degrees", 60.0)
-            return self.pano(temp_path, image, fov_degrees=fov)
+            caption = input["caption"]
+            return self.pano(temp_path, image, fov_degrees=fov, caption=caption)
         raise ValueError(f"Unknown action: {action}")
 
 if __name__ == "__main__":

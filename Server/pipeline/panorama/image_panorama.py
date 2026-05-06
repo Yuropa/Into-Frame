@@ -18,9 +18,10 @@ class ImagePanorama(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["sd2-community/stable-diffusion-2-inpainting"]
 
-    def pano(self, input: Image, temp_path: Path, fov: float = 60.0) -> Image:
+    def pano(self, input: Image, temp_path: Path, fov: float = 60.0, caption: str = "") -> Image:
         data = {
             "image": input,
-            "fov_degrees": fov
+            "fov_degrees": fov,
+            "caption": caption
         }
         return self.send(action="pano", input=data, temp_path=temp_path)
