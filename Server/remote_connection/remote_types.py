@@ -4,6 +4,7 @@ import io
 from pathlib import Path
 import numpy as np
 from util.json_utils import parse_json, write_json
+from util.image_utils import Image
 from PIL import Image as PILImage
 
 def encode_value(v):
@@ -27,6 +28,8 @@ def encode_value(v):
             "__ndarray__": True,
             "base64": base64.b64encode(buf.getvalue()).decode("ascii")
         }
+    if isinstance(v, Image):
+        return encode_value(v.image)
     if isinstance(v, PILImage.Image):
         buf = io.BytesIO()
         fmt = v.format or "PNG"

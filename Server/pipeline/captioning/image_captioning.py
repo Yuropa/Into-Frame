@@ -14,7 +14,7 @@ class ImageCaptioning:
         return ["Salesforce/blip-image-captioning-large"]
 
     def caption(self, input: Image, prompt: str = ""):
-        inputs = self.processor(input.image.convert('RGB'), prompt, return_tensors="pt").to(self.device)
+        inputs = self.processor(input.rgb(), prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             out = self.model.generate(**inputs)
