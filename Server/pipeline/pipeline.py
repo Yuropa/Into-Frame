@@ -15,6 +15,7 @@ from pipeline.panorama.panorama import PanoramaStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.captioning.captioning import CaptioningStage
+from pipeline.world_gen.generation import WorldGenStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -78,7 +79,8 @@ class Pipeline:
             SegmentationStage(config=config.stage_config("Object Segementation")),
             CaptioningStage(config=config.stage_config("Captioning")),
             DepthStage(config=config.stage_config("Depth Generation")),
-            PanoramaStage(config=config.stage_config("Panorama")),
+            WorldGenStage(config=config.stage_config("Panorama")),
+            # PanoramaStage(config=config.stage_config("Panorama")),
             ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]

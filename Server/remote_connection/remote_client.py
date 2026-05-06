@@ -9,7 +9,7 @@ import base64
 import os
 from io import BytesIO
 
-from typing import Any
+from typing import Any, Optional
 from util.image_utils import Image
 from util.device_utils import device_id
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
@@ -33,8 +33,12 @@ class RemoteClient():
             stream.close()
         return threading.Thread(target=_capture, args=(stream,), daemon=True)
 
-    def _cuda_env_for_device(self, device: torch.device) -> dict:
+    def _cuda_env_for_device(self, device: torch.device, env_options: Optional[dict]) -> dict:
         env = os.environ.copy()
+
+        if env_options is not None:
+            for key, value in env_options.items():
+                env[key] = str(value)
 
         if device.type == "cuda":
             idx = device.index if device.index is not None else torch.cuda.current_device()
@@ -42,7 +46,7 @@ class RemoteClient():
 
         return env
 
-    def __init__(self, device: torch.device, conda_env: str, script_path: Path) -> None:
+    def __init__(self, device: torch.device, conda_env: str, script_path: Path, env_options: Optional[dict] = None) -> None:
         self.process = None
         self.device = device
         self.script_path = script_path
@@ -54,7 +58,7 @@ class RemoteClient():
         self.server_sock.listen(1)
         self.conda_env = conda_env
 
-        env = self._cuda_env_for_device(device)
+        env = self._cuda_env_for_device(device, env_options)
 
         self.process = subprocess.Popen(
             [

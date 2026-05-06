@@ -77,7 +77,7 @@ while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "worldgen")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
@@ -204,6 +204,7 @@ conda run -n trellis2 pip install torch==2.10.0 torchvision==0.25.0 --extra-inde
 printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 conda run -n trellis2 pip install transformers==4.57.6
 conda run -n trellis2 pip install psutil
+conda run -n trellis2 pip install matplotlib
 
 info "Checking for flash-attn"
 
@@ -293,6 +294,7 @@ conda run -n stablepoint pip install --no-build-isolation git+https://github.com
 conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
 conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
 conda run -n stablepoint pip install --upgrade transparent-background flet
+conda run -n stablepoint pip install matplotlib
 ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 
 stop_env
@@ -310,8 +312,36 @@ fi
 
 conda run -n pano pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
 conda run -n pano pip install -r "$SCRIPT_DIR/requirements-panodreamer.txt"
+conda run -n pano pip install matplotlib
 mkdir -p "$CHECKPOINT_DIR/panodreamer"
 ln -sf  "$LIB_DIR/PanoDreamer" "$PACKAGES_DIR/pano_dreamer"
+
+stop_env
+
+## ============
+##    WorldGen
+## ============
+
+create_env "worldgen" 3.12
+
+section "Installing WorldGen"
+if [ ! -d "$LIB_DIR/WorldGen" ]; then
+    git clone https://github.com/ZiYang-xie/WorldGen.git --recursive "$LIB_DIR/WorldGen"
+fi
+
+conda run -n worldgen pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n worldgen pip install -r "$SCRIPT_DIR/requirements-worldgen.txt"
+conda run -n worldgen pip install git+https://github.com/mit-han-lab/nunchaku.git
+conda run -n worldgen pip install git+https://github.com/facebookresearch/pytorch3d.git --no-build-isolation
+
+conda run -n worldgen pip uninstall -y xformers
+conda run -n worldgen pip install ninja cmake setuptools wheel
+export TORCH_CUDA_ARCH_LIST="12.0"
+conda run -n worldgen pip install --no-build-isolation --verbose git+https://github.com/facebookresearch/xformers.git
+
+conda run -n worldgen pip install git+https://github.com/EnVision-Research/DA-2.git#subdirectory=src --no-deps
+
+ln -sf  "$LIB_DIR/WorldGen/src/worldgen" "$PACKAGES_DIR/worldgen"
 
 stop_env
 
