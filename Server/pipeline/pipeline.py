@@ -80,7 +80,7 @@ class Pipeline:
             CaptioningStage(config=config.stage_config("Captioning")),
             DepthStage(config=config.stage_config("Depth Generation")),
             PanoramaStage(config=config.stage_config("Panorama")),
-            # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
+            ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
