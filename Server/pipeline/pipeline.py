@@ -40,8 +40,7 @@ class PipelineConfiguration:
 
             self.output.mkdir(parents=True, exist_ok=True)
 
-            self.temp.mkdir(parents=True, exist_ok=True) 
-            _clear_directory(self.temp)
+            self.temp.mkdir(parents=True, exist_ok=True)
         else:
             self.output = None
             self.temp = None
@@ -146,6 +145,7 @@ class Pipeline:
 
     def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task):
         output_root, temp_root = self._create_output_directories()
+        _clear_directory(temp_root / stage.name)
         stage.set_output(output_root, temp_root)
         
         with monitor.stage(stage.name):    
@@ -187,7 +187,7 @@ class Pipeline:
             orig_input_image = context.image(ContextKey.INPUT)
             if not input_image.equal_to(orig_input_image):
                 self.log_info("New input image, purging stored content")
-                _clear_directory(self.config.output)
+                _clear_directory(output)
                 context = PipelineContext()
                 context.add_image(ContextKey.INPUT, input_image)
             else:
