@@ -23,6 +23,8 @@ from util.device_utils import preferred_device, device_name
 from util.image_utils import Image
 
 def _clear_directory(path: Path):
+    if not path.exists():
+        return
     for item in path.iterdir():
         if item.is_file():
             item.unlink()
