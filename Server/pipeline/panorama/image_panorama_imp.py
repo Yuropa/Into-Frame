@@ -8,60 +8,36 @@ import torch
 import math
 from PIL import Image
 from util.json_utils import write_json
+from torchvision import transforms
 from remote_connection.remote_server import RemoteServer
-import torchvision.transforms as T
-import pano_dreamer.multicondiffusion_panorama as pano_module
-
-class FovCylindricalPanorama(pano_module.CylindricalPanorama):
-    def image_to_cylindrical_panorama(self, scene, input_image, prompt,
-                                       negative_prompt='', height=512, width=3912,
-                                       num_inference_steps=50, guidance_scale=7.5,
-                                       num_iterations=7, save_dir='output',
-                                       debug=False, fov_degrees=44.701948991275390):
-        # The base class calls fov2focal(input_fov * math.pi / 180, ...)
-        # We patch the module-level fov2focal so our FOV is used instead
-        original_fov2focal = pano_module.fov2focal
-        target_fov_rad = fov_degrees * math.pi / 180
-
-        def patched_fov2focal(fov_radians, pixels):
-            # Replace whatever FOV the base class passes with ours
-            return original_fov2focal(target_fov_rad, pixels)
-
-        pano_module.fov2focal = patched_fov2focal
-        try:
-            return super().image_to_cylindrical_panorama(
-                scene=scene,
-                input_image=input_image,
-                prompt=prompt,
-                negative_prompt=negative_prompt,
-                height=height,
-                width=width,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-                num_iterations=num_iterations,
-                save_dir=save_dir,
-                debug=debug,
-            )
-        finally:
-            pano_module.fov2focal = original_fov2focal
+from cubediff.pipelines.pipeline import CubeDiffPipeline
 
 class PanoGenerator(RemoteServer):
     def setup(self):
-        pano_module.seed_everything(42)
-        self.model = FovCylindricalPanorama(self.device)
-
-    def pano(self, temp_path: Path, input_image: Image.Image, fov_degrees: float = 60.0, caption: str = "") -> Image.Image:
-        prompt = "A seamless 360 degree panorama. Consistent throughout. High resolution, 8k, photorealistic. " + caption
-        negative_prompt = "caption, subtitle, text, blur, lowres, bad anatomy, bad hands, cropped, worst quality, watermark, messy geometry, multiple suns, inconsistent environment"
-
-        return self.model.image_to_cylindrical_panorama(
-            scene="pano",
-            input_image=input_image,
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            save_dir=str(temp_path),
-            fov_degrees=fov_degrees,
+        self.pipeline = CubeDiffPipeline.from_pretrained(
+            "hlicai/cubediff-512-imgonly"
         )
+        self.pipeline.to(self.device)
+        self.transform = transforms.Compose([
+            transforms.Resize(512),
+            transforms.CenterCrop(512),
+            transforms.ToTensor()
+        ])
+
+    def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "") -> Image.Image:
+        result = self.pipeline(
+            prompts="",
+            conditioning_image=self.transform(input_image).unsqueeze(0).to(self.device),
+            num_inference_steps=50
+        )
+
+        for i, face in enumerate(result.faces):
+            Image.fromarray(face).save(str(temp_path / f"faces_{i}.png"))
+            
+        for i, face in enumerate(result.faces_cropped):
+            Image.fromarray(face).save(str(temp_path / f"faces_cropped_{i}.png"))
+
+        return Image.fromarray(result.equirectangular)
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":

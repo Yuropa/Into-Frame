@@ -2,19 +2,17 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.panorama.image_panorama import ImagePanorama
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
-from util.device_utils import preferred_device, DeviceStrategy
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class PanoramaStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._pano = None
-        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         pano_task = self.create_progress(2, "Panorama...")
         if self._pano is None:
-            self._pano = ImagePanorama(self.preferred_device)
+            self._pano = ImagePanorama(self.device)
         self.advance_progress(pano_task)
         intrinsics = context.intrinsics(ContextKey.INTRINSICS)
         caption = context.object(ContextKey.INPUT_CAPTION)
@@ -30,9 +28,7 @@ class PanoramaStage(PipelineStage):
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return (
-            context.image(ContextKey.PANORAMA) is not None
-        )
+        return context.image(ContextKey.PANORAMA) is not None
 
     def model_names(self) -> list[str]:
         return ImagePanorama.model_names()
