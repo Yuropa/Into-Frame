@@ -10,13 +10,13 @@ class ImagePanorama(RemoteClient):
 
         super().__init__(
             device=device, 
-            conda_env="pano", 
+            conda_env="cubediff", 
             script_path=script_path
         )
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["sd2-community/stable-diffusion-2-inpainting"]
+        return ["hlicai/cubediff-512-imgonly"]
 
     def pano(self, input: Image, temp_path: Path, fov: float = 60.0, caption: str = "") -> Image:
         data = {

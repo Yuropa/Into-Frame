@@ -298,20 +298,19 @@ ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 stop_env
 
 ## ============
-##    PanoDreamer
+##    CubeDiff
 ## ============
 
-create_env "pano" 3.12
+create_env "cubediff" 3.12
 
-section "Installing PanoDreamer"
-if [ ! -d "$LIB_DIR/PanoDreamer" ]; then
-    git clone https://github.com/avinashpaliwal/PanoDreamer.git --recursive "$LIB_DIR/PanoDreamer"
+section "Installing CubeDiff"
+if [ ! -d "$LIB_DIR/CubeDiff" ]; then
+    git clone git@github.com:Juan5713/OpenCubeDiff.git --recursive "$LIB_DIR/CubeDiff"
 fi
 
-conda run -n pano pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
-conda run -n pano pip install -r "$SCRIPT_DIR/requirements-panodreamer.txt"
-mkdir -p "$CHECKPOINT_DIR/panodreamer"
-ln -sf  "$LIB_DIR/PanoDreamer" "$PACKAGES_DIR/pano_dreamer"
+conda run -n cubediff pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n cubediff pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
+ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
 stop_env
 
