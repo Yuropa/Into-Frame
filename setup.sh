@@ -96,6 +96,15 @@ stop_env() {
     conda activate "$CONDA_NAME" 
 }
 
+download_repo() {
+    local NAME="$1"
+    local URL="$2"
+
+    if [ ! -d "$LIB_DIR/$NAME" ]; then
+        git clone "$URL" --recursive "$LIB_DIR/$NAME"
+    fi
+}
+
 source_shell_configs() {
   local found=0
   local file
@@ -180,9 +189,7 @@ mkdir -p "$PACKAGES_DIR"
 ## =============
 
 section "Installing SAM 2"
-if [ ! -d "$LIB_DIR/sam2" ]; then
-    git clone https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
-fi
+download_repo "sam2" https://github.com/facebookresearch/sam2.git
 pip install -e "$LIB_DIR/sam2"
 
 ## =============
@@ -190,9 +197,7 @@ pip install -e "$LIB_DIR/sam2"
 ## =============
 
 section "Installing Trellis"
-if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
-    git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$LIB_DIR/TRELLIS.2"
-fi
+download_repo "TRELLIS.2" https://github.com/microsoft/TRELLIS.2.git
 
 TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
 TRELLIS_SETUP="setup.sh"
@@ -204,6 +209,7 @@ conda run -n trellis2 pip install torch==2.10.0 torchvision==0.25.0 --extra-inde
 printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
 conda run -n trellis2 pip install transformers==4.57.6
 conda run -n trellis2 pip install psutil
+conda run -n trellis2 pip install matplotlib
 
 info "Checking for flash-attn"
 
@@ -237,16 +243,26 @@ if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
     rm -rf "$CHECKPOINT_DIR/hf-download"
 fi
 
-conda deactivate
+section "Installing SAM3D"
+
+create_env "sam3d" 3.12
+download_repo "SAM3D" org-16943930@github.com:facebookresearch/sam-3d-objects.git
+conda run -n sam3d pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n sam3d pip install -r "$SCRIPT_DIR/requirements-sam3d.txt"
+conda run -n sam3d pip install "git+https://github.com/facebookresearch/pytorch3d.git@75ebeeaea0908c5527e7b1e305fbc7681382db47" --no-build-isolation
+conda run -n sam3d pip install flash_attn==2.8.3 point-cloud-utils==0.29.5 --no-build-isolation
+conda run -n sam3d pip install matplotlib opencv-python tqdm loguru nvidia-pyindex==1.0.9 xformers==0.0.28.post3
+
+ln -sf  "$LIB_DIR/SAM3D/sam3d_objects" "$PACKAGES_DIR/sam3d_objects"
+
+stop_env
 
 ## ======================
 ##    Depth Anything
 ## ======================
 
 section "Installing Depth Anything"
-if [ ! -d "$LIB_DIR/depth-anything-3" ]; then
-    git clone https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
-fi
+download_repo "depth-anything-3" https://github.com/ByteDance-Seed/depth-anything-3
 
 warn "Removing xformers"
 sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
@@ -285,9 +301,8 @@ section "Installing Stable Point 3D"
 create_env "stablepoint" 3.12
 conda run -n stablepoint pip install transformers==4.42.3
 
-if [ ! -d "$LIB_DIR/StablePoint" ]; then
-    git clone https://github.com/Stability-AI/stable-point-aware-3d --recursive "$LIB_DIR/StablePoint"
-fi
+download_repo "StablePoint" https://github.com/Stability-AI/stable-point-aware-3d
+
 conda run -n stablepoint pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
 conda run -n stablepoint pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
@@ -304,9 +319,7 @@ stop_env
 create_env "cubediff" 3.12
 
 section "Installing CubeDiff"
-if [ ! -d "$LIB_DIR/CubeDiff" ]; then
-    git clone git@github.com:Juan5713/OpenCubeDiff.git --recursive "$LIB_DIR/CubeDiff"
-fi
+download_repo "CubeDiff" git@github.com:Juan5713/OpenCubeDiff.git 
 
 conda run -n cubediff pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
 conda run -n cubediff pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
