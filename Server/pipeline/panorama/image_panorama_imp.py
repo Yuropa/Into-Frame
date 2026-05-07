@@ -28,7 +28,7 @@ class PanoGenerator(RemoteServer):
         result = self.pipeline(
             prompts="",
             conditioning_image=self.transform(input_image).unsqueeze(0).to(self.device),
-            num_inference_steps=50
+            num_inference_steps=20
         )
 
         for i, face in enumerate(result.faces):
