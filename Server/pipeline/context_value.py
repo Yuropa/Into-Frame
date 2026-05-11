@@ -100,7 +100,7 @@ class ContextValue():
 
     def set_cubemap(self, obj: CubeMap):  
         self.type = ValueKeys.CUBEMAP
-        self.value = obj
+        self.value = CubeMap(obj)
 
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:

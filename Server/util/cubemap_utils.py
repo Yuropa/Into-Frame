@@ -5,6 +5,7 @@ from util.json_utils import write_json, parse_json
 from enum import StrEnum, Enum
 from typing import Optional, TypeVar, Callable
 from pathlib import Path
+import PIL
 
 class CubeFace(StrEnum):
     FRONT = "front"
@@ -42,13 +43,16 @@ class CubeMapType(StrEnum):
             case CubeMapType.DEPTH:
                 return "npy"
             
-    @property
-    def cls(self) -> type:
-        match self:
-            case CubeMapType.IMAGE:
-                return Image
-            case CubeMapType.DEPTH:
-                return Depth
+    @classmethod
+    def preferred_type(self, obj) -> Optional[CubeMapType]:
+        if isinstance(obj, Image):
+            return CubeMapType.IMAGE
+        elif isinstance(obj, PIL.Image.Image):
+            return CubeMapType.IMAGE
+        elif isinstance(obj, Depth):
+            return CubeMapType.DEPTH
+        else:
+            None
 
 class CubeMap:
     images: dict[CubeFace, Image | Depth]
@@ -65,6 +69,10 @@ class CubeMap:
             self.images = loaded.images
             self.type = loaded.type
             return
+        elif isinstance(obj, CubeMap):
+            self.images = obj.images
+            self.type = obj.type
+            return
 
         if not isinstance(obj, dict):
             raise TypeError(f"Unsupported type: {type(obj)}")
@@ -79,7 +87,7 @@ class CubeMap:
             first = next(iter(parsed_objects.values()), None)
             if first is None:
                 raise ValueError("Cannot infer CubeMapType from empty dict")
-            matched = next((t for t in CubeMapType if isinstance(first, t.cls)), None)
+            matched = CubeMapType.preferred_type(first)
             if matched is None:
                 raise TypeError(f"Cannot infer CubeMapType from {type(first)}")
             self.type = matched

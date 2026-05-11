@@ -1,4 +1,4 @@
-from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
+from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from scene.scene import Scene
 from scene.object import Object3D
