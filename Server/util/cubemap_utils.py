@@ -135,7 +135,7 @@ class CubeMap:
         for face, image in self.images.items():
             image.save(self._file_name(root=path, face=face)) 
 
-    def map(self, fn: Callable) -> "CubeMap":
+    def map(self, fn: Callable) -> CubeMap:
         return CubeMap({face: fn(value) for face, value in self.images.items()}, self.type)
 
     def save_debug_image(self, path: Path):

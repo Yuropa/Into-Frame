@@ -16,8 +16,16 @@ class SegmentationStage(PipelineStage):
         self._foreground_seg = None
         self._mask_inpainting = None
 
+    def _resolved_keys(self):
+        return self.keys({
+            SemanticKey.INPUT: ContextKey.INPUT,
+            SemanticKey.OUTPUT: ContextKey.OBJECT_COUNT
+        })
+
     def run(self, context: PipelineContext) -> PipelineContext:
-        input_image = context.input_image(ContextKey.INPUT).copy()
+        input_key, output_key = self._resolved_keys()
+
+        input_image = context.input_image(input_key).copy()
         total_crops = 0
 
         def store_segmentation_result(result: SegmentationResult):
@@ -86,11 +94,12 @@ class SegmentationStage(PipelineStage):
         self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)
 
-        context.add_object("count", total_crops)
+        context.add_object(output_key, total_crops)
         return context
     
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return context.object("count") is not None
+        _, output_key = self._resolved_keys()
+        return context.object(output_key) is not None
 
     def _prepare_mask_and_image(self, original_image: Image, small_mask: np.ndarray, box, radius: float = 5):
         x, y, w, h = box

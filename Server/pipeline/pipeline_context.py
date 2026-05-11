@@ -1,4 +1,4 @@
-from pipeline.context_value import ContextValue
+from pipeline.context_value import ContextValue, ValueKeys
 from pathlib import Path
 from typing import Literal, TypeAlias, Optional, Any
 from scene.mesh import Mesh
@@ -17,7 +17,8 @@ class ContextKey:
     PANORAMA = "panorama"
     INPUT_CAPTION = "input_caption"
     PANAORAMA_CUBENAME = "panorama_cubemap"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap"]
+    OBJECT_COUNT = "count"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
@@ -75,6 +76,10 @@ class PipelineContext():
 
         self._stage_state[self._current_stage][name] = value
         self._dirty_stage_state[self._current_stage].add(name)
+
+    # Type
+    def type_for(self, name: ContextKeyName) -> Optional[ValueKeys]:
+        return self._value(name).type
 
     # Image
     def add_image(self, name: ContextKeyName, input: Any):
