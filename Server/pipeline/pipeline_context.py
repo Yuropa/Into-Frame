@@ -16,7 +16,8 @@ class ContextKey:
     EXTRINSICS = "extrinsics"
     PANORAMA = "panorama"
     INPUT_CAPTION = "input_caption"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption"]
+    PANAORAMA_CUBENAME = "panorama_cubemap"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

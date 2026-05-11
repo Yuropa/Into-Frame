@@ -2,6 +2,7 @@ import json
 import numpy as np
 from util.image_utils import Image
 from util.depth_utils import Depth
+from util.cubemap_utils import CubeMap
 from pathlib import Path
 from typing import Optional, Any
 from enum import StrEnum
@@ -20,6 +21,28 @@ class ValueKeys(StrEnum):
     SCENE = "scene"
     INTRINSICS = "intrinsics"
     EXTRINSICS = "extrinsics"
+    CUBEMAP = "cubemap"
+
+    def preferred_extension(self) -> "str":
+        match self:
+            case ValueKeys.IMAGE:
+                return "png"
+            case ValueKeys.MESH:
+                return "glb"
+            case ValueKeys.DEPTH:
+                return "npy"
+            case ValueKeys.OBJECT:
+                return "json"
+            case ValueKeys.OBJECT3D:
+                return "json"
+            case ValueKeys.SCENE:
+                return "json"
+            case ValueKeys.INTRINSICS:
+                return "json"
+            case ValueKeys.EXTRINSICS:
+                return "json"
+            case ValueKeys.CUBEMAP:
+                return "cube"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -75,6 +98,10 @@ class ContextValue():
         self.type = ValueKeys.EXTRINSICS
         self.value = obj
 
+    def set_cubemap(self, obj: CubeMap):  
+        self.type = ValueKeys.CUBEMAP
+        self.value = obj
+
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
             return self.value
@@ -122,6 +149,12 @@ class ContextValue():
             return self.value
         else:
             return None
+        
+    def cubemap(self) -> Optional[CubeMap]:
+        if self.type == ValueKeys.CUBEMAP:
+            return self.value
+        else:
+            return None
 
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
@@ -132,84 +165,64 @@ class ContextValue():
             meta = json.load(f)
         
         value_type = ValueKeys(meta["type"])
+        resolved_path = path / (self.name + "." + value_type.preferred_extension())
 
         if value_type == ValueKeys.IMAGE:
-            self.set_image(Image.load(path / (self.name + ".png")))
+            self.set_image(Image.load(resolved_path))
         elif value_type == ValueKeys.MESH:
-            self.set_mesh(Mesh.load(path / (self.name + ".glb")))
+            self.set_mesh(Mesh.load(resolved_path))
         elif value_type == ValueKeys.DEPTH:
-            self.set_depth(Depth.load(path / (self.name + ".npy")))
+            self.set_depth(Depth.load(resolved_path))
         elif value_type == ValueKeys.OBJECT:
-            with open(path / (self.name + ".json")) as f:
+            with open(resolved_path) as f:
                 self.set_object(json.load(f))
         elif value_type == ValueKeys.OBJECT3D:
-            with open(path / (self.name + ".json")) as f:
+            with open(resolved_path) as f:
                 self.set_object3d(Object3D.decode(json.load(f)))
         elif value_type == ValueKeys.SCENE:
-            with open(path / (self.name + ".json")) as f:
+            with open(resolved_path) as f:
                 self.set_scene(Scene.decode(json.load(f)))
         elif value_type == ValueKeys.INTRINSICS:
-            with open(path / (self.name + ".json")) as f:
+            with open(resolved_path) as f:
                 self.set_intrinsics(CameraIntrinsics.decode(json.load(f)))
         elif value_type == ValueKeys.EXTRINSICS:
-            with open(path / (self.name + ".json")) as f:
+            with open(resolved_path) as f:
                 self.set_extrinsics(CameraExtrinsics.decode(json.load(f)))
+        elif value_type == ValueKeys.CUBEMAP:
+            self.set_cubemap(CubeMap.load(resolved_path))
         
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
         with open(meta_path, "w") as f:
             json.dump({"type": self.type}, f)
         
-        if self.type == ValueKeys.IMAGE:
-            save_path = str(path / (self.name + ".png"))
-            self.image().save(path=save_path)
-            return Path(save_path)
-        
-        elif self.type == ValueKeys.MESH:
-            save_path = str(path / (self.name + ".glb"))
-            self.mesh().save(path=save_path)
-            return Path(save_path)
+        save_path = path / (self.name + "." + self.type.preferred_extension())
 
+        if self.type == ValueKeys.IMAGE:
+            self.image().save(path=save_path)
+        elif self.type == ValueKeys.MESH:
+            self.mesh().save(path=save_path)
         elif self.type == ValueKeys.OBJECT:
-            save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
-            
-            return Path(save_path)
-
         elif self.type == ValueKeys.DEPTH:
-            save_path = str(path / (self.name + ".npy"))
             self.depth().save(path=save_path)
-            return Path(save_path)
-
         elif self.type == ValueKeys.OBJECT3D:
-            save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.object3d().encode(), f, indent=4, cls=JSONEncoder)
-
-            return Path(save_path)
-
         elif self.type == ValueKeys.SCENE:
-            save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.scene().encode(), f, indent=4, cls=JSONEncoder)
-
-            return Path(save_path)
-
         elif self.type == ValueKeys.INTRINSICS:
-            save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.intrinsics().encode(), f, indent=4, cls=JSONEncoder)
-
-            return Path(save_path)
-
         elif self.type == ValueKeys.EXTRINSICS:
-            save_path = str(path / (self.name + ".json"))
             with open(save_path, "w") as f:
                 json.dump(self.extrinsics().encode(), f, indent=4, cls=JSONEncoder)
+        elif self.type == ValueKeys.CUBEMAP:
+            self.cubemap().save(path=save_path)
 
-            return Path(save_path)
-
+        return save_path
     
     def describe(self) -> str:
         if self.type == ValueKeys.IMAGE:
@@ -233,4 +246,6 @@ class ContextValue():
             return f"Extrinsics"
         elif self.type == ValueKeys.OBJECT:
             return f"Object ({type(self.object()).__name__})"
+        elif self.type == ValueKeys.CUBEMAP:
+            return f"CubeMap ({self.cubemap().type.value})"
         return "None"
