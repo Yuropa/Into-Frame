@@ -26,7 +26,7 @@ class PanoGenerator(RemoteServer):
             transforms.ToTensor()
         ])
 
-    def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "") -> Image.Image:
+    def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "") -> dict:
         result = self.pipeline(
             prompts="Outdoor scene. 360-degree photorealistic panorama. " + caption + ". Dirt ground.",
             conditioning_image=self.transform(input_image).unsqueeze(0).to(self.device),
@@ -46,11 +46,15 @@ class PanoGenerator(RemoteServer):
 
         for i, face in enumerate(result.faces):
             Image.fromarray(face).save(str(temp_path / f"faces_{i}.png"))
-            
+        
         for i, face in enumerate(result.faces_cropped):
             Image.fromarray(face).save(str(temp_path / f"faces_cropped_{i}.png"))
 
-        return Image.fromarray(equirectangular_image)
+        result = {k: Image.fromarray(v) for k, v in cube_dict.items()}
+        return {
+            "image" : Image.fromarray(equirectangular_image),
+            "faces": result
+        }
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
