@@ -77,7 +77,7 @@ while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cudediff" "dreamcube")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
@@ -311,6 +311,23 @@ fi
 conda run -n cubediff pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
 conda run -n cubediff pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
 ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
+
+stop_env
+
+## ============
+##    DreamCube
+## ============
+
+create_env "dreamcube" 3.12
+
+section "Installing DreamCube"
+if [ ! -d "$LIB_DIR/DreamCube" ]; then
+    git clone https://github.com/Yukun-Huang/DreamCube.git --recursive "$LIB_DIR/DreamCube"
+fi
+
+conda run -n dreamcube pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+conda run -n dreamcube pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
+ln -sf  "$LIB_DIR/CubeDiff/DreamCube" "$PACKAGES_DIR/dreamcube"
 
 stop_env
 

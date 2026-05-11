@@ -1,38 +1,41 @@
 import torch
 from pathlib import Path
 from PIL import Image as PILImage
-from util.image_utils import Image
-from util.cubemap_utils import CubeMap
-from remote_connection.remote_client import RemoteClient 
-from pipeline.model_generation.model_generation_base import ModelGeneratorBase
+from pipeline.panorama.image_panorama_cubediff import ImagePanoramaCubeDiff
+from pipeline.panorama.image_panorama_dreamcube import ImagePanoramaDreamCube
+from pipeline.panorama.panorama_output import PanoramaOutput
+from enum import Enum
 
-class PanoramaOutput:
-    image: Image
-    cubemap: CubeMap
-
-    def __init__(self, values: dict):
-        self.image = Image(values["image"])
-        self.cubemap = CubeMap(values["faces"])
-
-class ImagePanorama(RemoteClient):
-    def __init__(self, device: torch.device) -> None:
-        script_path = Path(__file__).parent / "image_panorama_imp.py"
-
-        super().__init__(
-            device=device, 
-            conda_env="cubediff", 
-            script_path=script_path
-        )
+class PanoramaGeneratorType(Enum):
+    CUBEDIFF = 1
+    DREAMCUBE = 2
 
     @classmethod
-    def model_names(cls) -> list[str]:
-        return ["hlicai/cubediff-512-singlecaption"]
+    def default(cls):
+        return cls.CUBEDIFF
+
+class ImagePanorama:
+    def __init__(self, device: torch.device, type: PanoramaGeneratorType = PanoramaGeneratorType.default()) -> None:
+        match type:
+            case PanoramaGeneratorType.CUBEDIFF:
+                self.generator = ImagePanoramaCubeDiff(
+                    device=device
+                )
+            case PanoramaGeneratorType.DREAMCUBE:
+                self.generator = ImagePanoramaDreamCube(
+                    device=device
+                )
+
+    @classmethod
+    def model_names(cls, type: PanoramaGeneratorType = PanoramaGeneratorType.default()) -> list[str]:
+        match type:
+            case PanoramaGeneratorType.CUBEDIFF:
+                return ImagePanoramaCubeDiff.model_names()
+            case PanoramaGeneratorType.DREAMCUBE:
+                return ImagePanoramaDreamCube.model_names()
 
     def pano(self, input: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
-        data = {
-            "image": input,
-            "fov_degrees": fov,
-            "caption": caption
-        }
-        values = self.send(action="pano", input=data, temp_path=temp_path)
-        return PanoramaOutput(values=values)
+        return self.generator.pano(input, temp_path, fov, caption)
+
+    def close(self):
+        self.generator.close()
