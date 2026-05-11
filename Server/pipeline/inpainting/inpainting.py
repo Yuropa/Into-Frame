@@ -1,65 +1,51 @@
-from util.image_utils import Image
-from pipeline.inpainting.sd3_impls import SD3LatentFormat
 import torch
 import numpy as np
-from diffusers import StableDiffusion3Pipeline
+from PIL import Image as PILImage
+from diffusers import FluxInpaintPipeline
+from util.image_utils import Image
 
 class InPainting:
     def __init__(self, device, torch_dtype):
         self.device = device
         self.torch_dtype = torch_dtype
-        self.width = 1024
-        self.height = 1024
+        # FLUX models are heavy; 'dev' is high quality, 'schnell' is faster
+        self.model_id = "black-forest-labs/FLUX.1-Fill-dev"
 
-        self.pipeline = StableDiffusion3Pipeline.from_pretrained(
-            "stabilityai/stable-diffusion-3.5-medium", 
+        self.pipeline = FluxInpaintPipeline.from_pretrained(
+            self.model_id, 
             torch_dtype=torch_dtype
         )
-        self.pipeline = self.pipeline.to(device)
-
-    # python sd3_infer.py --controlnet_ckpt models/sd3.5_large_controlnet_canny.safetensors 
-    # --controlnet_cond_image input/canny.png --prompt "An adorable fluffy pastel creature"
+        
+        self.pipeline.to(device)
+        # self.pipeline.enable_model_cpu_offload() 
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["stabilityai/stable-diffusion-3.5-medium"]
+        return ["black-forest-labs/FLUX.1-Fill-dev"]
 
-    def _vae_encode(
-        self, image, using_2b_controlnet: bool = False, controlnet_type: int = 0
-    ) -> torch.Tensor:
-        image = image.convert("RGB")
-        image_np = np.array(image).astype(np.float32) / 255.0
-        image_np = np.moveaxis(image_np, 2, 0)
-        batch_images = np.expand_dims(image_np, axis=0).repeat(1, axis=0)
-        image_torch = torch.from_numpy(batch_images).cuda()
-        if using_2b_controlnet:
-            image_torch = image_torch * 2.0 - 1.0
-        elif controlnet_type == 1:  # canny
-            image_torch = image_torch * 255 * 0.5 + 0.5
-        else:
-            image_torch = 2.0 * image_torch - 1.0
-        image_torch = image_torch.to(self.device)
-        self.vae.model = self.vae.model.to(self.device)
-        latent = self.vae.model.encode(image_torch).cpu()
-        self.vae.model = self.vae.model.cpu()
-        return latent
+    def inpaint(self, input_image: Image, mask_image: Image, prompt: str = "", num_inference_steps=30, guidance_scale=30.0):
+        """
+        For FLUX.1-Fill:
+        - If prompt is "", it performs logic-based background reconstruction.
+        - Guidance scale for FLUX Fill typically defaults higher (around 30.0) compared to SD.
+        """
+        
+        # Ensure images are in RGB for the pipeline
+        init_img = input_image.image.convert("RGB")
+        mask_img = mask_image.image.convert("L") # Mask must be grayscale
 
-    def _image_to_latent(self, image):
-        image = image.resize((self.width, self.height), Image.LANCZOS)
-        latent = self._vae_encode(image, using_2b_controlnet=False, controlnet_type=1)
-        latent = SD3LatentFormat().process_in(latent)
+        # FLUX handles the VAE encoding internally within the pipeline call
+        # so we can bypass the manual latent processing used in your SD3 version.
+        output = self.pipeline(
+            prompt=prompt,
+            image=init_img,
+            mask_image=mask_img,
+            height=init_img.height,
+            width=init_img.width,
+            num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
+            max_sequence_length=512, # FLUX specific parameter
+            generator=torch.Generator(device=self.device).manual_seed(42)
+        ).images[0]
 
-    def inpaint(self, input: Image, prompt: str, num_inference_steps = 28, guidance_scale = 3.5):
-        if input is None:
-            return self.pipeline(
-                prompt,
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-            ).images[0]
-        else:
-            return self.pipeline(
-                prompt,
-                image=[input.image],
-                num_inference_steps=num_inference_steps,
-                guidance_scale=guidance_scale,
-            ).images[0]
+        return output
