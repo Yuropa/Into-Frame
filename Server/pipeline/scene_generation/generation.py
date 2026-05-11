@@ -11,18 +11,31 @@ class SceneGenerationStage(PipelineStage):
         super().__init__(config)
         self._gen = None
 
+    def _resolved_keys(self):
+        return self.keys({
+            SemanticKey.OBJECT_COUNT: ContextKey.OBJECT_COUNT,
+            SemanticKey.EXTRINSICS: ContextKey.EXTRINSICS,
+            SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
+            SemanticKey.INPUT: ContextKey.INPUT,
+            SemanticKey.DEPTH: ContextKey.DEPTH,
+            SemanticKey.PANORAMA: ContextKey.PANORAMA,
+            SemanticKey.OUTPUT: ContextKey.SCENE
+        })
+
     def run(self, context: PipelineContext) -> PipelineContext:
-        object_count = context.input_object("count")
-        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
-        extrinsics = context.input_extrinsics(ContextKey.EXTRINSICS)
-        depth = context.input_depth(ContextKey.DEPTH)
-        input = context.input_image(ContextKey.INPUT)
+        count_key, extrinsics_key, intrinsics_key, input_key, depth_key, panorama_key, output_key = self._resolved_keys()
+
+        object_count = context.input_object(count_key)
+        intrinsics = context.input_intrinsics(intrinsics_key)
+        extrinsics = context.input_extrinsics(extrinsics_key)
+        depth = context.input_depth(depth_key)
+        input = context.input_image(input_key)
 
         scene = Scene()
         scene.extrinsics = extrinsics
 
-        if context.image(ContextKey.PANORAMA) is not None:
-            scene.skybox = ContextKey.PANORAMA
+        if context.image(panorama_key) is not None:
+            scene.skybox = panorama_key
 
         generation_task = self.create_progress(object_count, "Creating Objects...")
         for idx in range(object_count):
@@ -67,11 +80,13 @@ class SceneGenerationStage(PipelineStage):
 
         self.finish_progress(generation_task)
 
-        context.add_scene(ContextKey.SCENE, scene)
+        context.add_scene(output_key, scene)
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return context.scene(ContextKey.SCENE) is not None
+        _, _, _, _, _, _, output_key = self._resolved_keys()
+
+        return context.scene(output_key) is not None
     
     def unproject_bbox(self, bbox, image_width, image_height, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
         bx, by, bw, bh = bbox

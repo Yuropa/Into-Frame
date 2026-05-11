@@ -15,7 +15,7 @@ from pipeline.panorama.panorama import PanoramaStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.captioning.captioning import CaptioningStage
-from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
+from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
@@ -57,12 +57,13 @@ class PipelineConfiguration:
         )
         self.log = logging.getLogger("rich")
 
-    def stage_config(self, name: str) -> PipelineStageConfiguration:
+    def stage_config(self, name: str, keys: dict[SemanticKeyName, ContextKeyName] | None = None,) -> PipelineStageConfiguration:
         new_config = PipelineStageConfiguration(
             name=name,
             device=self.device, 
             torch_dtype=self.torch_dtype,
-            log=self.log
+            log=self.log,
+            keys=keys
         )
 
         return new_config
@@ -81,6 +82,10 @@ class Pipeline:
             CaptioningStage(config=config.stage_config("Captioning")),
             DepthStage(config=config.stage_config("Depth Generation")),
             PanoramaStage(config=config.stage_config("Panorama")),
+            DepthStage(config=config.stage_config("Pano Depth"), keys={
+                SemanticKey.INPUT: ContextKey.PANAORAMA_CUBENAME,
+                SemanticKey.OUTPUT: "Panorama Depth"
+            }),
             # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]

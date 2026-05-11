@@ -1,7 +1,9 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.depth.image_depth import ImageDepth
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.context_value import ValueKeys
 from util.depth_utils import Depth
+from util.cubemap_utils import CubeFace
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class DepthStage(PipelineStage):
@@ -18,39 +20,60 @@ class DepthStage(PipelineStage):
         })
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        depth_task = self.create_progress(2, "Depth...")
+        input_key, output_key, intrinsics_key, extrinsics_key = self._resolved_keys()
+        is_cubemap = content.type_for(input_key) == ValueKeys.CUBEMAP
+
+        steps = 2
+        if is_cubemap:
+            steps = 7
+
+        depth_task = self.create_progress(steps, "Depth...")
         if self._depth is None:
             self._depth = ImageDepth(self.device)
         self.advance_progress(depth_task)
 
-        input_key, output_key, intrinsics_key, extrinsics_key = self._resolved_keys()
+        if is_cubemap:
+            input_cubemap = content.input_cubemap(input_key)
+            resulting_faces = {}
+            if input_cubemap is not None:
+                for face in CubeFace:
+                    input_image = input_cubemap[face]
+                    result = self._depth.depth(input_image, self.temp)
+                    depth = Depth(result.depth)
 
-        input_image = context.input_image(input_key)
-        if input_image is not None:
-            result = self._depth.depth(input_image, self.temp)
-            depth = Depth(result.depth)
+                    resulting_faces[face] = depth
+                    depth.save_debug_image(self.temp / (face.value + ".png"))
+                pass
+                
+            context.add_cubemap(output_key, resulting_faces)
+        else:
+            input_image = context.input_image(input_key)
+            if input_image is not None:
+                result = self._depth.depth(input_image, self.temp)
+                depth = Depth(result.depth)
 
-            intrinsics = CameraIntrinsics.from_depth_anything(
-                result.intrinsics, 
-                color_width=input_image.width, 
-                color_height=input_image.height,
-                depth_width=depth.width,
-                depth_height=depth.height
-            )
+                intrinsics = CameraIntrinsics.from_depth_anything(
+                    result.intrinsics, 
+                    color_width=input_image.width, 
+                    color_height=input_image.height,
+                    depth_width=depth.width,
+                    depth_height=depth.height
+                )
 
-            extrinsics = CameraExtrinsics.from_depth_anything(
-                result.extrinsics
-            )
+                extrinsics = CameraExtrinsics.from_depth_anything(
+                    result.extrinsics
+                )
 
-            depth.save_debug_image(self.temp / "depth.png")
+                depth.save_debug_image(self.temp / "depth.png")
 
-            self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
+                self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
-            context.add_depth(output_key, depth)
-            context.add_intrinsics(intrinsics_key, intrinsics)
-            context.add_extrinsics(extrinsics_key, extrinsics)
+                context.add_depth(output_key, depth)
+                context.add_intrinsics(intrinsics_key, intrinsics)
+                context.add_extrinsics(extrinsics_key, extrinsics)
 
-        self.advance_progress(depth_task)
+            self.advance_progress(depth_task)
+
         self.finish_progress(depth_task)
 
         return context

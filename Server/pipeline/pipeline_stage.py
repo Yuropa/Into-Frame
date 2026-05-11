@@ -14,6 +14,8 @@ class SemanticKey(StrEnum):
     INTRINSICS = "intrinsics"
     EXTRINSICS = "extrinsics"
     CUBEMAP = "cubemap"
+    OBJECT_COUNT = "count"
+    DEPTH = "depth"
 
 SemanticKeyName: TypeAlias = SemanticKey | str
 
