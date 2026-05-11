@@ -3,7 +3,7 @@ from typing import Optional, Any
 from logging import Logger
 from pathlib import Path
 from rich.progress import Progress
-from pipeline.pipeline_context import PipelineContext
+from pipeline.pipeline_context import PipelineContext, ContextKeyName
 from util.device_utils import clean_device_cache
 
 class PipelineStageConfiguration:
@@ -12,12 +12,16 @@ class PipelineStageConfiguration:
             name: str, 
             device: torch.device, 
             torch_dtype: Any,
-            log: Logger
+            log: Logger,
+            input_key: Optional[ContextKeyName] = None,
+            output_key: Optional[ContextKeyName] = None
             ):
         self.name = name
         self.device = device
         self.torch_dtype = torch_dtype
         self.log = log
+        self.input_key = input_key
+        self.output_key = output_key
 
 class PipelineStage:
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -26,6 +30,22 @@ class PipelineStage:
         self.device = config.device
         self.torch_dtype = config.torch_dtype
         self.total_tasks = None
+
+    def input_key(self, default_input_key: Optional[ContextKeyName] = None):
+        if self.config.input_key is not None:
+            return self.config.input_key
+        elif default_input_key is not None:
+            return default_input_key
+        else:
+            raise RuntimeError(f"No input key found")
+        
+    def output_key(self, default_output_key: Optional[ContextKeyName] = None):
+        if self.config.output_key is not None:
+            return self.config.output_key
+        elif default_output_key is not None:
+            return default_output_key
+        else:
+            raise RuntimeError(f"No output key found")
 
     def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
         if output_root is not None:
