@@ -1,10 +1,21 @@
 import torch
-from typing import Optional, Any, Tuple
+from typing import Optional, Any, Tuple, TypeAlias
 from logging import Logger
 from pathlib import Path
 from rich.progress import Progress
 from pipeline.pipeline_context import PipelineContext, ContextKeyName
 from util.device_utils import clean_device_cache
+from enum import StrEnum
+
+class SemanticKey(StrEnum):
+    INPUT = "input"
+    OUTPUT = "output"
+    CAPTION = "caption"
+    INTRINSICS = "intrinsics"
+    EXTRINSICS = "extrinsics"
+    CUBEMAP = "cubemap"
+
+SemanticKeyName: TypeAlias = SemanticKey | str
 
 class PipelineStageConfiguration:
     def __init__(
@@ -13,15 +24,13 @@ class PipelineStageConfiguration:
             device: torch.device, 
             torch_dtype: Any,
             log: Logger,
-            input_key: Optional[ContextKeyName] = None,
-            output_key: Optional[ContextKeyName] = None
+            keys: dict[SemanticKeyName, ContextKeyName] | None = None,
             ):
         self.name = name
         self.device = device
         self.torch_dtype = torch_dtype
         self.log = log
-        self.input_key = input_key
-        self.output_key = output_key
+        self.keys = keys or {}
 
 class PipelineStage:
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -31,27 +40,26 @@ class PipelineStage:
         self.torch_dtype = config.torch_dtype
         self.total_tasks = None
 
-    def input_key(self, default_input_key: Optional[ContextKeyName] = None) -> ContextKeyName:
-        if self.config.input_key is not None:
-            return self.config.input_key
-        elif default_input_key is not None:
-            return default_input_key
-        else:
-            raise RuntimeError("No input key found")
-        
-    def output_key(self, default_output_key: Optional[ContextKeyName] = None) -> ContextKeyName:
-        if self.config.output_key is not None:
-            return self.config.output_key
-        elif default_output_key is not None:
-            return default_output_key
-        else:
-            raise RuntimeError("No output key found")
-        
+    def input_key(self, default_input_key: Optional[ContextKeyName] = None) -> ContextKeyName:    
+        return self._resolve_key(SemanticKey.INPUT, default_input_key)
 
-    def keys(self, default_input_key: Optional[ContextKeyName] = None, default_output_key: Optional[ContextKeyName] = None) -> Tuple[ContextKeyName, ContextKeyName]:
-        input_key = self.input_key(default_input_key)
-        output_key = self.output_key(default_output_key)
-        return (input_key, output_key)
+    def output_key(self, default: ContextKeyName | None = None) -> ContextKeyName:
+        return self._resolve_key(SemanticKey.OUTPUT, default)
+
+    def _resolve_key(self, semantic: SemanticKey, default: ContextKeyName | None) -> ContextKeyName:
+        key = self.config.keys.get(semantic)
+        if key is not None:
+            return key
+        elif default is not None:
+            return default
+        else:
+            raise RuntimeError(f"No key found for '{semantic}'")
+
+    def keys(self, defaults: dict[SemanticKeyName, ContextKeyName] = {}) -> tuple[ContextKeyName, ...]:
+        return tuple(self._resolve_key(s, defaults.get(s)) for s in defaults)
+
+    def keys_dict(self, **defaults: ContextKeyName) -> dict[SemanticKey, ContextKeyName]:
+        return {s: self._resolve_key(s, defaults.get(s)) for s in SemanticKey}
 
     def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
         if output_root is not None:
