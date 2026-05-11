@@ -16,7 +16,7 @@ class ImagePanorama(RemoteClient):
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["hlicai/cubediff-512-imgonly"]
+        return ["hlicai/cubediff-512-singlecaption"]
 
     def pano(self, input: Image, temp_path: Path, fov: float = 60.0, caption: str = "") -> Image:
         data = {
