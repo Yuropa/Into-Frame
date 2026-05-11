@@ -1,7 +1,8 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
-from pipeline.panorama.image_panorama import ImagePanorama
+from pipeline.panorama.image_panorama import ImagePanorama, PanoramaGeneratorType
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
+from util.device_utils import DeviceStrategy, preferred_device
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class PanoramaStage(PipelineStage):
@@ -9,9 +10,15 @@ class PanoramaStage(PipelineStage):
         super().__init__(config)
         self._pano = None
 
+        strategy = DeviceStrategy.AUTO
+        if PanoramaGeneratorType.default() == PanoramaGeneratorType.DREAMCUBE:
+            strategy = DeviceStrategy.MEMORY
+        self.preferred_device, _ = preferred_device(strategy)
+
     def _resolved_keys(self):
         return self.keys({
             SemanticKey.INPUT: ContextKey.INPUT, 
+            SemanticKey.DEPTH: ContextKey.DEPTH,
             SemanticKey.OUTPUT: ContextKey.PANORAMA,
             SemanticKey.CUBEMAP: ContextKey.PANAORAMA_CUBENAME,
             SemanticKey.CAPTION: ContextKey.INPUT_CAPTION,
@@ -21,17 +28,18 @@ class PanoramaStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         pano_task = self.create_progress(2, "Panorama...")
 
-        input_key, output_key, cubemap_key, caption_key, intrinsics_key = self._resolved_keys()
+        input_key, depth_key, output_key, cubemap_key, caption_key, intrinsics_key = self._resolved_keys()
 
         if self._pano is None:
-            self._pano = ImagePanorama(self.device)
+            self._pano = ImagePanorama(self.preferred_device)
         self.advance_progress(pano_task)
         intrinsics = context.intrinsics(intrinsics_key)
         caption = context.object(caption_key)
 
         input_image = context.input_image(input_key)
+        depth_image = context.input_depth(depth_key)
         if input_image is not None:
-            pano = self._pano.pano(input_image.rgb(), self.temp, intrinsics.fov, caption)
+            pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, caption)
             context.add_image(output_key, pano.image)
             context.add_cubemap(cubemap_key, pano.cubemap)
 
@@ -41,10 +49,11 @@ class PanoramaStage(PipelineStage):
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        _, output_key, cubemap_key, _, _ = self._resolved_keys()
+        _, _, output_key, cubemap_key, _, _ = self._resolved_keys()
         return (
-            context.depth(output_key) is not None and
-            context.intrinsics(cubemap_key) is not None
+            context.image(output_key) is not None and
+            context.cubemap(cubemap_key) is not None and 
+            False
         )
 
     def model_names(self) -> list[str]:

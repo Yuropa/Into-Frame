@@ -13,3 +13,4 @@ tqdm
 trimesh
 matplotlib
 py360convert
+accelerate

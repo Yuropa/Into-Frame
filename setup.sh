@@ -327,7 +327,9 @@ fi
 
 conda run -n dreamcube pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
 conda run -n dreamcube pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
-ln -sf  "$LIB_DIR/CubeDiff/DreamCube" "$PACKAGES_DIR/dreamcube"
+conda run -n dreamcube pip install ninja wheel setuptools
+conda run -n dreamcube pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
 
 stop_env
 

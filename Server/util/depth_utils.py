@@ -26,6 +26,8 @@ class Depth:
         if self.depth.ndim == 3 and self.depth.shape[0] == 1:
             self.depth = self.depth.squeeze(0)
 
+        self._gray = None
+
     @classmethod
     def load(cls, path: Path) -> Self:
         return cls(np.load(path))
@@ -42,6 +44,22 @@ class Depth:
     def size(self):
         return (self.depth.shape[1], self.depth.shape[0])
     
+    def gray(self):
+        if self._gray is not None:
+            return self._gray
+
+        depth = self.depth.copy()
+        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+
+        dmin, dmax = depth.min(), depth.max()
+        if dmax > dmin:
+            depth = (depth - dmin) / (dmax - dmin)
+        else:
+            depth = np.zeros_like(depth)
+
+        self._gray = (depth * 255).astype(np.uint8)  # (H, W), grayscale
+        return self._gray
+
     def copy(self) -> Depth:
         return Depth(self.depth.copy())
     
@@ -52,12 +70,7 @@ class Depth:
         np.save(path, self.depth)
 
     def save_debug_image(self, path: Path):
-        depth = self.depth.copy()
-        dmin, dmax = depth.min(), depth.max()
-        if dmax > dmin:
-            depth = (depth - dmin) / (dmax - dmin) * 65535.0
-        depth = np.clip(depth, 0, np.iinfo(np.uint16).max).astype(np.uint16)
-        PIL.Image.fromarray(depth, mode="I;16").save(path)
+        PIL.Image.fromarray(self.gray(), mode="L").save(path)
 
     def min(self):
         return self.depth.min()

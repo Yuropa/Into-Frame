@@ -12,7 +12,7 @@ class PanoramaGeneratorType(Enum):
 
     @classmethod
     def default(cls):
-        return cls.CUBEDIFF
+        return cls.DREAMCUBE
 
 class ImagePanorama:
     def __init__(self, device: torch.device, type: PanoramaGeneratorType = PanoramaGeneratorType.default()) -> None:
@@ -34,8 +34,8 @@ class ImagePanorama:
             case PanoramaGeneratorType.DREAMCUBE:
                 return ImagePanoramaDreamCube.model_names()
 
-    def pano(self, input: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
-        return self.generator.pano(input, temp_path, fov, caption)
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
+        return self.generator.pano(input, depth, temp_path, fov, caption)
 
     def close(self):
         self.generator.close()
