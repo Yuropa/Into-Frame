@@ -1,0 +1,15 @@
+torch
+torchvision
+diffusers
+transformers
+gsplat
+scipy
+einops
+matplotlib
+open3d
+opencv_python
+pillow
+tqdm
+trimesh
+matplotlib
+py360convert
