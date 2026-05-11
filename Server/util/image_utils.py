@@ -89,7 +89,7 @@ class Image:
     def __getitem__(self, key):
         return self.image[key]
 
-    def equal_to(self, other: Image) -> bool:
+    def __eq__(self, other: Image) -> bool:
         if not isinstance(other, Image):
             return False
         if self.image.size != other.image.size:

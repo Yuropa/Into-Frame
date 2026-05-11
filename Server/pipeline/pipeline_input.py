@@ -22,7 +22,7 @@ class PipelineInputItem:
         return str(self.uuid)
 
     def equal_to(self, image: Image) -> bool:
-        return self.image.equal_to(image)
+        return self.image == image
     
     def path(self, root: Path) -> Path:
         return root / self.uuid_string()
