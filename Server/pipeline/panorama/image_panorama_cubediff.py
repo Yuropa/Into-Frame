@@ -21,7 +21,7 @@ class ImagePanoramaCubeDiff(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["hlicai/cubediff-512-singlecaption"]
 
-    def pano(self, input: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
         data = {
             "image": input,
             "fov_degrees": fov,

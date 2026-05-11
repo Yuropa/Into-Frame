@@ -1,16 +1,19 @@
-from path_utils import add_project_paths
+from path_utils import add_project_paths, add_system_path, lib_path
 add_project_paths()
+
+add_system_path(lib_path() / "DreamCube")
 
 from pathlib import Path
 from typing import Any
 import numpy as np
 from PIL import Image
 import py360convert
+import traceback
 
 from remote_connection.remote_server import RemoteServer
-from dreamcube.models.dreamcube import DreamCubeDepthPipeline
-from dreamcube.models.multiplane_sync_legacy import apply_custom_processors_for_vae, apply_custom_processors_for_unet
-
+from models.dreamcube import DreamCubeDepthPipeline
+from models.multiplane_sync_legacy import apply_custom_processors_for_vae, apply_custom_processors_for_unet
+from app import prepare_inputs
 
 class PanoGenerator(RemoteServer):
     def setup(self):
@@ -24,7 +27,7 @@ class PanoGenerator(RemoteServer):
             enable_sync_cross_attn=False,
             enable_sync_gn=True,
             enable_sync_conv2d=True,
-            cube_padding_impl='cuda',
+            cube_padding_impl='ref',
         )
         apply_custom_processors_for_vae(
             self.pipeline.vae,
@@ -32,12 +35,17 @@ class PanoGenerator(RemoteServer):
             enable_sync_gn=True,
             enable_sync_conv2d=True,
             enable_sync_attn=True,
-            cube_padding_impl='cuda',
+            cube_padding_impl='ref',
         )
 
         self.pipeline.to(self.device)
 
     def pano(self, temp_path: Path, input_image: Image.Image, depth_image: Image.Image, caption: str = "") -> dict:
+        if isinstance(depth_image, np.ndarray):
+            depth_image = Image.fromarray(depth_image)
+        if isinstance(input_image, np.ndarray):
+            input_image = Image.fromarray(input_image)
+
         # Resize inputs to 512x512
         input_image = input_image.resize((512, 512))
         depth_image = depth_image.resize((512, 512))
@@ -96,11 +104,19 @@ class PanoGenerator(RemoteServer):
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
-            print(f"Got input: {input}")
-            image = input["image"]
-            depth = input["depth"]
-            caption = input.get("caption", "")
-            return self.pano(temp_path, image, depth, caption=caption)
+            try:
+                print(f"Got input: {input}")
+                image = input["image"]
+                depth = input["depth"]
+                caption = input.get("caption", "")
+                result = self.pano(temp_path, image, depth, caption=caption)
+
+                print(f"Got dream cube values {result}")
+                return result
+            except Exception as e:
+                print(f"Unable to generate dream cube values: {e}")
+                traceback.print_exc()
+                raise e
         raise ValueError(f"Unknown action: {action}")
 
 if __name__ == "__main__":
