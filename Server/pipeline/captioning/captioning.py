@@ -1,3 +1,4 @@
+import re
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -13,6 +14,31 @@ class CaptioningStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.INPUT_CAPTION
         })
 
+    def _clean_caption(self, caption: str) -> str:
+        WORDS_TO_REMOVE = {
+            "arafed",
+            "araffe",
+            "arafe",
+            "araffed",
+        }
+
+        words = caption.split()
+
+        cleaned = []
+        for word in words:
+            normalized = re.sub(r"[^a-z]", "", word.lower())
+
+            if normalized in WORDS_TO_REMOVE:
+                continue
+
+            cleaned.append(word)
+
+        result = " ".join(cleaned)
+
+        result = re.sub(r"\s+", " ", result).strip()
+
+        return result
+
     def run(self, context: PipelineContext) -> PipelineContext:
         caption_task = self.create_progress(2, "Captioning...")
         if self._caption is None:
@@ -24,6 +50,7 @@ class CaptioningStage(PipelineStage):
         input_image = context.input_image(input_key)
         if input_image is not None:
             caption = self._caption.caption(input_image)
+            caption = self._clean_caption(caption)
             context.add_object(output_key, caption)
 
         self.advance_progress(caption_task)
