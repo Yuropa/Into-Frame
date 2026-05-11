@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 from logging import Logger
 from pathlib import Path
 from rich.progress import Progress
@@ -31,21 +31,27 @@ class PipelineStage:
         self.torch_dtype = config.torch_dtype
         self.total_tasks = None
 
-    def input_key(self, default_input_key: Optional[ContextKeyName] = None):
+    def input_key(self, default_input_key: Optional[ContextKeyName] = None) -> ContextKeyName:
         if self.config.input_key is not None:
             return self.config.input_key
         elif default_input_key is not None:
             return default_input_key
         else:
-            raise RuntimeError(f"No input key found")
+            raise RuntimeError("No input key found")
         
-    def output_key(self, default_output_key: Optional[ContextKeyName] = None):
+    def output_key(self, default_output_key: Optional[ContextKeyName] = None) -> ContextKeyName:
         if self.config.output_key is not None:
             return self.config.output_key
         elif default_output_key is not None:
             return default_output_key
         else:
-            raise RuntimeError(f"No output key found")
+            raise RuntimeError("No output key found")
+        
+
+    def keys(self, default_input_key: Optional[ContextKeyName] = None, default_output_key: Optional[ContextKeyName] = None) -> Tuple[ContextKeyName, ContextKeyName]:
+        input_key = self.input_key(default_input_key)
+        output_key = self.output_key(default_output_key)
+        return (input_key, output_key)
 
     def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
         if output_root is not None:
