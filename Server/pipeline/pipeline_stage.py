@@ -16,6 +16,7 @@ class SemanticKey(StrEnum):
     CUBEMAP = "cubemap"
     OBJECT_COUNT = "count"
     DEPTH = "depth"
+    PANORAMA = "panorama"
 
 SemanticKeyName: TypeAlias = SemanticKey | str
 

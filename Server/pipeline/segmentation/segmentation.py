@@ -1,4 +1,4 @@
-from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
+from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult

@@ -4,6 +4,7 @@ from typing import Literal, TypeAlias, Optional, Any
 from scene.mesh import Mesh
 from util.depth_utils import Depth
 from util.image_utils import Image
+from util.cubemap_utils import CubeMap
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
@@ -176,6 +177,18 @@ class PipelineContext():
     
     def input_extrinsics(self, name: ContextKeyName) -> Optional[CameraExtrinsics]:
         return self._value(name, self._previous_stage).extrinsics()
+
+    # CubeMap
+    def add_cubemap(self, name: ContextKeyName, input: CubeMap):
+        value = ContextValue(name=name)
+        value.set_cubemap(input)
+        self._set_value(name, value)
+
+    def cubemap(self, name: ContextKeyName) -> Optional[CubeMap]:
+        return self._value(name).cubemap()
+    
+    def input_cubemap(self, name: ContextKeyName) -> Optional[CubeMap]:
+        return self._value(name, self._previous_stage).cubemap()
     
     # Persistence
     def save(self, path: Path):

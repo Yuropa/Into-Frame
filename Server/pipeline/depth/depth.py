@@ -21,7 +21,7 @@ class DepthStage(PipelineStage):
 
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key, intrinsics_key, extrinsics_key = self._resolved_keys()
-        is_cubemap = content.type_for(input_key) == ValueKeys.CUBEMAP
+        is_cubemap = context.type_for(input_key) == ValueKeys.CUBEMAP
 
         steps = 2
         if is_cubemap:
@@ -33,7 +33,7 @@ class DepthStage(PipelineStage):
         self.advance_progress(depth_task)
 
         if is_cubemap:
-            input_cubemap = content.input_cubemap(input_key)
+            input_cubemap = context.input_cubemap(input_key)
             resulting_faces = {}
             if input_cubemap is not None:
                 for face in CubeFace:
