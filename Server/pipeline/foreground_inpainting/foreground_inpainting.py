@@ -1,4 +1,4 @@
-from pipeline.inpainting.inpainting import InPainting
+from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from util.image_utils import Image 
 from util.device_utils import clean_device_cache
@@ -51,10 +51,15 @@ class ForegroundInpaint:
 
             mask_pil = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
 
-            inpaint = InPainting(self.device, self.torch_dtype)
+            inpaint = InPainting(
+                self.device, 
+                self.torch_dtype,
+                ForegroundInpaint._preferred_inpainting()
+            )
             result = inpaint.inpaint(
                 masked_input, 
                 mask_pil, 
+                temp_path=temp_path,
                 prompt="no objects, clean background, seamless, empty landscape",
                 guidance_scale=2.0,
                 strength=1.0
@@ -63,7 +68,8 @@ class ForegroundInpaint:
             result = Image(result)
             result.save(temp_path / f"inpainted_{idx}.png")
 
-        self._clean_up(inpaint)
+            inpaint.close()
+            self._clean_up(inpaint)
 
         return result
     
@@ -108,5 +114,9 @@ class ForegroundInpaint:
 
 
     @classmethod
+    def _preferred_inpainting(cls) -> InPaintingType:
+        return InPaintingType.LAMA
+
+    @classmethod
     def model_names(cls) -> list[str]:
-        return InPainting.model_names() + ForegroundSeg.model_names()
+        return InPainting.model_names(type=cls._preferred_inpainting()) + ForegroundSeg.model_names()
