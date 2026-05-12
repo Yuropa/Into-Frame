@@ -56,7 +56,7 @@ class ForegroundInpaint:
                 masked_input, 
                 mask_pil, 
                 prompt="no objects, clean background, seamless, empty landscape",
-                guidance_scale=1.0,
+                guidance_scale=2.0,
                 strength=1.0
             )
 
