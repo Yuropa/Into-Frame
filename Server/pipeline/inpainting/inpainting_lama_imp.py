@@ -3,6 +3,7 @@ add_project_paths()
 
 add_system_path(lib_path() / "LaMa")
 
+import torch
 import numpy as np
 import yaml
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any
 import numpy as np
 from PIL import Image as PILImage
 from omegaconf import OmegaConf
+import torch.nn.functional as F
 
 from remote_connection.remote_server import RemoteServer
 from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
@@ -17,7 +19,14 @@ from pytorch_lightning.callbacks.model_checkpoint import ModelCheckpoint
 class InPaintingLama(RemoteServer):
     def setup(self):
         # Add lama to path so saicinpainting is importable
-        from saicinpainting.training.trainers import load_checkpoint
+        from saicinpainting.training.trainers import make_training_model
+
+        def load_checkpoint(train_config, path, map_location='cuda', strict=True):
+            model: torch.nn.Module = make_training_model(train_config)
+            state = torch.load(path, map_location=map_location, weights_only=False)
+            model.load_state_dict(state['state_dict'], strict=strict)
+            model.on_load_checkpoint(state)
+            return model
 
         model_path = checkpoints_path() / "lama/big-lama"
         train_config_path = model_path / "config.yaml"
@@ -29,11 +38,10 @@ class InPaintingLama(RemoteServer):
         train_config.training_model.predict_only = True
         train_config.visualizer.kind = 'noop'
 
-        model = load_checkpoint(train_config, str(checkpoint_path), strict=False, map_location='cpu')
-        model.freeze()
-        model.to(self.device)
-        model.eval()
-        return model
+        self.model = load_checkpoint(train_config, str(checkpoint_path), strict=False, map_location='cpu')
+        self.model.freeze()
+        self.model.to(self.device)
+        self.model.eval()
 
     def inpaint(
         self,
@@ -47,22 +55,32 @@ class InPaintingLama(RemoteServer):
     ) -> PILImage.Image:
         from saicinpainting.evaluation.utils import move_to_device
 
-        # Convert image to float32 tensor (H, W, C) -> (C, H, W) in [0, 1]
+        # Convert image to float32 tensor (H, W, C) -> (1, C, H, W)
         image_np = np.array(input_image.convert("RGB")).astype(np.float32) / 255.0
         image_tensor = torch.from_numpy(image_np).permute(2, 0, 1).unsqueeze(0)
 
-        # Convert mask: white=inpaint, black=keep -> float32 (1, H, W) in [0, 1]
+        # Convert mask
         mask_np = np.array(mask_image.convert("L")).astype(np.float32)
         if mask_np.max() <= 1.0:
             mask_np = mask_np * 255.0
+
         mask_np = (mask_np > 127).astype(np.float32)
         mask_tensor = torch.from_numpy(mask_np).unsqueeze(0).unsqueeze(0)
 
+        # Pad to multiple of 8
+        orig_h, orig_w = image_tensor.shape[-2:]
+
+        pad_h = (8 - orig_h % 8) % 8
+        pad_w = (8 - orig_w % 8) % 8
+
+        if pad_h != 0 or pad_w != 0:
+            image_tensor = F.pad(image_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+            mask_tensor = F.pad(mask_tensor, (0, pad_w, 0, pad_h), mode='reflect')
+
         batch = {
             'image': image_tensor,
-            'mask':  mask_tensor,
+            'mask': mask_tensor,
         }
-        batch = default_collate([{k: v.squeeze(0) for k, v in batch.items()}])
 
         with torch.no_grad():
             batch = move_to_device(batch, self.device)

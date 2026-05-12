@@ -36,4 +36,4 @@ class InPaintingLama(RemoteClient):
             "guidance_scale": guidance_scale,
             "strength": strength
         }
-        return self.send(action="inpaint", input=input, temp_path=temp_path)
+        return self.send(action="inpaint", input=data, temp_path=temp_path)

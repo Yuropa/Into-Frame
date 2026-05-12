@@ -7,11 +7,11 @@ from util.json_utils import parse_json, write_json
 from util.image_utils import Image
 from PIL import Image as PILImage
 
-def encode_value(v):
+def encode_value(v, k = None):
     if dataclasses.is_dataclass(v):
-        return {k: encode_value(val) for k, val in dataclasses.asdict(v).items()}
+        return {k: encode_value(val, k) for k, val in dataclasses.asdict(v).items()}
     if isinstance(v, dict):
-        return {k: encode_value(val) for k, val in v.items()}
+        return {k: encode_value(val, k) for k, val in v.items()}
     if isinstance(v, list):
         return [encode_value(x) for x in v]
     if isinstance(v, (str, int, float, bool)) or v is None:
@@ -29,7 +29,7 @@ def encode_value(v):
             "base64": base64.b64encode(buf.getvalue()).decode("ascii")
         }
     if isinstance(v, Image):
-        return encode_value(v.image)
+        return encode_value(v.image, k)
     if isinstance(v, PILImage.Image):
         buf = io.BytesIO()
         fmt = v.format or "PNG"
@@ -39,7 +39,7 @@ def encode_value(v):
             "format": fmt,
             "base64": base64.b64encode(buf.getvalue()).decode("ascii")
         }
-    print(f"Unable to encode value {v}")
+    print(f"Unable to encode value {v} for key {k}")
     return None
 
 def decode_value(v):
