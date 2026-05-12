@@ -16,8 +16,8 @@ class InPainting:
             torch_dtype=torch_dtype
         )
         
-        self.pipeline.to(device)
-        # self.pipeline.enable_model_cpu_offload() 
+        # self.pipeline.to(device)
+        self.pipeline.enable_model_cpu_offload()
 
     @classmethod
     def model_names(cls) -> list[str]:
@@ -31,8 +31,11 @@ class InPainting:
         """
         
         # Ensure images are in RGB for the pipeline
-        init_img = input_image.image.convert("RGB")
-        mask_img = mask_image.image.convert("L") # Mask must be grayscale
+        width = (input_image.width // 16) * 16
+        height = (input_image.height // 16) * 16
+
+        init_img = input_image.resize((width, height), PILImage.LANCZOS)
+        mask_img = mask_image.resize((width, height), PILImage.NEAREST)
 
         # FLUX handles the VAE encoding internally within the pipeline call
         # so we can bypass the manual latent processing used in your SD3 version.

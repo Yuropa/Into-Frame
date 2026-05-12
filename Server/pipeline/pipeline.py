@@ -14,6 +14,7 @@ from pipeline.depth.depth import DepthStage
 from pipeline.panorama.panorama import PanoramaStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
+from pipeline.foreground_inpainting.generation import ForegroundInpainting
 from pipeline.captioning.captioning import CaptioningStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
@@ -78,16 +79,17 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
-            SegmentationStage(config=config.stage_config("Object Segementation")),
-            CaptioningStage(config=config.stage_config("Captioning")),
-            DepthStage(config=config.stage_config("Depth Generation")),
-            PanoramaStage(config=config.stage_config("Panorama")),
-            DepthStage(config=config.stage_config("Pano Depth", keys={
-                SemanticKey.INPUT: ContextKey.PANAORAMA_CUBENAME,
-                SemanticKey.OUTPUT: "Panorama Depth"
-            })),
+            ForegroundInpainting(config=config.stage_config("Foreground Inpainting")),
+            # SegmentationStage(config=config.stage_config("Object Segementation")),
+            # CaptioningStage(config=config.stage_config("Captioning")),
+            # DepthStage(config=config.stage_config("Depth Generation")),
+            # PanoramaStage(config=config.stage_config("Panorama")),
+            # DepthStage(config=config.stage_config("Pano Depth", keys={
+            #     SemanticKey.INPUT: ContextKey.PANAORAMA_CUBENAME,
+            #     SemanticKey.OUTPUT: "Panorama Depth"
+            # })),
             # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
-            SceneGenerationStage(config=config.stage_config("Scene Generation"))
+            # SceneGenerationStage(config=config.stage_config("Scene Generation"))
         ]
 
         self.log_info(f"Using device {device_name(self.device)}")

@@ -35,6 +35,11 @@ class ForegroundSeg:
     def model_names(cls) -> list[str]:
         return ['ZhengPeng7/BiRefNet']
 
+    def unload(self):
+        self.birefnet.to('cpu')
+        del self.birefnet
+        self.birefnet = None
+
     def segment(self, input: Image) -> SegmentationResult:
         image = input.rgb()
         input_images = self.transform_image(image).unsqueeze(0).to(self.device).half()

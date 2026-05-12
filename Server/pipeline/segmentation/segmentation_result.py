@@ -15,7 +15,7 @@ class CroppedImage:
 class SegmentationResult:
     def __init__(self, masks, boxes, scores):
         self.masks = masks if isinstance(masks, list) else [masks]
-        self.boxes  = [self._to_box(b) for b in (boxes if isinstance(boxes, list) else [boxes])]
+        self.boxes  = [self._to_box(b) for b in (boxes if isinstance(boxes, list) else [self._to_box(boxes)])]
         self.scores = scores if isinstance(scores, list) else [scores]
 
     @staticmethod
