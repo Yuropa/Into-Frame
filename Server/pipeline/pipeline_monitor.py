@@ -219,56 +219,96 @@ def _fmt_gb(v: Optional[float]) -> str:
 
 
 def _print_summary(roots: list, has_gpu: bool):
-    # Column widths
-    STAGE_W  = 30
-    CPU_W    = 26   # "  avg:XX.X% peak:XX.X%"
-    RAM_W    = 24   # "  avg:X.XXgb peak:X.XXgb"
-    GPU_W    = 26 if has_gpu else 0
-    VRAM_W   = 24 if has_gpu else 0
-    TIME_W   = 10
-    INNER    = STAGE_W + CPU_W + RAM_W + GPU_W + VRAM_W + TIME_W + 2
-    W        = INNER + 2   # +2 for border chars
+    # Column widths (content only, no ANSI codes in padding)
+    STAGE_W  = 32
+    CPU_W    = 28   # "  avg:XX.X% / peak:XX.X%"
+    RAM_W    = 26   # "  X.XXgb / X.XXgb"
+    GPU_W    = 28 if has_gpu else 0
+    VRAM_W   = 26 if has_gpu else 0
+    TIME_W   = 12
+    INNER    = STAGE_W + CPU_W + RAM_W + GPU_W + VRAM_W + TIME_W
+    W        = INNER + 2
 
-    def rule(l, m, r):
+    def rule(l, r):
         print(_CYAN + l + "─" * INNER + r + _RESET)
 
-    def row(cells, bold=False, dim=False):
-        c = _BOLD if bold else (_DIM if dim else "")
-        print(_CYAN + "│" + _RESET + c + "".join(cells) + _RESET + _CYAN + "│" + _RESET)
+    def divider():
+        print(_DIM + _CYAN + "│" + "·" * INNER + "│" + _RESET)
 
-    print()
-    rule("┌", "┬", "┐")
+    def row(cells: list[tuple[str, int]], bold=False, dim=False):
+        """Each cell is (content_with_ansi, display_width)."""
+        prefix = _BOLD if bold else (_DIM if dim else "")
+        inner = "".join(
+            content + " " * max(0, width - _visible_len(content))
+            for content, width in cells
+        )
+        print(_CYAN + "│" + _RESET + prefix + inner + _RESET + _CYAN + "│" + _RESET)
+
+    def _visible_len(s: str) -> int:
+        """Length of string excluding ANSI escape codes."""
+        import re
+        return len(re.sub(r'\x1b\[[0-9;]*m', '', s))
+
+    def _center(text: str, width: int) -> str:
+        """Center text accounting for invisible ANSI codes."""
+        visible = _visible_len(text)
+        total_pad = max(0, width - visible)
+        left_pad = total_pad // 2
+        right_pad = total_pad - left_pad
+        return " " * left_pad + text + " " * right_pad
+
+    def _ljust(text: str, width: int) -> str:
+        visible = _visible_len(text)
+        return text + " " * max(0, width - visible)
+
+    # ── Top border ──────────────────────────────────────────────────────────
+    rule("┌", "┐")
 
     # Title
-    title = "  PIPELINE SUMMARY"
-    row([f"{_WHITE}{_BOLD}{title:<{INNER}}"])
+    title = f"  {_WHITE}{_BOLD}PIPELINE SUMMARY{_RESET}"
+    row([(title, INNER)])
 
-    rule("├", "┼", "┤")
+    rule("├", "┤")
 
-    # Header
-    h_stage = f" {'STAGE':<{STAGE_W - 1}}"
-    h_cpu   = f"{'CPU avg / peak':^{CPU_W}}"
-    h_ram   = f"{'RAM avg / peak':^{RAM_W}}"
-    h_gpu   = f"{'GPU avg / peak':^{GPU_W}}" if has_gpu else ""
-    h_vram  = f"{'VRAM avg / peak':^{VRAM_W}}" if has_gpu else ""
-    h_time  = f"{'time':^{TIME_W}}"
-    row([_DIM + h_stage + h_cpu + h_ram + h_gpu + h_vram + h_time], dim=False)
+    # Header row
+    row([
+        (_DIM + f" {'STAGE':<{STAGE_W - 1}}", STAGE_W),
+        (_DIM + _center("CPU avg / peak", CPU_W),  CPU_W),
+        (_DIM + _center("RAM avg / peak", RAM_W),  RAM_W),
+        *([
+            (_DIM + _center("GPU avg / peak",  GPU_W),  GPU_W),
+            (_DIM + _center("VRAM avg / peak", VRAM_W), VRAM_W),
+        ] if has_gpu else []),
+        (_DIM + _center("time", TIME_W), TIME_W),
+    ])
 
-    rule("├", "┼", "┤")
+    rule("├", "┤")
 
+    # ── Stages ──────────────────────────────────────────────────────────────
     def print_stage(stat: StageStats):
         indent = "  " * stat.depth
         prefix = "▸ " if stat.children else "  "
-        name   = (indent + prefix + stat.name)[:STAGE_W].ljust(STAGE_W)
+        name   = indent + prefix + stat.name
+        color  = (_YELLOW + _BOLD) if stat.depth == 0 else ""
 
-        col_cpu  = f"  {_fmt_pct(stat.cpu_avg)} / {_fmt_pct(stat.cpu_peak)}"
-        col_ram  = f"  {_fmt_gb(stat.ram_avg)} / {_fmt_gb(stat.ram_peak)}"
-        col_gpu  = (f"  {_fmt_pct(stat.gpu_avg)} / {_fmt_pct(stat.gpu_peak)}" if has_gpu else "")
-        col_vram = (f"  {_fmt_gb(stat.gpu_mem_avg)} / {_fmt_gb(stat.gpu_mem_peak)}" if has_gpu else "")
-        col_time = f"  {_fmt_time(stat.elapsed):>{TIME_W - 2}}"
+        col_stage = color + name + _RESET
+        col_cpu   = f"  {_fmt_pct(stat.cpu_avg)} / {_fmt_pct(stat.cpu_peak)}"
+        col_ram   = f"  {_fmt_gb(stat.ram_avg)} / {_fmt_gb(stat.ram_peak)}"
+        col_gpu   = f"  {_fmt_pct(stat.gpu_avg)} / {_fmt_pct(stat.gpu_peak)}" if has_gpu else None
+        col_vram  = f"  {_fmt_gb(stat.gpu_mem_avg)} / {_fmt_gb(stat.gpu_mem_peak)}" if has_gpu else None
+        col_time  = f"  {_fmt_time(stat.elapsed):>{TIME_W - 2}}"
 
-        color = _YELLOW + _BOLD if stat.depth == 0 else ""
-        row([color + name + _RESET + col_cpu + col_ram + col_gpu + col_vram + col_time])
+        cells = [
+            (col_stage, STAGE_W),
+            (col_cpu,   CPU_W),
+            (col_ram,   RAM_W),
+            *([
+                (col_gpu,  GPU_W),
+                (col_vram, VRAM_W),
+            ] if has_gpu else []),
+            (col_time, TIME_W),
+        ]
+        row(cells)
 
         for child in stat.children:
             print_stage(child)
@@ -276,7 +316,7 @@ def _print_summary(roots: list, has_gpu: bool):
     for i, root in enumerate(roots):
         print_stage(root)
         if i < len(roots) - 1:
-            print(_DIM + _CYAN + "│" + "·" * INNER + "│" + _RESET)
+            divider()
 
-    rule("└", "┴", "┘")
+    rule("└", "┘")
     print()
