@@ -3,7 +3,7 @@ import torch
 
 def offload_pipeline(device: torch.device, pipeline):
     if device.type == "cuda":
-        pipeline.enable_model_cpu_offload()
+        pipeline.enable_model_cpu_offload(gpu_id=device.index)
     elif device.type == "mps":
         pipeline.enable_sequential_cpu_offload()
 

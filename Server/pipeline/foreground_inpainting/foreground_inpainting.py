@@ -55,16 +55,9 @@ class ForegroundInpaint:
 
         mask_pil = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
 
-        print(f"masked_input size: {masked_input.size}")
-        print(f"mask_pil size: {mask_pil.size}")
-        print(f"mask_pil mode: {mask_pil.mode}")
-        print(f"mask values unique: {np.unique(np.array(mask_pil))}")
-
         inpaint = InPainting(self.device, self.torch_dtype)
         result = inpaint.inpaint(masked_input, mask_pil)
-
-        del inpaint
-        gc.inpaint()
+        
         clean_device_cache(self.device)
 
         return result

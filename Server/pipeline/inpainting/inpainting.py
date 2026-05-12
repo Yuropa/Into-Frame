@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 from PIL import Image as PILImage
-from diffusers import FluxInpaintPipeline
+from diffusers import FluxFillPipeline
 from util.image_utils import Image
+from util.device_utils import offload_pipeline
 
 class InPainting:
     def __init__(self, device, torch_dtype):
@@ -11,13 +12,12 @@ class InPainting:
         # FLUX models are heavy; 'dev' is high quality, 'schnell' is faster
         self.model_id = "black-forest-labs/FLUX.1-Fill-dev"
 
-        self.pipeline = FluxInpaintPipeline.from_pretrained(
+        self.pipeline = FluxFillPipeline.from_pretrained(
             self.model_id, 
             torch_dtype=torch_dtype
         )
         
-        # self.pipeline.to(device)
-        self.pipeline.enable_model_cpu_offload()
+        offload_pipeline(device, self.pipeline)
 
     @classmethod
     def model_names(cls) -> list[str]:
@@ -29,10 +29,13 @@ class InPainting:
         - If prompt is "", it performs logic-based background reconstruction.
         - Guidance scale for FLUX Fill typically defaults higher (around 30.0) compared to SD.
         """
+
+        def normalize_dimension(dim):
+            return (dim // 16) * 16
         
         # Ensure images are in RGB for the pipeline
-        width = (input_image.width // 16) * 16
-        height = (input_image.height // 16) * 16
+        width = normalize_dimension(input_image.width)
+        height = normalize_dimension(input_image.height)
 
         init_img = input_image.resize((width, height), PILImage.LANCZOS)
         mask_img = mask_image.resize((width, height), PILImage.NEAREST)
@@ -43,8 +46,8 @@ class InPainting:
             prompt=prompt,
             image=init_img,
             mask_image=mask_img,
-            height=init_img.height,
-            width=init_img.width,
+            height=height,
+            width=width,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
             max_sequence_length=512, # FLUX specific parameter
