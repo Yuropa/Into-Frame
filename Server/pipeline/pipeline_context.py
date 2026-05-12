@@ -19,7 +19,8 @@ class ContextKey:
     INPUT_CAPTION = "input_caption"
     PANAORAMA_CUBENAME = "panorama_cubemap"
     OBJECT_COUNT = "count"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count"]
+    FOREGROUND_MASKED_IMAGE = "foreground_masked_image"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
