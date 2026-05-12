@@ -14,53 +14,63 @@ class ForegroundInpaint:
         self.device = device
         self.torch_dtype = torch_dtype
 
-    def log_gpu_memory(self, label: str):
-        allocated = torch.cuda.memory_allocated(self.device) / 1024**3
-        reserved = torch.cuda.memory_reserved(self.device) / 1024**3
-        print(f"[{label}] Allocated: {allocated:.2f}GB | Reserved: {reserved:.2f}GB")
-
-
     def inpaint(self, input: Image, temp_path: Path) -> Image:
-        self.log_gpu_memory("start")
-        segment = ForegroundSeg(self.device)
-        self.log_gpu_memory("after ForegroundSeg load")
+        result = input
+        for idx in range(20):
+            result = result.copy()
 
-        segmentation = segment.segment(input)
-        self.log_gpu_memory("after segment()")
+            segment = ForegroundSeg(self.device)
+            segmentation = segment.segment(result)
 
+            segment.unload()
+            self._clean_up(segment)
 
-        segment.unload()
-        del segment
-        gc.collect()
-        clean_device_cache(self.device)
-        self.log_gpu_memory("after segment cleanup")
+            # Apply mask to input image
+            mask = segmentation.masks[0]
+            if mask.ndim == 3:
+                mask = mask[..., 0]
 
-        # Apply mask to input image
-        mask = segmentation.masks[0]
-        if mask.ndim == 3:
-            mask = mask[..., 0]
-        struct = np.ones((21, 21))
-        mask = binary_dilation(mask, structure=struct).astype(np.float32)
+            fill_pct = mask.mean()
+            print(f"Mask fill: {(fill_pct * 100):.2f}%  ({int(mask.sum())} / {mask.size} px)", flush=True)
+            self._save_mask(mask, temp_path / f"mask_{idx}.png")
 
-        self._save_mask(mask, temp_path / "mask.png")
-        masked_input = self._apply_mask(input, mask)
+            dilation_factor = 50
+            struct = np.ones((dilation_factor * 2 + 1, dilation_factor * 2 + 1))
+            mask = binary_dilation(mask, structure=struct).astype(np.float32)
 
-        # Save the masked input image
-        masked_save_path = temp_path / "masked_input.png"
-        masked_input.save(masked_save_path)
+            masked_input = self._apply_mask(result, mask)
 
-        self.log_gpu_memory("before InPainting load")
-        inpaint = InPainting(self.device, self.torch_dtype)
-        self.log_gpu_memory("after InPainting load")
+            # Save the masked input image
+            masked_save_path = temp_path / f"masked_input_{idx}.png"
+            masked_input.save(masked_save_path)
 
-        mask_pil = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
+            if fill_pct < 0.01:
+                break
 
-        inpaint = InPainting(self.device, self.torch_dtype)
-        result = inpaint.inpaint(masked_input, mask_pil)
-        
-        clean_device_cache(self.device)
+            inpaint = InPainting(self.device, self.torch_dtype)
+
+            mask_pil = PILImage.fromarray((mask * 255).astype(np.uint8), mode="L")
+
+            inpaint = InPainting(self.device, self.torch_dtype)
+            result = inpaint.inpaint(
+                masked_input, 
+                mask_pil, 
+                prompt="no objects, clean background, seamless, empty landscape",
+                guidance_scale=1.0,
+                strength=1.0
+            )
+
+            result = Image(result)
+            result.save(temp_path / f"inpainted_{idx}.png")
+
+        self._clean_up(inpaint)
 
         return result
+    
+    def _clean_up(self, obj):
+        del obj
+        gc.collect()
+        clean_device_cache(self.device)
 
     def _save_mask(self, mask: np.ndarray, save_path: Path):
         mask_array = mask.astype(np.float32)
