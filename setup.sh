@@ -62,6 +62,13 @@ cat << 'EOF'
 
 EOF
 
+# Make sure conda is installed
+if ! command -v conda >/dev/null 2>&1; then
+    echo "ERROR: Conda is not installed or not available in PATH." >&2
+    echo "Please install Miniconda or Anaconda first." >&2
+    exit 1
+fi
+
 info "** Installation can take a while to complete. Please be patient... **"
 
 if sudo -n true 2>/dev/null; then
@@ -77,23 +84,51 @@ while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
 
 CONDA_NAME="frame"
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cudediff" "dreamcube")
+BASE_ENV="frame-base"
+readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
+
+CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cudediff" "dreamcube" "lama")
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
+CURRENT_ENV=""
+
+create_base_env() {
+    section "Creating base environment"
+
+    conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
+    conda run -n "$BASE_ENV" pip install torch==2.10.0 torchvision==0.25.0 torchaudio --extra-index-url "$TORCH_URL"
+}
 
 create_env() {
     local name="$1"
-    local version="$2"
+    local version="${2:-}"
+
+    CURRENT_ENV="$name"
     conda deactivate
-    conda create -y -n "$name" python="$version" pip setuptools wheel
+
+    if [[ -n "$version" ]]; then
+        conda create -y -q -n "$name" "python=$version" pip setuptools wheel
+    else
+        conda create -y -q --name "$name" --clone "$BASE_ENV"
+    fi
     conda activate "$name" 
 }
 
 stop_env() {
     conda deactivate
     conda activate "$CONDA_NAME" 
+    CURRENT_ENV=""
+}
+
+run_in_env() {
+    if [[ -z "${CURRENT_ENV:-}" ]]; then
+        error "run_in_env called before create_env"
+        return 1
+    fi
+
+    conda run -n "$CURRENT_ENV" "$@"
 }
 
 source_shell_configs() {
@@ -119,6 +154,16 @@ source_shell_configs() {
   fi
 
   return 0
+}
+
+clone_if_needed() {
+    local repo="$1"
+    local dir="$2"
+    local extra="${3:-}"
+
+    if [ ! -d "$dir" ]; then
+        git clone --recursive $extra "$repo" "$dir"
+    fi
 }
 
 if [ "$FORCE" = true ]; then
@@ -152,19 +197,17 @@ else
     echo "WARNING: Could not install libwebp — unsupported package manager"
 fi
 
+create_base_env
+
 ## ===============
 ##    Main ENV
 ## ===============
 
 section "Creating Conda environment '$CONDA_NAME'..."
-create_env "$CONDA_NAME" 3.12
+create_env "$CONDA_NAME"
 
 eval "$(conda shell.bash hook)"
 conda activate "$CONDA_NAME"
-
-# Install PyTorch with MPS support (standard pip build includes MPS)
-section "Installing PyTorch..."
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # Install standard pip packages
 section "Installing pip requirements..."
@@ -180,9 +223,7 @@ mkdir -p "$PACKAGES_DIR"
 ## =============
 
 section "Installing SAM 2"
-if [ ! -d "$LIB_DIR/sam2" ]; then
-    git clone https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
-fi
+clone_if_needed https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
 pip install -e "$LIB_DIR/sam2"
 
 ## =============
@@ -190,20 +231,17 @@ pip install -e "$LIB_DIR/sam2"
 ## =============
 
 section "Installing Trellis"
-if [ ! -d "$LIB_DIR/TRELLIS.2" ]; then
-    git clone -b main https://github.com/microsoft/TRELLIS.2.git --recursive "$LIB_DIR/TRELLIS.2"
-fi
+clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$LIB_DIR/TRELLIS.2" -b main
 
 TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
 TRELLIS_SETUP="setup.sh"
 chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
 
 pushd "$TRELLIS_DIR" > /dev/null || exit 1
-create_env "trellis2" 3.10
-conda run -n trellis2 pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
+create_env "trellis2"
 printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
-conda run -n trellis2 pip install transformers==4.57.6
-conda run -n trellis2 pip install psutil
+run_in_env pip install transformers==4.57.6
+run_in_env pip install psutil
 
 info "Checking for flash-attn"
 
@@ -214,11 +252,11 @@ WHEEL="$DIR"/flash_attn-${VER}*.whl
 mkdir -p "$DIR"
 
 if ls $WHEEL 1> /dev/null 2>&1; then
-    conda run -n trellis2 pip install $WHEEL
+    run_in_env pip install $WHEEL
 else
     warn "Building flash-attn. This will take a while"
-    MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
-    conda run -n trellis2 pip install $(ls $WHEEL | head -n 1)
+    MAX_JOBS=4 run_in_env pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
+    run_in_env pip install $(ls $WHEEL | head -n 1)
 fi
 
 popd > /dev/null || exit 1
@@ -244,9 +282,7 @@ conda deactivate
 ## ======================
 
 section "Installing Depth Anything"
-if [ ! -d "$LIB_DIR/depth-anything-3" ]; then
-    git clone https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
-fi
+clone_if_needed https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
 
 warn "Removing xformers"
 sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
@@ -283,16 +319,14 @@ conda run -n frame pip install --upgrade --force-reinstall Pillow
 section "Installing Stable Point 3D"
 
 create_env "stablepoint" 3.12
-conda run -n stablepoint pip install transformers==4.42.3
+run_in_env pip install transformers==4.42.3
+clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
-if [ ! -d "$LIB_DIR/StablePoint" ]; then
-    git clone https://github.com/Stability-AI/stable-point-aware-3d --recursive "$LIB_DIR/StablePoint"
-fi
-conda run -n stablepoint pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
-conda run -n stablepoint pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
-conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
-conda run -n stablepoint pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
-conda run -n stablepoint pip install --upgrade transparent-background flet
+run_in_env pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
+run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
+run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
+run_in_env pip install --upgrade transparent-background flet
 ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 
 stop_env
@@ -301,15 +335,11 @@ stop_env
 ##    CubeDiff
 ## ============
 
-create_env "cubediff" 3.12
-
 section "Installing CubeDiff"
-if [ ! -d "$LIB_DIR/CubeDiff" ]; then
-    git clone git@github.com:Juan5713/OpenCubeDiff.git --recursive "$LIB_DIR/CubeDiff"
-fi
 
-conda run -n cubediff pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
-conda run -n cubediff pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
+create_env "cubediff"
+clone_if_needed git@github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
+run_in_env pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
 ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
 stop_env
@@ -318,18 +348,43 @@ stop_env
 ##    DreamCube
 ## ============
 
-create_env "dreamcube" 3.12
-
 section "Installing DreamCube"
-if [ ! -d "$LIB_DIR/DreamCube" ]; then
-    git clone https://github.com/Yukun-Huang/DreamCube.git --recursive "$LIB_DIR/DreamCube"
-fi
 
-conda run -n dreamcube pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url https://download.pytorch.org/whl/cu130
-conda run -n dreamcube pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
-conda run -n dreamcube pip install ninja wheel setuptools
-conda run -n dreamcube pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+create_env "dreamcube"
+clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
+run_in_env pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
+run_in_env pip install ninja wheel setuptools
+run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
 ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
+
+stop_env
+
+## ============
+##    Lama
+## ============
+
+section "Installing LaMa"
+
+create_env "lama" 3.10
+clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
+run_in_env pip install -r "$SCRIPT_DIR/requirements-lama.txt"
+run_in_env pip install torchvision
+ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
+
+LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
+
+if [ ! -d "$LAMA_CHECKPOINT" ]; then
+    mkdir -p "$LAMA_CHECKPOINT"
+    TMP_DIR="$(mktemp -d)"
+    ZIP_FILE="$TMP_DIR/big-lama.zip"
+
+    curl -L "https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip" -o "$ZIP_FILE"
+
+    unzip "$ZIP_FILE" -d "$LAMA_CHECKPOINT"
+
+    rm -f "$ZIP_FILE"
+    rmdir "$TMP_DIR"
+fi
 
 stop_env
 
