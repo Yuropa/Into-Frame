@@ -81,9 +81,13 @@ class Pipeline:
         self.stages = [
             ForegroundInpainting(config=config.stage_config("Foreground Inpainting")),
             # SegmentationStage(config=config.stage_config("Object Segementation")),
-            # CaptioningStage(config=config.stage_config("Captioning")),
-            # DepthStage(config=config.stage_config("Depth Generation")),
-            # PanoramaStage(config=config.stage_config("Panorama")),
+            CaptioningStage(config=config.stage_config("Captioning")),
+            DepthStage(config=config.stage_config("Depth Generation", keys={
+                # SemanticKey.INPUT: ContextKey.FOREGROUND_MASKED_IMAGE
+            })),
+            PanoramaStage(config=config.stage_config("Panorama", keys={
+                # SemanticKey.INPUT: ContextKey.FOREGROUND_MASKED_IMAGE
+            })),
             # DepthStage(config=config.stage_config("Pano Depth", keys={
             #     SemanticKey.INPUT: ContextKey.PANAORAMA_CUBENAME,
             #     SemanticKey.OUTPUT: "Panorama Depth"

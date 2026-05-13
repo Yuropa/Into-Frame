@@ -39,7 +39,11 @@ class PanoramaStage(PipelineStage):
         input_image = context.input_image(input_key)
         depth_image = context.input_depth(depth_key)
         if input_image is not None:
-            pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, caption)
+            if caption is None:
+                caption = ""
+            full_caption = "outdoor scene. open air. 360 degree panorama. dirt ground. seamless" + caption
+
+            pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption)
             context.add_image(output_key, pano.image)
             context.add_cubemap(cubemap_key, pano.cubemap)
 
