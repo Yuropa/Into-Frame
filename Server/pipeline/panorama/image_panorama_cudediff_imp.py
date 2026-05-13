@@ -27,8 +27,11 @@ class PanoGenerator(RemoteServer):
         ])
 
     def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "") -> dict:
+        if caption is None:
+            caption = ""
+
         result = self.pipeline(
-            prompts="Outdoor scene. 360-degree photorealistic panorama. " + caption + ". Dirt ground.",
+            prompts=caption,
             conditioning_image=self.transform(input_image).unsqueeze(0).to(self.device),
             num_inference_steps=50
         )
