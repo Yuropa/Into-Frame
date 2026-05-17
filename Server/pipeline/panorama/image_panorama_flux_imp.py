@@ -12,34 +12,47 @@ from einops import rearrange
 from PIL import ImageFilter
 
 from remote_connection.remote_server import RemoteServer
-from diffusers import FluxInpaintPipeline
+from diffusers import FluxInpaintPipeline, FluxImg2ImgPipeline, FluxPriorReduxPipeline
 from util.device_utils import offload_pipeline
 
 class PanoGenerator(RemoteServer):
     def setup(self):
-        # Load base pipeline
-        self.pipeline = FluxInpaintPipeline.from_pretrained(
+        self.inpaint_pipeline = FluxInpaintPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-dev",
             torch_dtype=torch.float16,
         )
-
-        self.pipeline.vae.enable_tiling()
-        self.pipeline.vae.enable_slicing()
-
-        self.pipeline.load_lora_weights(
+        self.inpaint_pipeline.vae.enable_tiling()
+        self.inpaint_pipeline.vae.enable_slicing()
+        
+        self.inpaint_pipeline.load_lora_weights(
             str(checkpoints_path() / "layer_pano_3d"), 
             weight_name="pano_lora_720*1440_v1.safetensors",
             adapter_name="pano"
         )
-        
-        offload_pipeline(self.device, self.pipeline)
+        offload_pipeline(self.device, self.inpaint_pipeline)
+
+        self.prior_pipeline = FluxPriorReduxPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-Redux-dev",
+            torch_dtype=torch.float16
+        )
+        offload_pipeline(self.device, self.prior_pipeline)
+
+        self.img2img_pipeline = FluxImg2ImgPipeline.from_pretrained(
+            "black-forest-labs/FLUX.1-dev",
+            torch_dtype=torch.float16,
+            text_encoder=None,
+            text_encoder_2=None 
+        )
+        self.img2img_pipeline.vae.enable_tiling()
+        self.img2img_pipeline.vae.enable_slicing()
+        offload_pipeline(self.device, self.img2img_pipeline)
 
     def make_outpaint_mask(
         self,
         equi_size: tuple,
         input_image: Image.Image,
         hfov_deg: float = 90.0,
-        blend_width: int = 180, # How many pixels to use for the transition
+        blend_width: int = 120,
     ) -> tuple[Image.Image, Image.Image, tuple]:
         equi_w, equi_h = equi_size
         target_w = int((hfov_deg / 360.0) * equi_w)
@@ -47,28 +60,19 @@ class PanoGenerator(RemoteServer):
 
         input_resized = input_image.resize((target_w, target_h), Image.LANCZOS)
         
-        # Create the background: Use a blurred version of the input to 'fill' the room colors
         canvas = input_resized.resize(equi_size, Image.BILINEAR).filter(ImageFilter.GaussianBlur(radius=50))
         x = (equi_w - target_w) // 2
         y = (equi_h - target_h) // 2
         canvas.paste(input_resized, (x, y))
 
-        # --- NEW GRADIENT MASK LOGIC ---
-        # 255 (White) is "Change Me", 0 (Black) is "Keep Me"
         mask = Image.new("L", equi_size, 255)
         
-        # Create a mask for just the input area that is black (0)
-        # But we make it slightly smaller than the actual image to ensure the edges are inpainted
         inner_w = target_w - (blend_width * 2)
         inner_h = target_h - (blend_width * 2)
         inner_x = x + blend_width
         inner_y = y + blend_width
         
-        # Draw the solid 'keep' area
         mask.paste(Image.new("L", (inner_w, inner_h), 0), (inner_x, inner_y))
-        
-        # Use a massive blur to turn that hard rectangle into a smooth gradient
-        # This creates a 'feathered' gray area where the AI blends with the original
         mask = mask.filter(ImageFilter.GaussianBlur(radius=blend_width // 2))
 
         return canvas, mask, (x, y, target_w, target_h)
@@ -80,34 +84,55 @@ class PanoGenerator(RemoteServer):
         equi_size = (2048, 1024)
         prompt = caption + ", 360 degree equirectangular panorama, seamless, hyper-detailed, sharp focus, 8k resolution"
 
-        # --- Single High-Quality Pass with Soft Masking ---
-        canvas, mask, (x, y, iw, ih) = self.make_outpaint_mask(equi_size, input_image, fov)
+        canvas, mask, _ = self.make_outpaint_mask(equi_size, input_image, fov)
 
-        canvas.save(str(temp_path / "prepared_canvas.png"))
-        mask.save(str(temp_path / "soft_mask.png"))
-
+        # ==========================================
+        # PASS 1: Build the Geometric 360 Panorama
+        # ==========================================
+        print("--- [Pass 1] Generating base panoramic structure ---")
         with torch.inference_mode():
-            # Using a slightly lower strength (0.85 - 0.92) allows the model to 
-            # stay "grounded" in the colors of your original image while filling the rest.
-            output = self.pipeline(
+            base_pano_output = self.inpaint_pipeline(
                 prompt=prompt,
                 image=canvas,
                 mask_image=mask,
                 height=equi_size[1],
                 width=equi_size[0],
-                strength=0.82, 
+                strength=0.88, 
+                guidance_scale=4.0,
+                num_inference_steps=40, # Accelerated slightly for pipeline staging
+                output_type='pil',
+            ).images[0]
+            
+        base_pano_output.save(str(temp_path / "pass1_structural_pano.png"))
+
+        # ==========================================
+        # PASS 2: Global Redux Style Transfer
+        # ==========================================
+        print("--- [Pass 2] Applying Redux style from original image ---")
+        with torch.inference_mode():
+            # Extract pure style embeddings from the original image token source
+            redux_output = self.prior_pipeline(image=input_image)
+            
+            # Apply those visual weights dynamically over our freshly minted full panorama 
+            stylized_pano = self.img2img_pipeline(
+                **redux_output,
+                image=base_pano_output,
+                height=equi_size[1],
+                width=equi_size[0],
+                strength=0.5,          # 0.4 - 0.5 is the sweet spot. Keeps Pass 1 structures 
+                                       # perfectly intact while re-painting texture/grading.
                 guidance_scale=3.5,
-                num_inference_steps=50,
-                output_type='np',
+                num_inference_steps=25,
+                output_type='np'
             ).images[0]
 
-        equirectangular = (output * 255).round().astype("uint8")
+        # Convert final stylized output array back to standard image spaces
+        equirectangular = (stylized_pano * 255).round().astype("uint8")
         equi_pil = Image.fromarray(equirectangular)
-        equi_pil.save(str(temp_path / "equirectangular.png"))
+        equi_pil.save(str(temp_path / "final_stylized_panorama.png"))
 
-        # Extract cube faces (this handles the wrapping/seams check)
+        # Extract cube faces for seam checking
         cube_dict = py360convert.e2c(equirectangular, face_w=512, cube_format='dict')
-
         for k, face in cube_dict.items():
             Image.fromarray(np.clip(face, 0, 255).astype("uint8")).save(str(temp_path / f"face_{k}.png"))
 
@@ -126,10 +151,10 @@ class PanoGenerator(RemoteServer):
                 fov = input.get("fov_degrees", 60.0) * 2.0
                 result = self.pano(temp_path, image, depth, fov=fov, caption=caption)
 
-                print(f"Got dream cube values {result}")
+                print(f"Got flux pano {result}")
                 return result
             except Exception as e:
-                print(f"Unable to generate dream cube values: {e}")
+                print(f"Unable to generate flux pano: {e}")
                 traceback.print_exc()
                 raise e
         raise ValueError(f"Unknown action: {action}")
