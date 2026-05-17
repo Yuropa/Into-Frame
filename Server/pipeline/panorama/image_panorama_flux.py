@@ -19,7 +19,7 @@ class ImagePanoramaFlux(RemoteClient):
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["black-forest-labs/FLUX.1-dev"]
+        return ["black-forest-labs/FLUX.1-dev", "black-forest-labs/FLUX.1-Redux-dev"]
 
     def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
         data = {
