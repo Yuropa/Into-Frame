@@ -355,6 +355,7 @@ clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube
 run_in_env pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
 run_in_env pip install ninja wheel setuptools
 run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+run_in_env pip install peft
 ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
 
 stop_env
@@ -387,6 +388,17 @@ if [ ! -d "$LAMA_CHECKPOINT" ]; then
 fi
 
 stop_env
+
+## ============
+## LayerPano3D
+## ============
+
+LAYER_PANO_CHECKPOINT="$CHECKPOINT_DIR/layer_pano_3d"
+if [ ! -d "$LAYER_PANO_CHECKPOINT" ]; then
+    mkdir -p "$LAYER_PANO_CHECKPOINT"
+    curl -L "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" -o "$LAYER_PANO_CHECKPOINT/pano_lora_720*1440_v1.safetensors"
+fi
+
 
 ## ============
 ##    End
