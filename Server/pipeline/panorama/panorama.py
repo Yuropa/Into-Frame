@@ -11,7 +11,7 @@ class PanoramaStage(PipelineStage):
         self._pano = None
 
         strategy = DeviceStrategy.AUTO
-        if PanoramaGeneratorType.default() == PanoramaGeneratorType.DREAMCUBE:
+        if PanoramaGeneratorType.default() == PanoramaGeneratorType.DREAMCUBE or PanoramaGeneratorType.default() == PanoramaGeneratorType.FLUX:
             strategy = DeviceStrategy.MEMORY
         self.preferred_device, _ = preferred_device(strategy)
 
@@ -41,7 +41,7 @@ class PanoramaStage(PipelineStage):
         if input_image is not None:
             if caption is None:
                 caption = ""
-            full_caption = "outdoor scene. open air. 360 degree panorama. dirt ground. seamless" + caption
+            full_caption = "360 view. seamless. outdoor scene. clear in-focus. smooth background. open air. 360 degree panorama. dirt ground. " + caption
 
             pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption)
             context.add_image(output_key, pano.image)
