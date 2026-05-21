@@ -1,6 +1,5 @@
 import SwiftUI
 
-/// Maintains app-wide state
 @MainActor
 @Observable
 class AppModel {
@@ -13,4 +12,14 @@ class AppModel {
     var immersiveSpaceState = ImmersiveSpaceState.closed
 
     let sceneManager = SceneManager()
+    var renderer: Renderer?
+
+    init() {
+        sceneManager.onSceneReady = { [weak self] objects, assets, params in
+            guard let renderer = self?.renderer else { return }
+            Task {
+                await renderer.loadScene(objects: objects, assets: assets, params: params)
+            }
+        }
+    }
 }

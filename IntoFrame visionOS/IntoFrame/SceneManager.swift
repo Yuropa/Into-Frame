@@ -10,10 +10,11 @@ class SceneManager {
     var sceneObjects: [String: SceneObject] = [:]
     var sceneParams: SceneParams?
     var downloadedAssets: [String: Data] = [:]
-
     var totalAssets = 0
     var completedAssets = 0
     var isLoading = false
+
+    var onSceneReady: (([SceneObject], [String: Data], SceneParams?) -> Void)?
 
     private let logger = Logger(subsystem: "com.intoframe", category: "SceneManager")
 
@@ -65,10 +66,11 @@ class SceneManager {
             sceneObjects[obj.id] = obj
         }
 
-        logger.info("Scene initialized: \(objects.count) objects, \(assetNames.count) assets to download")
+        logger.info("Scene init: \(objects.count) objects, \(assetNames.count) assets")
 
         Task {
             await downloadAllAssets(assetNames)
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
         }
     }
 
@@ -99,7 +101,7 @@ class SceneManager {
         }
 
         isLoading = false
-        logger.info("All assets downloaded. Scene ready.")
+        logger.info("All assets downloaded")
     }
 
     // MARK: - Object Lifecycle
@@ -124,6 +126,7 @@ class SceneManager {
                     downloadedAssets[texture] = data
                 }
             }
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
         }
     }
 
@@ -134,24 +137,14 @@ class SceneManager {
         if let rot = changes.rotation { existing.rotation = rot }
         if let scale = changes.scale { existing.scale = scale }
         if let texture = changes.texture { existing.texture = texture }
-        if let mesh = changes.mesh {
-            let oldMesh = existing.mesh
-            existing.mesh = mesh
-            if mesh != oldMesh {
-                Task {
-                    let server = assetServer
-                    if downloadedAssets[mesh] == nil,
-                       let data = try? await server.fetchResource(mesh) {
-                        downloadedAssets[mesh] = data
-                    }
-                }
-            }
-        }
+        if let mesh = changes.mesh { existing.mesh = mesh }
 
         sceneObjects[update.id] = existing
+        onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
     }
 
     private func handleDestroy(_ id: String) {
         sceneObjects.removeValue(forKey: id)
+        onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
     }
 }
