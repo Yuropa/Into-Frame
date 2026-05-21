@@ -19,6 +19,132 @@ from transformers import CLIPVisionModelWithProjection
 #  Canvas helpers                                                              #
 # --------------------------------------------------------------------------- #
 
+import torch
+import torch.nn as nn
+import torchvision.transforms as T
+import torchvision.models as models
+
+class NeuralStyleTransfer:
+    """
+    Arbitrary image style transfer using VGG19 gram-matrix matching.
+    Works with any style reference — photos, paintings, sketches, etc.
+    """
+
+    CONTENT_LAYERS = ["conv4_2"]
+    STYLE_LAYERS   = ["conv1_1", "conv2_1", "conv3_1", "conv4_1", "conv5_1"]
+    STYLE_WEIGHTS  = [1e3, 1e3, 1e3, 1e3, 1e3]   # equal weight per layer
+
+    def __init__(self, device: str = "cuda"):
+        self.device = device
+        vgg = models.vgg19(weights=models.VGG19_Weights.DEFAULT).features.to(device).eval()
+        # Freeze — we only optimise the canvas, not the network
+        for p in vgg.parameters():
+            p.requires_grad_(False)
+        self.vgg = vgg
+
+        # Map readable names to VGG layer indices
+        self._layer_map = {
+            "conv1_1": 1,  "conv2_1": 6,  "conv3_1": 11,
+            "conv4_1": 20, "conv4_2": 22, "conv5_1": 29,
+        }
+
+    def _get_features(self, x: torch.Tensor) -> dict[str, torch.Tensor]:
+        features = {}
+        wanted = set(self._layer_map.values())
+        name_by_idx = {v: k for k, v in self._layer_map.items()}
+        for idx, layer in enumerate(self.vgg):
+            x = layer(x)
+            if idx in wanted:
+                features[name_by_idx[idx]] = x
+        return features
+
+    @staticmethod
+    def _gram(feat: torch.Tensor) -> torch.Tensor:
+        b, c, h, w = feat.shape
+        f = feat.view(c, h * w)
+        return f @ f.t() / (c * h * w)
+
+    def _to_tensor(self, img: Image.Image, max_size: int = 512) -> torch.Tensor:
+        """Resize (preserving aspect) then normalise to ImageNet stats."""
+        w, h  = img.size
+        scale = max_size / max(w, h)
+        img   = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+        tf    = T.Compose([
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std =[0.229, 0.224, 0.225]),
+        ])
+        return tf(img).unsqueeze(0).to(self.device)
+
+    def _to_image(self, tensor: torch.Tensor) -> Image.Image:
+        t = tensor.squeeze(0).cpu().detach()
+        t = t * torch.tensor([0.229, 0.224, 0.225])[:, None, None] \
+              + torch.tensor([0.485, 0.456, 0.406])[:, None, None]
+        t = t.clamp(0, 1)
+        return T.ToPILImage()(t)
+
+    def transfer(
+        self,
+        content: Image.Image,
+        style: Image.Image,
+        strength: float = 0.5,
+        steps: int = 300,
+        content_weight: float = 1.0,
+        style_weight: float = 1e6,
+    ) -> Image.Image:
+        """
+        Parameters
+        ----------
+        content  : the generated panorama
+        style    : arbitrary reference image (painting, photo, sketch…)
+        strength : 0.0 = no change, 1.0 = full NST result.  Blends
+                   optimised canvas back against original.
+        steps    : optimisation iterations.  200–400 is usually enough.
+        """
+        orig_size = content.size
+
+        ct = self._to_tensor(content)
+        st = self._to_tensor(style)
+
+        content_feats = self._get_features(ct)
+        style_feats   = self._get_features(st)
+        style_grams   = {l: self._gram(style_feats[l]) for l in self.STYLE_LAYERS}
+
+        # Optimise a canvas initialised from content (not noise — faster convergence)
+        canvas = ct.clone().requires_grad_(True)
+        optimiser = torch.optim.Adam([canvas], lr=0.02)
+
+        for step in range(steps):
+            optimiser.zero_grad()
+            feats = self._get_features(canvas)
+
+            # Content loss — keep high-level structure
+            c_loss = nn.functional.mse_loss(feats["conv4_2"], content_feats["conv4_2"])
+
+            # Style loss — match gram matrices across layers
+            s_loss = sum(
+                w * nn.functional.mse_loss(self._gram(feats[l]), style_grams[l])
+                for l, w in zip(self.STYLE_LAYERS, self.STYLE_WEIGHTS)
+            )
+
+            loss = content_weight * c_loss + style_weight * s_loss
+            loss.backward()
+            optimiser.step()
+
+            if step % 50 == 0:
+                print(f"    NST step {step}/{steps}  loss={loss.item():.1f}")
+
+        nst_result = self._to_image(canvas).resize(orig_size, Image.LANCZOS)
+
+        # Blend: 0 = original content, 1 = full NST
+        if strength < 1.0:
+            nst_arr     = np.array(nst_result).astype(np.float32)
+            content_arr = np.array(content.resize(orig_size)).astype(np.float32)
+            blended     = content_arr * (1 - strength) + nst_arr * strength
+            return Image.fromarray(blended.clip(0, 255).astype(np.uint8))
+
+        return nst_result
+
 def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
@@ -121,6 +247,8 @@ def _lab_color_transfer(
 class PanoGenerator(RemoteServer):
 
     def setup(self):
+        self.style_transfer = NeuralStyleTransfer(device=self.device)
+
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(
             "openai/clip-vit-large-patch14",
             torch_dtype=torch.bfloat16,
@@ -187,10 +315,12 @@ class PanoGenerator(RemoteServer):
         self,
         temp_path: Path,
         input_image: Image.Image,
-        fov_deg: float = 60.0,
-        caption: str = "",
-        ip_adapter_scale: float = 0.6,
-        color_transfer_strength: float = 0.30,
+        fov_deg: float,
+        caption: str,
+        ip_adapter_scale: float,
+        color_transfer_strength: float,
+        style_strength: float,
+        nst_steps: int,
     ) -> dict:
         """
         Generate a 360° equirectangular panorama from a single input image.
@@ -262,16 +392,27 @@ class PanoGenerator(RemoteServer):
         # ------------------------------------------------------------------ #
         #  Pass 2 — LAB colour transfer (light touch, zero VRAM)            #
         # ------------------------------------------------------------------ #
-        print(f"--- [Pass 2] LAB colour transfer (strength={color_transfer_strength}) ---")
-        final = _lab_color_transfer(
+        print("--- [Pass 2a] LAB colour transfer ---")
+        lab_result = _lab_color_transfer(
             source=input_image,
             target=pass1,
-            strength=color_transfer_strength,
+            strength=color_transfer_strength,   # ~0.3
         )
+        lab_result.save(str(temp_path / "03_lab_transfer.png"))
+
+        # Pass 2b — Neural style transfer (captures texture/brushstroke quality)
+        print("--- [Pass 2b] Neural style transfer ---")
+        final = lab_result
+        # self.style_transfer.transfer(
+        #     content=lab_result,
+        #     style=input_image,
+        #     strength=style_strength,     # new param, 0.3–0.7 depending on how painterly you want
+        #     steps=nst_steps,             # new param, default ~300
+        # )
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
-        final.save(str(temp_path / "03_final_panorama.png"))
+        final.save(str(temp_path / "04_final_panorama.png"))
 
         # ------------------------------------------------------------------ #
         #  Cube-map projection                                               #
@@ -306,6 +447,8 @@ class PanoGenerator(RemoteServer):
                     caption=input.get("caption", ""),
                     ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
                     color_transfer_strength=float(input.get("color_transfer_strength", 0.30)),
+                    style_strength=float(input.get("style_strength", 0.45)),
+                    nst_steps=int(input.get("nst_steps", 300)),
                 )
                 print(f"Panorama complete: {result['image'].size}")
                 return result
