@@ -1,10 +1,3 @@
-//
-//  AppModel.swift
-//  InfoFrame
-//
-//  Created by Josh Ford on 5/21/26.
-//
-
 import SwiftUI
 
 /// Maintains app-wide state
@@ -18,4 +11,6 @@ class AppModel {
         case open
     }
     var immersiveSpaceState = ImmersiveSpaceState.closed
+
+    let sceneManager = SceneManager()
 }
