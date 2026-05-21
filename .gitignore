@@ -7,6 +7,7 @@ __pycache__/
 *.so
 
 *.pkl.txt
+*.xcuserstate
 
 # Distribution / packaging
 .Python
