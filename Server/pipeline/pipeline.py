@@ -79,7 +79,7 @@ class Pipeline:
         self.torch_dtype = config.torch_dtype
 
         self.stages = [
-            ForegroundInpainting(config=config.stage_config("Foreground Inpainting")),
+            # ForegroundInpainting(config=config.stage_config("Foreground Inpainting")),
             # SegmentationStage(config=config.stage_config("Object Segementation")),
             CaptioningStage(config=config.stage_config("Captioning")),
             DepthStage(config=config.stage_config("Depth Generation", keys={
