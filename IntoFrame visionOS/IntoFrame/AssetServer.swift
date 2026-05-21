@@ -3,7 +3,16 @@ import Foundation
 struct AssetServer: Sendable {
     let baseURL: URL
 
-    init(baseURL: URL = URL(string: "http://localhost:3000/assets/")!) {
+    private static func configuredBaseURL() -> URL {
+        if let dict = Bundle.main.infoDictionary,
+           let urlString = dict["AssetBaseURL"] as? String,
+           let url = URL(string: urlString) {
+            return url
+        }
+        return URL(string: "http://localhost:3000/assets/")!
+    }
+
+    init(baseURL: URL = AssetServer.configuredBaseURL()) {
         self.baseURL = baseURL
     }
 

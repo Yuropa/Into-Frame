@@ -1,7 +1,6 @@
 import Foundation
 import os
 
-@MainActor
 @Observable
 class SceneClient {
     enum ConnectionState: Equatable {
@@ -28,7 +27,16 @@ class SceneClient {
     var onObjectDestroy: ((String) -> Void)?
     var onProgress: ((SceneProgressPayload) -> Void)?
 
-    init(serverURL: URL = URL(string: "ws://localhost:8080")!, reconnectDelay: TimeInterval = 3) {
+    private static func configuredWebSocketURL() -> URL {
+        if let dict = Bundle.main.infoDictionary,
+           let urlString = dict["ServerWSURL"] as? String,
+           let url = URL(string: urlString) {
+            return url
+        }
+        return URL(string: "ws://localhost:8080")!
+    }
+
+    init(serverURL: URL = SceneClient.configuredWebSocketURL(), reconnectDelay: TimeInterval = 3) {
         self.serverURL = serverURL
         self.reconnectDelay = reconnectDelay
     }
