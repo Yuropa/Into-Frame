@@ -200,7 +200,7 @@ class Pipeline:
             orig_input_image = context.image(ContextKey.INPUT)
             if not input_image == orig_input_image:
                 self.log_info("New input image, purging stored content")
-                _clear_directory(self.config.output)
+                _clear_directory(output)
                 context = PipelineContext()
                 context.add_image(ContextKey.INPUT, input_image)
             else:
