@@ -1,13 +1,28 @@
 #!/bin/bash
 FORCE=false
+SAVE_LOGS=false
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+LOG_DIR="$SCRIPT_DIR/logs"
 
-while getopts "f" opt; do
+show_usage() {
+    echo -e "Usage: $(basename "$0") [OPTIONS]"
+    echo -e ""
+    echo -e "Options:"
+    echo -e "  -f    Force clean installation (removes existing libraries and conda environments)"
+    echo -e "  -s    Save existing installation logs (default behavior wipes the logs directory)"
+    echo -e "  -h    Show this help message and exit"
+    exit 0
+}
+
+# Parse command line flags
+while getopts "fsh" opt; do
   case $opt in
     f) FORCE=true ;;
-    *) echo "Usage: $0 [-f]" >&2; exit 1 ;;
+    s) SAVE_LOGS=true ;;
+    h) show_usage ;;
+    *) echo "Invalid option. Use -h for help." >&2; exit 1 ;;
   esac
 done
 
@@ -80,12 +95,20 @@ fi
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
 # Setup logs
-LOG_DIR="$SCRIPT_DIR/logs"
-mkdir -p "$LOG_DIR"
+if [ "$SAVE_LOGS" = true ]; then
+    # Saving prior execution logs
+    mkdir -p "$LOG_DIR"
+else
+    if [ -d "$LOG_DIR" ]; then
+        rm -rf "$LOG_DIR"
+    fi
+    mkdir -p "$LOG_DIR"
+fi
 LOG_FILE="$LOG_DIR/install-$(date +%Y%m%d-%H%M%S).log"
 
 touch "$LOG_FILE"
-info "Logging to: $LOG_FILE"
+echo ""
+echo "Logging to file: $LOG_FILE"
 
 CONDA_NAME="frame"
 BASE_ENV="frame-base"
@@ -96,6 +119,8 @@ LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
+
+FLASH_ATTN_DIR="$HOME/.cache/wheels/flash-attn"
 
 create_base_env() {
     conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
@@ -188,16 +213,26 @@ TOTAL_STEPS=$(( $(grep -c "^run_step" "$0") - 1 ))
 spinner() {
     local pid=$1
     local msg="$2"
-    local spin='|/-\\'
+    
+    # Define the characters as separate items in a sequence
+    local spin=("|" "/" "-" "\\")
+    local delay=0.1
+
+    # Hide the cursor so it looks cleaner
+    printf "\e[?25l"
 
     while kill -0 "$pid" 2>/dev/null; do
-        for c in $spin; do
-            printf "\r${BLUE}[%s]${RESET} %s" "$c" "$msg"
-            sleep 0.1
+        # Loop over the indices of the array
+        for c in "${spin[@]}"; do
+            printf "\r${BLUE}[%s]${RESET} %s\e[K" "$c" "$msg"
+            sleep "$delay"
+            
+            if ! kill -0 "$pid" 2>/dev/null; then break; fi
         done
     done
 
-    printf "\r"
+    # Restore the cursor and clear the line one last time
+    printf "\e[?25h\r\e[K"
 }
 
 run_step() {
@@ -205,63 +240,80 @@ run_step() {
     shift
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
-
     echo ""
-    info "[$CURRENT_STEP/$TOTAL_STEPS] $desc"
+    printf "${BLUE}[$CURRENT_STEP/$TOTAL_STEPS]${RESET} ${BOLD}$desc${RESET}\n"
 
-    # Start command FIRST
+    # Execute step cleanly in background logging stdout & stderr
     "$@" >>"$LOG_FILE" 2>&1 &
     local pid=$!
 
-    # Then spinner watches real PID
-    spinner "$pid" "[$CURRENT_STEP] $desc"
+    # Spin safely while monitoring background process
+    spinner "$pid" "Running..."
 
-    if wait "$pid"; then
+    # Capture the exact exit status code
+    wait "$pid"
+    local exit_status=$?
+
+    if [ $exit_status -eq 0 ]; then
         success "✓ Done"
     else
-        error "✗ Failed"
+        error "✗ Failed (Exit Code: $exit_status)"
         error "See log: $LOG_FILE"
-
         echo ""
-        warn "Last 40 log lines:"
-        tail -n 40 "$LOG_FILE"
-
+        warn "Last 20 log lines:"
+        tail -n 20 "$LOG_FILE"
         exit 1
     fi
 }
 
-if [ "$FORCE" = true ]; then
-    warn "Removing old Conda environments..."
-    if [ -d "$LIB_DIR" ]; then
-        rm -rf "$LIB_DIR"
-    fi
+cleanup_if_needed() {
+    if [ "$FORCE" = true ]; then
+        warn "Removing old Conda environments..."
+        if [ -d "$LIB_DIR" ]; then
+            rm -rf "$LIB_DIR"
+        fi
 
+        rm -rf "$FLASH_ATTN_DIR"
+
+        conda init
+        source_shell_configs
+
+        EXISTING_ENVS=$(conda env list --json | grep -o '"/[^" ]*' | xargs -L1 basename 2>/dev/null)
+
+        conda deactivate
+        for env in "${CONDA_ENVS[@]}"; do
+            if echo "$EXISTING_ENVS" | grep -qxF "$env"; then
+                conda env remove --name "$env" --yes
+            fi
+        done
+    fi
+}
+
+run_step "Cleanup" \
+    cleanup_if_needed
+
+setup_shell_env() {
     conda init
     source_shell_configs
 
-    conda deactivate
-    for env in "${CONDA_ENVS[@]}"; do
-        conda env remove --name "$env" --yes
-    done
-fi
+    # Detect OS and install accordingly
+    if command -v apt &>/dev/null; then
+        sudo apt install -y libwebp-dev
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y libwebp-devel
+    elif command -v pacman &>/dev/null; then
+        sudo pacman -S --noconfirm libwebp
+    elif command -v brew &>/dev/null; then
+        brew install webp
+    else
+        echo "WARNING: Could not install libwebp — unsupported package manager"
+    fi
+}
 
-conda init
-source_shell_configs
+run_step "Setup Shell Environment" \
+    setup_shell_env
 
-# Detect OS and install accordingly
-if command -v apt &>/dev/null; then
-    sudo apt install -y libwebp-dev
-elif command -v dnf &>/dev/null; then
-    sudo dnf install -y libwebp-devel
-elif command -v pacman &>/dev/null; then
-    sudo pacman -S --noconfirm libwebp
-elif command -v brew &>/dev/null; then
-    brew install webp
-else
-    echo "WARNING: Could not install libwebp — unsupported package manager"
-fi
-
-run_step "Creating base environment" \
+run_step "Creating Base Environment" \
     create_base_env
 
 ## ===============
@@ -283,7 +335,7 @@ create_main_environment() {
     mkdir -p "$PACKAGES_DIR"
 } 
 
-run_step "Creating Conda environment '$CONDA_NAME'" \
+run_step "Creating Conda Environment '$CONDA_NAME'" \
     create_main_environment
 
 ## =============
@@ -303,40 +355,49 @@ run_step "Installing SAM 2" \
 ## =============
 
 setup_trellis() {
-    clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$LIB_DIR/TRELLIS.2" -b main
+    local trellis_dir="$LIB_DIR/TRELLIS.2"
+    local setup_script="setup.sh"
 
-    TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
-    TRELLIS_SETUP="setup.sh"
-    chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
+    clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$trellis_dir" -b main
+    chmod +x "$trellis_dir/$setup_script"
 
-    pushd "$TRELLIS_DIR" > /dev/null || exit 1
     create_env "trellis2"
-    printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
-    run_in_env pip install transformers==4.57.6 psutil
+    
+    # Run the setup script safely using --cwd and explicit environment handling
+    conda run --cwd "$trellis_dir" -n trellis2 bash "$setup_script" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm <<< "Y"
+    
+    # Explicitly run inside the targeted environment
+    conda run -n trellis2 pip install transformers==4.57.6 psutil
+}
 
-    info "Checking for flash-attn"
+install_flash_attn() {
+    local trellis_dir="$LIB_DIR/TRELLIS.2"
+    local cache_dir="$HOME/.cache/wheels/flash-attn"
+    local ver="2.7.3"
+    
+    mkdir -p "$cache_dir"
 
-    VER="2.7.3"
-    DIR="$HOME/.cache/wheels/flash-attn"
-    WHEEL="$DIR"/flash_attn-${VER}*.whl
-
-    mkdir -p "$DIR"
-
-    if ls $WHEEL 1> /dev/null 2>&1; then
-        run_in_env pip install $WHEEL
+    # Safely check for existing pre-compiled wheels
+    if ls "$cache_dir"/flash_attn-${ver}*.whl 1>/dev/null 2>&1; then
+        conda run -n trellis2 pip install "$cache_dir"/flash_attn-${ver}*.whl
     else
-        warn "Building flash-attn. This will take a while"
-        MAX_JOBS=4 run_in_env pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
-        run_in_env pip install $(ls $WHEEL | head -n 1)
+        warn "Building flash-attn. This will take a while..."
+        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn==$ver -w "$cache_dir" --no-build-isolation
+        conda run -n trellis2 pip install "$(ls "$cache_dir"/flash_attn-${ver}*.whl | head -n 1)"
     fi
 
-    popd > /dev/null || exit 1
-    ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
+    # Handle your symlink and env cleanup directly without relying on volatile pushd/popd stacks
+    ln -sf "$trellis_dir" "$PACKAGES_DIR/trellis2"
     stop_env
 }
 
 run_step "Installing Trellis" \
     setup_trellis
+
+info "Checking for flash-attn"
+
+run_step "Building Flash Attention" \
+    install_flash_attn
 
 ## =============
 ##    SAM 3D
@@ -493,7 +554,7 @@ download_layer_pano_3d() {
     download_checkpoint "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" "layer_pano_3d"
 }
 
-run_step "Downloading layer_pano_3d" \
+run_step "Downloading Layer Pano 3D" \
     download_layer_pano_3d
 
 ## ============
