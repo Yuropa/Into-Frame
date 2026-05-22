@@ -167,6 +167,20 @@ clone_if_needed() {
     fi
 }
 
+download_checkpoint() {
+    local url="$1"
+    local dir="$2"
+
+    local filename
+    filename=$(basename "${url%%\?*}")
+
+    local local_checkpoint_dir="$CHECKPOINT_DIR/$dir"
+    if [ ! -d "$local_checkpoint_dir" ]; then
+        mkdir -p "$local_checkpoint_dir"
+        curl -L "$url" -o "$local_checkpoint_dir/$filename"
+    fi
+}
+
 # Progress
 CURRENT_STEP=0
 TOTAL_STEPS=$(( $(grep -c "^run_step" "$0") - 1 ))
@@ -476,11 +490,7 @@ run_step "Installing LaMa" \
 ## ============
 
 download_layer_pano_3d() {
-    LAYER_PANO_CHECKPOINT="$CHECKPOINT_DIR/layer_pano_3d"
-    if [ ! -d "$LAYER_PANO_CHECKPOINT" ]; then
-        mkdir -p "$LAYER_PANO_CHECKPOINT"
-        curl -L "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" -o "$LAYER_PANO_CHECKPOINT/pano_lora_720*1440_v1.safetensors"
-    fi
+    download_checkpoint "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" "layer_pano_3d"
 }
 
 run_step "Downloading layer_pano_3d" \
@@ -494,6 +504,9 @@ setup_depth_pano() {
     create_env "depthpano"
     clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
     run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
+
+    download_checkpoint "https://huggingface.co/Insta360-Research/DAP-weights/resolve/main/model.pth" "depth_pano"
+
     ln -sf  "$LIB_DIR/DAP" "$PACKAGES_DIR/dap"
 }
 
