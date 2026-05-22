@@ -240,8 +240,12 @@ run_step() {
     shift
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
+    
+    # Generate a clean timestamp, e.g., [14:32:05]
+    local timestamp=$(date +"%H:%M:%S")
+
     echo ""
-    printf "${BLUE}[$CURRENT_STEP/$TOTAL_STEPS]${RESET} ${BOLD}$desc${RESET}\n"
+    printf "${BLUE}[$CURRENT_STEP/$TOTAL_STEPS]${RESET} ($timestamp) ${BOLD}$desc${RESET}\n"
 
     # Execute step cleanly in background logging stdout & stderr
     "$@" >>"$LOG_FILE" 2>&1 &
@@ -257,7 +261,8 @@ run_step() {
     if [ $exit_status -eq 0 ]; then
         success "✓ Done"
     else
-        error "✗ Failed (Exit Code: $exit_status)"
+        local end_timestamp=$(date +"%H:%M:%S")
+        error "✗ Failed at $end_timestamp (Exit Code: $exit_status)"
         error "See log: $LOG_FILE"
         echo ""
         warn "Last 20 log lines:"
@@ -354,40 +359,45 @@ run_step "Installing SAM 2" \
 ##    TRELLIS
 ## =============
 
+TRELLIS_DIR="$LIB_DIR/TRELLIS.2"
+FLASH_VERSION="2.7.3"
+
 setup_trellis() {
-    local trellis_dir="$LIB_DIR/TRELLIS.2"
     local setup_script="setup.sh"
 
-    clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$trellis_dir" -b main
-    chmod +x "$trellis_dir/$setup_script"
+    clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$TRELLIS_DIR" -b main
+    chmod +x "$TRELLIS_DIR/$setup_script"
 
     create_env "trellis2"
     
     # Run the setup script safely using --cwd and explicit environment handling
-    conda run --cwd "$trellis_dir" -n trellis2 bash "$setup_script" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm <<< "Y"
+    conda run --cwd "$TRELLIS_DIR" -n trellis2 bash "$setup_script" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm <<< "Y"
     
     # Explicitly run inside the targeted environment
     conda run -n trellis2 pip install transformers==4.57.6 psutil
 }
 
 install_flash_attn() {
-    local trellis_dir="$LIB_DIR/TRELLIS.2"
-    local cache_dir="$HOME/.cache/wheels/flash-attn"
-    local ver="2.7.3"
-    
-    mkdir -p "$cache_dir"
+    mkdir -p "$FLASH_WHEEL_DIR"
 
-    # Safely check for existing pre-compiled wheels
-    if ls "$cache_dir"/flash_attn-${ver}*.whl 1>/dev/null 2>&1; then
-        conda run -n trellis2 pip install "$cache_dir"/flash_attn-${ver}*.whl
+    local matched_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION"*.whl)
+
+    # Check if the expansion actually found a real file
+    if [ -f "${matched_wheels[0]}" ]; then
+        info "Found pre-compiled wheel. Installing..."
+        conda run -n trellis2 pip install "${matched_wheels[0]}"
     else
         warn "Building flash-attn. This will take a while..."
-        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn==$ver -w "$cache_dir" --no-build-isolation
-        conda run -n trellis2 pip install "$(ls "$cache_dir"/flash_attn-${ver}*.whl | head -n 1)"
+        # Fixed $ver to $FLASH_VERSION here
+        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn=="$FLASH_VERSION" -w "$FLASH_WHEEL_DIR" --no-build-isolation
+        
+        # Re-evaluate the expansion array to find the newly built wheel
+        matched_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION"*.whl)
+        conda run -n trellis2 pip install "${matched_wheels[0]}"
     fi
 
-    # Handle your symlink and env cleanup directly without relying on volatile pushd/popd stacks
-    ln -sf "$trellis_dir" "$PACKAGES_DIR/trellis2"
+    # Handle your symlink cleanly
+    ln -sf "$TRELLIS_DIR" "$PACKAGES_DIR/trellis2"
     stop_env
 }
 
@@ -395,6 +405,10 @@ run_step "Installing Trellis" \
     setup_trellis
 
 info "Checking for flash-attn"
+
+if ! ls "$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION"*.whl 1>/dev/null 2>&1; then
+    warn "No pre-compiled wheel found. Building flash-attn from source. This can take over 40 minutes..."
+fi
 
 run_step "Building Flash Attention" \
     install_flash_attn
