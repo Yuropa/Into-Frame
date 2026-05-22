@@ -1,6 +1,9 @@
 #!/bin/bash
 FORCE=false
 
+# Current directory
+SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
 while getopts "f" opt; do
   case $opt in
     f) FORCE=true ;;
@@ -20,12 +23,6 @@ info()    { printf "${CYAN}%s${RESET}\n" "$*"; }
 success() { printf "${GREEN}%s${RESET}\n" "$*"; }
 warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
-section() {
-  local msg="$1"
-  info "========================================"
-  info "  $msg"
-  info "========================================"
-}
 
 echo ""
 
@@ -82,21 +79,25 @@ fi
 # Keep sudo alive
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
+# Setup logs
+LOG_DIR="$SCRIPT_DIR/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/install-$(date +%Y%m%d-%H%M%S).log"
+
+touch "$LOG_FILE"
+info "Logging to: $LOG_FILE"
 
 CONDA_NAME="frame"
 BASE_ENV="frame-base"
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cudediff" "dreamcube" "lama")
-SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano")
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
 create_base_env() {
-    section "Creating base environment"
-
     conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
     conda run -n "$BASE_ENV" pip install torch==2.10.0 torchvision==0.25.0 torchaudio --extra-index-url "$TORCH_URL"
 }
@@ -166,6 +167,55 @@ clone_if_needed() {
     fi
 }
 
+# Progress
+CURRENT_STEP=0
+TOTAL_STEPS=$(( $(grep -c "^run_step" "$0") - 1 ))
+
+spinner() {
+    local pid=$1
+    local msg="$2"
+    local spin='|/-\\'
+
+    while kill -0 "$pid" 2>/dev/null; do
+        for c in $spin; do
+            printf "\r${BLUE}[%s]${RESET} %s" "$c" "$msg"
+            sleep 0.1
+        done
+    done
+
+    printf "\r"
+}
+
+run_step() {
+    local desc="$1"
+    shift
+
+    CURRENT_STEP=$((CURRENT_STEP + 1))
+
+    echo ""
+    info "[$CURRENT_STEP/$TOTAL_STEPS] $desc"
+
+    # Start command FIRST
+    "$@" >>"$LOG_FILE" 2>&1 &
+    local pid=$!
+
+    # Then spinner watches real PID
+    spinner "$pid" "[$CURRENT_STEP] $desc"
+
+    if wait "$pid"; then
+        success "✓ Done"
+    else
+        error "✗ Failed"
+        error "See log: $LOG_FILE"
+
+        echo ""
+        warn "Last 40 log lines:"
+        tail -n 40 "$LOG_FILE"
+
+        exit 1
+    fi
+}
+
 if [ "$FORCE" = true ]; then
     warn "Removing old Conda environments..."
     if [ -d "$LIB_DIR" ]; then
@@ -197,100 +247,118 @@ else
     echo "WARNING: Could not install libwebp — unsupported package manager"
 fi
 
-create_base_env
+run_step "Creating base environment" \
+    create_base_env
 
 ## ===============
 ##    Main ENV
 ## ===============
 
-section "Creating Conda environment '$CONDA_NAME'..."
-create_env "$CONDA_NAME"
+create_main_environment() {
+    create_env "$CONDA_NAME"
 
-eval "$(conda shell.bash hook)"
-conda activate "$CONDA_NAME"
+    eval "$(conda shell.bash hook)"
+    conda activate "$CONDA_NAME"
 
-# Install standard pip packages
-section "Installing pip requirements..."
-pip install -r "$SCRIPT_DIR/requirements.txt"
-pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+    # Install standard pip packages
+    conda run -n frame pip install -r "$SCRIPT_DIR/requirements.txt"
+    conda run -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
-mkdir -p "$LIB_DIR"
-mkdir -p "$CHECKPOINT_DIR"
-mkdir -p "$PACKAGES_DIR"
+    mkdir -p "$LIB_DIR"
+    mkdir -p "$CHECKPOINT_DIR"
+    mkdir -p "$PACKAGES_DIR"
+} 
+
+run_step "Creating Conda environment '$CONDA_NAME'" \
+    create_main_environment
 
 ## =============
 ##    SAM 2
 ## =============
 
-section "Installing SAM 2"
-clone_if_needed https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
-pip install -e "$LIB_DIR/sam2"
+setup_sam2() {
+    clone_if_needed https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
+    conda run -n frame pip install -e "$LIB_DIR/sam2"
+}
+
+run_step "Installing SAM 2" \
+    setup_sam2
 
 ## =============
 ##    TRELLIS
 ## =============
 
-section "Installing Trellis"
-clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$LIB_DIR/TRELLIS.2" -b main
+setup_trellis() {
+    clone_if_needed https://github.com/microsoft/TRELLIS.2.git "$LIB_DIR/TRELLIS.2" -b main
 
-TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
-TRELLIS_SETUP="setup.sh"
-chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
+    TRELLIS_DIR="$LIB_DIR/TRELLIS.2/"
+    TRELLIS_SETUP="setup.sh"
+    chmod +x "$TRELLIS_DIR/$TRELLIS_SETUP"
 
-pushd "$TRELLIS_DIR" > /dev/null || exit 1
-create_env "trellis2"
-printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
-run_in_env pip install transformers==4.57.6
-run_in_env pip install psutil
+    pushd "$TRELLIS_DIR" > /dev/null || exit 1
+    create_env "trellis2"
+    printf "Y\n" | bash "$TRELLIS_SETUP" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm
+    run_in_env pip install transformers==4.57.6 psutil
 
-info "Checking for flash-attn"
+    info "Checking for flash-attn"
 
-VER="2.7.3"
-DIR="$HOME/.cache/wheels/flash-attn"
-WHEEL="$DIR"/flash_attn-${VER}*.whl
+    VER="2.7.3"
+    DIR="$HOME/.cache/wheels/flash-attn"
+    WHEEL="$DIR"/flash_attn-${VER}*.whl
 
-mkdir -p "$DIR"
+    mkdir -p "$DIR"
 
-if ls $WHEEL 1> /dev/null 2>&1; then
-    run_in_env pip install $WHEEL
-else
-    warn "Building flash-attn. This will take a while"
-    MAX_JOBS=4 run_in_env pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
-    run_in_env pip install $(ls $WHEEL | head -n 1)
-fi
+    if ls $WHEEL 1> /dev/null 2>&1; then
+        run_in_env pip install $WHEEL
+    else
+        warn "Building flash-attn. This will take a while"
+        MAX_JOBS=4 run_in_env pip wheel flash-attn==$VER -w "$DIR" --no-build-isolation
+        run_in_env pip install $(ls $WHEEL | head -n 1)
+    fi
 
-popd > /dev/null || exit 1
-ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
-stop_env
+    popd > /dev/null || exit 1
+    ln -sf  "$TRELLIS_DIR/trellis2" "$PACKAGES_DIR/trellis2"
+    stop_env
+}
+
+run_step "Installing Trellis" \
+    setup_trellis
 
 ## =============
 ##    SAM 3D
 ## =============
 
-section "Downloading SAM 3D"
+download_sam3d() {
+    if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
+        hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
+        mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
+        rm -rf "$CHECKPOINT_DIR/hf-download"
+    fi
 
-if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
-    hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
-    mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
-    rm -rf "$CHECKPOINT_DIR/hf-download"
-fi
+    conda deactivate
+}
 
-conda deactivate
+run_step "Downloading SAM 3D" \
+    download_sam3d
 
 ## ======================
 ##    Depth Anything
 ## ======================
 
-section "Installing Depth Anything"
-clone_if_needed https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
+setup_depth_anything() {
+    clone_if_needed https://github.com/ByteDance-Seed/depth-anything-3 "$LIB_DIR/depth-anything-3"
 
-warn "Removing xformers"
-sed -i '' '/xformers/d' "$LIB_DIR/depth-anything-3/requirements.txt"
-sed -i '' '/"xformers"/d' "$LIB_DIR/depth-anything-3/pyproject.toml"
+    warn "Removing xformers"
+    perl -pi -e 's/.*xformers.*//g' "$LIB_DIR/depth-anything-3/requirements.txt"
+    perl -pi -e 's/.*"xformers".*//g' "$LIB_DIR/depth-anything-3/pyproject.toml"
 
-create_env "depthanything" 3.10
-pip install -e "$LIB_DIR/depth-anything-3"
-stop_env
+    create_env "depthanything" 3.10
+    run_in_env pip install -e "$LIB_DIR/depth-anything-3"
+    stop_env
+}
+
+run_step "Installing Depth Anything" \
+    setup_depth_anything
 
 ## ======================
 ##    Models Download
@@ -299,8 +367,8 @@ stop_env
 # Hugging Face auth for gated checkpoints
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
-pip install huggingface_hub
-python -c "from huggingface_hub import interpreter_login; interpreter_login()"
+conda run -n "$CONDA_NAME" pip install huggingface_hub
+conda run -n "$CONDA_NAME" python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
 info "Downloading models..."
 python3 "$SCRIPT_DIR/Server/main.py" download
@@ -310,95 +378,127 @@ if [ $? -ne 0 ]; then
     error "Models will be downloaded later when running pipeline" >&2
 fi
 
-conda run -n frame pip install --upgrade --force-reinstall Pillow
+run_step "Installing Updated Pillow" \
+    conda run -n frame pip install --upgrade --force-reinstall Pillow
 
 ## ======================
 ##    Stable Point 3D
 ## ======================
 
-section "Installing Stable Point 3D"
+setup_stable_point() {
+    create_env "stablepoint" 3.12
+    run_in_env pip install transformers==4.42.3
+    clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
-create_env "stablepoint" 3.12
-run_in_env pip install transformers==4.42.3
-clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
+    run_in_env pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
+    run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+    run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
+    run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
+    run_in_env pip install --upgrade transparent-background flet
+    ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
 
-run_in_env pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
-run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
-run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
-run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
-run_in_env pip install --upgrade transparent-background flet
-ln -sf  "$LIB_DIR/StablePoint/spar3d" "$PACKAGES_DIR/spar3d"
+    stop_env
+}
 
-stop_env
+run_step "Installing Stable Point 3D" \
+    setup_stable_point
 
 ## ============
 ##    CubeDiff
 ## ============
 
-section "Installing CubeDiff"
+setup_cubediff() {
+    create_env "cubediff"
+    clone_if_needed git@github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
+    run_in_env pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
+    ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
-create_env "cubediff"
-clone_if_needed git@github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
-run_in_env pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
-ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
+    stop_env
+}
 
-stop_env
+run_step "Installing CubeDiff" \
+    setup_cubediff
 
 ## ============
 ##    DreamCube
 ## ============
 
-section "Installing DreamCube"
+setup_dreamcube() {
+    create_env "dreamcube"
 
-create_env "dreamcube"
-clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
-run_in_env pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
-run_in_env pip install ninja wheel setuptools
-run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
-run_in_env pip install peft
-ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
+    clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
+    run_in_env pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
+    run_in_env pip install ninja wheel setuptools
+    run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+    run_in_env pip install peft
+    ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
 
-stop_env
+    stop_env
+}
+
+run_step "Installing DreamCube" \
+    setup_dreamcube
 
 ## ============
 ##    Lama
 ## ============
 
-section "Installing LaMa"
+setup_lama() {
+    create_env "lama" 3.10
+    clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
+    run_in_env pip install -r "$SCRIPT_DIR/requirements-lama.txt"
+    run_in_env pip install torchvision
+    ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
 
-create_env "lama" 3.10
-clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
-run_in_env pip install -r "$SCRIPT_DIR/requirements-lama.txt"
-run_in_env pip install torchvision
-ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
+    LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
 
-LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
+    if [ ! -d "$LAMA_CHECKPOINT" ]; then
+        mkdir -p "$LAMA_CHECKPOINT"
+        TMP_DIR="$(mktemp -d)"
+        ZIP_FILE="$TMP_DIR/big-lama.zip"
 
-if [ ! -d "$LAMA_CHECKPOINT" ]; then
-    mkdir -p "$LAMA_CHECKPOINT"
-    TMP_DIR="$(mktemp -d)"
-    ZIP_FILE="$TMP_DIR/big-lama.zip"
+        curl -L "https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip" -o "$ZIP_FILE"
 
-    curl -L "https://huggingface.co/smartywu/big-lama/resolve/main/big-lama.zip" -o "$ZIP_FILE"
+        unzip "$ZIP_FILE" -d "$LAMA_CHECKPOINT"
 
-    unzip "$ZIP_FILE" -d "$LAMA_CHECKPOINT"
+        rm -f "$ZIP_FILE"
+        rmdir "$TMP_DIR"
+    fi
 
-    rm -f "$ZIP_FILE"
-    rmdir "$TMP_DIR"
-fi
+    stop_env
+}
 
-stop_env
+run_step "Installing LaMa" \
+    setup_lama
 
 ## ============
 ## LayerPano3D
 ## ============
 
-LAYER_PANO_CHECKPOINT="$CHECKPOINT_DIR/layer_pano_3d"
-if [ ! -d "$LAYER_PANO_CHECKPOINT" ]; then
-    mkdir -p "$LAYER_PANO_CHECKPOINT"
-    curl -L "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" -o "$LAYER_PANO_CHECKPOINT/pano_lora_720*1440_v1.safetensors"
-fi
+download_layer_pano_3d() {
+    LAYER_PANO_CHECKPOINT="$CHECKPOINT_DIR/layer_pano_3d"
+    if [ ! -d "$LAYER_PANO_CHECKPOINT" ]; then
+        mkdir -p "$LAYER_PANO_CHECKPOINT"
+        curl -L "https://huggingface.co/ysmikey/Layerpano3D-FLUX-Panorama-LoRA/resolve/main/lora_hubs/pano_lora_720*1440_v1.safetensors?download=true" -o "$LAYER_PANO_CHECKPOINT/pano_lora_720*1440_v1.safetensors"
+    fi
+}
 
+run_step "Downloading layer_pano_3d" \
+    download_layer_pano_3d
+
+## ============
+## Depth Any Panoramas
+## ============
+
+setup_depth_pano() {
+    create_env "depthpano"
+    clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
+    run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
+    ln -sf  "$LIB_DIR/DAP" "$PACKAGES_DIR/dap"
+}
+
+run_step "Install Depth Any Panoramas" \
+    setup_depth_pano
 
 ## ============
 ##    End
