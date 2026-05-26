@@ -89,8 +89,8 @@ class NeuralStyleTransfer:
         style: Image.Image,
         strength: float = 0.5,
         steps: int = 200,
-        content_weight: float = 5.0,  # Bumped content weight to enforce structure sharpness
-        style_weight: float = 1e5,
+        content_weight: float = 50.0,
+        style_weight: float = 5e4,
     ) -> Image.Image:
         if strength <= 0.0:
             return content
@@ -161,7 +161,7 @@ def _make_canvas(
     avg    = tuple(int(c) for c in np.array(tile).mean(axis=(0, 1)))
     canvas = Image.new("RGB", equi_size, avg)
     canvas.paste(surround, (0, 0))
-    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 20))
+    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 80))
     canvas.paste(tile, (cx, cy))
 
     # Strict mask generation: prevent wide gray gradients from eating the image center
@@ -426,8 +426,8 @@ class PanoGenerator(RemoteServer):
                     caption=input.get("caption", ""),
                     ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
                     color_transfer_strength=float(input.get("color_transfer_strength", 0.35)),
-                    style_strength=float(input.get("style_strength", 0.45)),
-                    nst_steps=int(input.get("nst_steps", 300)),
+                    style_strength=float(input.get("style_strength", 0.2)),
+                    nst_steps=int(input.get("nst_steps", 150)),
                     seed=int(input.get("seed", 0)),
                 )
             except Exception as e:
