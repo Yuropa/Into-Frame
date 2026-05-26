@@ -1,11 +1,7 @@
-from path_utils import add_project_paths, lib_path, checkpoints_path
+from path_utils import add_project_paths, lib_path, checkpoints_path, add_system_path, run_relative_to
 add_project_paths()
 
-# Add DAP project root so `from networks.models import make` resolves
-import sys as _sys
-_dap_root = lib_path() / "packages" / "dap"
-if str(_dap_root) not in _sys.path:
-    _sys.path.insert(0, str(_dap_root))
+add_system_path(lib_path() / "DAP")
 
 from pathlib import Path
 from typing import Any
@@ -22,7 +18,7 @@ from remote_connection.remote_server import RemoteServer
 
 class PanoDepthGenerator(RemoteServer):
     def setup(self):
-        dap_root = lib_path() / "packages" / "dap"
+        dap_root = lib_path() / "DAP"
         config_path = dap_root / "config" / "infer.yaml"
 
         with open(config_path) as f:
@@ -33,16 +29,17 @@ class PanoDepthGenerator(RemoteServer):
 
         state = torch.load(str(model_path), map_location=self.device)
 
-        model = make(config["model"])
+        run_relative_to(dap_root):
+            model = make(config["model"])
 
-        if any(k.startswith("module") for k in state.keys()):
-            model = nn.DataParallel(model)
+            if any(k.startswith("module") for k in state.keys()):
+                model = nn.DataParallel(model)
 
-        model_state = model.state_dict()
-        model.load_state_dict(
-            {k: v for k, v in state.items() if k in model_state},
-            strict=False,
-        )
+            model_state = model.state_dict()
+            model.load_state_dict(
+                {k: v for k, v in state.items() if k in model_state},
+                strict=False,
+            )
 
         self.model = model.to(self.device)
         self.model.eval()

@@ -1,5 +1,7 @@
+import os
 import sys
 from pathlib import Path
+from contextlib import contextmanager
 
 def _server_path() -> Path:
     start = Path(__file__).resolve()
@@ -36,3 +38,12 @@ def checkpoints_path() -> Path:
 
 def lib_path() -> Path:
     return _server_path().parent / "lib"
+
+@contextmanager
+def run_relative_to(path: Path):
+    prev = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(prev)
