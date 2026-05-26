@@ -117,7 +117,7 @@ class TerrainMeshStage(PipelineStage):
             grid_size_meters=grid_size,
             n_z_vertices=cfg.n_z_vertices,
             n_x_half_vertices=cfg.n_x_half_vertices,
-            z_far=grid_size,
+            z_far=grid_size / 2.0,  # half-extent: terrain spans ±z_far in Z
             noise_amplitude=cfg.noise_amplitude,
             noise_seed=cfg.seed,
             texture=texture_pil,

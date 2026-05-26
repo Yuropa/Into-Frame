@@ -46,13 +46,15 @@ class TerrainMeshGenerator:
                                clamped to the image border).
         intrinsics: required when uv_mode='pinhole'.
         """
-        z_far = z_far if z_far is not None else grid_size_meters
+        # z_far is the half-extent: terrain spans [-z_far, +z_far] in Z.
+        z_far = z_far if z_far is not None else grid_size_meters / 2.0
         x_half = grid_size_meters / 2.0
         hm = height_map.depth  # (H, W) float32
 
-        # ── Z axis: log-spaced rows, dense near camera ──────────────────────
-        z_inner = np.logspace(np.log10(0.01), np.log10(z_far), n_z_vertices - 1)
-        z_positions = np.concatenate([[0.0], z_inner]).astype(np.float32)
+        # ── Z axis: log-spaced, symmetric around origin (forward + backward) ─
+        n_half = max(1, n_z_vertices // 2)
+        z_inner = np.logspace(np.log10(0.01), np.log10(z_far), n_half).astype(np.float32)
+        z_positions = np.concatenate([-z_inner[::-1], [0.0], z_inner])
 
         # ── X axis: log-spaced, symmetric around 0 ──────────────────────────
         x_inner = np.logspace(np.log10(0.01), np.log10(x_half), n_x_half_vertices)
@@ -64,8 +66,9 @@ class TerrainMeshGenerator:
         n_x = len(x_positions)
 
         # ── Sample height map at every (X, Z) grid point ────────────────────
+        # Height map rows run from Z=-z_far (row 0) to Z=+z_far (row h-1).
         h, w = hm.shape
-        row_coords = (z_positions / grid_size_meters * (h - 1)).clip(0, h - 1)
+        row_coords = ((z_positions + z_far) / (2.0 * z_far) * (h - 1)).clip(0, h - 1)
         col_coords = ((x_positions + x_half) / grid_size_meters * (w - 1)).clip(0, w - 1)
 
         Z_grid = z_positions[:, None] * np.ones((1, n_x), dtype=np.float32)
@@ -81,9 +84,9 @@ class TerrainMeshGenerator:
         ).reshape(n_z, n_x).astype(np.float32)
         Y_grid = np.nan_to_num(Y_grid, nan=0.0)
 
-        # ── Perlin-like noise, blended in with distance ──────────────────────
+        # ── Perlin-like noise, blended in with distance from origin ─────────
         noise = TerrainMeshGenerator._smooth_noise((n_z, n_x), seed=noise_seed)
-        blend = np.sqrt(Z_grid / z_far).clip(0.0, 1.0)
+        blend = np.sqrt(np.abs(Z_grid) / z_far).clip(0.0, 1.0)
         Y_grid += noise * noise_amplitude * blend
 
         # ── Vertex array ─────────────────────────────────────────────────────

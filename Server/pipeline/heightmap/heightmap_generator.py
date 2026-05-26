@@ -25,7 +25,7 @@ class HeightMapGenerator:
 
         ground_y_max: Y threshold in camera space; points with Y <= this value are
                       treated as ground (e.g. -0.5 means at least 0.5 m below camera).
-        grid_size_meters: side length of the square grid; X spans ±half, Z spans [0, full].
+        grid_size_meters: side length of the square grid; both X and Z span ±half (centred at origin).
         use_equirectangular: when True, treat depth as an equirectangular (360°) map
                              where each pixel encodes a radial (Euclidean) distance.
                              When False, treat depth as a rectilinear (pinhole) Z-depth
@@ -55,9 +55,12 @@ class HeightMapGenerator:
             Y = -((cy - intrinsics.py) * d / intrinsics.fy)  # flipped Y (Unity convention)
             Z = d
 
+        half = grid_size_meters / 2.0
+
         ground_mask = (
             (Y <= ground_y_max)
-            & (Z > 0.0)
+            & (np.abs(Z) <= half)
+            & (np.abs(X) <= half)
             & np.isfinite(d)
         )
 
@@ -68,9 +71,8 @@ class HeightMapGenerator:
         if len(Xg) == 0:
             return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
-        half = grid_size_meters / 2.0
         x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(0.0, grid_size_meters, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
 
         xi = np.digitize(Xg, x_edges) - 1  # column index
         zi = np.digitize(Zg, z_edges) - 1  # row index
