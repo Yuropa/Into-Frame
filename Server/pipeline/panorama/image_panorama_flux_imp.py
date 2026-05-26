@@ -197,6 +197,19 @@ def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
     return Image.fromarray(shifted)
 
 
+def _make_surround_mask(
+    equi_size: tuple,
+    tile_size: tuple[int, int],
+    tile_pos: tuple[int, int],
+    feather: int = 32,
+) -> Image.Image:
+    """Mask that is white in the generated surround, fading to black over the source tile."""
+    mask = Image.new("L", equi_size, 255)
+    blank = Image.new("L", tile_size, 0)
+    mask.paste(blank, tile_pos)
+    return mask.filter(ImageFilter.GaussianBlur(radius=feather))
+
+
 def _lab_color_transfer(
     source: Image.Image,
     target: Image.Image,
@@ -314,7 +327,7 @@ class PanoGenerator(RemoteServer):
 
         # --- Pass 1 — Main Generation ---
         self.report_progress(0.10, "Building blending canvas...")
-        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.05)
+        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.10)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
@@ -371,13 +384,23 @@ class PanoGenerator(RemoteServer):
         self.base_pipeline.vae.to("cpu")
         torch.cuda.empty_cache()
 
+        # Compute tile placement for the surround color-transfer mask
+        tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
+        tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
+        tile_h = min(tile_h, equi_size[1])
+        cx = (equi_size[0] - tile_w) // 2
+        cy = (equi_size[1] - tile_h) // 2
+
         # --- Pass 3 — Color & Style Adjustments ---
         self.report_progress(0.85, "Post-processing color and style...")
+
+        # Focus color transfer on the generated surround so the model output matches the input palette
+        surround_mask = _make_surround_mask(equi_size, (tile_w, tile_h), (cx, cy), feather=32)
         lab_result = _lab_color_transfer(
             source=input_image,
             target=pass2,
             strength=color_transfer_strength,
-            mask=None,
+            mask=surround_mask,
         )
 
         # NST processing
@@ -387,17 +410,6 @@ class PanoGenerator(RemoteServer):
             strength=style_strength,
             steps=nst_steps,
         )
-
-        # Composite original crisp structural center back over the final output to guarantee 0% blur
-        cx = (equi_size[0] - pass1.width) // 2 # alignment check
-        tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
-        tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
-        tile_h = min(tile_h, equi_size[1])
-        cx = (equi_size[0] - tile_w) // 2
-        cy = (equi_size[1] - tile_h) // 2
-        
-        # Paste original un-sampled input image directly onto the final output canvas
-        final.paste(input_image.resize((tile_w, tile_h), Image.LANCZOS), (cx, cy))
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
@@ -425,7 +437,7 @@ class PanoGenerator(RemoteServer):
                     fov_deg=float(input.get("fov_degrees", 60.0)),
                     caption=input.get("caption", ""),
                     ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
-                    color_transfer_strength=float(input.get("color_transfer_strength", 0.35)),
+                    color_transfer_strength=float(input.get("color_transfer_strength", 0.6)),
                     style_strength=float(input.get("style_strength", 0.2)),
                     nst_steps=int(input.get("nst_steps", 150)),
                     seed=int(input.get("seed", 0)),
