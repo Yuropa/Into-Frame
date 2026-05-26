@@ -10,7 +10,7 @@ class SceneGenerationStage(PipelineStage):
     """
     Assembles the final 3D scene by unprojecting each detected object's bounding box
     into world space (using depth + camera parameters) and placing its mesh or billboard
-    at the computed position.
+    at the computed position. Also adds the terrain mesh (if present) at the origin.
 
     Input keys:
       SemanticKey.INPUT        → ContextKey.INPUT          (Image, used for bbox scale)
@@ -24,6 +24,9 @@ class SceneGenerationStage(PipelineStage):
       crop_{i}      → Image   (object texture)
       mesh_{i}      → Mesh    (optional; falls back to billboard if absent)
       metadata_{i}  → object  ({"box": [...], "score": float})
+
+    Optional:
+      ContextKey.TERRAIN_MESH  → Mesh  (placed at origin if present)
 
     Output key (SemanticKey.OUTPUT) → ContextKey.SCENE (Scene)
     """
@@ -100,6 +103,11 @@ class SceneGenerationStage(PipelineStage):
             self.advance_progress(generation_task)
 
         self.finish_progress(generation_task)
+
+        terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
+        if terrain_mesh is not None:
+            self.log_info("Adding terrain mesh to scene")
+            scene.add_object(Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0))
 
         context.add_scene(output_key, scene)
         return context
