@@ -145,25 +145,21 @@ class NeuralStyleTransfer:
 
         return nst_result
 
+# --------------------------------------------------------------------------- #
+#  Canvas & Seam Helpers                                                      #
+# --------------------------------------------------------------------------- #
+
 def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
     hfov_deg: float,
-    minimum_strength: float = 120.0,
+    feather_pct: float = 0.15,
 ) -> tuple[Image.Image, Image.Image]:
     """
-    Place input image at centre of equirectangular canvas.
-
-    The surround is a smooth outward-blurred extension of the image edges so the
-    LoRA sees a neutral prior rather than tiled duplicates.
-
-    Returns
-    -------
-    canvas : RGB Image  — full equirectangular initialisation
-    mask   : L Image    — 255 = inpaint this region, 0 = keep as-is
+    Places input image at center, but creates a gradient mask that allows FLUX
+    to slightly inpaint/alter the borders of the input image for a perfect blend.
     """
     equi_w, equi_h = equi_size
-    hfov_deg = hfov_deg * 2.0
 
     tile_w = max(1, int((hfov_deg / 360.0) * equi_w))
     tile_h = max(1, int((hfov_deg / 180.0) * equi_h * (input_image.height / input_image.width)))
@@ -175,20 +171,14 @@ def _make_canvas(
 
     surround = Image.new("RGB", equi_size)
 
+    # Simple edge extension for neutral prior
     left_strip  = tile.crop((0, 0, 1, tile_h)).resize((cx, tile_h), Image.BILINEAR)
     surround.paste(left_strip, (0, cy))
-
-    right_strip = tile.crop((tile_w - 1, 0, tile_w, tile_h)).resize(
-        (equi_w - cx - tile_w, tile_h), Image.BILINEAR
-    )
+    right_strip = tile.crop((tile_w - 1, 0, tile_w, tile_h)).resize((equi_w - cx - tile_w, tile_h), Image.BILINEAR)
     surround.paste(right_strip, (cx + tile_w, cy))
-
     top_strip = tile.crop((0, 0, tile_w, 1)).resize((tile_w, cy), Image.BILINEAR)
     surround.paste(top_strip, (cx, 0))
-
-    bot_strip = tile.crop((0, tile_h - 1, tile_w, tile_h)).resize(
-        (tile_w, equi_h - cy - tile_h), Image.BILINEAR
-    )
+    bot_strip = tile.crop((0, tile_h - 1, tile_w, tile_h)).resize((tile_w, equi_h - cy - tile_h), Image.BILINEAR)
     surround.paste(bot_strip, (cx, cy + tile_h))
 
     avg    = tuple(int(c) for c in np.array(tile).mean(axis=(0, 1)))
@@ -197,82 +187,46 @@ def _make_canvas(
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 20))
     canvas.paste(tile, (cx, cy))
 
+    # Create a gradient mask (Inpaint everything except deep center of original image)
+    # 255 = completely change, 0 = keep completely untouched
     mask = Image.new("L", equi_size, 255)
-    mask.paste(Image.new("L", (tile_w, tile_h), 0), (cx, cy))
-
-    feather_radius = max(minimum_strength, tile_w // 20)
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=feather_radius))
+    
+    # Inner region to keep safe
+    feather_w = int(tile_w * feather_pct)
+    feather_h = int(tile_h * feather_pct)
+    inner_w = max(1, tile_w - (feather_w * 2))
+    inner_h = max(1, tile_h - (feather_h * 2))
+    
+    inner_blank = Image.new("L", (inner_w, inner_h), 0)
+    mask.paste(inner_blank, (cx + feather_w, cy + feather_h))
+    
+    # Smooth out the transition so it doesn't look pasted
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(feather_w, feather_h)))
 
     return canvas, mask
 
 
-def _lab_color_transfer(
-    source: Image.Image,
-    target: Image.Image,
-    strength: float = 0.35,
-    mask: Image.Image | None = None,
-) -> Image.Image:
+def _make_seam_mask(equi_size: tuple, seam_width: int = 128) -> Image.Image:
     """
-    Transfer the LAB colour statistics of *source* onto *target*.
-
-    Preserves all spatial structure (edges, geometry, textures) in *target*
-    while nudging its palette toward *source*.
-
-    Uses float32 LAB (L∈[0,100], A/B∈[−127,127]) throughout so that:
-      • the A/B channels sit at 0 for neutral grey (not 128 as in uint8 LAB),
-        giving the std-rescaling correct numerical grounding.
-      • overflow values from the rescaling are only clipped to the valid LAB
-        range *before* the LAB→RGB conversion — the old uint8 path clipped
-        in LAB space first, which introduced hue/saturation artefacts.
-
-    Parameters
-    ----------
-    source   : reference image whose colour distribution we want to match
-    target   : generated panorama whose structure we want to keep
-    strength : 0.0 = no change, 1.0 = full transfer.  Keep low (0.2–0.4)
-               for a light touch.
-    mask     : optional single-channel image (same size as target) where
-               255 = apply full transfer, 0 = no transfer.  Pass the
-               inpainting mask so the source region is left untouched and
-               the effect fades in across the feathered edge.
+    Creates a vertical mask down the center of the image to correct the 360 seam
+    after a 50% horizontal shift.
     """
-    def to_lab(img: Image.Image) -> np.ndarray:
-        rgb = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
-        return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)   # L∈[0,100], A/B∈[−127,127]
+    w, h = equi_size
+    mask = Image.new("L", equi_size, 0)
+    # Draw a white mask down the middle where the old left/right outer edges met
+    seam_box = Image.new("L", (seam_width, h), 255)
+    mask.paste(seam_box, ((w - seam_width) // 2, 0))
+    # Soften edges
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=seam_width // 4))
+    return mask
 
-    src = to_lab(source)
-    tgt = to_lab(target)
 
-    transferred = tgt.copy()
-    for ch in range(3):
-        tgt_mean = tgt[..., ch].mean()
-        tgt_std  = tgt[..., ch].std() + 1e-6
-        src_mean = src[..., ch].mean()
-        src_std  = src[..., ch].std() + 1e-6
-        transferred[..., ch] = (tgt[..., ch] - tgt_mean) / tgt_std * src_std + src_mean
-
-    # Per-pixel strength: scalar * mask weight (H, W, 1) so it broadcasts over channels.
-    # Where mask=0 (source region) the blend is zero; where mask=255 it is full `strength`.
-    if mask is not None:
-        mask_resized = mask.convert("L").resize(
-            (target.width, target.height), Image.BILINEAR
-        )
-        pixel_strength = (
-            np.array(mask_resized, dtype=np.float32)[..., None] / 255.0 * strength
-        )
-    else:
-        pixel_strength = strength
-
-    blended = tgt + pixel_strength * (transferred - tgt)
-
-    # Clip to valid LAB range *before* the nonlinear LAB→RGB conversion
-    blended[..., 0] = np.clip(blended[..., 0],    0.0, 100.0)  # L
-    blended[..., 1] = np.clip(blended[..., 1], -127.0, 127.0)  # A
-    blended[..., 2] = np.clip(blended[..., 2], -127.0, 127.0)  # B
-
-    # Convert back and clip in RGB space
-    rgb = cv2.cvtColor(blended, cv2.COLOR_LAB2RGB)
-    return Image.fromarray(np.clip(rgb * 255.0, 0, 255).astype(np.uint8))
+def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
+    """Cyclically rolls the image pixels horizontally."""
+    arr = np.array(img)
+    shift_amt = int(arr.shape[1] * pct)
+    shifted = np.roll(arr, shift_amt, axis=1)
+    return Image.fromarray(shifted)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,6 +236,8 @@ def _lab_color_transfer(
 class PanoGenerator(RemoteServer):
 
     def setup(self):
+        # We'll use your NeuralStyleTransfer implementation cleanly
+        from __main__ import NeuralStyleTransfer
         self.style_transfer = NeuralStyleTransfer(device=self.device)
 
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(
@@ -289,22 +245,18 @@ class PanoGenerator(RemoteServer):
             torch_dtype=torch.bfloat16,
         )
 
-        # Single inpaint pipeline — carries the pano LoRA + IP-Adapter
         self.base_pipeline = FluxInpaintPipeline.from_pretrained(
             "black-forest-labs/FLUX.1-dev",
             torch_dtype=torch.bfloat16,
             image_encoder=image_encoder,
         )
 
-        # Pano LoRA
         self.base_pipeline.load_lora_weights(
             str(checkpoints_path() / "layer_pano_3d"),
             weight_name="pano_lora_720*1440_v1.safetensors",
             adapter_name="pano",
         )
 
-        # IP-Adapter — injects input-image semantics into cross-attention.
-        # XLabs weights work well for FLUX.1-dev; swap path if you have another.
         self.base_pipeline.load_ip_adapter(
             "XLabs-AI/flux-ip-adapter",
             weight_name="ip_adapter.safetensors",
@@ -314,37 +266,21 @@ class PanoGenerator(RemoteServer):
         self.base_pipeline.vae.enable_tiling()
         self.base_pipeline.vae.enable_slicing()
 
-    # ---------------------------------------------------------------------- #
-    #  Helpers                                                                #
-    # ---------------------------------------------------------------------- #
-
     def _encode_prompt(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
-        """Run text encoding in isolation so T5 is evicted before the transformer runs."""
         te1 = self.base_pipeline.text_encoder
         te2 = self.base_pipeline.text_encoder_2
-
         te1.to(self.device)
         te2.to(self.device)
         torch.cuda.empty_cache()
 
         with torch.inference_mode():
             result = self.base_pipeline.encode_prompt(
-                prompt=prompt,
-                prompt_2=None,
-                device=self.device,
-                num_images_per_prompt=1,
+                prompt=prompt, prompt_2=None, device=self.device, num_images_per_prompt=1
             )
-        prompt_embeds, pooled_prompt_embeds = result[0], result[1]
-
         te1.to("cpu")
         te2.to("cpu")
         torch.cuda.empty_cache()
-
-        return prompt_embeds, pooled_prompt_embeds
-
-    # ---------------------------------------------------------------------- #
-    #  Core panorama generation                                               #
-    # ---------------------------------------------------------------------- #
+        return result[0], result[1]
 
     def pano(
         self,
@@ -358,20 +294,6 @@ class PanoGenerator(RemoteServer):
         nst_steps: int,
         seed: int = 0,
     ) -> dict:
-        """
-        Generate a 360° equirectangular panorama from a single input image.
-
-        Parameters
-        ----------
-        input_image            : the seed photograph / render
-        fov_deg                : estimated horizontal FoV of the input image
-        caption                : optional text description to guide generation
-        ip_adapter_scale       : how strongly the input image guides the LoRA
-                                 pass (0 = text-only, 1 = image-dominated).
-                                 0.5–0.7 is a good starting range.
-        color_transfer_strength: 0.0–1.0 weight for the final LAB colour
-                                 transfer step.  Keep ≤ 0.4 for a light touch.
-        """
         if isinstance(input_image, np.ndarray):
             input_image = Image.fromarray(input_image)
 
@@ -384,25 +306,18 @@ class PanoGenerator(RemoteServer):
         # ------------------------------------------------------------------ #
         #  Pass 0 — Encode text prompt                                       #
         # ------------------------------------------------------------------ #
-        self.report_progress(0.05, "Encoding prompt...")
-        print("--- [Pass 0] Encoding prompt ---")
         prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
 
         # ------------------------------------------------------------------ #
-        #  Pass 1 — IP-Adapter guided inpaint with pano LoRA                #
+        #  Pass 1 — Main Generation (with Gradient Blend Mask)               #
         # ------------------------------------------------------------------ #
-        self.report_progress(0.20, "Building canvas...")
-        print("--- [Pass 1] Building canvas & mask ---")
-        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
+        self.report_progress(0.10, "Building blending canvas...")
+        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.15)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
-        self.report_progress(0.25, "Inpainting 360° surround...")
-        print("--- [Pass 1] Inpainting 360° surround (IP-Adapter + pano LoRA) ---")
+        self.report_progress(0.20, "Running main 360° outpaint...")
         self.base_pipeline.set_adapters(["pano"], adapter_weights=[1.0])
-
-        # IP-Adapter scale: controls how tightly the generated content tracks
-        # the input image appearance vs the text prompt.
         self.base_pipeline.set_ip_adapter_scale(ip_adapter_scale)
 
         generator = torch.Generator(device=self.device).manual_seed(seed)
@@ -410,10 +325,10 @@ class PanoGenerator(RemoteServer):
             pass1: Image.Image = self.base_pipeline(
                 prompt_embeds=prompt_embeds,
                 pooled_prompt_embeds=pooled_prompt_embeds,
-                ip_adapter_image=input_image,   # <-- image guidance injected here
+                ip_adapter_image=input_image,
                 image=canvas,
                 mask_image=mask,
-                strength=0.99,
+                strength=0.95,  # Allows subtle alterations on the gradient boundaries
                 height=equi_size[1],
                 width=equi_size[0],
                 guidance_scale=3.5,
@@ -421,53 +336,76 @@ class PanoGenerator(RemoteServer):
                 output_type="pil",
                 generator=generator,
             ).images[0]
+            
+        pass1.save(str(temp_path / "02_pass1_initial.png"))
 
+        # ------------------------------------------------------------------ #
+        #  Pass 2 — Seam Stitch Fix (Horizontal Shift + Inpaint)             #
+        # ------------------------------------------------------------------ #
+        self.report_progress(0.60, "Fixing panorama edge seams...")
+        print("--- [Pass 2] Fixing 360 outer seams ---")
+        
+        # Shift layout by 50% so the outer-edges meet cleanly right in the center
+        shifted_pass1 = _shift_horizon(pass1, pct=0.5)
+        seam_mask = _make_seam_mask(equi_size, seam_width=160)
+        
+        shifted_pass1.save(str(temp_path / "03_shifted_canvas.png"))
+        seam_mask.save(str(temp_path / "03_seam_mask.png"))
+
+        # Inpaint a clean strip down the center seam to force context coherence
+        with torch.inference_mode():
+            fixed_shifted: Image.Image = self.base_pipeline(
+                prompt_embeds=prompt_embeds,
+                pooled_prompt_embeds=pooled_prompt_embeds,
+                ip_adapter_image=input_image,
+                image=shifted_pass1,
+                mask_image=seam_mask,
+                strength=0.75,  # High context match, low disruption
+                height=equi_size[1],
+                width=equi_size[0],
+                guidance_scale=3.5,
+                num_inference_steps=25,
+                output_type="pil",
+                generator=generator,
+            ).images[0]
+
+        # Shift it back 50% to return to original view alignment
+        pass2 = _shift_horizon(fixed_shifted, pct=-0.5)
+        pass2.save(str(temp_path / "04_seams_fixed.png"))
+
+        # Offload pipeline safely
         self.base_pipeline.transformer.to("cpu")
         self.base_pipeline.vae.to("cpu")
         torch.cuda.empty_cache()
 
-        if pass1.size != equi_size:
-            pass1 = pass1.resize(equi_size, Image.LANCZOS)
-        pass1.save(str(temp_path / "02_pass1_layout.png"))
-
         # ------------------------------------------------------------------ #
-        #  Pass 2 — LAB colour transfer (light touch, zero VRAM)            #
+        #  Pass 3 — Color & Style Adjustments                                #
         # ------------------------------------------------------------------ #
-        self.report_progress(0.88, "Colour transfer...")
-        print("--- [Pass 2a] LAB colour transfer ---")
+        self.report_progress(0.85, "Post-processing color and style...")
+        from __main__ import _lab_color_transfer
         lab_result = _lab_color_transfer(
             source=input_image,
-            target=pass1,
-            strength=color_transfer_strength,   # ~0.3
-            mask=mask,                          # fades to zero over source region
+            target=pass2,
+            strength=color_transfer_strength,
+            mask=None,  # Post-seam fix, apply globally or keep custom
         )
-        lab_result.save(str(temp_path / "03_lab_transfer.png"))
 
-        # Pass 2b — Neural style transfer (captures texture/brushstroke quality)
-        print("--- [Pass 2b] Neural style transfer ---")
-        final = lab_result
-        # self.style_transfer.transfer(
-        #     content=lab_result,
-        #     style=input_image,
-        #     strength=style_strength,     # new param, 0.3–0.7 depending on how painterly you want
-        #     steps=nst_steps,             # new param, default ~300
-        # )
+        final = self.style_transfer.transfer(
+            content=lab_result,
+            style=input_image,
+            strength=style_strength,
+            steps=nst_steps,
+        )
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
-        final.save(str(temp_path / "04_final_panorama.png"))
+        final.save(str(temp_path / "05_final_panorama.png"))
 
-        # ------------------------------------------------------------------ #
-        #  Cube-map projection                                               #
-        # ------------------------------------------------------------------ #
+        # Cube-map projection
         self.report_progress(0.95, "Projecting cubemap...")
         equirectangular = np.array(final)
         cube_dict = py360convert.e2c(equirectangular, face_w=512, cube_format="dict")
-        for k, face in cube_dict.items():
-            Image.fromarray(np.clip(face, 0, 255).astype("uint8")).save(
-                str(temp_path / f"face_{k}.png")
-            )
-
+        
         return {
             "image": final,
             "faces": {
@@ -476,29 +414,22 @@ class PanoGenerator(RemoteServer):
             },
         }
 
-    # ---------------------------------------------------------------------- #
-    #  RemoteServer dispatch                                                  #
-    # ---------------------------------------------------------------------- #
-
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
             try:
-                print(f"Got input keys: {list(input.keys())}")
                 result = self.pano(
                     temp_path=temp_path,
                     input_image=input["image"],
                     fov_deg=float(input.get("fov_degrees", 60.0)),
                     caption=input.get("caption", ""),
                     ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
-                    color_transfer_strength=float(input.get("color_transfer_strength", 0.75)),
+                    color_transfer_strength=float(input.get("color_transfer_strength", 0.35)),
                     style_strength=float(input.get("style_strength", 0.45)),
                     nst_steps=int(input.get("nst_steps", 300)),
                     seed=int(input.get("seed", 0)),
                 )
-                print(f"Panorama complete: {result['image'].size}")
                 return result
             except Exception as e:
-                print(f"Unable to generate panorama: {e}")
                 traceback.print_exc()
                 raise
         raise ValueError(f"Unknown action: {action}")
