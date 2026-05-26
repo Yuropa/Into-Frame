@@ -258,11 +258,11 @@ class Pipeline:
         if progress_queue is not None:
             progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
 
-    def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task):
+    def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task, force_run: bool = False) -> bool:
         output_root, temp_root = self._create_output_directories()
         stage.set_output(output_root, temp_root)
-        
-        with monitor.stage(stage.name):    
+
+        with monitor.stage(stage.name):
             try:
                 self.log_info(f"Handling stage: {stage.name}")
                 stage._set_progress(progress, task)
@@ -271,18 +271,21 @@ class Pipeline:
                 self._post_progress(progress_queue)
 
                 context.push_stage(stage.name)
-                if not stage.has_expected_output(context):
+                if force_run or not stage.has_expected_output(context):
                     context = stage.run(context)
                     stage.log_memory_usage()
                     stage.clean_up()
+                    ran = True
                 else:
                     self.log_info(f"Skipping cached stage {stage.name}")
-        
+                    ran = False
+
                 context.pop_stage()
 
                 self._save_context(context)
                 self.current_step_index += 1
                 self._post_progress(progress_queue)
+                return ran
             except RuntimeError as e:
                 self._print_total_allocations()
                 raise
@@ -326,15 +329,19 @@ class Pipeline:
             ) as progress:
                 task = progress.add_task("Processing...", total=len(self.stages))
 
+                force_run = False
                 for stage in self.stages:
-                    self._run_stage(
+                    ran = self._run_stage(
                         stage=stage,
                         context=context,
                         progress_queue=progress_queue,
                         monitor=monitor,
                         progress=progress,
-                        task=task
-                    )                    
+                        task=task,
+                        force_run=force_run,
+                    )
+                    if ran:
+                        force_run = True
 
         self._save_context(context)
         monitor.print_summary()
