@@ -229,6 +229,74 @@ def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
     return Image.fromarray(shifted)
 
 
+def _lab_color_transfer(
+    source: Image.Image,
+    target: Image.Image,
+    strength: float = 0.35,
+    mask: Image.Image | None = None,
+) -> Image.Image:
+    """
+    Transfer the LAB colour statistics of *source* onto *target*.
+
+    Preserves all spatial structure (edges, geometry, textures) in *target*
+    while nudging its palette toward *source*.
+
+    Uses float32 LAB (L∈[0,100], A/B∈[−127,127]) throughout so that:
+      • the A/B channels sit at 0 for neutral grey (not 128 as in uint8 LAB),
+        giving the std-rescaling correct numerical grounding.
+      • overflow values from the rescaling are only clipped to the valid LAB
+        range *before* the LAB→RGB conversion — the old uint8 path clipped
+        in LAB space first, which introduced hue/saturation artefacts.
+
+    Parameters
+    ----------
+    source   : reference image whose colour distribution we want to match
+    target   : generated panorama whose structure we want to keep
+    strength : 0.0 = no change, 1.0 = full transfer.  Keep low (0.2–0.4)
+               for a light touch.
+    mask     : optional single-channel image (same size as target) where
+               255 = apply full transfer, 0 = no transfer.  Pass the
+               inpainting mask so the source region is left untouched and
+               the effect fades in across the feathered edge.
+    """
+    def to_lab(img: Image.Image) -> np.ndarray:
+        rgb = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)   # L∈[0,100], A/B∈[−127,127]
+
+    src = to_lab(source)
+    tgt = to_lab(target)
+
+    transferred = tgt.copy()
+    for ch in range(3):
+        tgt_mean = tgt[..., ch].mean()
+        tgt_std  = tgt[..., ch].std() + 1e-6
+        src_mean = src[..., ch].mean()
+        src_std  = src[..., ch].std() + 1e-6
+        transferred[..., ch] = (tgt[..., ch] - tgt_mean) / tgt_std * src_std + src_mean
+
+    # Per-pixel strength: scalar * mask weight (H, W, 1) so it broadcasts over channels.
+    # Where mask=0 (source region) the blend is zero; where mask=255 it is full `strength`.
+    if mask is not None:
+        mask_resized = mask.convert("L").resize(
+            (target.width, target.height), Image.BILINEAR
+        )
+        pixel_strength = (
+            np.array(mask_resized, dtype=np.float32)[..., None] / 255.0 * strength
+        )
+    else:
+        pixel_strength = strength
+
+    blended = tgt + pixel_strength * (transferred - tgt)
+
+    # Clip to valid LAB range *before* the nonlinear LAB→RGB conversion
+    blended[..., 0] = np.clip(blended[..., 0],    0.0, 100.0)  # L
+    blended[..., 1] = np.clip(blended[..., 1], -127.0, 127.0)  # A
+    blended[..., 2] = np.clip(blended[..., 2], -127.0, 127.0)  # B
+
+    # Convert back and clip in RGB space
+    rgb = cv2.cvtColor(blended, cv2.COLOR_LAB2RGB)
+    return Image.fromarray(np.clip(rgb * 255.0, 0, 255).astype(np.uint8))
+
 # --------------------------------------------------------------------------- #
 #  PanoGenerator                                                               #
 # --------------------------------------------------------------------------- #
@@ -382,7 +450,6 @@ class PanoGenerator(RemoteServer):
         #  Pass 3 — Color & Style Adjustments                                #
         # ------------------------------------------------------------------ #
         self.report_progress(0.85, "Post-processing color and style...")
-        from __main__ import _lab_color_transfer
         lab_result = _lab_color_transfer(
             source=input_image,
             target=pass2,
