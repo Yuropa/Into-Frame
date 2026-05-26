@@ -135,6 +135,7 @@ def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
     hfov_deg: float,
+    feather_pct: float = 0.25,
 ) -> tuple[Image.Image, Image.Image]:
     equi_w, equi_h = equi_size
 
@@ -163,8 +164,17 @@ def _make_canvas(
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 80))
     canvas.paste(tile, (cx, cy))
 
-    # Full-white mask: inpaint everything — IP adapter guides style from the input image
+    # Wide feathered mask: 0 (preserve) in the protected core, 255 (inpaint) in surround.
+    # feather_pct=0.25 gives a gradual transition wide enough to be invisible without losing structure.
+    feather_w = max(8, int(tile_w * feather_pct))
+    feather_h = max(8, int(tile_h * feather_pct))
+    inner_w   = max(1, tile_w - feather_w * 2)
+    inner_h   = max(1, tile_h - feather_h * 2)
+
     mask = Image.new("L", equi_size, 255)
+    mask.paste(Image.new("L", (inner_w, inner_h), 0), (cx + feather_w, cy + feather_h))
+    # Blur radius matches the feather zone so the gradient spans the full transition area
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(feather_w, feather_h) // 2))
 
     return canvas, mask
 
@@ -402,7 +412,7 @@ class PanoGenerator(RemoteServer):
                     input_image=input["image"],
                     fov_deg=float(input.get("fov_degrees", 60.0)),
                     caption=input.get("caption", ""),
-                    ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
+                    ip_adapter_scale=float(input.get("ip_adapter_scale", 0.8)),
                     color_transfer_strength=float(input.get("color_transfer_strength", 0.6)),
                     style_strength=float(input.get("style_strength", 0.2)),
                     nst_steps=int(input.get("nst_steps", 150)),
