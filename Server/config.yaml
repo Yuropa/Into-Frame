@@ -39,6 +39,7 @@ stages:
     grid_resolution: 512         # grid cells per side
     ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground
     use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
+    smooth_sigma: 8.0            # distance-weighted smoothing: 0 at centre → this value (px) at corners
 
   - name: Terrain Mesh
     stage: TerrainMeshStage

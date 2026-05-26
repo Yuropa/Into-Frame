@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
 from util.depth_utils import Depth
 from scene.camera import CameraIntrinsics
 from typing import Optional
@@ -14,6 +15,7 @@ class HeightMapGenerator:
         grid_resolution: int = 512,
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
+        smooth_sigma: float = 0.0,
     ) -> np.ndarray:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -92,7 +94,51 @@ class HeightMapGenerator:
         has_data = height_cnt > 0
         height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
 
-        return HeightMapGenerator._interpolate(height_map)
+        result = HeightMapGenerator._interpolate(height_map)
+        if smooth_sigma > 0:
+            result = HeightMapGenerator._smooth_distance_weighted(result, max_sigma=smooth_sigma)
+        return result
+
+    @staticmethod
+    def _smooth_distance_weighted(
+        height_map: np.ndarray,
+        max_sigma: float,
+        n_levels: int = 5,
+    ) -> np.ndarray:
+        """
+        Spatially-varying Gaussian smoothing: sigma=0 at the grid centre
+        (nearest to camera, highest-confidence data) increasing linearly to
+        max_sigma at the grid corners (farthest away, lowest confidence).
+
+        Implemented as a scale-space blend: pre-compute n_levels+1 Gaussian
+        blurs at evenly-spaced sigmas, then for each pixel interpolate between
+        the two neighbouring levels according to its normalised distance from
+        the centre.  This is O(n_levels × H × W) and avoids a per-pixel blur.
+        """
+        h, w = height_map.shape
+
+        # Normalised distance from grid centre: 0 at centre, 1 at corner
+        y = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
+        x = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
+        dist = np.clip(np.sqrt(y ** 2 + x ** 2) / np.sqrt(2.0), 0.0, 1.0)
+
+        # Pre-compute Gaussian levels: 0 = original, n_levels = max_sigma
+        sigmas = np.linspace(0.0, max_sigma, n_levels + 1)
+        levels = np.stack(
+            [height_map if s == 0 else gaussian_filter(height_map, sigma=s)
+             for s in sigmas],
+            axis=0,
+        )  # (n_levels+1, H, W)
+
+        # Per-pixel blend between floor and ceiling levels
+        idx  = dist * n_levels                                         # [0, n_levels]
+        lo   = np.floor(idx).astype(np.int32).clip(0, n_levels - 1)
+        hi   = (lo + 1).clip(0, n_levels)
+        frac = (idx - lo).astype(np.float32)
+
+        rows, cols = np.mgrid[0:h, 0:w]
+        return (levels[lo, rows, cols] * (1.0 - frac) +
+                levels[hi, rows, cols] * frac).astype(np.float32)
 
     @staticmethod
     def _interpolate(height_map: np.ndarray) -> np.ndarray:

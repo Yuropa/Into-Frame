@@ -22,6 +22,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         grid_resolution: int = 512,
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
+        smooth_sigma: float = 0.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -30,6 +31,9 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # -0.5 means at least 0.5 m below the camera origin.
         self.ground_y_max = ground_y_max
         self.use_equirectangular = use_equirectangular
+        # Max Gaussian sigma (in grid pixels) for distance-weighted smoothing.
+        # 0 disables smoothing; sigma is 0 at the centre, smooth_sigma at the corners.
+        self.smooth_sigma = smooth_sigma
 
 
 class HeightMapStage(PipelineStage):
@@ -87,6 +91,7 @@ class HeightMapStage(PipelineStage):
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
             use_equirectangular=cfg.use_equirectangular,
+            smooth_sigma=cfg.smooth_sigma,
         )
         self.advance_progress(task)
 
