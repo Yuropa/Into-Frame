@@ -20,9 +20,10 @@ class ContextKey:
     PANAORAMA_CUBENAME = "panorama_cubemap"
     OBJECT_COUNT = "count"
     FOREGROUND_MASKED_IMAGE = "foreground_masked_image"
+    PANORAMA_DEPTH = "panorama_depth"
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "height_map", "height_map_params"]
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

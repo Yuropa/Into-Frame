@@ -17,6 +17,7 @@ from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.foreground_inpainting.generation import ForegroundInpainting
 from pipeline.captioning.captioning import CaptioningStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
+from pipeline.panorama_depth.depth import PanoramaDepthStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -89,18 +90,17 @@ class Pipeline:
             PanoramaStage(config=config.stage_config("Panorama", keys={
                 # SemanticKey.INPUT: ContextKey.FOREGROUND_MASKED_IMAGE
             })),
-            # DepthStage(config=config.stage_config("Pano Depth", keys={
-            #     SemanticKey.INPUT: ContextKey.PANAORAMA_CUBENAME,
-            #     SemanticKey.OUTPUT: "Panorama Depth"
-            # })),
+            # PanoramaDepthStage(config=config.stage_config("Panorama Depth")),
             # HeightMapStage(config=HeightMapConfiguration(
             #     name="Height Map",
             #     device=config.device,
             #     torch_dtype=config.torch_dtype,
             #     log=config.log,
-            #     # To consume panorama-derived depth instead of the direct image depth,
-            #     # set SemanticKey.DEPTH → "Panorama Depth" (matching the Pano Depth stage above).
-            #     # keys={SemanticKey.DEPTH: "Panorama Depth", SemanticKey.INTRINSICS: ...},
+            #     # Consume the panorama-derived depth map produced by PanoramaDepthStage above.
+            #     keys={
+            #         SemanticKey.DEPTH: ContextKey.PANORAMA_DEPTH,
+            #         SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
+            #     },
             #     grid_size_meters=100.0,   # side length of the output grid in metres
             #     grid_resolution=512,      # grid cells per side
             #     ground_y_max=-0.5,        # Y threshold (camera space): points ≤ this are ground
