@@ -14,7 +14,7 @@ Into Frame is built around a two-part architecture: a Python server that runs th
 |-----------|-------------|
 | **`Server/`** | A Python server that runs the AI generation pipeline. Handles model inference, scene construction, and serves assets to connected clients. |
 | **`Into Frame/`** | A Unity project (C#) that connects to the Python server and renders the generated 3D scene in real time. |
-| **`IntoFrame visionOS/`** | A native macOS app (Swift + Metal) that connects to the Python server and renders the scene with full immersive support. |
+| **`IntoFrame visionOS/`** | A native macOS app (Swift + Metal 4) that connects to the Python server, renders the generated scene, and streams it as a full-immersion experience to an Apple Vision Pro via Remote Immersive Space. |
 
 ---
 
@@ -77,9 +77,13 @@ By default this binds to `localhost:8080`, with an asset server on port `3000`.
 
 Open the `Into Frame/` folder as a Unity project. With the Python server running, press **Play** to connect and explore your generated scene.
 
-#### macOS App
+#### macOS App (Apple Vision Pro)
 
-Open `IntoFrame visionOS/IntoFrame.xcodeproj` in Xcode, build, and run. The app connects to `ws://localhost:8080` by default — this can be overridden via the `ServerWSURL` key in the app's `Info.plist`.
+Open `IntoFrame visionOS/IntoFrame.xcodeproj` in Xcode, build, and run. The app connects to the Python server, downloads the generated scene assets, and renders them using a custom Metal 4 renderer. Once a scene is ready, tap **Enter Immersive Space** to stream a full-immersion view of the environment to a nearby Apple Vision Pro via [Remote Immersive Space](https://developer.apple.com/documentation/visionos/creating-immersive-spaces-in-visionos-with-swiftui).
+
+The main window shows connection status, scene generation progress, and asset download progress before the immersive view is available.
+
+The server URL defaults to `ws://localhost:8080` and can be overridden via the `ServerWSURL` key in the app's `Info.plist`.
 
 ---
 
