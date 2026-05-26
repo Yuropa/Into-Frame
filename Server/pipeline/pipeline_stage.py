@@ -46,8 +46,13 @@ class PipelineStage:
     Subclasses implement run() to read from PipelineContext, process data, and write results back.
     Override has_expected_output() to enable caching (stage is skipped if it returns True).
     Override model_names() to declare HuggingFace repos that must be present before the pipeline runs.
+    Override config_class() to advertise a stage-specific PipelineStageConfiguration subclass.
     Use create_progress/advance_progress/finish_progress for consistent progress reporting.
     """
+
+    @classmethod
+    def config_class(cls) -> type['PipelineStageConfiguration']:
+        return PipelineStageConfiguration
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
         self.name = config.name

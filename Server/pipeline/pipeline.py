@@ -3,6 +3,7 @@ import os
 import random
 import sys
 import torch
+import yaml
 from typing import Optional
 import logging
 import shutil
@@ -76,19 +77,24 @@ def _clear_directory(path: Path):
             shutil.rmtree(item)
 
 class PipelineConfiguration:
-    """Top-level configuration: output/temp paths, device selection, and logger."""
+    """Top-level configuration: output/temp paths, device selection, logger, and stage list loaded from YAML."""
 
     output: Optional[Path]
     save_files: bool = False
 
-    def __init__(self, output: Optional[str], seeds: Optional[SeedConfiguration] = None):
+    def __init__(
+        self,
+        output: Optional[str],
+        seeds: Optional[SeedConfiguration] = None,
+        config_path: Optional[Path] = None,
+    ):
         if output is not None:
             self.output = Path(output)
             self.temp = Path(output + "/build")
 
             self.output.mkdir(parents=True, exist_ok=True)
 
-            self.temp.mkdir(parents=True, exist_ok=True) 
+            self.temp.mkdir(parents=True, exist_ok=True)
             _clear_directory(self.temp)
         else:
             self.output = None
@@ -103,25 +109,56 @@ class PipelineConfiguration:
             handlers=[RichHandler(rich_tracebacks=True)]
         )
         self.log = logging.getLogger("rich")
+        self.stages_yaml = self._load_stages_yaml(config_path)
 
-    def stage_config(self, name: str, keys: dict[SemanticKeyName, ContextKeyName] | None = None,) -> PipelineStageConfiguration:
-        return PipelineStageConfiguration(
+    def _load_stages_yaml(self, config_path: Optional[Path]) -> list[dict]:
+        if config_path is None or not config_path.exists():
+            return []
+        with open(config_path) as f:
+            data = yaml.safe_load(f)
+        return data.get("stages", [])
+
+    def stage_config(
+        self,
+        name: str,
+        config_class: type[PipelineStageConfiguration] = PipelineStageConfiguration,
+        keys: dict[SemanticKeyName, ContextKeyName] | None = None,
+        **kwargs,
+    ) -> PipelineStageConfiguration:
+        return config_class(
             name=name,
             device=self.device,
             torch_dtype=self.torch_dtype,
             log=self.log,
             keys=keys,
             seed=self.seeds.seed_for(name),
+            **kwargs,
         )
+
+STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
+    "CaptioningStage": CaptioningStage,
+    "DepthStage": DepthStage,
+    "PanoramaStage": PanoramaStage,
+    "PanoramaDepthStage": PanoramaDepthStage,
+    "HeightMapStage": HeightMapStage,
+    "TerrainMeshStage": TerrainMeshStage,
+    "SegmentationStage": SegmentationStage,
+    "SupersamplingStage": SupersamplingStage,
+    "SceneGenerationStage": SceneGenerationStage,
+    "ModelGenerationStage": ModelGenerationStage,
+    "ForegroundInpainting": ForegroundInpainting,
+}
+
 
 class Pipeline:
     """
-    Runs a fixed sequence of PipelineStages against a single input image.
+    Runs a sequence of PipelineStages against a single input image.
 
-    Stages are executed in order; each stage receives the shared PipelineContext and may
-    read values written by any prior stage. A stage whose has_expected_output() returns
-    True is skipped (cache hit). After each stage the context is optionally persisted to
-    disk so a re-run can resume from where it left off.
+    The stage list is driven by config.yaml (loaded via PipelineConfiguration). Stages are
+    executed in order; each receives the shared PipelineContext and may read values written
+    by any prior stage. A stage whose has_expected_output() returns True is skipped (cache
+    hit). After each stage the context is optionally persisted to disk so a re-run can
+    resume from where it left off.
     """
 
     stages: list[PipelineStage]
@@ -131,48 +168,36 @@ class Pipeline:
         self.config = config
         self.device = config.device
         self.torch_dtype = config.torch_dtype
-
-        self.stages = [
-            # ForegroundInpainting(config=config.stage_config("Foreground Inpainting")),
-            # SegmentationStage(config=config.stage_config("Object Segementation")),
-            CaptioningStage(config=config.stage_config("Captioning")),
-            DepthStage(config=config.stage_config("Depth Generation", keys={
-                # SemanticKey.INPUT: ContextKey.FOREGROUND_MASKED_IMAGE
-            })),
-            PanoramaStage(config=config.stage_config("Panorama", keys={
-                # SemanticKey.INPUT: ContextKey.FOREGROUND_MASKED_IMAGE
-            })),
-            # PanoramaDepthStage(config=config.stage_config("Panorama Depth")),
-            # HeightMapStage(config=HeightMapConfiguration(
-            #     name="Height Map",
-            #     device=config.device,
-            #     torch_dtype=config.torch_dtype,
-            #     log=config.log,
-            #     # Consume the panorama-derived depth map produced by PanoramaDepthStage above.
-            #     keys={
-            #         SemanticKey.DEPTH: ContextKey.PANORAMA_DEPTH,
-            #         SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
-            #     },
-            #     grid_size_meters=100.0,   # side length of the output grid in metres
-            #     grid_resolution=512,      # grid cells per side
-            #     ground_y_max=-0.5,        # Y threshold (camera space): points ≤ this are ground
-            # )),
-            # TerrainMeshStage(config=TerrainMeshConfiguration(
-            #     name="Terrain Mesh",
-            #     device=config.device,
-            #     torch_dtype=config.torch_dtype,
-            #     log=config.log,
-            #     n_z_vertices=150,         # Z rows: log-spaced, dense near camera
-            #     n_x_half_vertices=50,     # X columns per side: log-spaced, dense near centre
-            #     z_far=None,               # None → use HEIGHT_MAP_PARAMS grid_size_meters
-            #     noise_amplitude=0.05,     # metres of peak noise displacement
-            #     noise_seed=config.seeds.seed_for("Terrain Mesh"),
-            # )),
-            # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
-            # SceneGenerationStage(config=config.stage_config("Scene Generation"))
-        ]
-
+        self.stages = self._build_stages()
         self.log_info(f"Using device {device_name(self.device)}")
+
+    def _build_stages(self) -> list[PipelineStage]:
+        stages = []
+        for entry in self.config.stages_yaml:
+            if not entry.get("enabled", True):
+                continue
+
+            stage_name = entry.get("stage", "")
+            if stage_name not in STAGE_REGISTRY:
+                raise ValueError(
+                    f"Unknown stage '{stage_name}' in config. "
+                    f"Available: {sorted(STAGE_REGISTRY)}"
+                )
+
+            stage_class = STAGE_REGISTRY[stage_name]
+            cfg_class = stage_class.config_class()
+            name = entry["name"]
+
+            raw_keys = entry.get("keys")
+            keys = {SemanticKey(k): v for k, v in raw_keys.items()} if raw_keys else None
+
+            reserved = {"name", "stage", "enabled", "keys"}
+            kwargs = {k: v for k, v in entry.items() if k not in reserved}
+
+            stage_config = self.config.stage_config(name, cfg_class, keys=keys, **kwargs)
+            stages.append(stage_class(config=stage_config))
+
+        return stages
 
     def _create_output_directories(self) -> tuple[Optional[Path], Optional[Path]]:
         input_name = self.input.uuid_string()

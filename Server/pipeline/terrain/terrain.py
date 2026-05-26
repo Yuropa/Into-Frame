@@ -16,13 +16,13 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         torch_dtype: Any,
         log: Logger,
         keys=None,
+        seed: int = 42,
         n_z_vertices: int = 150,
         n_x_half_vertices: int = 50,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
-        noise_seed: int = 42,
     ):
-        super().__init__(name, device, torch_dtype, log, keys, seed=noise_seed)
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.n_z_vertices = n_z_vertices
         self.n_x_half_vertices = n_x_half_vertices
         self.z_far = z_far
@@ -52,6 +52,10 @@ class TerrainMeshStage(PipelineStage):
     Also reads ContextKey.HEIGHT_MAP_PARAMS for grid_size_meters / z_far when
     not overridden in TerrainMeshConfiguration.
     """
+
+    @classmethod
+    def config_class(cls) -> type[TerrainMeshConfiguration]:
+        return TerrainMeshConfiguration
 
     def __init__(self, config: TerrainMeshConfiguration) -> None:
         super().__init__(config)

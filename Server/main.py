@@ -5,10 +5,13 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import asyncio
 import argparse
+from pathlib import Path
 from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration, check_conda_env
 from pipeline.pipeline_input import PipelineInput
 from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
+
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
 
 def create_parser():
     parser = argparse.ArgumentParser(
@@ -71,6 +74,12 @@ def create_parser():
         default="./output",
         help="Output directory"
     )
+    server_parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
+    )
 
     # run
     run_parser = subparsers.add_parser(
@@ -96,11 +105,23 @@ def create_parser():
         default=True,
         type=bool
     )
+    run_parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
+    )
 
     # download
     download_parser = subparsers.add_parser(
         "download",
         help="Download all the models needed for the pipeline"
+    )
+    download_parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
     )
 
     return parser
@@ -131,6 +152,7 @@ def _create_pipeline_config(args):
     config = PipelineConfiguration(
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
+        config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
     )
 
     config.save_files = args.debug
@@ -168,7 +190,8 @@ def handle_run(args):
 
 def handle_download(args):
     config = PipelineConfiguration(
-        output=None
+        output=None,
+        config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
     )
 
     pipeline = Pipeline(

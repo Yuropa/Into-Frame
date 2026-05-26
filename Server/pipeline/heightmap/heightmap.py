@@ -17,11 +17,12 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         torch_dtype: Any,
         log: Logger,
         keys=None,
+        seed: int = 0,
         grid_size_meters: float = 100.0,
         grid_resolution: int = 512,
         ground_y_max: float = -0.5,
     ):
-        super().__init__(name, device, torch_dtype, log, keys)
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
         self.grid_resolution = grid_resolution
         # Y threshold in camera space; points with Y <= this are treated as ground.
@@ -42,6 +43,10 @@ class HeightMapStage(PipelineStage):
     Grid layout: rows = Z near→far, cols = X left→right, values = Y in camera space (metres).
     Configure grid_size_meters, grid_resolution, and ground_y_max via HeightMapConfiguration.
     """
+
+    @classmethod
+    def config_class(cls) -> type[HeightMapConfiguration]:
+        return HeightMapConfiguration
 
     def __init__(self, config: HeightMapConfiguration) -> None:
         super().__init__(config)
