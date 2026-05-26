@@ -135,7 +135,6 @@ def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
     hfov_deg: float,
-    feather_pct: float = 0.05,  # Reduced default feather to keep the center clean
 ) -> tuple[Image.Image, Image.Image]:
     equi_w, equi_h = equi_size
 
@@ -164,19 +163,8 @@ def _make_canvas(
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 80))
     canvas.paste(tile, (cx, cy))
 
-    # Strict mask generation: prevent wide gray gradients from eating the image center
+    # Full-white mask: inpaint everything — IP adapter guides style from the input image
     mask = Image.new("L", equi_size, 255)
-    
-    feather_w = max(4, int(tile_w * feather_pct))
-    feather_h = max(4, int(tile_h * feather_pct))
-    inner_w = max(1, tile_w - (feather_w * 2))
-    inner_h = max(1, tile_h - (feather_h * 2))
-    
-    inner_blank = Image.new("L", (inner_w, inner_h), 0)
-    mask.paste(inner_blank, (cx + feather_w, cy + feather_h))
-    
-    # Use a small, disciplined radius for edge softening
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(4, min(feather_w, feather_h) // 2)))
 
     return canvas, mask
 
@@ -195,19 +183,6 @@ def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
     shift_amt = int(arr.shape[1] * pct)
     shifted = np.roll(arr, shift_amt, axis=1)
     return Image.fromarray(shifted)
-
-
-def _make_surround_mask(
-    equi_size: tuple,
-    tile_size: tuple[int, int],
-    tile_pos: tuple[int, int],
-    feather: int = 32,
-) -> Image.Image:
-    """Mask that is white in the generated surround, fading to black over the source tile."""
-    mask = Image.new("L", equi_size, 255)
-    blank = Image.new("L", tile_size, 0)
-    mask.paste(blank, tile_pos)
-    return mask.filter(ImageFilter.GaussianBlur(radius=feather))
 
 
 def _lab_color_transfer(
@@ -327,7 +302,7 @@ class PanoGenerator(RemoteServer):
 
         # --- Pass 1 — Main Generation ---
         self.report_progress(0.10, "Building blending canvas...")
-        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.10)
+        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
@@ -384,23 +359,14 @@ class PanoGenerator(RemoteServer):
         self.base_pipeline.vae.to("cpu")
         torch.cuda.empty_cache()
 
-        # Compute tile placement for the surround color-transfer mask
-        tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
-        tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
-        tile_h = min(tile_h, equi_size[1])
-        cx = (equi_size[0] - tile_w) // 2
-        cy = (equi_size[1] - tile_h) // 2
-
         # --- Pass 3 — Color & Style Adjustments ---
         self.report_progress(0.85, "Post-processing color and style...")
 
-        # Focus color transfer on the generated surround so the model output matches the input palette
-        surround_mask = _make_surround_mask(equi_size, (tile_w, tile_h), (cx, cy), feather=32)
         lab_result = _lab_color_transfer(
             source=input_image,
             target=pass2,
             strength=color_transfer_strength,
-            mask=surround_mask,
+            mask=None,
         )
 
         # NST processing
