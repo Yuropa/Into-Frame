@@ -2,19 +2,21 @@ import numpy as np
 from scipy.interpolate import griddata
 from util.depth_utils import Depth
 from scene.camera import CameraIntrinsics
+from typing import Optional
 
 
 class HeightMapGenerator:
     @staticmethod
     def generate(
         depth: Depth,
-        intrinsics: CameraIntrinsics,
+        intrinsics: Optional[CameraIntrinsics],
         grid_size_meters: float = 100.0,
         grid_resolution: int = 512,
         ground_y_max: float = -0.5,
+        use_equirectangular: bool = False,
     ) -> np.ndarray:
         """
-        Project ground points from a rectilinear depth map onto a top-down height grid.
+        Project ground points from a depth map onto a top-down height grid.
 
         The output array is (grid_resolution, grid_resolution) float32 where:
           - rows index Z (near → far), columns index X (left → right)
@@ -24,6 +26,10 @@ class HeightMapGenerator:
         ground_y_max: Y threshold in camera space; points with Y <= this value are
                       treated as ground (e.g. -0.5 means at least 0.5 m below camera).
         grid_size_meters: side length of the square grid; X spans ±half, Z spans [0, full].
+        use_equirectangular: when True, treat depth as an equirectangular (360°) map
+                             where each pixel encodes a radial (Euclidean) distance.
+                             When False, treat depth as a rectilinear (pinhole) Z-depth
+                             map and use intrinsics to unproject.
         """
         d = depth.depth  # (H, W) float32, metric depth in metres
         h, w = d.shape
@@ -32,10 +38,22 @@ class HeightMapGenerator:
         cy = np.arange(h, dtype=np.float32)
         cx, cy = np.meshgrid(cx, cy)  # both (H, W)
 
-        # Vectorised unproject — matches CameraIntrinsics.unproject convention
-        X = (cx - intrinsics.px) * d / intrinsics.fx
-        Y = -((cy - intrinsics.py) * d / intrinsics.fy)  # flipped Y (Unity convention)
-        Z = d
+        if use_equirectangular:
+            # Equirectangular (spherical) unprojection.
+            # Each pixel maps to a ray direction; depth is radial (Euclidean) distance.
+            # theta: longitude in [-π, π],  0 = forward (+Z)
+            # phi:   latitude  in [-π/2, π/2], positive = above horizon
+            theta = (cx / w - 0.5) * 2.0 * np.pi
+            phi   = (0.5 - cy / h) * np.pi
+            cos_phi = np.cos(phi)
+            X =  d * cos_phi * np.sin(theta)
+            Y =  d * np.sin(phi)              # Unity Y-up: positive above camera
+            Z =  d * cos_phi * np.cos(theta)  # positive = forward
+        else:
+            # Rectilinear (pinhole) unprojection — matches CameraIntrinsics.unproject
+            X = (cx - intrinsics.px) * d / intrinsics.fx
+            Y = -((cy - intrinsics.py) * d / intrinsics.fy)  # flipped Y (Unity convention)
+            Z = d
 
         ground_mask = (
             (Y <= ground_y_max)

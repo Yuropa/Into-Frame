@@ -21,6 +21,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         grid_size_meters: float = 100.0,
         grid_resolution: int = 512,
         ground_y_max: float = -0.5,
+        use_equirectangular: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -28,6 +29,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # Y threshold in camera space; points with Y <= this are treated as ground.
         # -0.5 means at least 0.5 m below the camera origin.
         self.ground_y_max = ground_y_max
+        self.use_equirectangular = use_equirectangular
 
 
 class HeightMapStage(PipelineStage):
@@ -73,7 +75,7 @@ class HeightMapStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        if intrinsics is None:
+        if not cfg.use_equirectangular and intrinsics is None:
             self.log_warning("No camera intrinsics found — skipping height map generation")
             self.finish_progress(task)
             return context
@@ -84,6 +86,7 @@ class HeightMapStage(PipelineStage):
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
+            use_equirectangular=cfg.use_equirectangular,
         )
         self.advance_progress(task)
 

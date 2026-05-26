@@ -31,13 +31,14 @@ stages:
   - name: Height Map
     stage: HeightMapStage
     enabled: true
-    # Consume the panorama-derived depth map produced by Panorama Depth above.
+    # Panorama depth is equirectangular (radial distances); use spherical unprojection.
     keys:
       depth: panorama_depth
       intrinsics: intrinsics
-    grid_size_meters: 100.0   # side length of the output grid in metres
-    grid_resolution: 512      # grid cells per side
-    ground_y_max: -0.5        # Y threshold (camera space): points ≤ this are ground
+    grid_size_meters: 100.0      # side length of the output grid in metres
+    grid_resolution: 512         # grid cells per side
+    ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground
+    use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
