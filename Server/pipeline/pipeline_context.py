@@ -24,7 +24,8 @@ class ContextKey:
     PANORAMA_DEPTH = "panorama_depth"
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params"]
+    TERRAIN_MESH = "terrain_mesh"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

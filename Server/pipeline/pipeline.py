@@ -18,6 +18,7 @@ from pipeline.foreground_inpainting.generation import ForegroundInpainting
 from pipeline.captioning.captioning import CaptioningStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
 from pipeline.panorama_depth.depth import PanoramaDepthStage
+from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -115,6 +116,17 @@ class Pipeline:
             #     grid_size_meters=100.0,   # side length of the output grid in metres
             #     grid_resolution=512,      # grid cells per side
             #     ground_y_max=-0.5,        # Y threshold (camera space): points ≤ this are ground
+            # )),
+            # TerrainMeshStage(config=TerrainMeshConfiguration(
+            #     name="Terrain Mesh",
+            #     device=config.device,
+            #     torch_dtype=config.torch_dtype,
+            #     log=config.log,
+            #     n_z_vertices=150,         # Z rows: log-spaced, dense near camera
+            #     n_x_half_vertices=50,     # X columns per side: log-spaced, dense near centre
+            #     z_far=None,               # None → use HEIGHT_MAP_PARAMS grid_size_meters
+            #     noise_amplitude=0.05,     # metres of peak noise displacement
+            #     noise_seed=42,
             # )),
             # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             # SceneGenerationStage(config=config.stage_config("Scene Generation"))
