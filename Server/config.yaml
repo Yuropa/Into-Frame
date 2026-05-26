@@ -26,11 +26,11 @@ stages:
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
-    enabled: false
+    enabled: true
 
   - name: Height Map
     stage: HeightMapStage
-    enabled: false
+    enabled: true
     # Consume the panorama-derived depth map produced by Panorama Depth above.
     keys:
       depth: panorama_depth
@@ -41,7 +41,7 @@ stages:
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
-    enabled: false
+    enabled: true
     n_z_vertices: 150         # Z rows: log-spaced, dense near camera
     n_x_half_vertices: 50     # X columns per side: log-spaced, dense near centre
     z_far: null               # null → use Height Map grid_size_meters
@@ -61,4 +61,4 @@ stages:
 
   - name: Scene Generation
     stage: SceneGenerationStage
-    enabled: false
+    enabled: true

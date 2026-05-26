@@ -78,7 +78,7 @@ def create_parser():
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
+        help="Path to pipeline configuration YAML (default: config.yaml)"
     )
 
     # run
@@ -109,7 +109,7 @@ def create_parser():
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
+        help="Path to pipeline configuration YAML (default: config.yaml)"
     )
 
     # download
@@ -121,7 +121,7 @@ def create_parser():
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
-        help="Path to pipeline configuration YAML (default: config.yaml next to main.py)"
+        help="Path to pipeline configuration YAML (default: config.yaml)"
     )
 
     return parser
