@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter
+from scipy.spatial import KDTree
 from typing import Optional, Literal
 import trimesh
 import trimesh.visual.material
@@ -109,10 +110,25 @@ class TerrainMeshGenerator:
             np.stack([v10, v11, v01], axis=-1),
         ], axis=0).astype(np.int32)
 
-        # ── UV coordinates + texture ──────────────────────────────────────────
-        if texture is not None:
-            uv = TerrainMeshGenerator._compute_uvs(
-                vertices, uv_mode, intrinsics, texture
+        # ── Colour ───────────────────────────────────────────────────────────
+        if texture is not None and uv_mode == "panorama":
+            # Bake vertex colours by projecting each 3D point back into the
+            # panorama.  Vertices whose viewing angle is above the horizon or
+            # too steeply downward (near-nadir region; poorly generated) are
+            # treated as holes and filled from the nearest valid neighbour.
+            vertex_colors = TerrainMeshGenerator._bake_panorama_colors(
+                vertices, texture
+            )
+            tri_mesh = trimesh.Trimesh(
+                vertices=vertices, faces=faces,
+                vertex_colors=vertex_colors, process=False
+            )
+            _ = tri_mesh.vertex_normals
+        elif texture is not None and uv_mode == "pinhole":
+            # Pinhole: original image covers a limited but well-defined FOV,
+            # so UV mapping is correct for every in-frame vertex.
+            uv = TerrainMeshGenerator._uvs_pinhole(
+                vertices[:, 0], vertices[:, 1], vertices[:, 2], intrinsics
             )
             material = trimesh.visual.material.PBRMaterial(
                 baseColorTexture=texture.convert("RGB"),
@@ -122,50 +138,85 @@ class TerrainMeshGenerator:
             tri_mesh = trimesh.Trimesh(
                 vertices=vertices, faces=faces, visual=visual, process=False
             )
-            # Trigger lazy vertex-normal computation so the GLB includes them
             _ = tri_mesh.vertex_normals
         else:
             tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
         return Mesh(tri_mesh)
 
-    # ── UV helpers ────────────────────────────────────────────────────────────
+    # ── Colour helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _compute_uvs(
+    def _bake_panorama_colors(
         vertices: np.ndarray,
-        mode: UVMode,
-        intrinsics: Optional[CameraIntrinsics],
-        texture: PIL.Image.Image,
+        panorama: PIL.Image.Image,
+        min_lat_deg: float = -35.0,
     ) -> np.ndarray:
-        X = vertices[:, 0]
-        Y = vertices[:, 1]
-        Z = vertices[:, 2]
-
-        if mode == "panorama":
-            return TerrainMeshGenerator._uvs_panorama(X, Y, Z)
-        else:
-            if intrinsics is None:
-                raise ValueError("intrinsics required for uv_mode='pinhole'")
-            return TerrainMeshGenerator._uvs_pinhole(X, Y, Z, intrinsics)
-
-    @staticmethod
-    def _uvs_panorama(X: np.ndarray, Y: np.ndarray, Z: np.ndarray) -> np.ndarray:
         """
-        Equirectangular projection (X right, Y up, Z forward convention).
+        Sample a colour for every terrain vertex from the equirectangular panorama.
 
-        Assumes the panorama is centred on the forward (+Z) direction so that:
-          u=0.5  → straight ahead, u=0/1 → directly behind
-          v=0    → zenith (+Y), v=0.5 → horizon, v=1 → nadir (-Y)
+        For each vertex the direction from the camera origin to that point is computed
+        and mapped to a panorama pixel.  Two classes of vertex are treated as "holes"
+        and filled by interpolation from the nearest valid neighbour (in XZ):
+
+          • above the horizon  (lat >= 0)   — would sample sky
+          • steeper than min_lat_deg below  — near-nadir region, poorly generated
+
+        Bilinear sampling is used; the panorama wraps horizontally.
+
+        min_lat_deg: most-negative latitude (degrees) still considered valid.
+                     -35° means ≈3 m horizontal distance for a 2 m camera height.
         """
-        lon = np.arctan2(X, Z)                                    # (−π, π]
+        X = vertices[:, 0].astype(np.float64)
+        Y = vertices[:, 1].astype(np.float64)
+        Z = vertices[:, 2].astype(np.float64)
+
         r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
-        lat = np.arctan2(Y, r_xz)                                 # [−π/2, π/2]
+        lat = np.arctan2(Y, r_xz)            # negative = below horizon
+        lon = np.arctan2(X, Z)               # 0 = forward (+Z)
 
-        u = (lon + np.pi) / (2.0 * np.pi)
-        v = 0.5 - lat / np.pi
+        min_lat_rad = np.radians(min_lat_deg)
+        valid = (lat < 0.0) & (lat >= min_lat_rad)
 
-        return np.stack([u, v], axis=-1).astype(np.float32)
+        pano = np.array(panorama.convert("RGB"), dtype=np.float32)
+        H, W = pano.shape[:2]
+
+        # Fractional pixel coordinates
+        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)   # [0, W-1], wraps
+        pv = (0.5 - lat / np.pi) * (H - 1)               # [0, H-1], clamp
+
+        # Integer corners with horizontal wrap and vertical clamp
+        pu0 = np.floor(pu).astype(np.int32) % W
+        pu1 = (pu0 + 1) % W
+        pv0 = np.clip(np.floor(pv).astype(np.int32), 0, H - 1)
+        pv1 = np.clip(pv0 + 1, 0, H - 1)
+
+        fu = (pu - np.floor(pu))[:, None]   # (N, 1)
+        fv = (pv - np.floor(pv))[:, None]
+
+        c00 = pano[pv0, pu0]
+        c10 = pano[pv0, pu1]
+        c01 = pano[pv1, pu0]
+        c11 = pano[pv1, pu1]
+
+        colors_f = (c00 * (1 - fu) * (1 - fv) +
+                    c10 * fu       * (1 - fv) +
+                    c01 * (1 - fu) * fv       +
+                    c11 * fu       * fv)
+
+        colors = np.zeros((len(vertices), 4), dtype=np.uint8)
+        colors[:, 3] = 255  # alpha
+        colors[valid, :3] = np.clip(colors_f[valid], 0, 255).astype(np.uint8)
+
+        # Fill holes: nearest valid neighbour in XZ plane
+        invalid = ~valid
+        if invalid.any() and valid.any():
+            valid_xz = np.stack([X[valid], Z[valid]], axis=-1)
+            invalid_xz = np.stack([X[invalid], Z[invalid]], axis=-1)
+            _, nn = KDTree(valid_xz).query(invalid_xz)
+            colors[invalid, :3] = colors[valid][nn, :3]
+
+        return colors
 
     @staticmethod
     def _uvs_pinhole(
