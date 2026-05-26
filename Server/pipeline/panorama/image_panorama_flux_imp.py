@@ -490,7 +490,7 @@ class PanoGenerator(RemoteServer):
                     fov_deg=float(input.get("fov_degrees", 60.0)),
                     caption=input.get("caption", ""),
                     ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
-                    color_transfer_strength=float(input.get("color_transfer_strength", 0.30)),
+                    color_transfer_strength=float(input.get("color_transfer_strength", 0.75)),
                     style_strength=float(input.get("style_strength", 0.45)),
                     nst_steps=int(input.get("nst_steps", 300)),
                     seed=int(input.get("seed", 0)),
