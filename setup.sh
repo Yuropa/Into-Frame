@@ -423,8 +423,6 @@ download_sam3d() {
         mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
         rm -rf "$CHECKPOINT_DIR/hf-download"
     fi
-
-    conda deactivate
 }
 
 run_step "Downloading SAM 3D" \
