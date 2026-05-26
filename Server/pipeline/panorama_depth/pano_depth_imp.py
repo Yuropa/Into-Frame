@@ -29,7 +29,7 @@ class PanoDepthGenerator(RemoteServer):
 
         state = torch.load(str(model_path), map_location=self.device)
 
-        run_relative_to(dap_root):
+        with run_relative_to(dap_root):
             model = make(config["model"])
 
             if any(k.startswith("module") for k in state.keys()):

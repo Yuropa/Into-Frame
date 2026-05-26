@@ -577,6 +577,7 @@ setup_depth_pano() {
     create_env "depthpano"
     clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
     run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
+    run_in_env pip install xformers
 
     download_checkpoint "https://huggingface.co/Insta360-Research/DAP-weights/resolve/main/model.pth" "depth_pano"
 

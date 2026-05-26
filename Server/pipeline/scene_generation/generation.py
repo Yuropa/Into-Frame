@@ -61,48 +61,49 @@ class SceneGenerationStage(PipelineStage):
         if context.image(panorama_key) is not None:
             scene.skybox = panorama_key
 
-        generation_task = self.create_progress(object_count, "Creating Objects...")
-        for idx in range(object_count):
-            texture_name = f"crop_{idx}"
-            mesh_name = f"mesh_{idx}"
+        if object_count is not None:
+            generation_task = self.create_progress(object_count, "Creating Objects...")
+            for idx in range(object_count):
+                texture_name = f"crop_{idx}"
+                mesh_name = f"mesh_{idx}"
 
-            metadata = context.input_object(f"metadata_{idx}")
+                metadata = context.input_object(f"metadata_{idx}")
 
-            result = self.unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
-            if result is None:
-                self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
+                result = self.unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
+                if result is None:
+                    self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
+                    self.advance_progress(generation_task)
+                    continue
+
+                position, width, height = result
+
+                if context.input_mesh(mesh_name) is not None:
+                    updated_mesh = context.input_mesh(mesh_name)
+                    updated_mesh.fit_to_box(width=width, height=height)
+                    context.add_mesh(mesh_name, updated_mesh)
+
+                    self.log_info(f"Creating mesh for {idx}")
+                    mesh_obj = Object3D.mesh(
+                        mesh_name,
+                        x=position[0],
+                        y=position[1],
+                        z=position[2],
+                    )
+                    scene.add_object(mesh_obj)
+                else:
+                    self.log_info(f"Creating billboard for {idx}")
+                    billboard = Object3D.billboard(
+                        texture_name, 
+                        width=width,
+                        height=height,
+                        x=position[0],
+                        y=position[1],
+                        z=position[2],
+                    )
+                    scene.add_object(billboard)
                 self.advance_progress(generation_task)
-                continue
 
-            position, width, height = result
-
-            if context.input_mesh(mesh_name) is not None:
-                updated_mesh = context.input_mesh(mesh_name)
-                updated_mesh.fit_to_box(width=width, height=height)
-                context.add_mesh(mesh_name, updated_mesh)
-
-                self.log_info(f"Creating mesh for {idx}")
-                mesh_obj = Object3D.mesh(
-                    mesh_name,
-                    x=position[0],
-                    y=position[1],
-                    z=position[2],
-                )
-                scene.add_object(mesh_obj)
-            else:
-                self.log_info(f"Creating billboard for {idx}")
-                billboard = Object3D.billboard(
-                    texture_name, 
-                    width=width,
-                    height=height,
-                    x=position[0],
-                    y=position[1],
-                    z=position[2],
-                )
-                scene.add_object(billboard)
-            self.advance_progress(generation_task)
-
-        self.finish_progress(generation_task)
+            self.finish_progress(generation_task)
 
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
         if terrain_mesh is not None:
