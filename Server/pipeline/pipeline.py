@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import random
 import sys
 import torch
 from typing import Optional
@@ -28,6 +29,33 @@ from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name
 from util.image_utils import Image
 
+class SeedConfiguration:
+    """
+    Seed policy for a pipeline run.
+
+    A global seed is always present (randomly generated when not supplied) so
+    every run is reproducible by default.  Per-stage overrides take priority over
+    the global seed for the named stage; all other stages fall back to global.
+    """
+
+    def __init__(
+        self,
+        global_seed: Optional[int] = None,
+        stage_seeds: Optional[dict[str, int]] = None,
+    ):
+        self.global_seed = global_seed if global_seed is not None else random.randint(0, 2**32 - 1)
+        self.stage_seeds: dict[str, int] = stage_seeds or {}
+
+    def seed_for(self, stage_name: str) -> int:
+        return self.stage_seeds.get(stage_name, self.global_seed)
+
+    def describe(self) -> str:
+        if self.stage_seeds:
+            overrides = ", ".join(f"{name}={seed}" for name, seed in self.stage_seeds.items())
+            return f"global={self.global_seed} | per-stage: {overrides}"
+        return str(self.global_seed)
+
+
 def check_conda_env(expected: str = "frame"):
     active = os.environ.get("CONDA_DEFAULT_ENV")
     if active != expected:
@@ -53,7 +81,7 @@ class PipelineConfiguration:
     output: Optional[Path]
     save_files: bool = False
 
-    def __init__(self, output: Optional[str]):
+    def __init__(self, output: Optional[str], seeds: Optional[SeedConfiguration] = None):
         if output is not None:
             self.output = Path(output)
             self.temp = Path(output + "/build")
@@ -66,6 +94,7 @@ class PipelineConfiguration:
             self.output = None
             self.temp = None
 
+        self.seeds = seeds if seeds is not None else SeedConfiguration()
         self.device, self.torch_dtype = preferred_device()
 
         logging.basicConfig(
@@ -76,15 +105,14 @@ class PipelineConfiguration:
         self.log = logging.getLogger("rich")
 
     def stage_config(self, name: str, keys: dict[SemanticKeyName, ContextKeyName] | None = None,) -> PipelineStageConfiguration:
-        new_config = PipelineStageConfiguration(
+        return PipelineStageConfiguration(
             name=name,
-            device=self.device, 
+            device=self.device,
             torch_dtype=self.torch_dtype,
             log=self.log,
-            keys=keys
+            keys=keys,
+            seed=self.seeds.seed_for(name),
         )
-
-        return new_config
 
 class Pipeline:
     """
@@ -235,6 +263,7 @@ class Pipeline:
                 raise
 
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
+        self.log_info(f"Seed: {self.config.seeds.describe()}")
         self.log_info(f"Running with input: {self.input}")
         context = PipelineContext()
         input_image = self.input.image

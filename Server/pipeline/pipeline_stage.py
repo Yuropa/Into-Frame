@@ -25,17 +25,19 @@ class PipelineStageConfiguration:
 
     def __init__(
             self,
-            name: str, 
-            device: torch.device, 
+            name: str,
+            device: torch.device,
             torch_dtype: Any,
             log: Logger,
             keys: dict[SemanticKeyName, ContextKeyName] | None = None,
+            seed: int = 0,
             ):
         self.name = name
         self.device = device
         self.torch_dtype = torch_dtype
         self.log = log
         self.keys = keys or {}
+        self.seed = seed
 
 class PipelineStage:
     """
@@ -52,6 +54,7 @@ class PipelineStage:
         self.config = config
         self.device = config.device
         self.torch_dtype = config.torch_dtype
+        self.seed = config.seed
         self.total_tasks = None
 
     def input_key(self, default_input_key: Optional[ContextKeyName] = None) -> ContextKeyName:    

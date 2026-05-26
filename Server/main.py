@@ -5,7 +5,7 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import asyncio
 import argparse
-from pipeline.pipeline import Pipeline, PipelineConfiguration, check_conda_env
+from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration, check_conda_env
 from pipeline.pipeline_input import PipelineInput
 from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
@@ -20,6 +20,17 @@ def create_parser():
         type=str,
         default="frame",
         help="Expected conda environment name (default: frame)"
+    )
+    parser.add_argument(
+        "--seed",
+        type=str,
+        action="append",
+        metavar="VALUE|STAGE:VALUE",
+        help=(
+            "Random seed for reproducibility. Pass a single integer to seed all stages "
+            "identically, or one or more STAGE:VALUE pairs to seed stages individually. "
+            "A global seed is always generated and logged even if not supplied."
+        ),
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -94,9 +105,32 @@ def create_parser():
 
     return parser
 
+def _parse_seeds(seed_args: list[str] | None) -> SeedConfiguration:
+    if not seed_args:
+        return SeedConfiguration()
+
+    global_seed = None
+    stage_seeds: dict[str, int] = {}
+
+    for arg in seed_args:
+        if ":" in arg:
+            stage, _, raw = arg.partition(":")
+            stage_seeds[stage.strip()] = int(raw.strip())
+        else:
+            if global_seed is not None:
+                raise ValueError(
+                    f"Multiple bare seed values supplied. "
+                    f"Use STAGE:VALUE pairs for per-stage seeds."
+                )
+            global_seed = int(arg)
+
+    return SeedConfiguration(global_seed=global_seed, stage_seeds=stage_seeds)
+
+
 def _create_pipeline_config(args):
     config = PipelineConfiguration(
-        output=args.output
+        output=args.output,
+        seeds=_parse_seeds(getattr(args, "seed", None)),
     )
 
     config.save_files = args.debug
