@@ -454,16 +454,19 @@ run_step "Installing Depth Anything" \
 # Hugging Face auth for gated checkpoints
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
-conda run -n "$CONDA_NAME" pip install huggingface_hub
+conda run -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
 conda run -n "$CONDA_NAME" python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
-info "Downloading models..."
-python3 "$SCRIPT_DIR/Server/main.py" download
+# Encapsulating the download wrapper so it interfaces cleanly with your UI spinner
+download_pipeline_models() {
+    if ! conda run -n "$CONDA_NAME" python3 "$SCRIPT_DIR/Server/main.py" download; then
+        error "Error: failed to download models. Access may be required on Hugging Face" >&2
+        error "Models will be downloaded later when running pipeline" >&2
+    fi
+}
 
-if [ $? -ne 0 ]; then
-    error "Error: failed to download models. Access may be required on Hugging Face" >&2
-    error "Models will be downloaded later when running pipeline" >&2
-fi
+run_step "Downloading Model Checkpoints" \
+    download_pipeline_models
 
 run_step "Installing Updated Pillow" \
     conda run -n frame pip install --upgrade --force-reinstall Pillow
@@ -569,15 +572,14 @@ download_layer_pano_3d() {
 run_step "Downloading Layer Pano 3D" \
     download_layer_pano_3d
 
-## ============
+## ======================
 ## Depth Any Panoramas
-## ============
+## ======================
 
 setup_depth_pano() {
     create_env "depthpano"
     clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
     run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
-    run_in_env pip install xformers
 
     download_checkpoint "https://huggingface.co/Insta360-Research/DAP-weights/resolve/main/model.pth" "depth_pano"
 
