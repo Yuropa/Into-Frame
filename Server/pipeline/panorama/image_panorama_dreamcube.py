@@ -21,7 +21,7 @@ class ImagePanoramaDreamCube(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["KevinHuang/DreamCube"]
 
-    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0) -> PanoramaOutput:
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0, on_progress=None) -> PanoramaOutput:
         data = {
             "image": input,
             "fov_degrees": fov,

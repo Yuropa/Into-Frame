@@ -9,9 +9,10 @@ import base64
 import os
 from io import BytesIO
 
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from util.image_utils import Image
 from util.device_utils import device_id
+from util.json_utils import parse_json
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
 
 class RemoteClient():
@@ -135,31 +136,44 @@ class RemoteClient():
         self.json_out.write(encoded)
         self.json_out.flush()
 
-    def send(self, action: str, input, temp_path: Path) -> Any:
+    def send(
+        self,
+        action: str,
+        input,
+        temp_path: Path,
+        on_progress: Optional[Callable[[float, str], None]] = None,
+    ) -> Any:
         self._check_for_errors()
 
         request = RemoteInput(
-            action=action, 
-            temp_path=temp_path, 
+            action=action,
+            temp_path=temp_path,
             input=input
         )
         self._send(request)
         self.dump_logs()
 
-        response_line = self._readline_json(self.json_pipe)
-        if response_line is None:
-            raise RuntimeError("Subprocess closed connection unexpectedly")
-        response = RemoteOutput.decode(response_line)
+        while True:
+            response_line = self._readline_json(self.json_pipe)
+            if response_line is None:
+                raise RuntimeError("Subprocess closed connection unexpectedly")
 
-        error = getattr(response, "error", None)
-        if error:
-            stack = getattr(response, "stack", None)
-            print(f"Encountered error {error}")
-            print(f"{stack}")
-            raise RuntimeError(f"Remote error: {error}")
+            raw = parse_json(response_line)
+            if isinstance(raw, dict) and raw.get("type") == "progress":
+                if on_progress is not None:
+                    on_progress(float(raw.get("fraction", 0.0)), str(raw.get("label", "")))
+                continue
 
-        self.dump_logs()
-        return response.output
+            response = RemoteOutput.decode(response_line)
+            error = getattr(response, "error", None)
+            if error:
+                stack = getattr(response, "stack", None)
+                print(f"Encountered error {error}")
+                print(f"{stack}")
+                raise RuntimeError(f"Remote error: {error}")
+
+            self.dump_logs()
+            return response.output
     
     def close(self):
         if self.process is not None:

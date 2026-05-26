@@ -42,8 +42,8 @@ class ImagePanorama:
             case PanoramaGeneratorType.FLUX:
                 return ImagePanoramaFlux.model_names()
 
-    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0) -> PanoramaOutput:
-        return self.generator.pano(input, depth, temp_path, fov, caption, seed=seed)
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0, on_progress=None) -> PanoramaOutput:
+        return self.generator.pano(input, depth, temp_path, fov, caption, seed=seed, on_progress=on_progress)
 
     def close(self):
         self.generator.close()

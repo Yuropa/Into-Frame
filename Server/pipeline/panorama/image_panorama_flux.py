@@ -21,7 +21,7 @@ class ImagePanoramaFlux(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["black-forest-labs/FLUX.1-dev", "black-forest-labs/FLUX.1-Redux-dev", "openai/clip-vit-large-patch14", "XLabs-AI/flux-ip-adapter"]
 
-    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0) -> PanoramaOutput:
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0, on_progress=None) -> PanoramaOutput:
         data = {
             "image": input,
             "fov_degrees": fov,
@@ -29,5 +29,5 @@ class ImagePanoramaFlux(RemoteClient):
             "depth": depth,
             "seed": seed,
         }
-        values = self.send(action="pano", input=data, temp_path=temp_path)
+        values = self.send(action="pano", input=data, temp_path=temp_path, on_progress=on_progress)
         return PanoramaOutput(values=values)

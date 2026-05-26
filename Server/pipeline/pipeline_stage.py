@@ -150,11 +150,28 @@ class PipelineStage:
 
     def advance_progress(self, sub_task):
         self.progress.advance(sub_task)
-        
+
         task = next(t for t in self.progress.tasks if t.id == sub_task)
         sub_total = task.total if task.total is not None else task.completed + 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
         self.progress.advance(self.main_task, 1 / (sub_total * total_tasks))
+
+    def update_progress(self, sub_task, fraction: float):
+        """Set a sub-task to an absolute fraction [0, 1] of completion and advance the main task by the delta."""
+        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        total = task.total if task.total is not None else 1
+        new_completed = min(fraction * total, total)
+        delta = new_completed - task.completed
+        if delta > 0:
+            self.progress.update(sub_task, completed=new_completed)
+            total_tasks = self.total_tasks if self.total_tasks is not None else 1
+            self.progress.advance(self.main_task, delta / (total * total_tasks))
+
+    def make_progress_callback(self, sub_task):
+        """Return a (fraction, label) → None callable for passing to remote calls."""
+        def callback(fraction: float, label: str = ""):
+            self.update_progress(sub_task, fraction)
+        return callback
 
     def finish_progress(self, task):
         # Snap main task forward by whatever fraction this stage didn't account for

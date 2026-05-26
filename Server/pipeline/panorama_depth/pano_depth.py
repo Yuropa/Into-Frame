@@ -23,6 +23,6 @@ class PanoramaDepth(RemoteClient):
         # Loaded from a local checkpoint — not a HuggingFace repo
         return []
 
-    def depth(self, input: PILImage.Image, temp_path: Path) -> DepthResult:
-        result = self.send(action="depth", input=input, temp_path=temp_path)
+    def depth(self, input: PILImage.Image, temp_path: Path, on_progress=None) -> DepthResult:
+        result = self.send(action="depth", input=input, temp_path=temp_path, on_progress=on_progress)
         return DepthResult(result)

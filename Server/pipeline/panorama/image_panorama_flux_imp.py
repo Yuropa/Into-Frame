@@ -349,17 +349,20 @@ class PanoGenerator(RemoteServer):
         # ------------------------------------------------------------------ #
         #  Pass 0 — Encode text prompt                                       #
         # ------------------------------------------------------------------ #
+        self.report_progress(0.05, "Encoding prompt...")
         print("--- [Pass 0] Encoding prompt ---")
         prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
 
         # ------------------------------------------------------------------ #
         #  Pass 1 — IP-Adapter guided inpaint with pano LoRA                #
         # ------------------------------------------------------------------ #
+        self.report_progress(0.20, "Building canvas...")
         print("--- [Pass 1] Building canvas & mask ---")
         canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
+        self.report_progress(0.25, "Inpainting 360° surround...")
         print("--- [Pass 1] Inpainting 360° surround (IP-Adapter + pano LoRA) ---")
         self.base_pipeline.set_adapters(["pano"], adapter_weights=[1.0])
 
@@ -395,6 +398,7 @@ class PanoGenerator(RemoteServer):
         # ------------------------------------------------------------------ #
         #  Pass 2 — LAB colour transfer (light touch, zero VRAM)            #
         # ------------------------------------------------------------------ #
+        self.report_progress(0.88, "Colour transfer...")
         print("--- [Pass 2a] LAB colour transfer ---")
         lab_result = _lab_color_transfer(
             source=input_image,
@@ -420,6 +424,7 @@ class PanoGenerator(RemoteServer):
         # ------------------------------------------------------------------ #
         #  Cube-map projection                                               #
         # ------------------------------------------------------------------ #
+        self.report_progress(0.95, "Projecting cubemap...")
         equirectangular = np.array(final)
         cube_dict = py360convert.e2c(equirectangular, face_w=512, cube_format="dict")
         for k, face in cube_dict.items():

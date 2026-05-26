@@ -27,6 +27,6 @@ class ImageDepth(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["depth-anything/da3nested-giant-large"]
 
-    def depth(self, input: Image, temp_path: Path) -> DepthResult:
-        result = self.send(action="depth", input=input.image, temp_path=temp_path)
+    def depth(self, input: Image, temp_path: Path, on_progress=None) -> DepthResult:
+        result = self.send(action="depth", input=input.image, temp_path=temp_path, on_progress=on_progress)
         return DepthResult(result)

@@ -47,7 +47,7 @@ class DepthStage(PipelineStage):
             if input_cubemap is not None:
                 for face in CubeFace:
                     input_image = input_cubemap[face]
-                    result = self._depth.depth(input_image, self.temp)
+                    result = self._depth.depth(input_image, self.temp, on_progress=self.make_progress_callback(depth_task))
                     depth = Depth(result.depth)
 
                     resulting_faces[face] = depth
@@ -58,7 +58,7 @@ class DepthStage(PipelineStage):
         else:
             input_image = context.input_image(input_key)
             if input_image is not None:
-                result = self._depth.depth(input_image, self.temp)
+                result = self._depth.depth(input_image, self.temp, on_progress=self.make_progress_callback(depth_task))
                 depth = Depth(result.depth)
 
                 intrinsics = CameraIntrinsics.from_depth_anything(

@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 from pathlib import Path
 from util.device_utils import clean_device_cache, device_name, device_from_id
+from util.json_utils import write_json
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
 
 class RemoteServer(ABC):
@@ -39,6 +40,11 @@ class RemoteServer(ABC):
     def _send(self, obj: RemoteObject):
         encoded = obj.encode()
         print(encoded, file=self.json_out, flush=True)
+
+    def report_progress(self, fraction: float, label: str = ""):
+        """Send an intermediate progress update to the client before the final result."""
+        msg = write_json({"type": "progress", "fraction": fraction, "label": label})
+        print(msg, file=self.json_out, flush=True)
 
     def poll(self):
         is_running = True

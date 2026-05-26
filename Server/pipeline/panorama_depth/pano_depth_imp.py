@@ -62,6 +62,7 @@ class PanoDepthGenerator(RemoteServer):
             .to(self.device)
         )
 
+        self.report_progress(0.1, "Running panorama depth inference...")
         with torch.inference_mode():
             outputs = self.model(tensor)
 
@@ -75,6 +76,7 @@ class PanoDepthGenerator(RemoteServer):
 
         # DAP output is 0–1 where 1.0 = 100 m; convert to metric metres
         depth_metres = pred.astype(np.float32) * 100.0
+        self.report_progress(1.0, "Done")
         return {"depth": depth_metres}
 
 

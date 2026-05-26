@@ -34,7 +34,7 @@ class PanoramaDepthStage(PipelineStage):
 
         input_image = context.input_image(input_key)
         if input_image is not None:
-            result = self._depth.depth(input_image.image, self.temp)
+            result = self._depth.depth(input_image.image, self.temp, on_progress=self.make_progress_callback(task))
             depth = Depth(result.depth)
 
             if self.temp is not None:
