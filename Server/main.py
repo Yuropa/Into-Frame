@@ -5,7 +5,7 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import asyncio
 import argparse
-from pipeline.pipeline import Pipeline, PipelineConfiguration
+from pipeline.pipeline import Pipeline, PipelineConfiguration, check_conda_env
 from pipeline.pipeline_input import PipelineInput
 from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
@@ -13,6 +13,13 @@ from server.server import SimulationServerConfiguration, SimulationServer
 def create_parser():
     parser = argparse.ArgumentParser(
         description="Generate immersive scenes from an image"
+    )
+
+    parser.add_argument(
+        "--env",
+        type=str,
+        default="frame",
+        help="Expected conda environment name (default: frame)"
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -143,6 +150,8 @@ def main():
     except SystemExit as e:
         print(f"{e}")
         return
+
+    check_conda_env(args.env)
 
     if args.command == "server":
         handle_server(args)

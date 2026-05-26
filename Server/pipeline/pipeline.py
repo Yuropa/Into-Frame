@@ -1,4 +1,6 @@
 from pathlib import Path
+import os
+import sys
 import torch
 from typing import Optional
 import logging
@@ -25,6 +27,16 @@ from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name
 from util.image_utils import Image
+
+def check_conda_env(expected: str = "frame"):
+    active = os.environ.get("CONDA_DEFAULT_ENV")
+    if active != expected:
+        print(
+            f"Error: wrong conda environment '{active}'. "
+            f"Activate '{expected}' first:\n  conda activate {expected}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 def _clear_directory(path: Path):
     if not path.exists():
