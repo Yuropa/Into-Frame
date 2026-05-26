@@ -120,7 +120,7 @@ CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
-FLASH_ATTN_DIR="$HOME/.cache/wheels/flash-attn"
+FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
 
 create_base_env() {
     conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
@@ -278,7 +278,7 @@ cleanup_if_needed() {
             rm -rf "$LIB_DIR"
         fi
 
-        rm -rf "$FLASH_ATTN_DIR"
+        rm -rf "$FLASH_WHEEL_DIR"
 
         conda init
         source_shell_configs
@@ -299,6 +299,7 @@ run_step "Cleanup" \
 
 setup_shell_env() {
     conda init
+    eval "$(conda shell.bash hook)"
     source_shell_configs
 
     # Detect OS and install accordingly
@@ -389,7 +390,7 @@ install_flash_attn() {
     else
         warn "Building flash-attn. This will take a while..."
         # Fixed $ver to $FLASH_VERSION here
-        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn=="$FLASH_VERSION" -w "$FLASH_WHEEL_DIR" --no-build-isolation
+        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn=="$FLASH_VERSION" -w "$FLASH_WHEEL_DIR" -v --no-build-isolation
         
         # Re-evaluate the expansion array to find the newly built wheel
         matched_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION"*.whl)
@@ -398,7 +399,6 @@ install_flash_attn() {
 
     # Handle your symlink cleanly
     ln -sf "$TRELLIS_DIR" "$PACKAGES_DIR/trellis2"
-    stop_env
 }
 
 run_step "Installing Trellis" \
