@@ -15,11 +15,11 @@ class DepthResult:
 
 class ImageDepth(RemoteClient):
     def __init__(self, device: torch.device) -> None:
-        script_path = Path(__file__).parent / "depth_imp.py"
+        script_path = Path(__file__).parent / "pano_depth_imp.py"
 
         super().__init__(
             device=device, 
-            conda_env="depthanything", 
+            conda_env="depthpano", 
             script_path=script_path
         )
 
