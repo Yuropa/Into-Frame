@@ -10,6 +10,18 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 
 class SegmentationStage(PipelineStage):
+    """
+    Detects and segments foreground objects in the input image, storing each
+    object's masked crop and bounding-box metadata for downstream stages.
+
+    Input key  (SemanticKey.INPUT)  → ContextKey.INPUT          (Image)
+    Output key (SemanticKey.OUTPUT) → ContextKey.OBJECT_COUNT    (int)
+
+    Dynamic context keys per detected object (index i):
+      crop_{i}      → Image  (masked object crop)
+      metadata_{i}  → object ({"box": [...], "score": float})
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._seg = None

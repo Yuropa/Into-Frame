@@ -6,6 +6,16 @@ import numpy as np
 import PIL
 
 class SupersamplingStage(PipelineStage):
+    """
+    Upsamples each object crop produced by SegmentationStage using a
+    super-resolution model, replacing the crops in context with higher-res versions.
+
+    Reads/writes dynamic context keys per object (index i):
+      crop_{i}  → Image  (read as input, overwritten with upsampled result)
+
+    Also reads: count (object) → number of crops to process
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._samp = None

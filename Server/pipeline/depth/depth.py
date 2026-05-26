@@ -7,6 +7,15 @@ from util.cubemap_utils import CubeFace
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class DepthStage(PipelineStage):
+    """
+    Estimates metric depth for a single image or each face of a cubemap using Depth Anything 3.
+
+    Input key       (SemanticKey.INPUT)      → ContextKey.INPUT           (Image or CubeMap)
+    Output key      (SemanticKey.OUTPUT)     → ContextKey.DEPTH            (Depth or CubeMap of Depth)
+    Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS       (CameraIntrinsics, image only)
+    Extrinsics key  (SemanticKey.EXTRINSICS) → ContextKey.EXTRINSICS       (CameraExtrinsics, image only)
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._depth = None

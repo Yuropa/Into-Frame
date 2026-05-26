@@ -35,6 +35,8 @@ def _clear_directory(path: Path):
             shutil.rmtree(item)
 
 class PipelineConfiguration:
+    """Top-level configuration: output/temp paths, device selection, and logger."""
+
     output: Optional[Path]
     save_files: bool = False
 
@@ -72,6 +74,15 @@ class PipelineConfiguration:
         return new_config
 
 class Pipeline:
+    """
+    Runs a fixed sequence of PipelineStages against a single input image.
+
+    Stages are executed in order; each stage receives the shared PipelineContext and may
+    read values written by any prior stage. A stage whose has_expected_output() returns
+    True is skipped (cache hit). After each stage the context is optionally persisted to
+    disk so a re-run can resume from where it left off.
+    """
+
     stages: list[PipelineStage]
     input: PipelineInputItem
 

@@ -7,6 +7,27 @@ from util.depth_utils import Depth
 import numpy as np
 
 class SceneGenerationStage(PipelineStage):
+    """
+    Assembles the final 3D scene by unprojecting each detected object's bounding box
+    into world space (using depth + camera parameters) and placing its mesh or billboard
+    at the computed position.
+
+    Input keys:
+      SemanticKey.INPUT        → ContextKey.INPUT          (Image, used for bbox scale)
+      SemanticKey.DEPTH        → ContextKey.DEPTH          (Depth, for world-space placement)
+      SemanticKey.INTRINSICS   → ContextKey.INTRINSICS     (CameraIntrinsics)
+      SemanticKey.EXTRINSICS   → ContextKey.EXTRINSICS     (CameraExtrinsics)
+      SemanticKey.PANORAMA     → ContextKey.PANORAMA       (Image, used as scene skybox)
+      SemanticKey.OBJECT_COUNT → ContextKey.OBJECT_COUNT   (int)
+
+    Dynamic context keys per object (index i):
+      crop_{i}      → Image   (object texture)
+      mesh_{i}      → Mesh    (optional; falls back to billboard if absent)
+      metadata_{i}  → object  ({"box": [...], "score": float})
+
+    Output key (SemanticKey.OUTPUT) → ContextKey.SCENE (Scene)
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._gen = None

@@ -9,6 +9,14 @@ from PIL import Image as PILImage
 from PIL import ImageOps
 
 class ForegroundInpainting(PipelineStage):
+    """
+    Detects and removes foreground objects from the input image, filling the
+    removed regions with plausible background content via inpainting.
+
+    Input key  (SemanticKey.INPUT)  → ContextKey.INPUT                   (Image)
+    Output key (SemanticKey.OUTPUT) → ContextKey.FOREGROUND_MASKED_IMAGE  (Image, foreground removed)
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._inpaint = None

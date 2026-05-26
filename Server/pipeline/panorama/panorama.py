@@ -6,6 +6,18 @@ from util.device_utils import DeviceStrategy, preferred_device
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class PanoramaStage(PipelineStage):
+    """
+    Generates a 360° equirectangular panorama and cubemap from the input image,
+    guided by the caption and depth map.
+
+    Input key      (SemanticKey.INPUT)      → ContextKey.INPUT             (Image)
+    Depth key      (SemanticKey.DEPTH)      → ContextKey.DEPTH             (Depth)
+    Caption key    (SemanticKey.CAPTION)    → ContextKey.INPUT_CAPTION     (str)
+    Intrinsics key (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS        (CameraIntrinsics)
+    Output key     (SemanticKey.OUTPUT)     → ContextKey.PANORAMA          (Image, equirectangular)
+    Cubemap key    (SemanticKey.CUBEMAP)    → ContextKey.PANAORAMA_CUBENAME (CubeMap)
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._pano = None

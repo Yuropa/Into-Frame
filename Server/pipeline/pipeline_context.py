@@ -10,6 +10,7 @@ from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 
 class ContextKey:
+    """Well-known string keys for values stored in PipelineContext."""
     INPUT = "input"
     DEPTH = "depth"
     SCENE = "scene"
@@ -28,6 +29,16 @@ class ContextKey:
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
 class PipelineContext():
+    """
+    Shared key-value store that flows through every pipeline stage.
+
+    Values are namespaced per stage: each stage writes into its own slot, and the
+    context walks stages in reverse order when looking up a key, so later stages
+    naturally shadow earlier ones. Use input_*() accessors to read values written
+    by a prior stage; use the plain accessors (image(), depth(), …) to read values
+    that may have been written by the current stage (e.g. for cache checks).
+    """
+
     def __init__(self) -> None:
         self._stage_state = {}
         self._state = {}

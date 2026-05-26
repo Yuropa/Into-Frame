@@ -21,6 +21,8 @@ class SemanticKey(StrEnum):
 SemanticKeyName: TypeAlias = SemanticKey | str
 
 class PipelineStageConfiguration:
+    """Base configuration passed to every pipeline stage (name, device, dtype, logger, key overrides)."""
+
     def __init__(
             self,
             name: str, 
@@ -36,6 +38,15 @@ class PipelineStageConfiguration:
         self.keys = keys or {}
 
 class PipelineStage:
+    """
+    Base class for all pipeline stages.
+
+    Subclasses implement run() to read from PipelineContext, process data, and write results back.
+    Override has_expected_output() to enable caching (stage is skipped if it returns True).
+    Override model_names() to declare HuggingFace repos that must be present before the pipeline runs.
+    Use create_progress/advance_progress/finish_progress for consistent progress reporting.
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         self.name = config.name
         self.config = config

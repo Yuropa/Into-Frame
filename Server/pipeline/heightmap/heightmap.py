@@ -31,15 +31,16 @@ class HeightMapConfiguration(PipelineStageConfiguration):
 
 class HeightMapStage(PipelineStage):
     """
-    Converts a rectilinear depth map into a top-down height map of the ground plane.
+    Projects ground-plane points from a rectilinear depth map into a top-down
+    height grid, then interpolates any missing cells from their neighbours.
 
-    Input keys (overridable via SemanticKey config):
-      DEPTH      → depth map (e.g. from DepthStage or PanoramaDepthStage)
-      INTRINSICS → matching camera intrinsics
+    Input key      (SemanticKey.DEPTH)      → ContextKey.DEPTH          (Depth, metric metres)
+    Intrinsics key (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS     (CameraIntrinsics)
+    Output key     (SemanticKey.OUTPUT)     → ContextKey.HEIGHT_MAP     (Depth, grid_resolution²)
+                                              ContextKey.HEIGHT_MAP_PARAMS (object, grid metadata)
 
-    Output keys:
-      OUTPUT     → Depth object wrapping the (grid_resolution × grid_resolution) height array
-                   rows = Z near→far, cols = X left→right, values = Y in camera space
+    Grid layout: rows = Z near→far, cols = X left→right, values = Y in camera space (metres).
+    Configure grid_size_meters, grid_resolution, and ground_y_max via HeightMapConfiguration.
     """
 
     def __init__(self, config: HeightMapConfiguration) -> None:

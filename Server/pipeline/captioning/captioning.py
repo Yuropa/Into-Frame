@@ -4,6 +4,13 @@ from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class CaptioningStage(PipelineStage):
+    """
+    Generates a text caption for the input image using a vision-language model.
+
+    Input key  (SemanticKey.INPUT)  → ContextKey.INPUT          (Image)
+    Output key (SemanticKey.OUTPUT) → ContextKey.INPUT_CAPTION   (str, stored as object)
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._caption = None

@@ -4,6 +4,18 @@ from pipeline.pipeline_context import PipelineContext
 from util.device_utils import DeviceStrategy, preferred_device
 
 class ModelGenerationStage(PipelineStage):
+    """
+    Generates a 3D mesh for each segmented object crop using a reconstruction model.
+
+    Reads dynamic context keys per object (index i):
+      crop_{i}   → Image  (textured object crop from SegmentationStage)
+
+    Writes dynamic context keys per object (index i):
+      mesh_{i}   → Mesh   (generated GLB mesh)
+
+    Also reads: count (object) → number of crops to process
+    """
+
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
 
