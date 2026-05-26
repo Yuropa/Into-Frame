@@ -36,14 +36,15 @@ class InPainting:
                 return InPaintingLama.model_names()
 
     def inpaint(
-        self, 
-        input_image: PILImage, 
-        mask_image: PILImage, 
+        self,
+        input_image: PILImage,
+        mask_image: PILImage,
         temp_path: Path,
-        prompt: str = "", 
-        num_inference_steps=30, 
+        prompt: str = "",
+        num_inference_steps=30,
         guidance_scale=30.0,
-        strength=1.0
+        strength=1.0,
+        seed: int = 0,
     ) -> PILImage:
         return self.generator.inpaint(
             input_image=input_image,
@@ -52,7 +53,8 @@ class InPainting:
             prompt=prompt,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
-            strength=strength
+            strength=strength,
+            seed=seed,
         )
     
     def close(self):

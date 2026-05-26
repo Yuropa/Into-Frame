@@ -38,10 +38,11 @@ class ModelGenerator():
             case ModelGeneratorType.TRELLIS:
                 return ModelGeneratorTrellis.model_names()
     
-    def meshify(self, image: Image, temp_path: Path) -> Mesh:
+    def meshify(self, image: Image, temp_path: Path, seed: int = 0) -> Mesh:
         return self.generator.meshify(
             image=image,
-            temp_path=temp_path
+            temp_path=temp_path,
+            seed=seed,
         )
 
     def close(self):

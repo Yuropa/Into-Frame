@@ -24,7 +24,8 @@ class ModelGenerator(ModelGeneratorBase):
         self.model.eval()
         self.bg_remove = Remover(device=self.device)
     
-    def meshify(self, temp_path: Path, input: Image) -> Any:
+    def meshify(self, temp_path: Path, input: Image, seed: int = 0) -> Any:
+        torch.manual_seed(seed)
         cleaned_image = remove_background(input, self.bg_remove)
         cleaned_image = foreground_crop(cleaned_image, self.foreground_ratio)
 

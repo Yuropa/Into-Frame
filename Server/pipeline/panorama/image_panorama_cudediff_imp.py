@@ -26,10 +26,11 @@ class PanoGenerator(RemoteServer):
             transforms.ToTensor()
         ])
 
-    def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "") -> dict:
+    def pano(self, temp_path: Path, input_image: Image, fov_degrees: float = 60.0, caption: str = "", seed: int = 0) -> dict:
         if caption is None:
             caption = ""
 
+        torch.manual_seed(seed)
         result = self.pipeline(
             prompts=caption,
             conditioning_image=self.transform(input_image).unsqueeze(0).to(self.device),
@@ -65,7 +66,8 @@ class PanoGenerator(RemoteServer):
             image = input["image"]
             fov = input.get("fov_degrees", 60.0)
             caption = input["caption"]
-            return self.pano(temp_path, image, fov_degrees=fov, caption=caption)
+            seed = int(input.get("seed", 0))
+            return self.pano(temp_path, image, fov_degrees=fov, caption=caption, seed=seed)
         raise ValueError(f"Unknown action: {action}")
 
 if __name__ == "__main__":

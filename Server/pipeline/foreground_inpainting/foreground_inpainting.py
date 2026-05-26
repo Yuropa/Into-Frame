@@ -10,9 +10,10 @@ import gc
 import torch
 
 class ForegroundInpaint:
-    def __init__(self, device, torch_dtype):
+    def __init__(self, device, torch_dtype, seed: int = 0):
         self.device = device
         self.torch_dtype = torch_dtype
+        self.seed = seed
 
     def inpaint(self, input: Image, temp_path: Path) -> Image:
         result = input
@@ -57,12 +58,13 @@ class ForegroundInpaint:
                 ForegroundInpaint._preferred_inpainting()
             )
             result = inpaint.inpaint(
-                masked_input, 
-                mask_pil, 
+                masked_input,
+                mask_pil,
                 temp_path=temp_path,
                 prompt="no objects, clean background, seamless, empty landscape",
                 guidance_scale=2.0,
-                strength=1.0
+                strength=1.0,
+                seed=self.seed,
             )
 
             result = Image(result)

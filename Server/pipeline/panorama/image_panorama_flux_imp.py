@@ -321,6 +321,7 @@ class PanoGenerator(RemoteServer):
         color_transfer_strength: float,
         style_strength: float,
         nst_steps: int,
+        seed: int = 0,
     ) -> dict:
         """
         Generate a 360° equirectangular panorama from a single input image.
@@ -366,6 +367,7 @@ class PanoGenerator(RemoteServer):
         # the input image appearance vs the text prompt.
         self.base_pipeline.set_ip_adapter_scale(ip_adapter_scale)
 
+        generator = torch.Generator(device=self.device).manual_seed(seed)
         with torch.inference_mode():
             pass1: Image.Image = self.base_pipeline(
                 prompt_embeds=prompt_embeds,
@@ -379,6 +381,7 @@ class PanoGenerator(RemoteServer):
                 guidance_scale=3.5,
                 num_inference_steps=40,
                 output_type="pil",
+                generator=generator,
             ).images[0]
 
         self.base_pipeline.transformer.to("cpu")
@@ -449,6 +452,7 @@ class PanoGenerator(RemoteServer):
                     color_transfer_strength=float(input.get("color_transfer_strength", 0.30)),
                     style_strength=float(input.get("style_strength", 0.45)),
                     nst_steps=int(input.get("nst_steps", 300)),
+                    seed=int(input.get("seed", 0)),
                 )
                 print(f"Panorama complete: {result['image'].size}")
                 return result

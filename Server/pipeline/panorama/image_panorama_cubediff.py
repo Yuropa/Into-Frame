@@ -21,11 +21,12 @@ class ImagePanoramaCubeDiff(RemoteClient):
     def model_names(cls) -> list[str]:
         return ["hlicai/cubediff-512-singlecaption"]
 
-    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "") -> PanoramaOutput:
+    def pano(self, input: PILImage, depth: PILImage, temp_path: Path, fov: float = 60.0, caption: str = "", seed: int = 0) -> PanoramaOutput:
         data = {
             "image": input,
             "fov_degrees": fov,
-            "caption": caption
+            "caption": caption,
+            "seed": seed,
         }
         values = self.send(action="pano", input=data, temp_path=temp_path)
         return PanoramaOutput(values=values)

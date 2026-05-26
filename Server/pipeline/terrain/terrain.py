@@ -22,18 +22,11 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         noise_amplitude: float = 0.05,
         noise_seed: int = 42,
     ):
-        super().__init__(name, device, torch_dtype, log, keys)
-        # Row count along Z — log-spaced, dense near camera.
+        super().__init__(name, device, torch_dtype, log, keys, seed=noise_seed)
         self.n_z_vertices = n_z_vertices
-        # Column count on *each side* of X=0 — log-spaced, dense near centre.
-        # Total X columns = 2 * n_x_half_vertices + 1.
         self.n_x_half_vertices = n_x_half_vertices
-        # Far edge in metres. None → read from HEIGHT_MAP_PARAMS, fallback 100 m.
         self.z_far = z_far
-        # Peak height displacement from noise (metres). Scales in with
-        # sqrt(Z/z_far) so ground at the viewer's feet matches the raw map.
         self.noise_amplitude = noise_amplitude
-        self.noise_seed = noise_seed
 
 
 class TerrainMeshStage(PipelineStage):
@@ -122,7 +115,7 @@ class TerrainMeshStage(PipelineStage):
             n_x_half_vertices=cfg.n_x_half_vertices,
             z_far=grid_size,
             noise_amplitude=cfg.noise_amplitude,
-            noise_seed=cfg.noise_seed,
+            noise_seed=cfg.seed,
             texture=texture_pil,
             uv_mode=uv_mode,
             intrinsics=intrinsics,

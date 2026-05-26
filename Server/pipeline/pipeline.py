@@ -166,7 +166,7 @@ class Pipeline:
             #     n_x_half_vertices=50,     # X columns per side: log-spaced, dense near centre
             #     z_far=None,               # None → use HEIGHT_MAP_PARAMS grid_size_meters
             #     noise_amplitude=0.05,     # metres of peak noise displacement
-            #     noise_seed=42,
+            #     noise_seed=config.seeds.seed_for("Terrain Mesh"),
             # )),
             # ModelGenerationStage(config=config.stage_config("Mesh Generation")),
             # SceneGenerationStage(config=config.stage_config("Scene Generation"))

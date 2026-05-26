@@ -55,7 +55,7 @@ class PanoramaStage(PipelineStage):
                 caption = ""
             full_caption = "360 view. seamless. outdoor scene. clear in-focus. smooth background. open air. 360 degree panorama. dirt ground. " + caption
 
-            pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption)
+            pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption, seed=self.seed)
             context.add_image(output_key, pano.image)
             context.add_cubemap(cubemap_key, pano.cubemap)
 

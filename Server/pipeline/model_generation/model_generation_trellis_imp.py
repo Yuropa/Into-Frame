@@ -24,9 +24,10 @@ class ModelGenerator(ModelGeneratorBase):
         padded.paste(image.convert("RGBA"), (pad_x, pad_y))
         return padded
 
-    def meshify(self, temp_path: Path, input: Image) -> Any:
+    def meshify(self, temp_path: Path, input: Image, seed: int = 0) -> Any:
+        torch.manual_seed(seed)
         padded_image = self.pad_image(input)
-        mesh = self.pipeline.run(padded_image)[0]
+        mesh = self.pipeline.run(padded_image, seed=seed)[0]
         mesh.simplify(1000000)
 
         glb = o_voxel.postprocess.to_glb(

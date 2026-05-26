@@ -71,7 +71,7 @@ class PanoGenerator(RemoteServer):
 
             self.pipeline.to(self.device)
 
-    def pano(self, temp_path: Path, input_image: Image.Image, depth_image: Image.Image, caption: str = "") -> dict:
+    def pano(self, temp_path: Path, input_image: Image.Image, depth_image: Image.Image, caption: str = "", seed: int = 0) -> dict:
         if isinstance(depth_image, np.ndarray):
             depth_image = Image.fromarray(depth_image)
         if isinstance(input_image, np.ndarray):
@@ -87,13 +87,14 @@ class PanoGenerator(RemoteServer):
 
         face_keys = ["F", "R", "B", "L", "U", "D"]
 
+        generator = torch.Generator(device=self.device).manual_seed(seed)
         if self.USE_STABLE_DIFFUSION:
             prompts = [caption] * 6
-            latents = torch.randn(6, 4, image_size // 8, image_size // 8).to(self.device, dtype=torch.float16)
+            latents = torch.randn(6, 4, image_size // 8, image_size // 8, generator=generator).to(self.device, dtype=torch.float16)
 
             with torch.inference_mode():
                 with torch.autocast('cuda'):
-                    images = self.pipeline(prompts, latents=latents, output_type='np').images
+                    images = self.pipeline(prompts, latents=latents, generator=generator, output_type='np').images
 
             images = rearrange(images, '(b m) h w c -> b m h w c', m=6)[0]  # (6, H, W, C)
 
@@ -126,6 +127,7 @@ class PanoGenerator(RemoteServer):
                         num_inference_steps=50,
                         output_type='np',
                         normalize_scale=0.6,
+                        generator=generator,
                     )
 
             images_pred = prediction.images  # (B*6, H, W, C), float32
@@ -157,7 +159,7 @@ class PanoGenerator(RemoteServer):
                 image = input["image"]
                 depth = input["depth"]
                 caption = input.get("caption", "")
-                result = self.pano(temp_path, image, depth, caption=caption)
+                result = self.pano(temp_path, image, depth, caption=caption, seed=int(input.get("seed", 0)))
 
                 print(f"Got dream cube values {result}")
                 return result

@@ -35,7 +35,7 @@ class ForegroundInpainting(PipelineStage):
 
         inpainting_task = self.create_progress(2, "Inpainting...")
         if self._inpaint is None:
-            self._inpaint = ForegroundInpaint(self.preferred_device, self.preferred_format)
+            self._inpaint = ForegroundInpaint(self.preferred_device, self.preferred_format, seed=self.seed)
         self.advance_progress(inpainting_task)
 
         result = self._inpaint.inpaint(input_image, self.temp)

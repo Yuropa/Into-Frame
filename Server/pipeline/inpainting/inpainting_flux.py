@@ -25,14 +25,15 @@ class InPaintingFlux:
         return ["black-forest-labs/FLUX.1-Fill-dev"]
 
     def inpaint(
-        self, 
-        input_image: PILImage, 
-        mask_image: PILImage, 
+        self,
+        input_image: PILImage,
+        mask_image: PILImage,
         temp_path: Path,
-        prompt: str = "", 
-        num_inference_steps=30, 
+        prompt: str = "",
+        num_inference_steps=30,
         guidance_scale=30.0,
-        strength=1.0
+        strength=1.0,
+        seed: int = 0,
     ) -> PILImage:
         """
         For FLUX.1-Fill:
@@ -50,8 +51,7 @@ class InPaintingFlux:
         init_img = input_image.resize((width, height), PILImage.LANCZOS)
         mask_img = mask_image.resize((width, height), PILImage.NEAREST)
 
-        # FLUX handles the VAE encoding internally within the pipeline call
-        # so we can bypass the manual latent processing used in your SD3 version.
+        generator = torch.Generator(device=self.device).manual_seed(seed)
         output = self.pipeline(
             prompt=prompt,
             image=init_img,
@@ -61,7 +61,8 @@ class InPaintingFlux:
             strength=strength,
             num_inference_steps=num_inference_steps,
             guidance_scale=guidance_scale,
-            max_sequence_length=512, # FLUX specific parameter
+            max_sequence_length=512,
+            generator=generator,
         ).images[0]
 
         return output

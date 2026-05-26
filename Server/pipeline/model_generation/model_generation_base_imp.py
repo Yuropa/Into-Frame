@@ -14,17 +14,24 @@ class ModelGeneratorBase(RemoteServer, ABC):
         raise ValueError(f"Unknown action: {action}")
     
     @abstractmethod
-    def meshify(self, temp_path: Path, input: Image) -> Any:
+    def meshify(self, temp_path: Path, input: Image, seed: int = 0) -> Any:
         pass
-    
+
     def _run_meshify(self, temp_path: Path, input: Any) -> Any:
-        image = input
+        if isinstance(input, dict):
+            image = input["image"]
+            seed = int(input.get("seed", 0))
+        else:
+            image = input
+            seed = 0
+
         image.save(str(temp_path / "output.png"))
 
         with torch.no_grad():
             mesh = self.meshify(
                 temp_path=temp_path,
-                input=image
+                input=image,
+                seed=seed,
             )
 
         debug = {
