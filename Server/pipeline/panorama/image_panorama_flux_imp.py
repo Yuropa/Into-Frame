@@ -190,6 +190,27 @@ def _make_seam_mask(equi_size: tuple, seam_width: int = 96) -> Image.Image:
     return mask
 
 
+def _enforce_wrap_continuity(img: Image.Image, blend_px: int = 48) -> Image.Image:
+    """Cross-fade the left/right boundary columns so the panorama wraps with zero discontinuity."""
+    arr = np.array(img).astype(np.float32)
+    w = arr.shape[1]
+
+    # t[i]: 1 at the seam edge, 0 at blend_px distance inward
+    t = np.linspace(1.0, 0.0, blend_px)[None, :, None]
+
+    left_strip  = arr[:, :blend_px].copy()
+    right_strip = arr[:, w - blend_px:].copy()
+
+    # avg[:,i] = mean of column i from the left and column (w-1-i) from the right,
+    # so avg[:,0] = mean(col 0, col w-1) — guaranteeing arr[:,0] == arr[:,w-1] after blend.
+    avg = (left_strip + right_strip[:, ::-1]) / 2.0
+
+    arr[:, :blend_px]      = left_strip  * (1 - t)         + avg          * t
+    arr[:, w - blend_px:]  = right_strip * (1 - t[:, ::-1]) + avg[:, ::-1] * t[:, ::-1]
+
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
 def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
     arr = np.array(img)
     shift_amt = int(arr.shape[1] * pct)
@@ -388,21 +409,8 @@ class PanoGenerator(RemoteServer):
             steps=nst_steps,
         )
 
-        # Soft-composite original back into center with feathered edges so it blends naturally
-        tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
-        tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
-        tile_h = min(tile_h, equi_size[1])
-        cx = (equi_size[0] - tile_w) // 2
-        cy = (equi_size[1] - tile_h) // 2
-
-        tile_resized = input_image.resize((tile_w, tile_h), Image.LANCZOS)
-        feather_px = max(12, int(min(tile_w, tile_h) * 0.10))
-        center_mask = Image.new("L", (tile_w, tile_h), 0)
-        inner_w = max(1, tile_w - feather_px * 2)
-        inner_h = max(1, tile_h - feather_px * 2)
-        center_mask.paste(Image.new("L", (inner_w, inner_h), 255), (feather_px, feather_px))
-        center_mask = center_mask.filter(ImageFilter.GaussianBlur(radius=feather_px))
-        final.paste(tile_resized, (cx, cy), mask=center_mask)
+        # Guarantee pixel-perfect wrap continuity at the left/right boundary
+        final = _enforce_wrap_continuity(final, blend_px=48)
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
