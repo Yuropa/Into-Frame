@@ -96,33 +96,59 @@ class HeightMapGenerator:
 
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
-            result = HeightMapGenerator._smooth_distance_weighted(result, max_sigma=smooth_sigma)
+            result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
         return result
 
     @staticmethod
-    def _smooth_distance_weighted(
+    def _smooth_edge_preserving(
         height_map: np.ndarray,
         max_sigma: float,
+        edge_sensitivity: float = 1.0,
         n_levels: int = 5,
     ) -> np.ndarray:
         """
-        Spatially-varying Gaussian smoothing: sigma=0 at the grid centre
-        (nearest to camera, highest-confidence data) increasing linearly to
-        max_sigma at the grid corners (farthest away, lowest confidence).
+        Spatially-varying, edge-preserving Gaussian smooth.
 
-        Implemented as a scale-space blend: pre-compute n_levels+1 Gaussian
-        blurs at evenly-spaced sigmas, then for each pixel interpolate between
-        the two neighbouring levels according to its normalised distance from
-        the centre.  This is O(n_levels × H × W) and avoids a per-pixel blur.
+        Each pixel's smoothing amount is driven by two weights multiplied together:
+
+          distance weight  — 0 at grid centre (camera position, most reliable),
+                             1 at corners (least reliable).  Same as before.
+
+          flatness weight  — 1 where the local gradient is small (likely noise,
+                             smooth freely), 0 where the gradient is large (real
+                             structure, preserve it).
+
+        The gradient threshold is set adaptively at the 85th percentile of all
+        gradient magnitudes so it scales with the scene.  edge_sensitivity > 1
+        preserves more structures; < 1 smooths more aggressively.
+
+        Implementation: pre-compute n_levels+1 Gaussian blurs, then for each
+        pixel pick between them according to the combined weight.
         """
         h, w = height_map.shape
 
-        # Normalised distance from grid centre: 0 at centre, 1 at corner
+        # ── Distance weight ───────────────────────────────────────────────
         y = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
         x = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
         dist = np.clip(np.sqrt(y ** 2 + x ** 2) / np.sqrt(2.0), 0.0, 1.0)
 
-        # Pre-compute Gaussian levels: 0 = original, n_levels = max_sigma
+        # ── Flatness weight ───────────────────────────────────────────────
+        gy, gx = np.gradient(height_map)
+        grad_mag = np.sqrt(gx ** 2 + gy ** 2).astype(np.float32)
+
+        # Scale threshold by the 85th-percentile gradient so it adapts to the scene.
+        # tanh gives a smooth 0→1 ramp: near zero for flat areas, near 1 for edges.
+        scale = np.percentile(grad_mag, 85) / edge_sensitivity + 1e-6
+        edge_weight = np.tanh(grad_mag / scale)
+
+        # Blur the edge mask slightly to avoid halos at sharp transitions.
+        edge_weight = gaussian_filter(edge_weight, sigma=2.0)
+        flat_weight = (1.0 - edge_weight).clip(0.0, 1.0)
+
+        # ── Combined smoothing amount ─────────────────────────────────────
+        smooth_weight = (dist * flat_weight).astype(np.float32)
+
+        # ── Scale-space blend ─────────────────────────────────────────────
         sigmas = np.linspace(0.0, max_sigma, n_levels + 1)
         levels = np.stack(
             [height_map if s == 0 else gaussian_filter(height_map, sigma=s)
@@ -130,8 +156,7 @@ class HeightMapGenerator:
             axis=0,
         )  # (n_levels+1, H, W)
 
-        # Per-pixel blend between floor and ceiling levels
-        idx  = dist * n_levels                                         # [0, n_levels]
+        idx  = smooth_weight * n_levels
         lo   = np.floor(idx).astype(np.int32).clip(0, n_levels - 1)
         hi   = (lo + 1).clip(0, n_levels)
         frac = (idx - lo).astype(np.float32)
