@@ -209,10 +209,10 @@ class SimulationServer():
         runner = PipelineRunner(self.pipeline)
 
         def run_pipeline():
-            runner.run(input)
+            return runner.run(input, progress_queue)
 
         try:
-            context_result = await asyncio.get_running_loop().run_in_executor(None, run_pipeline, progress_queue)
+            context_result = await asyncio.get_running_loop().run_in_executor(None, run_pipeline)
             self.scene = context_result.scene(ContextKey.SCENE)
             self._context = context_result
         except asyncio.CancelledError:
