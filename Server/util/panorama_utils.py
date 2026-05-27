@@ -3,6 +3,7 @@ import numpy as np
 import PIL.Image
 from pathlib import Path
 from scipy.spatial import KDTree
+from util.image_utils import Image
 
 
 class Panorama:
@@ -29,6 +30,8 @@ class Panorama:
         if isinstance(obj, str):
             self.image = PIL.Image.open(obj).convert("RGB")
         elif isinstance(obj, Panorama):
+            self.image = obj.image
+        elif isinstance(obj, Image):
             self.image = obj.image
         elif isinstance(obj, PIL.Image.Image):
             self.image = obj.convert("RGB") if obj.mode != "RGB" else obj
