@@ -135,7 +135,6 @@ def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
     hfov_deg: float,
-    feather_pct: float = 0.05,  # Reduced default feather to keep the center clean
 ) -> tuple[Image.Image, Image.Image]:
     equi_w, equi_h = equi_size
 
@@ -164,19 +163,9 @@ def _make_canvas(
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 80))
     canvas.paste(tile, (cx, cy))
 
-    # Strict mask generation: prevent wide gray gradients from eating the image center
+    # Full inpaint mask — let the model regenerate everything using the IP adapter as guidance
+    # rather than hard-preserving the original center pixels.
     mask = Image.new("L", equi_size, 255)
-    
-    feather_w = max(4, int(tile_w * feather_pct))
-    feather_h = max(4, int(tile_h * feather_pct))
-    inner_w = max(1, tile_w - (feather_w * 2))
-    inner_h = max(1, tile_h - (feather_h * 2))
-    
-    inner_blank = Image.new("L", (inner_w, inner_h), 0)
-    mask.paste(inner_blank, (cx + feather_w, cy + feather_h))
-    
-    # Use a small, disciplined radius for edge softening
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(4, min(feather_w, feather_h) // 2)))
 
     return canvas, mask
 
@@ -335,7 +324,7 @@ class PanoGenerator(RemoteServer):
 
         # --- Pass 1 — Main Generation ---
         self.report_progress(0.10, "Building blending canvas...")
-        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.05)
+        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
