@@ -44,9 +44,10 @@ stages:
   - name: Terrain Mesh
     stage: TerrainMeshStage
     enabled: true
-    n_z_vertices: 150         # Z rows: log-spaced, dense near camera
-    n_x_half_vertices: 50     # X columns per side: log-spaced, dense near centre
-    z_far: null               # null → use Height Map grid_size_meters
+    inner_grid_n: 30
+    n_rings: 24
+    ring_base_points: 64     
+    z_far: null             
     noise_amplitude: 0.05     # metres of peak noise displacement
 
   - name: Foreground Inpainting
