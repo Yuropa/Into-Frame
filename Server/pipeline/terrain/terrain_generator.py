@@ -63,7 +63,7 @@ class TerrainMeshGenerator:
         Z_pos = all_xz[:, 1].astype(np.float32)
 
         # ── Delaunay triangulation ────────────────────────────────────────
-        faces = Delaunay(all_xz).simplices.astype(np.int32)
+        faces = Delaunay(all_xz).simplices[:, ::-1].astype(np.int32)
 
         # ── Sample height map at every vertex ─────────────────────────────
         h_hm, w_hm = hm.shape
