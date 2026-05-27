@@ -4,7 +4,7 @@ from typing import Self
 
 class Scene:
     def __init__(self):
-        self.ambient_color = "#1a1a2e"
+        self.ambient_color = "#ffffff"
         self.gravity = -9.81
         self.time_scale = 1.0
         self.near_clip_plane = 0.1
