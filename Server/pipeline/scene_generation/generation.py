@@ -64,7 +64,7 @@ class SceneGenerationStage(PipelineStage):
                 scene.far_clip_plane = float(np.percentile(valid, 99)) * 1.5
                 scene.far_clip_plane = max(10.0, min(scene.far_clip_plane, 1000.0))
 
-        if context.image(panorama_key) is not None:
+        if context.panorama(panorama_key) is not None:
             scene.skybox = panorama_key
 
         if object_count is not None:
