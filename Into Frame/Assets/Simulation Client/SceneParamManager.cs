@@ -33,6 +33,13 @@ public class SceneParamManager : MonoBehaviour
         }
 
 
+        Camera cam = camera != null ? camera.GetComponent<Camera>() : Camera.main;
+        if (cam != null)
+        {
+            if (p.nearClipPlane > 0f) cam.nearClipPlane = p.nearClipPlane;
+            if (p.farClipPlane  > 0f) cam.farClipPlane  = p.farClipPlane;
+        }
+
         if (p.extrinsics != null)
         {
             float[] r = p.extrinsics.rotation;     // 9 floats, row-major

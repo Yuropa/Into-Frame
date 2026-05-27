@@ -238,8 +238,10 @@ public class SceneParams
     public string ambientColor;
     public float  gravity;
     public float  timeScale;
+    public float  nearClipPlane;
+    public float  farClipPlane;
     public string skybox;
-    
+
     public SceneObject[] objects;
     public ExtrinsicsParams extrinsics;
 }

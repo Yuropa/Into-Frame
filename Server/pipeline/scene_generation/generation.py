@@ -58,6 +58,12 @@ class SceneGenerationStage(PipelineStage):
         scene = Scene()
         scene.extrinsics = extrinsics
 
+        if depth is not None:
+            valid = depth.depth[np.isfinite(depth.depth) & (depth.depth > 0)]
+            if len(valid) > 0:
+                scene.far_clip_plane = float(np.percentile(valid, 99)) * 1.5
+                scene.far_clip_plane = max(10.0, min(scene.far_clip_plane, 1000.0))
+
         if context.image(panorama_key) is not None:
             scene.skybox = panorama_key
 
