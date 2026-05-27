@@ -73,10 +73,13 @@ public class PanoramaSkybox : MonoBehaviour
         // Panorama textures need to wrap horizontally
         texture.wrapModeU = TextureWrapMode.Repeat;
         texture.wrapModeV = TextureWrapMode.Clamp;
+        texture.filterMode = FilterMode.Trilinear;
+        texture.anisoLevel = 4;
         texture.Apply();
 
         // Create a Panoramic skybox material
         skyboxMaterial = new Material(Shader.Find("Skybox/Panoramic"));
+        skyboxMaterial.SetFloat("_Mapping", 0);
         skyboxMaterial.SetTexture("_MainTex", texture);
         skyboxMaterial.SetFloat("_Exposure", exposure);
         skyboxMaterial.SetFloat("_Rotation", rotation);
@@ -92,7 +95,7 @@ public class PanoramaSkybox : MonoBehaviour
 
     void OnDestroy()
     {
-        if (skyboxMaterial != null)
-            Destroy(skyboxMaterial);
+        if (skyboxMaterial != null) Destroy(skyboxMaterial);
+        if (currentTexture != null) Destroy(currentTexture);
     }
 }
