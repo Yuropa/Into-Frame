@@ -54,6 +54,8 @@ class SceneGenerationStage(PipelineStage):
         extrinsics = context.input_extrinsics(extrinsics_key)
         depth = context.input_depth(depth_key)
         input = context.input_image(input_key)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        panorama = context.input_panorama(panorama_key)
 
         scene = Scene()
         scene.extrinsics = extrinsics
@@ -72,7 +74,7 @@ class SceneGenerationStage(PipelineStage):
                 scene.far_clip_plane = float(np.percentile(valid, 99)) * 1.5
                 scene.far_clip_plane = max(10.0, min(scene.far_clip_plane, 1000.0))
 
-        if context.panorama(panorama_key) is not None:
+        if panorama is not None:
             scene.skybox = panorama_key
 
         if object_count is not None:
@@ -83,7 +85,10 @@ class SceneGenerationStage(PipelineStage):
 
                 metadata = context.input_object(f"metadata_{idx}")
 
-                result = self.unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
+                if panorama_depth is not None and panorama is not None:
+                    result = self.unproject_bbox_equirect(metadata["box"], panorama.width, panorama.height, pano_depth=panorama_depth, extrinsics=extrinsics)
+                else:
+                    result = self.unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
                 if result is None:
                     self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                     self.advance_progress(generation_task)
@@ -165,3 +170,46 @@ class SceneGenerationStage(PipelineStage):
         bottom   = extrinsics.transform(intrinsics.unproject(cx, y2, depth))
 
         return position, abs(right[0] - left[0]), abs(bottom[1] - top[1])
+
+    def unproject_bbox_equirect(self, bbox, pano_width, pano_height, pano_depth: Depth, extrinsics: CameraExtrinsics):
+        bx, by, bw, bh = bbox
+        x1, y1, x2, y2 = bx, by, bx + bw, by + bh
+
+        sx = pano_depth.width  / pano_width
+        sy = pano_depth.height / pano_height
+
+        cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+        dx, dy = int(round(cx * sx)), int(round(cy * sy))
+
+        patch_radius = 5
+        patch_x1 = max(0, dx - patch_radius)
+        patch_x2 = min(pano_depth.width,  dx + patch_radius)
+        patch_y1 = max(0, dy - patch_radius)
+        patch_y2 = min(pano_depth.height, dy + patch_radius)
+
+        patch = pano_depth.depth[patch_y1:patch_y2, patch_x1:patch_x2]
+        valid = patch[(patch > 0) & np.isfinite(patch)]
+
+        if len(valid) == 0:
+            return None
+
+        depth = float(np.median(valid))
+
+        def equirect_point(px, py):
+            theta = (px / pano_width  - 0.5) * 2.0 * np.pi
+            phi   = (0.5 - py / pano_height) * np.pi
+            x_cam = depth * np.cos(phi) * np.sin(theta)
+            y_cam = depth * np.sin(phi)
+            z_cam = depth * np.cos(phi) * np.cos(theta)
+            return np.array(extrinsics.transform((x_cam, y_cam, z_cam)))
+
+        position = equirect_point(cx, cy)
+        left     = equirect_point(x1, cy)
+        right    = equirect_point(x2, cy)
+        top      = equirect_point(cx, y1)
+        bottom   = equirect_point(cx, y2)
+
+        width  = float(np.linalg.norm(right - left))
+        height = float(np.linalg.norm(bottom - top))
+
+        return tuple(position), width, height
