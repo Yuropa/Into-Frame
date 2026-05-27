@@ -2,7 +2,6 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
-using UnityEngine.UI;
 using NativeWebSocket; // https://github.com/endel/NativeWebSocket
 
 /// <summary>
@@ -19,12 +18,7 @@ public class SceneClient : MonoBehaviour
     [Header("References")]
     public SceneObjectManager objectManager;
     public SceneParamManager paramManager;
-
-    [Header("UI")]
-    public TMPro.TextMeshProUGUI statusLabel;
-    public Toggle statusToggle;
-    public TMPro.TextMeshProUGUI progressLabel;
-    public Slider progressSlider;
+    public ProgressController progressController;
 
     private WebSocket _ws;
     private bool _reconnecting = false;
@@ -33,8 +27,9 @@ public class SceneClient : MonoBehaviour
 
     private void Start()
     {
-        if (objectManager == null) objectManager = FindObjectOfType<SceneObjectManager>();
-        if (paramManager  == null) paramManager  = FindObjectOfType<SceneParamManager>();
+        if (objectManager      == null) objectManager      = FindObjectOfType<SceneObjectManager>();
+        if (paramManager       == null) paramManager       = FindObjectOfType<SceneParamManager>();
+        if (progressController == null) progressController = FindObjectOfType<ProgressController>();
         ConnectAsync();
     }
 
@@ -75,22 +70,19 @@ public class SceneClient : MonoBehaviour
         Debug.Log("[SceneClient] Connected!");
         Send(new TypeOnlyMessage("CLIENT_READY"));
 
-        statusLabel.text = "Connected";
-        statusToggle.isOn = true;
+        progressController.SetConnected(true);
     }
 
     private void OnError(string error)
     {
         Debug.LogWarning($"[SceneClient] Error: {error}");
-        statusLabel.text = $"Error ({error})";
-        statusToggle.isOn = false;
+        progressController.SetConnected(false, $"Error ({error})");
     }
 
     private void OnClose(WebSocketCloseCode code)
     {
         Debug.Log($"[SceneClient] Disconnected ({code})");
-        statusLabel.text = "Disconnected";
-        statusToggle.isOn = false;
+        progressController.SetConnected(false);
 
         if (!_reconnecting) StartCoroutine(Reconnect());
     }
@@ -99,8 +91,7 @@ public class SceneClient : MonoBehaviour
     {
         _reconnecting = true;
         Debug.Log($"[SceneClient] Reconnecting in {reconnectDelay}s…");
-        statusLabel.text = $"Reconnecting...";
-        statusToggle.isOn = false;
+        progressController.SetConnected(false, "Reconnecting...");
         yield return new WaitForSeconds(reconnectDelay);
         _reconnecting = false;
         ConnectAsync();
@@ -155,8 +146,7 @@ public class SceneClient : MonoBehaviour
                 var progress = JsonUtility.FromJson<SceneProgressPayload>(ExtractPayload(fullJson));
                 Debug.Log($"[SceneClient] Progress {progress.step} at {progress.percent * 100.0}%");
 
-                progressLabel.text = progress.step;
-                progressSlider.value = progress.percent;
+                progressController.ReportServerProgress(progress.step, progress.percent);
                 break;
 
             default:

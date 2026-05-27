@@ -3447,7 +3447,7 @@ MonoBehaviour:
   reconnectDelay: 3
   objectManager: {fileID: 1862969861}
   paramManager: {fileID: 1862969860}
-  progress: {fileID: 605623678}
+  progressController: {fileID: 605623678}
 --- !u!4 &1862969863
 Transform:
   m_ObjectHideFlags: 0
