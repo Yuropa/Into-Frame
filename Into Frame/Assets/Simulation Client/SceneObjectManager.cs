@@ -299,15 +299,7 @@ public class SceneObjectManager : MonoBehaviour
             yield break;
         }
 
-        SetDoubleSided(container);
         Debug.Log($"[SceneObjectManager] Mesh '{meshId}' loaded into {container.name}");
-    }
-
-    private static void SetDoubleSided(GameObject root)
-    {
-        foreach (var r in root.GetComponentsInChildren<Renderer>())
-            foreach (var mat in r.materials)
-                mat.SetFloat("_Cull", 2f); // GLTFast Face Render: Front=0, Back=1, Both=2
     }
 
     // ── Texture Loading ────────────────────────────────────────────────────
