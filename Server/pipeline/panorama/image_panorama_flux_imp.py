@@ -135,7 +135,7 @@ def _make_canvas(
     input_image: Image.Image,
     equi_size: tuple,
     hfov_deg: float,
-    feather_pct: float = 0.25,
+    feather_pct: float = 0.05,  # Reduced default feather to keep the center clean
 ) -> tuple[Image.Image, Image.Image]:
     equi_w, equi_h = equi_size
 
@@ -164,17 +164,19 @@ def _make_canvas(
     canvas = canvas.filter(ImageFilter.GaussianBlur(radius=equi_w // 80))
     canvas.paste(tile, (cx, cy))
 
-    # Wide feathered mask: 0 (preserve) in the protected core, 255 (inpaint) in surround.
-    # feather_pct=0.25 gives a gradual transition wide enough to be invisible without losing structure.
-    feather_w = max(8, int(tile_w * feather_pct))
-    feather_h = max(8, int(tile_h * feather_pct))
-    inner_w   = max(1, tile_w - feather_w * 2)
-    inner_h   = max(1, tile_h - feather_h * 2)
-
+    # Strict mask generation: prevent wide gray gradients from eating the image center
     mask = Image.new("L", equi_size, 255)
-    mask.paste(Image.new("L", (inner_w, inner_h), 0), (cx + feather_w, cy + feather_h))
-    # Blur radius matches the feather zone so the gradient spans the full transition area
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(feather_w, feather_h) // 2))
+    
+    feather_w = max(4, int(tile_w * feather_pct))
+    feather_h = max(4, int(tile_h * feather_pct))
+    inner_w = max(1, tile_w - (feather_w * 2))
+    inner_h = max(1, tile_h - (feather_h * 2))
+    
+    inner_blank = Image.new("L", (inner_w, inner_h), 0)
+    mask.paste(inner_blank, (cx + feather_w, cy + feather_h))
+    
+    # Use a small, disciplined radius for edge softening
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=max(4, min(feather_w, feather_h) // 2)))
 
     return canvas, mask
 
@@ -312,7 +314,7 @@ class PanoGenerator(RemoteServer):
 
         # --- Pass 1 — Main Generation ---
         self.report_progress(0.10, "Building blending canvas...")
-        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
+        canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg, feather_pct=0.05)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
@@ -371,7 +373,6 @@ class PanoGenerator(RemoteServer):
 
         # --- Pass 3 — Color & Style Adjustments ---
         self.report_progress(0.85, "Post-processing color and style...")
-
         lab_result = _lab_color_transfer(
             source=input_image,
             target=pass2,
@@ -386,6 +387,17 @@ class PanoGenerator(RemoteServer):
             strength=style_strength,
             steps=nst_steps,
         )
+
+        # Composite original crisp structural center back over the final output to guarantee 0% blur
+        cx = (equi_size[0] - pass1.width) // 2 # alignment check
+        tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
+        tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
+        tile_h = min(tile_h, equi_size[1])
+        cx = (equi_size[0] - tile_w) // 2
+        cy = (equi_size[1] - tile_h) // 2
+        
+        # Paste original un-sampled input image directly onto the final output canvas
+        final.paste(input_image.resize((tile_w, tile_h), Image.LANCZOS), (cx, cy))
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
@@ -412,8 +424,8 @@ class PanoGenerator(RemoteServer):
                     input_image=input["image"],
                     fov_deg=float(input.get("fov_degrees", 60.0)),
                     caption=input.get("caption", ""),
-                    ip_adapter_scale=float(input.get("ip_adapter_scale", 0.8)),
-                    color_transfer_strength=float(input.get("color_transfer_strength", 0.6)),
+                    ip_adapter_scale=float(input.get("ip_adapter_scale", 0.6)),
+                    color_transfer_strength=float(input.get("color_transfer_strength", 0.35)),
                     style_strength=float(input.get("style_strength", 0.2)),
                     nst_steps=int(input.get("nst_steps", 150)),
                     seed=int(input.get("seed", 0)),
