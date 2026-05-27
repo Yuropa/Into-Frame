@@ -388,16 +388,21 @@ class PanoGenerator(RemoteServer):
             steps=nst_steps,
         )
 
-        # Composite original crisp structural center back over the final output to guarantee 0% blur
-        cx = (equi_size[0] - pass1.width) // 2 # alignment check
+        # Soft-composite original back into center with feathered edges so it blends naturally
         tile_w = max(1, int((fov_deg / 360.0) * equi_size[0]))
         tile_h = max(1, int((fov_deg / 180.0) * equi_size[1] * (input_image.height / input_image.width)))
         tile_h = min(tile_h, equi_size[1])
         cx = (equi_size[0] - tile_w) // 2
         cy = (equi_size[1] - tile_h) // 2
-        
-        # Paste original un-sampled input image directly onto the final output canvas
-        final.paste(input_image.resize((tile_w, tile_h), Image.LANCZOS), (cx, cy))
+
+        tile_resized = input_image.resize((tile_w, tile_h), Image.LANCZOS)
+        feather_px = max(12, int(min(tile_w, tile_h) * 0.10))
+        center_mask = Image.new("L", (tile_w, tile_h), 0)
+        inner_w = max(1, tile_w - feather_px * 2)
+        inner_h = max(1, tile_h - feather_px * 2)
+        center_mask.paste(Image.new("L", (inner_w, inner_h), 255), (feather_px, feather_px))
+        center_mask = center_mask.filter(ImageFilter.GaussianBlur(radius=feather_px))
+        final.paste(tile_resized, (cx, cy), mask=center_mask)
 
         if final.size != equi_size:
             final = final.resize(equi_size, Image.LANCZOS)
