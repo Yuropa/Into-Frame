@@ -68,8 +68,7 @@ class PanoramaStage(PipelineStage):
         _, _, output_key, cubemap_key, _, _ = self._resolved_keys()
         return (
             context.panorama(output_key) is not None and
-            context.cubemap(cubemap_key) is not None and
-            False
+            context.cubemap(cubemap_key) is not None
         )
 
     def model_names(self) -> list[str]:

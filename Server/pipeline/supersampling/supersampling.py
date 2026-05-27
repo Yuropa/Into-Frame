@@ -20,6 +20,12 @@ class SupersamplingStage(PipelineStage):
         super().__init__(config)
         self._samp = None
 
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        count = context.input_object("count")
+        if count is None:
+            return False
+        return all(context.input_image(f"crop_{i}") is not None for i in range(count))
+
     def run(self, context: PipelineContext) -> PipelineContext:
         count = context.input_object("count")
 
