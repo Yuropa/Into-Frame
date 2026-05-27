@@ -24,6 +24,10 @@ stages:
     stage: PanoramaStage
     enabled: true
 
+  - name: Panorama Inpainting
+    stage: PanoramaInpaintingStage
+    enabled: true
+
   - name: Panorama Depth
     stage: PanoramaDepthStage
     enabled: true
