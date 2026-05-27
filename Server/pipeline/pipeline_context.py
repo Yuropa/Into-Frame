@@ -5,6 +5,7 @@ from scene.mesh import Mesh
 from util.depth_utils import Depth
 from util.image_utils import Image
 from util.cubemap_utils import CubeMap
+from util.panorama_utils import Panorama
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
@@ -205,7 +206,19 @@ class PipelineContext():
     
     def input_cubemap(self, name: ContextKeyName) -> Optional[CubeMap]:
         return self._value(name, self._previous_stage).cubemap()
-    
+
+    # Panorama
+    def add_panorama(self, name: ContextKeyName, input: Any):
+        value = ContextValue(name=name)
+        value.set_panorama(input)
+        self._set_value(name, value)
+
+    def panorama(self, name: ContextKeyName) -> Optional[Panorama]:
+        return self._value(name).panorama()
+
+    def input_panorama(self, name: ContextKeyName) -> Optional[Panorama]:
+        return self._value(name, self._previous_stage).panorama()
+
     # Persistence
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)

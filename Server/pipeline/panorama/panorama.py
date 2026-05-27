@@ -56,7 +56,7 @@ class PanoramaStage(PipelineStage):
             full_caption = "360 view. seamless. outdoor scene. clear in-focus. smooth background. open air. 360 degree panorama. no people." + caption
 
             pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption, seed=self.seed, on_progress=self.make_progress_callback(pano_task))
-            context.add_image(output_key, pano.image)
+            context.add_panorama(output_key, pano.panorama)
             context.add_cubemap(cubemap_key, pano.cubemap)
 
         self.advance_progress(pano_task)
@@ -67,8 +67,8 @@ class PanoramaStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, output_key, cubemap_key, _, _ = self._resolved_keys()
         return (
-            context.image(output_key) is not None and
-            context.cubemap(cubemap_key) is not None and 
+            context.panorama(output_key) is not None and
+            context.cubemap(cubemap_key) is not None and
             False
         )
 

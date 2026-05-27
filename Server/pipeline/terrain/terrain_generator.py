@@ -1,17 +1,15 @@
 import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter
-from scipy.spatial import KDTree, Delaunay
-from typing import Optional, Literal
+from scipy.spatial import Delaunay
+from typing import Optional
 import trimesh
 import trimesh.visual.material
 import PIL.Image
 
 from util.depth_utils import Depth
+from util.panorama_utils import Panorama
 from scene.camera import CameraIntrinsics
 from scene.mesh import Mesh
-
-
-UVMode = Literal["panorama", "pinhole"]
 
 
 class TerrainMeshGenerator:
@@ -25,8 +23,8 @@ class TerrainMeshGenerator:
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
         noise_seed: int = 42,
+        panorama: Optional[Panorama] = None,
         texture: Optional[PIL.Image.Image] = None,
-        uv_mode: UVMode = "panorama",
         intrinsics: Optional[CameraIntrinsics] = None,
     ) -> Mesh:
         """
@@ -37,10 +35,9 @@ class TerrainMeshGenerator:
         rectangle of boundary points anchors the domain edges.  All points are
         triangulated with Delaunay, giving a smooth LOD falloff with no axis-bias.
 
-        texture  : PIL image to embed as the base-colour texture.
-        uv_mode  : 'panorama' — equirectangular spherical projection.
-                   'pinhole'  — standard pinhole projection via CameraIntrinsics.
-        intrinsics: required when uv_mode='pinhole'.
+        panorama  : Panorama for equirectangular vertex-colour baking (full 360° coverage).
+        texture   : PIL image for pinhole UV mapping via CameraIntrinsics (FOV-limited).
+        intrinsics: required when texture is supplied.
         """
         z_far  = z_far if z_far is not None else grid_size_meters / 2.0
         x_half = grid_size_meters / 2.0
@@ -117,14 +114,14 @@ class TerrainMeshGenerator:
         vertices = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
 
         # ── Colour / texture ──────────────────────────────────────────────
-        if texture is not None and uv_mode == "panorama":
-            vertex_colors = TerrainMeshGenerator._bake_panorama_colors(vertices, texture)
+        if panorama is not None:
+            vertex_colors = panorama.sample_3d(vertices)
             tri_mesh = trimesh.Trimesh(
                 vertices=vertices, faces=faces,
                 vertex_colors=vertex_colors, process=False,
             )
             _ = tri_mesh.vertex_normals
-        elif texture is not None and uv_mode == "pinhole":
+        elif texture is not None and intrinsics is not None:
             uv = TerrainMeshGenerator._uvs_pinhole(
                 vertices[:, 0], vertices[:, 1], vertices[:, 2], intrinsics
             )
@@ -143,61 +140,6 @@ class TerrainMeshGenerator:
         return Mesh(tri_mesh)
 
     # ── Colour helpers ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _bake_panorama_colors(
-        vertices: np.ndarray,
-        panorama: PIL.Image.Image,
-        min_lat_deg: float = -35.0,
-    ) -> np.ndarray:
-        """
-        Sample a colour for every terrain vertex from the equirectangular panorama.
-
-        Vertices above the horizon or steeper than min_lat_deg below are treated
-        as holes and filled from the nearest valid neighbour in XZ.
-        """
-        X = vertices[:, 0].astype(np.float64)
-        Y = vertices[:, 1].astype(np.float64)
-        Z = vertices[:, 2].astype(np.float64)
-
-        r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
-        lat  = np.arctan2(Y, r_xz)
-        lon  = np.arctan2(X, Z)
-
-        min_lat_rad = np.radians(min_lat_deg)
-        valid = (lat < 0.0) & (lat >= min_lat_rad)
-
-        pano = np.array(panorama.convert("RGB"), dtype=np.float32)
-        H, W = pano.shape[:2]
-
-        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
-        pv = (0.5 - lat / np.pi) * (H - 1)
-
-        pu0 = np.floor(pu).astype(np.int32) % W
-        pu1 = (pu0 + 1) % W
-        pv0 = np.clip(np.floor(pv).astype(np.int32), 0, H - 1)
-        pv1 = np.clip(pv0 + 1, 0, H - 1)
-
-        fu = (pu - np.floor(pu))[:, None]
-        fv = (pv - np.floor(pv))[:, None]
-
-        colors_f = (pano[pv0, pu0] * (1 - fu) * (1 - fv) +
-                    pano[pv0, pu1] * fu        * (1 - fv) +
-                    pano[pv1, pu0] * (1 - fu)  * fv       +
-                    pano[pv1, pu1] * fu         * fv)
-
-        colors = np.zeros((len(vertices), 4), dtype=np.uint8)
-        colors[:, 3] = 255
-        colors[valid, :3] = np.clip(colors_f[valid], 0, 255).astype(np.uint8)
-
-        invalid = ~valid
-        if invalid.any() and valid.any():
-            _, nn = KDTree(np.stack([X[valid], Z[valid]], axis=-1)).query(
-                np.stack([X[invalid], Z[invalid]], axis=-1)
-            )
-            colors[invalid, :3] = colors[valid][nn, :3]
-
-        return colors
 
     @staticmethod
     def _uvs_pinhole(

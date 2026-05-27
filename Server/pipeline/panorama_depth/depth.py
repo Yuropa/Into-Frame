@@ -32,9 +32,9 @@ class PanoramaDepthStage(PipelineStage):
             self._depth = PanoramaDepth(self.device)
         self.advance_progress(task)
 
-        input_image = context.input_image(input_key)
-        if input_image is not None:
-            result = self._depth.depth(input_image.image, self.temp, on_progress=self.make_progress_callback(task))
+        input_panorama = context.input_panorama(input_key)
+        if input_panorama is not None:
+            result = self._depth.depth(input_panorama.rgb(), self.temp, on_progress=self.make_progress_callback(task))
             depth = Depth(result.depth)
 
             if self.temp is not None:
@@ -46,7 +46,7 @@ class PanoramaDepthStage(PipelineStage):
             )
             context.add_depth(output_key, depth)
         else:
-            self.log_warning("No panorama image found — skipping panorama depth")
+            self.log_warning("No panorama found — skipping panorama depth")
 
         self.finish_progress(task)
         return context

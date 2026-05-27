@@ -3,6 +3,7 @@ import numpy as np
 from util.image_utils import Image
 from util.depth_utils import Depth
 from util.cubemap_utils import CubeMap
+from util.panorama_utils import Panorama
 from pathlib import Path
 from typing import Optional, Any
 from enum import StrEnum
@@ -22,6 +23,7 @@ class ValueKeys(StrEnum):
     INTRINSICS = "intrinsics"
     EXTRINSICS = "extrinsics"
     CUBEMAP = "cubemap"
+    PANORAMA = "panorama"
 
     def preferred_extension(self) -> "str":
         match self:
@@ -43,6 +45,8 @@ class ValueKeys(StrEnum):
                 return "json"
             case ValueKeys.CUBEMAP:
                 return "cube"
+            case ValueKeys.PANORAMA:
+                return "png"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -98,9 +102,13 @@ class ContextValue():
         self.type = ValueKeys.EXTRINSICS
         self.value = obj
 
-    def set_cubemap(self, obj: CubeMap):  
+    def set_cubemap(self, obj: CubeMap):
         self.type = ValueKeys.CUBEMAP
         self.value = CubeMap(obj)
+
+    def set_panorama(self, obj: Any):
+        self.type = ValueKeys.PANORAMA
+        self.value = Panorama(obj)
 
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
@@ -156,6 +164,12 @@ class ContextValue():
         else:
             return None
 
+    def panorama(self) -> Optional[Panorama]:
+        if self.type == ValueKeys.PANORAMA:
+            return self.value
+        else:
+            return None
+
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
@@ -190,6 +204,8 @@ class ContextValue():
                 self.set_extrinsics(CameraExtrinsics.decode(json.load(f)))
         elif value_type == ValueKeys.CUBEMAP:
             self.set_cubemap(CubeMap.load(resolved_path))
+        elif value_type == ValueKeys.PANORAMA:
+            self.set_panorama(Panorama.load(resolved_path))
         
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
@@ -221,6 +237,8 @@ class ContextValue():
                 json.dump(self.extrinsics().encode(), f, indent=4, cls=JSONEncoder)
         elif self.type == ValueKeys.CUBEMAP:
             self.cubemap().save(path=save_path)
+        elif self.type == ValueKeys.PANORAMA:
+            self.panorama().save(path=save_path)
 
         return save_path
     
@@ -248,4 +266,7 @@ class ContextValue():
             return f"Object ({type(self.object()).__name__})"
         elif self.type == ValueKeys.CUBEMAP:
             return f"CubeMap ({self.cubemap().type.value})"
+        elif self.type == ValueKeys.PANORAMA:
+            v = self.panorama()
+            return f"Panorama ({v.width}x{v.height})"
         return "None"

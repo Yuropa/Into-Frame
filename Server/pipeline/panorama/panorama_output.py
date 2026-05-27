@@ -1,10 +1,11 @@
-from util.image_utils import Image
+from util.panorama_utils import Panorama
 from util.cubemap_utils import CubeMap
 
+
 class PanoramaOutput:
-    image: Image
+    panorama: Panorama
     cubemap: CubeMap
 
     def __init__(self, values: dict):
-        self.image = Image(values["image"])
+        self.panorama = Panorama(values["image"])
         self.cubemap = CubeMap(values["faces"])

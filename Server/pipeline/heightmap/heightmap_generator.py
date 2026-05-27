@@ -2,6 +2,7 @@ import numpy as np
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
 from util.depth_utils import Depth
+from util.panorama_utils import Panorama
 from scene.camera import CameraIntrinsics
 from typing import Optional
 
@@ -36,23 +37,13 @@ class HeightMapGenerator:
         d = depth.depth  # (H, W) float32, metric depth in metres
         h, w = d.shape
 
-        cx = np.arange(w, dtype=np.float32)
-        cy = np.arange(h, dtype=np.float32)
-        cx, cy = np.meshgrid(cx, cy)  # both (H, W)
-
         if use_equirectangular:
-            # Equirectangular (spherical) unprojection.
-            # Each pixel maps to a ray direction; depth is radial (Euclidean) distance.
-            # theta: longitude in [-π, π],  0 = forward (+Z)
-            # phi:   latitude  in [-π/2, π/2], positive = above horizon
-            theta = (cx / w - 0.5) * 2.0 * np.pi
-            phi   = (0.5 - cy / h) * np.pi
-            cos_phi = np.cos(phi)
-            X =  d * cos_phi * np.sin(theta)
-            Y =  d * np.sin(phi)              # Unity Y-up: positive above camera
-            Z =  d * cos_phi * np.cos(theta)  # positive = forward
+            X, Y, Z = Panorama.equirectangular_unproject(depth)
         else:
             # Rectilinear (pinhole) unprojection — matches CameraIntrinsics.unproject
+            cx = np.arange(w, dtype=np.float32)
+            cy = np.arange(h, dtype=np.float32)
+            cx, cy = np.meshgrid(cx, cy)
             X = (cx - intrinsics.px) * d / intrinsics.fx
             Y = -((cy - intrinsics.py) * d / intrinsics.fy)  # flipped Y (Unity convention)
             Z = d

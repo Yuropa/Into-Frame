@@ -5,7 +5,7 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.terrain.terrain_generator import TerrainMeshGenerator, UVMode
+from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 
 
 class TerrainMeshConfiguration(PipelineStageConfiguration):
@@ -92,21 +92,17 @@ class TerrainMeshStage(PipelineStage):
         )
 
         # ── Resolve texture source ────────────────────────────────────────────
-        texture_pil = None
-        uv_mode: UVMode = "panorama"
+        panorama_tex = context.input_panorama(panorama_key)
+        pinhole_texture = None
         intrinsics = None
 
-        panorama = context.input_image(panorama_key)
-        if panorama is not None:
-            texture_pil = panorama.rgb()
-            uv_mode = "panorama"
+        if panorama_tex is not None:
             self.log_info("Terrain texture: equirectangular panorama")
         else:
             original = context.input_image(ContextKey.INPUT)
             intrinsics = context.input_intrinsics(intrinsics_key)
             if original is not None and intrinsics is not None:
-                texture_pil = original.rgb()
-                uv_mode = "pinhole"
+                pinhole_texture = original.rgb()
                 self.log_info("Terrain texture: original image (pinhole projection)")
             else:
                 self.log_warning(
@@ -120,11 +116,11 @@ class TerrainMeshStage(PipelineStage):
             inner_grid_n=cfg.inner_grid_n,
             n_rings=cfg.n_rings,
             ring_base_points=cfg.ring_base_points,
-            z_far=grid_size / 2.0,  # half-extent: terrain spans ±z_far in Z
+            z_far=grid_size / 2.0,
             noise_amplitude=cfg.noise_amplitude,
             noise_seed=cfg.seed,
-            texture=texture_pil,
-            uv_mode=uv_mode,
+            panorama=panorama_tex,
+            texture=pinhole_texture,
             intrinsics=intrinsics,
         )
         self.advance_progress(task)
