@@ -19,14 +19,15 @@ class InPaintingLama(RemoteClient):
         return []
 
     def inpaint(
-        self, 
-        input_image: PILImage, 
-        mask_image: PILImage, 
+        self,
+        input_image: PILImage,
+        mask_image: PILImage,
         temp_path: Path,
-        prompt: str = "", 
-        num_inference_steps=30, 
+        prompt: str = "",
+        num_inference_steps=30,
         guidance_scale=30.0,
-        strength=1.0
+        strength=1.0,
+        seed: int = 0,
     ) -> PILImage:
         data = {
             "image": input_image,
