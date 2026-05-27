@@ -307,10 +307,7 @@ public class SceneObjectManager : MonoBehaviour
     {
         foreach (var r in root.GetComponentsInChildren<Renderer>())
             foreach (var mat in r.materials)
-            {
-                mat.SetFloat("_CullMode", 0);
-                mat.DisableKeyword("_BACKFACE_CULLING_ON");
-            }
+                mat.SetFloat("_Cull", 2f); // GLTFast Face Render: Front=0, Back=1, Both=2
     }
 
     // ── Texture Loading ────────────────────────────────────────────────────
