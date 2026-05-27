@@ -17,14 +17,16 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 42,
-        n_z_vertices: int = 150,
-        n_x_half_vertices: int = 50,
+        inner_grid_n: int = 30,
+        n_rings: int = 12,
+        ring_base_points: int = 64,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
-        self.n_z_vertices = n_z_vertices
-        self.n_x_half_vertices = n_x_half_vertices
+        self.inner_grid_n = inner_grid_n
+        self.n_rings = n_rings
+        self.ring_base_points = ring_base_points
         self.z_far = z_far
         self.noise_amplitude = noise_amplitude
 
@@ -115,8 +117,9 @@ class TerrainMeshStage(PipelineStage):
         mesh = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
-            n_z_vertices=cfg.n_z_vertices,
-            n_x_half_vertices=cfg.n_x_half_vertices,
+            inner_grid_n=cfg.inner_grid_n,
+            n_rings=cfg.n_rings,
+            ring_base_points=cfg.ring_base_points,
             z_far=grid_size / 2.0,  # half-extent: terrain spans ±z_far in Z
             noise_amplitude=cfg.noise_amplitude,
             noise_seed=cfg.seed,
