@@ -1,7 +1,6 @@
 import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter
 from scipy.spatial import Delaunay
-from scipy.stats.qmc import PoissonDisk
 from typing import Optional
 import trimesh
 import trimesh.visual.material
@@ -44,14 +43,10 @@ class TerrainMeshGenerator:
         x_half = grid_size_meters / 2.0
         hm     = height_map.depth  # (H, W) float32
 
-        # Inner region half-extent: 20 % of the shorter half-dimension
-        inner_half = min(x_half, z_far) * 0.20
-
         # ── Poisson disc sampling ─────────────────────────────────────────
         all_xz = TerrainMeshGenerator._poisson_disc_xz(
             x_half=x_half,
             z_far=z_far,
-            inner_half=inner_half,
             inner_min_dist=inner_min_dist,
             outer_min_dist=outer_min_dist,
             n_boundary=n_boundary,
@@ -120,39 +115,89 @@ class TerrainMeshGenerator:
     def _poisson_disc_xz(
         x_half: float,
         z_far: float,
-        inner_half: float,
         inner_min_dist: float,
         outer_min_dist: float,
         n_boundary: int,
         seed: int = 42,
+        k: int = 30,
     ) -> np.ndarray:
-        rng = np.random.default_rng(seed)
+        """
+        Bridson's Poisson disc sampling with linearly varying radius.
+        Spacing grows from inner_min_dist at the origin to outer_min_dist
+        at the domain corner, giving a smooth continuous density falloff.
+        """
+        rng   = np.random.default_rng(seed)
+        d_max = np.hypot(x_half, z_far)
 
-        def sample(w: float, h: float, min_dist: float) -> np.ndarray:
-            max_dim = max(w, h)
-            r_norm  = min_dist / max_dim
-            n_max   = max(64, int(4.0 / (np.pi * r_norm ** 2)))
-            engine  = PoissonDisk(d=2, radius=r_norm, seed=int(rng.integers(2**31)))
-            pts     = engine.random(n_max)
-            return (pts * [w, h]).astype(np.float32)
+        def radius_at(x: float, z: float) -> float:
+            t = min(1.0, np.hypot(x, z) / d_max)
+            return inner_min_dist + (outer_min_dist - inner_min_dist) * t
 
-        inner_w   = 2.0 * inner_half
-        inner_pts = sample(inner_w, inner_w, inner_min_dist) - inner_half
+        # Background grid sized to the smallest possible radius
+        cell = inner_min_dist / np.sqrt(2.0)
+        cols = int(np.ceil(2.0 * x_half / cell)) + 2
+        rows = int(np.ceil(2.0 * z_far  / cell)) + 2
+        grid = np.full((rows, cols), -1, dtype=np.int32)
 
-        domain_w, domain_d = 2.0 * x_half, 2.0 * z_far
-        outer_pts = sample(domain_w, domain_d, outer_min_dist) - [x_half, z_far]
+        pts_x: list[float] = []
+        pts_z: list[float] = []
+        active: list[int]  = []
+
+        def to_grid(x: float, z: float):
+            c = int((x + x_half) / cell)
+            r = int((z + z_far)  / cell)
+            return np.clip(r, 0, rows - 1), np.clip(c, 0, cols - 1)
+
+        def try_add(x: float, z: float) -> bool:
+            r  = radius_at(x, z)
+            gr, gc = to_grid(x, z)
+            hw = int(np.ceil(r / cell)) + 1
+            for dr in range(-hw, hw + 1):
+                for dc in range(-hw, hw + 1):
+                    nr, nc = gr + dr, gc + dc
+                    if 0 <= nr < rows and 0 <= nc < cols and grid[nr, nc] >= 0:
+                        i = grid[nr, nc]
+                        if np.hypot(x - pts_x[i], z - pts_z[i]) < r:
+                            return False
+            idx = len(pts_x)
+            pts_x.append(x)
+            pts_z.append(z)
+            active.append(idx)
+            grid[gr, gc] = idx
+            return True
+
+        try_add(0.0, 0.0)
+
+        while active:
+            i      = int(rng.integers(len(active)))
+            ax, az = pts_x[active[i]], pts_z[active[i]]
+            r      = radius_at(ax, az)
+            placed = False
+            for _ in range(k):
+                angle = rng.uniform(0.0, 2.0 * np.pi)
+                dist  = rng.uniform(r, 2.0 * r)
+                nx    = ax + dist * np.cos(angle)
+                nz    = az + dist * np.sin(angle)
+                if -x_half <= nx <= x_half and -z_far <= nz <= z_far:
+                    if try_add(nx, nz):
+                        placed = True
+                        break
+            if not placed:
+                active.pop(i)
+
+        pts = np.column_stack([pts_x, pts_z]).astype(np.float32)
 
         n  = n_boundary
         ex = np.linspace(-x_half, x_half, n, dtype=np.float32)
         ez = np.linspace(-z_far,  z_far,  n, dtype=np.float32)
         boundary_pts = np.concatenate([
-            np.column_stack([ex,                           np.full(n, -z_far,  dtype=np.float32)]),
-            np.column_stack([ex,                           np.full(n,  z_far,  dtype=np.float32)]),
+            np.column_stack([ex,                                np.full(n, -z_far,  dtype=np.float32)]),
+            np.column_stack([ex,                                np.full(n,  z_far,  dtype=np.float32)]),
             np.column_stack([np.full(n, -x_half, dtype=np.float32), ez]),
             np.column_stack([np.full(n,  x_half, dtype=np.float32), ez]),
         ]).astype(np.float32)
 
-        return np.concatenate([inner_pts, outer_pts, boundary_pts])
+        return np.concatenate([pts, boundary_pts])
 
     # ── Colour helpers ────────────────────────────────────────────────────────
 
