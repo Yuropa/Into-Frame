@@ -9,6 +9,7 @@ class Scene:
         self.time_scale = 1.0
         self.near_clip_plane = 0.1
         self.far_clip_plane = 100.0
+        self.skybox_rotation = 0.0
         self.extrinsics = CameraExtrinsics.identity()
         self.objects = []
         self.skybox = ""
@@ -25,7 +26,8 @@ class Scene:
             "farClipPlane":  self.far_clip_plane,
             "objects":       [obj.encode() for obj in self.objects],
             "extrinsics":    self.extrinsics.encode(),
-            "skybox":        self.skybox,
+            "skybox":         self.skybox,
+            "skyboxRotation": self.skybox_rotation,
         }
 
     @classmethod
@@ -39,4 +41,5 @@ class Scene:
         obj.extrinsics      = CameraExtrinsics.decode(data["extrinsics"])
         obj.objects         = [Object3D.decode(o) for o in data["objects"]]
         obj.skybox          = data["skybox"]
+        obj.skybox_rotation = data.get("skyboxRotation", 0.0)
         return obj

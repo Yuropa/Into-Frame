@@ -60,7 +60,7 @@ public class SceneParamManager : MonoBehaviour
 
         if (p.skybox != null)
         {
-            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox);
+            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox, p.skyboxRotation);
         }
     }
 

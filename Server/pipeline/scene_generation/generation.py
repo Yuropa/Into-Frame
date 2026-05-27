@@ -58,6 +58,14 @@ class SceneGenerationStage(PipelineStage):
         scene = Scene()
         scene.extrinsics = extrinsics
 
+        # Rotate the skybox to align the panorama center with the camera's forward direction.
+        # The panorama center (theta=0) = +Z in camera space; the extrinsics rotation tells
+        # us where +Z ended up in world space.  The skybox _Rotation (Y-axis, degrees) must
+        # match that yaw so terrain and panorama line up.
+        if extrinsics is not None:
+            cam_forward = extrinsics.rotation @ np.array([0.0, 0.0, 1.0])
+            scene.skybox_rotation = float(np.degrees(np.arctan2(cam_forward[0], cam_forward[2])))
+
         if depth is not None:
             valid = depth.depth[np.isfinite(depth.depth) & (depth.depth > 0)]
             if len(valid) > 0:

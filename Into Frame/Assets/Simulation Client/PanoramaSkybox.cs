@@ -7,6 +7,7 @@ public class PanoramaSkybox : MonoBehaviour
     [Header("Skybox Settings")]
     public string imageName;
     public float exposure = 1.0f;
+    public float rotation = 0.0f;
 
     private Material skyboxMaterial;
 
@@ -17,6 +18,12 @@ public class PanoramaSkybox : MonoBehaviour
     {
         if (!string.IsNullOrEmpty(imageName))
             LoadFromName(imageName);
+    }
+
+    public void LoadFromName(string name, float rotationDegrees = 0f)
+    {
+        rotation = rotationDegrees;
+        LoadFromName(name);
     }
 
     public void LoadFromName(string name)
@@ -72,6 +79,7 @@ public class PanoramaSkybox : MonoBehaviour
         skyboxMaterial = new Material(Shader.Find("Skybox/Panoramic"));
         skyboxMaterial.SetTexture("_MainTex", texture);
         skyboxMaterial.SetFloat("_Exposure", exposure);
+        skyboxMaterial.SetFloat("_Rotation", rotation);
 
         // Apply to the scene
         RenderSettings.skybox = skyboxMaterial;
