@@ -53,7 +53,7 @@ class PanoramaStage(PipelineStage):
         if input_image is not None:
             if caption is None:
                 caption = ""
-            full_caption = "360 view. seamless. outdoor scene. clear in-focus. smooth background. open air. 360 degree panorama. dirt ground. " + caption
+            full_caption = "360 view. seamless. outdoor scene. clear in-focus. smooth background. open air. 360 degree panorama. no people." + caption
 
             pano = self._pano.pano(input_image.rgb(), depth_image.gray(), self.temp, intrinsics.fov, full_caption, seed=self.seed, on_progress=self.make_progress_callback(pano_task))
             context.add_image(output_key, pano.image)
