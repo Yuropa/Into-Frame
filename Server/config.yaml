@@ -44,11 +44,11 @@ stages:
   - name: Terrain Mesh
     stage: TerrainMeshStage
     enabled: true
-    inner_grid_n: 30
-    n_rings: 24
-    ring_base_points: 64     
-    z_far: null             
-    noise_amplitude: 0.05     # metres of peak noise displacement
+    inner_min_dist: 0.25    # metres between samples in the inner region (~20 m radius)
+    outer_min_dist: 1.5     # metres between samples across the full domain
+    n_boundary: 16          # anchor points per edge of the domain rectangle
+    z_far: null
+    noise_amplitude: 0.05   # metres of peak noise displacement
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting

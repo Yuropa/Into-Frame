@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter
 from scipy.spatial import Delaunay
+from scipy.stats.qmc import PoissonDisk
 from typing import Optional
 import trimesh
 import trimesh.visual.material
@@ -17,9 +18,9 @@ class TerrainMeshGenerator:
     def generate(
         height_map: Depth,
         grid_size_meters: float,
-        inner_grid_n: int = 30,
-        n_rings: int = 12,
-        ring_base_points: int = 64,
+        inner_min_dist: float = 1.5,
+        outer_min_dist: float = 6.0,
+        n_boundary: int = 12,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
         noise_seed: int = 42,
@@ -28,12 +29,12 @@ class TerrainMeshGenerator:
         intrinsics: Optional[CameraIntrinsics] = None,
     ) -> Mesh:
         """
-        Build a variable-density terrain mesh from a height map.
+        Build a variable-density terrain mesh from a height map using Poisson
+        disc sampling and Delaunay triangulation.
 
-        A dense Cartesian grid covers the centre, surrounded by concentric rings
-        whose point count decreases logarithmically with radius.  A sparse
-        rectangle of boundary points anchors the domain edges.  All points are
-        triangulated with Delaunay, giving a smooth LOD falloff with no axis-bias.
+        A dense Poisson disc pass covers the inner region; a sparser pass covers
+        the full domain.  Boundary points anchor the rectangle edges.  All points
+        are triangulated with Delaunay, giving a natural, non-axis-biased LOD.
 
         panorama  : Panorama for equirectangular vertex-colour baking (full 360° coverage).
         texture   : PIL image for pinhole UV mapping via CameraIntrinsics (FOV-limited).
@@ -43,46 +44,19 @@ class TerrainMeshGenerator:
         x_half = grid_size_meters / 2.0
         hm     = height_map.depth  # (H, W) float32
 
-        # Inner grid half-extent: 20 % of the shorter half-dimension
+        # Inner region half-extent: 20 % of the shorter half-dimension
         inner_half = min(x_half, z_far) * 0.20
 
-        # ── Dense inner Cartesian grid ────────────────────────────────────
-        xi = np.linspace(-inner_half, inner_half, inner_grid_n + 1, dtype=np.float32)
-        XX, ZZ = np.meshgrid(xi, xi)
-        inner_pts = np.stack([XX.ravel(), ZZ.ravel()], axis=-1)
-
-        # ── Concentric rings ──────────────────────────────────────────────
-        # Start just outside the inner grid's corners, end at the domain corner.
-        r_start = inner_half * np.sqrt(2.0) * 1.05
-        r_end   = np.hypot(x_half, z_far)
-        ring_radii = np.logspace(np.log10(r_start), np.log10(r_end), n_rings)
-
-        min_ring_pts = 8
-        ring_pts_list = []
-        for i, r in enumerate(ring_radii):
-            t     = i / max(1, n_rings - 1)           # 0 → 1 across rings
-            log_n = (1.0 - t) * np.log2(ring_base_points) + t * np.log2(min_ring_pts)
-            n_pts = max(min_ring_pts, int(2 ** log_n))
-            angles = np.linspace(0.0, 2.0 * np.pi, n_pts, endpoint=False, dtype=np.float32)
-            pts = np.stack([r * np.sin(angles), r * np.cos(angles)], axis=-1)
-            pts[:, 0] = pts[:, 0].clip(-x_half, x_half)
-            pts[:, 1] = pts[:, 1].clip(-z_far,  z_far)
-            ring_pts_list.append(pts)
-
-        # ── Sparse boundary rectangle ─────────────────────────────────────
-        # Ensures Delaunay hull fills the full rectangular domain.
-        n_edge = max(4, n_rings // 2)
-        ex = np.linspace(-x_half, x_half, n_edge, dtype=np.float32)
-        ez = np.linspace(-z_far,  z_far,  n_edge, dtype=np.float32)
-        boundary_pts = np.concatenate([
-            np.stack([ex, np.full(n_edge, -z_far, dtype=np.float32)], axis=-1),
-            np.stack([ex, np.full(n_edge,  z_far, dtype=np.float32)], axis=-1),
-            np.stack([np.full(n_edge, -x_half, dtype=np.float32), ez], axis=-1),
-            np.stack([np.full(n_edge,  x_half, dtype=np.float32), ez], axis=-1),
-        ])
-
-        # ── Combine and deduplicate ───────────────────────────────────────
-        all_xz = np.concatenate([inner_pts] + ring_pts_list + [boundary_pts], axis=0)
+        # ── Poisson disc sampling ─────────────────────────────────────────
+        all_xz = TerrainMeshGenerator._poisson_disc_xz(
+            x_half=x_half,
+            z_far=z_far,
+            inner_half=inner_half,
+            inner_min_dist=inner_min_dist,
+            outer_min_dist=outer_min_dist,
+            n_boundary=n_boundary,
+            seed=noise_seed,
+        )
         all_xz = np.unique(np.round(all_xz, 4), axis=0)
 
         X_pos = all_xz[:, 0].astype(np.float32)
@@ -138,6 +112,46 @@ class TerrainMeshGenerator:
             tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
         return Mesh(tri_mesh)
+
+    # ── Point generation ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _poisson_disc_xz(
+        x_half: float,
+        z_far: float,
+        inner_half: float,
+        inner_min_dist: float,
+        outer_min_dist: float,
+        n_boundary: int,
+        seed: int = 42,
+    ) -> np.ndarray:
+        rng = np.random.default_rng(seed)
+
+        def sample(w: float, h: float, min_dist: float) -> np.ndarray:
+            max_dim = max(w, h)
+            r_norm  = min_dist / max_dim
+            n_max   = max(64, int(4.0 / (np.pi * r_norm ** 2)))
+            engine  = PoissonDisk(d=2, radius=r_norm, seed=int(rng.integers(2**31)))
+            pts     = engine.random(n_max)
+            return (pts * [w, h]).astype(np.float32)
+
+        inner_w   = 2.0 * inner_half
+        inner_pts = sample(inner_w, inner_w, inner_min_dist) - inner_half
+
+        domain_w, domain_d = 2.0 * x_half, 2.0 * z_far
+        outer_pts = sample(domain_w, domain_d, outer_min_dist) - [x_half, z_far]
+
+        n  = n_boundary
+        ex = np.linspace(-x_half, x_half, n, dtype=np.float32)
+        ez = np.linspace(-z_far,  z_far,  n, dtype=np.float32)
+        boundary_pts = np.concatenate([
+            np.column_stack([ex,                           np.full(n, -z_far,  dtype=np.float32)]),
+            np.column_stack([ex,                           np.full(n,  z_far,  dtype=np.float32)]),
+            np.column_stack([np.full(n, -x_half, dtype=np.float32), ez]),
+            np.column_stack([np.full(n,  x_half, dtype=np.float32), ez]),
+        ]).astype(np.float32)
+
+        return np.concatenate([inner_pts, outer_pts, boundary_pts])
 
     # ── Colour helpers ────────────────────────────────────────────────────────
 
