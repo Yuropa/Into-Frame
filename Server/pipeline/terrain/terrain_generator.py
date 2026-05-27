@@ -81,6 +81,7 @@ class TerrainMeshGenerator:
         nc = (col_coords / (w_hm - 1) * 255).clip(0, 255)
         noise_vals = map_coordinates(noise_tex, [nr, nc], order=1, mode="wrap").astype(np.float32)
 
+        r_end = np.hypot(x_half, z_far)
         blend = (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
         Y_pos += noise_vals * noise_amplitude * blend
 
