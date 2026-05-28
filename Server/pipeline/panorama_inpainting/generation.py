@@ -61,6 +61,8 @@ class PanoramaInpaintingStage(PipelineStage):
                 "box":   [float(x) for x in crop.box],
                 "score": float(crop.score),
             })
+            if self.temp is not None:
+                crop.image.save(self.temp / f"crop_{idx}.png")
             self.advance_progress(cropping_task)
         self.finish_progress(cropping_task)
         context.add_object(ContextKey.OBJECT_COUNT, result.length)

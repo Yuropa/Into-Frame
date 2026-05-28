@@ -1,7 +1,28 @@
+from typing import Any
+from logging import Logger
+
+import torch
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
-from pipeline.model_generation.model_generation import ModelGenerator
+from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
 from pipeline.pipeline_context import PipelineContext
 from util.device_utils import DeviceStrategy, preferred_device
+
+
+class ModelGenerationConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        generator_type: str = "TRELLIS",
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.generator_type = ModelGeneratorType[generator_type.upper()]
+
 
 class ModelGenerationStage(PipelineStage):
     """
@@ -16,16 +37,20 @@ class ModelGenerationStage(PipelineStage):
     Also reads: count (object) → number of crops to process
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
-        super().__init__(config)
+    @classmethod
+    def config_class(cls):
+        return ModelGenerationConfiguration
 
+    def __init__(self, config: ModelGenerationConfiguration) -> None:
+        super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         count = context.input_object("count")
 
+        gen_type = getattr(self.config, "generator_type", ModelGeneratorType.default())
         super().clean_up()
-        gen = ModelGenerator(self.preferred_device)
+        gen = ModelGenerator(self.preferred_device, type=gen_type)
         generation_task = self.create_progress(count, "Meshifying...")
         for idx in range(count):
             mesh_name = f"mesh_{idx}"   

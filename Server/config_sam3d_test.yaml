@@ -1,0 +1,28 @@
+# SAM3D test pipeline
+#
+# Minimal pipeline for testing the SAM3D mesh generator end-to-end:
+#   Input image → depth → panorama → segment + inpaint objects → SAM3D meshes
+#
+# Usage:
+#   python main.py run <image> --config config_sam3d_test.yaml
+#
+# Each crop_{i} masked image is saved to the temp/build directory so you can
+# inspect exactly what gets fed to the 3D generator.
+
+stages:
+  - name: Depth Generation
+    stage: DepthStage
+    enabled: true
+
+  - name: Panorama
+    stage: PanoramaStage
+    enabled: true
+
+  - name: Panorama Inpainting
+    stage: PanoramaInpaintingStage
+    enabled: true
+
+  - name: Mesh Generation
+    stage: ModelGenerationStage
+    enabled: true
+    generator_type: SAM3D
