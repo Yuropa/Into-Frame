@@ -1,6 +1,7 @@
 #!/bin/bash
 FORCE=false
 SAVE_LOGS=false
+VERBOSE=false
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
@@ -12,15 +13,17 @@ show_usage() {
     echo -e "Options:"
     echo -e "  -f    Force clean installation (removes existing libraries and conda environments)"
     echo -e "  -s    Save existing installation logs (default behavior wipes the logs directory)"
+    echo -e "  -v    Verbose mode (dumps output to terminal instead of a log file)"
     echo -e "  -h    Show this help message and exit"
     exit 0
 }
 
 # Parse command line flags
-while getopts "fsh" opt; do
+while getopts "fshv" opt; do
   case $opt in
     f) FORCE=true ;;
     s) SAVE_LOGS=true ;;
+    v) VERBOSE=true ;;
     h) show_usage ;;
     *) echo "Invalid option. Use -h for help." >&2; exit 1 ;;
   esac
@@ -108,19 +111,27 @@ LOG_FILE="$LOG_DIR/install-$(date +%Y%m%d-%H%M%S).log"
 
 touch "$LOG_FILE"
 echo ""
-echo "Logging to file: $LOG_FILE"
+if [ "$VERBOSE" = true ]; then
+    echo "Verbose mode enabled. Outputting directly to terminal (also logging to $LOG_FILE)"
+else
+    echo "Logging to file: $LOG_FILE"
+fi
 
 CONDA_NAME="frame"
 BASE_ENV="frame-base"
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano")
+CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
 LIB_DIR="$SCRIPT_DIR/lib"
 CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
+
+load_conda() {
+    eval "$(conda shell.bash hook)" 2>/dev/null || true
+}
 
 create_base_env() {
     conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
@@ -132,6 +143,7 @@ create_env() {
     local version="${2:-}"
 
     CURRENT_ENV="$name"
+    load_conda
     conda deactivate
 
     if [[ -n "$version" ]]; then
@@ -143,6 +155,7 @@ create_env() {
 }
 
 stop_env() {
+    load_conda
     conda deactivate
     conda activate "$CONDA_NAME" 
     CURRENT_ENV=""
@@ -240,34 +253,46 @@ run_step() {
     shift
 
     CURRENT_STEP=$((CURRENT_STEP + 1))
-    
-    # Generate a clean timestamp, e.g., [14:32:05]
     local timestamp=$(date +"%H:%M:%S")
 
     echo ""
     printf "${BLUE}[$CURRENT_STEP/$TOTAL_STEPS]${RESET} ($timestamp) ${BOLD}$desc${RESET}\n"
 
-    # Execute step cleanly in background logging stdout & stderr
-    "$@" >>"$LOG_FILE" 2>&1 &
-    local pid=$!
-
-    # Spin safely while monitoring background process
-    spinner "$pid" "Running..."
-
-    # Capture the exact exit status code
-    wait "$pid"
-    local exit_status=$?
-
-    if [ $exit_status -eq 0 ]; then
-        success "✓ Done"
+    if [ "$VERBOSE" = true ]; then
+        # Verbose Mode: Run in foreground, show output live, still save to log
+        # 'tee -a' duplicates stdout to the log file
+        # 2>&1 merges stderr into stdout so you see errors too
+        "$@" 2>&1 | tee -a "$LOG_FILE"
+        local exit_status=${PIPESTATUS[0]} # Gets exit code of "$@", not tee
+        
+        if [ $exit_status -eq 0 ]; then
+            success "✓ Done"
+        else
+            local end_timestamp=$(date +"%H:%M:%S")
+            error "✗ Failed at $end_timestamp (Exit Code: $exit_status)"
+            exit 1
+        fi
     else
-        local end_timestamp=$(date +"%H:%M:%S")
-        error "✗ Failed at $end_timestamp (Exit Code: $exit_status)"
-        error "See log: $LOG_FILE"
-        echo ""
-        warn "Last 20 log lines:"
-        tail -n 20 "$LOG_FILE"
-        exit 1
+        # Standard Mode: Original background worker + spinner
+        "$@" >>"$LOG_FILE" 2>&1 &
+        local pid=$!
+
+        spinner "$pid" "Running..."
+
+        wait "$pid"
+        local exit_status=$?
+
+        if [ $exit_status -eq 0 ]; then
+            success "✓ Done"
+        else
+            local end_timestamp=$(date +"%H:%M:%S")
+            error "✗ Failed at $end_timestamp (Exit Code: $exit_status)"
+            error "See log: $LOG_FILE"
+            echo ""
+            warn "Last 20 log lines:"
+            tail -n 20 "$LOG_FILE"
+            exit 1
+        fi
     fi
 }
 
@@ -298,8 +323,8 @@ run_step "Cleanup" \
     cleanup_if_needed
 
 setup_shell_env() {
+    load_conda
     conda init
-    eval "$(conda shell.bash hook)"
     source_shell_configs
 
     # Detect OS and install accordingly
@@ -329,7 +354,7 @@ run_step "Creating Base Environment" \
 create_main_environment() {
     create_env "$CONDA_NAME"
 
-    eval "$(conda shell.bash hook)"
+    load_conda
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
@@ -428,6 +453,17 @@ download_sam3d() {
 run_step "Downloading SAM 3D" \
     download_sam3d
 
+setup_sam3d() {
+    clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
+
+    create_env "sam3d"
+    run_in_env pip install -r "$LIB_DIR/SAM3D/requirements.txt"
+    stop_env
+}
+
+run_step "Setup SAM 3D" \
+    setup_sam3d
+
 ## ======================
 ##    Depth Anything
 ## ======================
@@ -448,6 +484,42 @@ run_step "Installing Depth Anything" \
     setup_depth_anything
 
 ## ======================
+##        RAM++
+## ======================
+
+setup_recognize_anything() {
+    clone_if_needed https://github.com/xinyu1205/recognize-anything.git "$LIB_DIR/recognize-anything"
+    download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/blob/main/ram_plus_swin_large_14m.pth" "recognize_anything"
+
+    create_env "recognize" 3.10
+    run_in_env pip install -e "$LIB_DIR/recognize-anything"
+    stop_env
+}
+
+run_step "Installing Recognize Anything" \
+    setup_recognize_anything
+
+## ======================
+##    LuxDiT
+## ======================
+
+setup_lux_dit() {
+    clone_if_needed https://github.com/nv-tlabs/LuxDiT.git "$LIB_DIR/LuxDiT"
+
+    create_env "lux-dit" 3.10
+    run_in_env pip install -r "$LIB_DIR/LuxDiT/requirements.txt"
+
+    if [ ! -d "$CHECKPOINT_DIR/LuxDiT" ]; then
+        run_in_env python "$LIB_DIR/LuxDiT/download_weights.py" --repo_id nvidia/LuxDiT --local_dir "$CHECKPOINT_DIR/LuxDiT"
+    fi
+
+    stop_env
+}
+
+run_step "Installing LuxDiT" \
+    setup_lux_dit
+
+## ======================
 ##    Models Download
 ## ======================
 
@@ -455,7 +527,9 @@ run_step "Installing Depth Anything" \
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
 conda run -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
-conda run -n "$CONDA_NAME" python -c "from huggingface_hub import interpreter_login; interpreter_login()"
+load_conda
+conda activate "$CONDA_NAME"
+python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
 # Encapsulating the download wrapper so it interfaces cleanly with your UI spinner
 download_pipeline_models() {
@@ -499,7 +573,7 @@ run_step "Installing Stable Point 3D" \
 
 setup_cubediff() {
     create_env "cubediff"
-    clone_if_needed git@github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
+    clone_if_needed https://github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
     run_in_env pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
     ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
@@ -593,7 +667,7 @@ run_step "Install Depth Any Panoramas" \
 ##    End
 ## ============
 
-eval "$(conda shell.bash hook)"
+load_conda
 conda activate "$CONDA_NAME"
 
 success ""
