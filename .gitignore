@@ -32,6 +32,7 @@ sdist/
 var/
 wheels/
 taming/
+memory/
 share/python-wheels/
 *.egg-info/
 .installed.cfg

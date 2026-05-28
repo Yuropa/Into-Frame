@@ -11,6 +11,7 @@ from scene.mesh import Mesh
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
+from scene.lighting import SceneLighting
 
 class ValueKeys(StrEnum):
     NONE = "none"
@@ -24,6 +25,7 @@ class ValueKeys(StrEnum):
     EXTRINSICS = "extrinsics"
     CUBEMAP = "cubemap"
     PANORAMA = "panorama"
+    LIGHTING = "lighting"
 
     def preferred_extension(self) -> "str":
         match self:
@@ -47,6 +49,8 @@ class ValueKeys(StrEnum):
                 return "cube"
             case ValueKeys.PANORAMA:
                 return "png"
+            case ValueKeys.LIGHTING:
+                return "lighting"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -110,6 +114,10 @@ class ContextValue():
         self.type = ValueKeys.PANORAMA
         self.value = Panorama(obj)
 
+    def set_lighting(self, obj: SceneLighting):
+        self.type = ValueKeys.LIGHTING
+        self.value = obj
+
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
             return self.value
@@ -170,6 +178,12 @@ class ContextValue():
         else:
             return None
 
+    def lighting(self) -> Optional[SceneLighting]:
+        if self.type == ValueKeys.LIGHTING:
+            return self.value
+        else:
+            return None
+
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
@@ -206,7 +220,9 @@ class ContextValue():
             self.set_cubemap(CubeMap.load(resolved_path))
         elif value_type == ValueKeys.PANORAMA:
             self.set_panorama(Panorama.load(resolved_path))
-        
+        elif value_type == ValueKeys.LIGHTING:
+            self.set_lighting(SceneLighting.load(resolved_path))
+
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
         with open(meta_path, "w") as f:
@@ -239,6 +255,8 @@ class ContextValue():
             self.cubemap().save(path=save_path)
         elif self.type == ValueKeys.PANORAMA:
             self.panorama().save(path=save_path)
+        elif self.type == ValueKeys.LIGHTING:
+            self.lighting().save(save_path)
 
         return save_path
     
@@ -269,4 +287,7 @@ class ContextValue():
         elif self.type == ValueKeys.PANORAMA:
             v = self.panorama()
             return f"Panorama ({v.width}x{v.height})"
+        elif self.type == ValueKeys.LIGHTING:
+            v = self.lighting()
+            return f"Lighting ({v.width}x{v.height})"
         return "None"

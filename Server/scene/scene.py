@@ -1,6 +1,6 @@
 from scene.object import Object3D
 from scene.camera import CameraExtrinsics
-from typing import Self
+from typing import Self, Optional
 
 class Scene:
     def __init__(self):
@@ -13,6 +13,7 @@ class Scene:
         self.extrinsics = CameraExtrinsics.identity()
         self.objects = []
         self.skybox = ""
+        self.lighting = None  # Optional[SceneLighting]
 
     def add_object(self, object: Object3D):
         self.objects.append(object)
@@ -28,10 +29,12 @@ class Scene:
             "extrinsics":    self.extrinsics.encode(),
             "skybox":         self.skybox,
             "skyboxRotation": self.skybox_rotation,
+            "lighting":       self.lighting.encode() if self.lighting is not None else None,
         }
 
     @classmethod
     def decode(cls, data: dict) -> Self:
+        from scene.lighting import SceneLighting
         obj = cls()
         obj.ambient_color   = data["ambientColor"]
         obj.gravity         = data["gravity"]
@@ -42,4 +45,6 @@ class Scene:
         obj.objects         = [Object3D.decode(o) for o in data["objects"]]
         obj.skybox          = data["skybox"]
         obj.skybox_rotation = data.get("skyboxRotation", 0.0)
+        lighting_data       = data.get("lighting")
+        obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
         return obj

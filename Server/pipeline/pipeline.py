@@ -23,6 +23,7 @@ from pipeline.captioning.captioning import CaptioningStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
 from pipeline.panorama_depth.depth import PanoramaDepthStage
 from pipeline.panorama_inpainting.generation import PanoramaInpaintingStage
+from pipeline.lighting.lighting import PanoramaLightingStage
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
@@ -141,6 +142,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "DepthStage": DepthStage,
     "PanoramaStage": PanoramaStage,
     "PanoramaDepthStage": PanoramaDepthStage,
+    "PanoramaLightingStage": PanoramaLightingStage,
     "HeightMapStage": HeightMapStage,
     "TerrainMeshStage": TerrainMeshStage,
     "SegmentationStage": SegmentationStage,

@@ -28,6 +28,10 @@ stages:
     stage: PanoramaInpaintingStage
     enabled: true
 
+  - name: Panorama Lighting
+    stage: PanoramaLightingStage
+    enabled: true
+
   - name: Panorama Depth
     stage: PanoramaDepthStage
     enabled: true

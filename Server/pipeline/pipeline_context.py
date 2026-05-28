@@ -9,6 +9,7 @@ from util.panorama_utils import Panorama
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
+from scene.lighting import SceneLighting
 
 class ContextKey:
     """Well-known string keys for values stored in PipelineContext."""
@@ -26,7 +27,8 @@ class ContextKey:
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh"]
+    LIGHTING = "lighting"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh", "lighting"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
@@ -218,6 +220,18 @@ class PipelineContext():
 
     def input_panorama(self, name: ContextKeyName) -> Optional[Panorama]:
         return self._value(name, self._previous_stage).panorama()
+
+    # Lighting
+    def add_lighting(self, name: ContextKeyName, input: SceneLighting):
+        value = ContextValue(name=name)
+        value.set_lighting(input)
+        self._set_value(name, value)
+
+    def lighting(self, name: ContextKeyName) -> Optional[SceneLighting]:
+        return self._value(name).lighting()
+
+    def input_lighting(self, name: ContextKeyName) -> Optional[SceneLighting]:
+        return self._value(name, self._previous_stage).lighting()
 
     # Persistence
     def save(self, path: Path):
