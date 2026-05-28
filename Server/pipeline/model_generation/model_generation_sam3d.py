@@ -1,44 +1,32 @@
-# class ModelGenerator():
-#     def __init__(self, device) -> None:
-#         self.device = device
-#         self.model_id = "facebook/sam3"
-        
-#         self.processor = Sam3Processor.from_pretrained(self.model_id)
-#         self.model = Sam3DModel.from_pretrained(
-#             self.model_id, 
-#             torch_dtype=torch.float16 # Mandatory for 24GB Mac
-#         ).to(self.device)
+import torch
+from pathlib import Path
 
-#     @classmethod
-#     def model_names(cls) -> list[str]:
-#         return ["facebook/sam3"] # "facebook/sam-3d-objects"
-    
-#     def meshify(
-#         self, 
-#         image: Image,
-#         prompt: str = "an object"
-#     ):
-#         raw_image = image.rgb()
+from pipeline.model_generation.model_generation_base import ModelGeneratorBase
 
-#         inputs = self.processor(raw_image, text=prompt, return_tensors="pt").to(self.device)
-            
-#         with torch.no_grad():
-#             # SAM3DModel returns vertices, faces, and texture maps directly
-#             outputs = self.model.generate_mesh(**inputs)
-            
-#         # 3. Build the Trimesh object
-#         # The .generate_mesh() call returns a dictionary of CPU tensors
-#         mesh = trimesh.Trimesh(
-#             vertices=outputs.vertices.numpy(),
-#             faces=outputs.faces.numpy(),
-#             process=True
-#         )
-        
-#         # 4. Apply Texture (SAM 3D is famous for its high-quality baking)
-#         if hasattr(outputs, "textures"):
-#             mesh.visual = trimesh.visual.TextureVisuals(
-#                 image=outputs.textures, # This is a PIL image
-#                 uv=outputs.uvs.numpy()
-#             )
-        
-#         return Mesh(mesh)
+
+class ModelGeneratorSam3D(ModelGeneratorBase):
+    """
+    Mesh generator backed by SAM 3 (Segment Anything with Concepts).
+
+    SAM 3 is a segmentation model, not a 3D reconstructor. This generator uses
+    SAM 3's text-prompted segmentation to get a clean object mask, then extrudes
+    the 2D silhouette into a shallow 3D mesh and applies the masked image as a
+    texture. Results are cookie-cutter style — accurate silhouette, limited depth.
+
+    Note: trimesh, shapely, and opencv-python must be present in the sam3d env.
+    Add them to the setup script if the subprocess fails to import them:
+        conda run -n sam3d pip install trimesh shapely opencv-python
+    """
+
+    def __init__(self, device: torch.device) -> None:
+        script_path = Path(__file__).parent / "model_generation_sam3d_imp.py"
+        super().__init__(
+            device=device,
+            conda_env="sam3d",
+            script_path=script_path,
+        )
+
+    @classmethod
+    def model_names(cls) -> list[str]:
+        # Downloaded via setup.sh from facebook/sam-3d-objects — not a HF snapshot
+        return []
