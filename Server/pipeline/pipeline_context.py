@@ -28,7 +28,8 @@ class ContextKey:
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
     LIGHTING = "lighting"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh", "lighting"]
+    RECOGNIZE_TAGS = "recognize_tags"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

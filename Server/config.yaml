@@ -58,6 +58,10 @@ stages:
     z_far: null
     noise_amplitude: 0.05   # metres of peak noise displacement
 
+  - name: Object Recognition
+    stage: RecognizeAnythingStage
+    enabled: false
+
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false
