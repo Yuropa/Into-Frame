@@ -149,6 +149,15 @@ Commands:
 
 `--env` overrides the conda environment name (default: `frame`). `--seed` accepts a bare integer or `STAGE:VALUE` pairs and is repeatable.
 
+Pass `-h` or `--help` anywhere to see options:
+
+```bash
+./frame.sh -h              # global help
+./frame.sh run -h          # run options
+./frame.sh server -h       # server options
+./frame.sh remote -h       # remote options
+```
+
 ---
 
 ## Project Structure

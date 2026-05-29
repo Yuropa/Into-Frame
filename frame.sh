@@ -178,7 +178,7 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
       -d|--debug)  DEBUG="$2";  shift 2 ;;
       --config)    CONFIG="$2"; shift 2 ;;
       -h|--help)   usage; exit 0 ;;
-      *) echo "Unknown run option: $1"; usage; exit 1 ;;
+      *) echo "Unknown run option: $1" >&2; exit 1 ;;
     esac
   done
 
@@ -204,7 +204,7 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
       -d|--debug)   DEBUG="$2";      shift 2 ;;
       --config)     CONFIG="$2";     shift 2 ;;
       -h|--help)    usage; exit 0 ;;
-      *) echo "Unknown server option: $1"; usage; exit 1 ;;
+      *) echo "Unknown server option: $1" >&2; exit 1 ;;
     esac
   done
 
@@ -225,7 +225,7 @@ elif [[ "$SUBCOMMAND" == "download" ]]; then
     case $1 in
       --config)  CONFIG="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
-      *) echo "Unknown download option: $1"; usage; exit 1 ;;
+      *) echo "Unknown download option: $1" >&2; exit 1 ;;
     esac
   done
 
