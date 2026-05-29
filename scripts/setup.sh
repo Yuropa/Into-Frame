@@ -136,7 +136,7 @@ load_conda() {
 
 create_base_env() {
     conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
-    conda run -n "$BASE_ENV" pip install torch==2.10.0 torchvision==0.25.0 torchaudio --extra-index-url "$TORCH_URL"
+    conda run --no-capture-output -n "$BASE_ENV" pip install torch==2.10.0 torchvision==0.25.0 torchaudio --extra-index-url "$TORCH_URL"
 }
 
 create_env() {
@@ -168,7 +168,7 @@ run_in_env() {
         return 1
     fi
 
-    conda run -n "$CURRENT_ENV" "$@"
+    conda run --no-capture-output -n "$CURRENT_ENV" "$@"
 }
 
 source_shell_configs() {
@@ -359,8 +359,8 @@ create_main_environment() {
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
-    conda run -n frame pip install -r "$PROJECT_DIR/requirements.txt"
-    conda run -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+    conda run --no-capture-output -n frame pip install -r "$PROJECT_DIR/requirements.txt"
+    conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
     mkdir -p "$LIB_DIR"
     mkdir -p "$CHECKPOINT_DIR"
@@ -376,7 +376,7 @@ run_step "Creating Conda Environment '$CONDA_NAME'" \
 
 setup_sam2() {
     clone_if_needed https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
-    conda run -n frame pip install -e "$LIB_DIR/sam2"
+    conda run --no-capture-output -n frame pip install -e "$LIB_DIR/sam2"
 }
 
 run_step "Installing SAM 2" \
@@ -398,10 +398,10 @@ setup_trellis() {
     create_env "trellis2"
     
     # Run the setup script safely using --cwd and explicit environment handling
-    conda run --cwd "$TRELLIS_DIR" -n trellis2 bash "$setup_script" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm <<< "Y"
-    
+    conda run --no-capture-output --cwd "$TRELLIS_DIR" -n trellis2 bash "$setup_script" --basic --nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm <<< "Y"
+
     # Explicitly run inside the targeted environment
-    conda run -n trellis2 pip install transformers==4.57.6 psutil
+    conda run --no-capture-output -n trellis2 pip install transformers==4.57.6 psutil
 }
 
 install_flash_attn() {
@@ -412,15 +412,14 @@ install_flash_attn() {
     # Check if the expansion actually found a real file
     if [ -f "${matched_wheels[0]}" ]; then
         info "Found pre-compiled wheel. Installing..."
-        conda run -n trellis2 pip install "${matched_wheels[0]}"
+        conda run --no-capture-output -n trellis2 pip install "${matched_wheels[0]}"
     else
         warn "Building flash-attn. This will take a while..."
-        # Fixed $ver to $FLASH_VERSION here
-        MAX_JOBS=4 conda run -n trellis2 pip wheel flash-attn=="$FLASH_VERSION" -w "$FLASH_WHEEL_DIR" -v --no-build-isolation
-        
+        MAX_JOBS=4 conda run --no-capture-output -n trellis2 pip wheel flash-attn=="$FLASH_VERSION" -w "$FLASH_WHEEL_DIR" -v --no-build-isolation
+
         # Re-evaluate the expansion array to find the newly built wheel
         matched_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION"*.whl)
-        conda run -n trellis2 pip install "${matched_wheels[0]}"
+        conda run --no-capture-output -n trellis2 pip install "${matched_wheels[0]}"
     fi
 
     # Handle your symlink cleanly
@@ -527,14 +526,14 @@ run_step "Installing LuxDiT" \
 # Hugging Face auth for gated checkpoints
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
-conda run -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
+conda run --no-capture-output -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
 load_conda
 conda activate "$CONDA_NAME"
 python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
 # Encapsulating the download wrapper so it interfaces cleanly with your UI spinner
 download_pipeline_models() {
-    if ! conda run -n "$CONDA_NAME" python3 "$PROJECT_DIR/server/main.py" download; then
+    if ! conda run --no-capture-output -n "$CONDA_NAME" python3 "$PROJECT_DIR/server/main.py" download; then
         error "Error: failed to download models. Access may be required on Hugging Face" >&2
         error "Models will be downloaded later when running pipeline" >&2
     fi
@@ -544,7 +543,7 @@ run_step "Downloading Model Checkpoints" \
     download_pipeline_models
 
 run_step "Installing Updated Pillow" \
-    conda run -n frame pip install --upgrade --force-reinstall Pillow
+    conda run --no-capture-output -n frame pip install --upgrade --force-reinstall Pillow
 
 ## ======================
 ##    Stable Point 3D
