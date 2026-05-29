@@ -12,7 +12,7 @@ Into Frame is built around a two-part architecture: a Python server that runs th
 
 | Component | Description |
 |-----------|-------------|
-| **`Server/`** | A Python server that runs the AI generation pipeline. Handles model inference, scene construction, and serves assets to connected clients. |
+| **`server/`** | A Python server that runs the AI generation pipeline. Handles model inference, scene construction, and serves assets to connected clients. |
 | **`Into Frame/`** | A Unity project (C#) that connects to the Python server and renders the generated 3D scene in real time. |
 | **`IntoFrame visionOS/`** | A native macOS app (Swift + Metal 4) that connects to the Python server, renders the generated scene, and streams it as a full-immersion experience to an Apple Vision Pro via Remote Immersive Space. |
 
@@ -35,8 +35,8 @@ Into Frame is built around a two-part architecture: a Python server that runs th
 Run the setup script to configure the Python environment. **This will take a while** as it installs all required dependencies and downloads AI models:
 
 ```bash
-chmod +x setup.sh
-./setup.sh
+chmod +x frame.sh
+./frame.sh setup
 ```
 
 **Options:**
@@ -45,18 +45,17 @@ chmod +x setup.sh
 |------|-------------|
 | `-f` | Force clean installation — removes existing libraries and conda environments |
 | `-s` | Save existing installation logs (default wipes the logs directory) |
+| `-v` | Verbose mode — dump output to terminal instead of a log file |
 
 > **Note:** The setup script downloads all required models automatically. If that step fails (e.g. missing Hugging Face access for gated models), you can re-run the download manually:
 > ```bash
-> conda activate frame
-> python Server/main.py download
+> ./frame.sh download
 > ```
 
 ### 2. Start the Generation Server
 
 ```bash
-conda activate frame
-python Server/main.py server
+./frame.sh server
 ```
 
 By default this binds to `localhost:8080`, with an asset server on port `3000`.
@@ -89,12 +88,13 @@ The server URL defaults to `ws://localhost:8080` and can be overridden via the `
 
 ## Running the Pipeline Directly
 
-You can also run the generation pipeline on a single image without starting the server:
+Run the generation pipeline on a single image without starting the server:
 
 ```bash
-conda activate frame
-python Server/main.py run path/to/image.jpg
+./frame.sh run path/to/image.jpg
 ```
+
+The default image (when called with no arguments) is `samples/Paris.jpg`.
 
 **Options:**
 
@@ -102,19 +102,52 @@ python Server/main.py run path/to/image.jpg
 |------|---------|-------------|
 | `--output`, `-o` | `./output` | Output directory |
 | `--debug`, `-d` | `True` | Save intermediate pipeline files |
+| `--config` | `server/config.yaml` | Pipeline configuration YAML |
+
+---
+
+## Remote Server
+
+To run the generation server on a remote machine with local port forwarding (useful when the GPU is on a separate box):
+
+```bash
+./frame.sh remote --host 192.168.1.10 --user admin
+```
+
+This SSH-tunnels ports `8080` and `3000` to `localhost` so the clients connect as if the server were local.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `your-remote-host` | Remote hostname or IP |
+| `--user` | `admin` | Remote SSH username |
+| `--dir` | `~/Research/Into-Frame/server` | Remote project directory |
+| `--port` | `8080` | Server port |
+| `--asset-port` | `3000` | Asset server port |
+| `--ssh-port` | `22` | SSH port |
+| `--key` | — | Path to SSH private key |
+
+`REMOTE_USER`, `REMOTE_HOST`, `REMOTE_DIR`, `PORT`, and `ASSET_PORT` can also be set as environment variables.
 
 ---
 
 ## CLI Reference
 
+`frame.sh` is the unified entry point for all server operations. Global options apply to all subcommands.
+
 ```
-python Server/main.py <command>
+./frame.sh [--env ENV] [--seed VALUE] <command> [options]
 
 Commands:
-  server      Start the generation server
-  run         Run the pipeline on a single image
-  download    Download all models required by the pipeline
+  run       Run the pipeline on an image (default: samples/Paris.jpg)
+  server    Start the local generation server
+  download  Download all models required by the pipeline
+  remote    Start the server on a remote machine via SSH
+  setup     Install dependencies and configure conda environments
 ```
+
+`--env` overrides the conda environment name (default: `frame`). `--seed` accepts a bare integer or `STAGE:VALUE` pairs and is repeatable.
 
 ---
 
@@ -122,13 +155,18 @@ Commands:
 
 ```
 into-frame/
-├── Server/
-│   ├── main.py          # Entry point — CLI for server, run, and download
-│   ├── pipeline/        # AI generation pipeline
-│   └── server/          # WebSocket/HTTP server logic
+├── frame.sh             # Unified CLI — setup, run, server, remote
+├── server/
+│   ├── main.py          # Python entry point (server, run, download)
+│   ├── pipeline/        # AI generation pipeline stages
+│   ├── scene/           # 3D scene representation
+│   ├── server/          # WebSocket/HTTP server logic
+│   └── samples/         # Sample input images
+├── scripts/
+│   ├── setup.sh         # Full environment install script
+│   └── remote-server.sh # Standalone remote SSH launcher
 ├── Into Frame/          # Unity client (C#)
 ├── IntoFrame visionOS/  # macOS client (Swift + Metal, Xcode)
 ├── docs/                # Project website
-├── setup.sh             # Environment setup script
-└── README.md
+└── requirements*.txt    # Per-environment pip requirements
 ```

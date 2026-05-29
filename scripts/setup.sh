@@ -5,7 +5,8 @@ VERBOSE=false
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
-LOG_DIR="$SCRIPT_DIR/logs"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+LOG_DIR="$PROJECT_DIR/logs"
 
 show_usage() {
     echo -e "Usage: $(basename "$0") [OPTIONS]"
@@ -122,8 +123,8 @@ BASE_ENV="frame-base"
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
 CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
-LIB_DIR="$SCRIPT_DIR/lib"
-CHECKPOINT_DIR="$SCRIPT_DIR/checkpoints"
+LIB_DIR="$PROJECT_DIR/lib"
+CHECKPOINT_DIR="$PROJECT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
@@ -358,7 +359,7 @@ create_main_environment() {
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
-    conda run -n frame pip install -r "$SCRIPT_DIR/requirements.txt"
+    conda run -n frame pip install -r "$PROJECT_DIR/requirements.txt"
     conda run -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
 
     mkdir -p "$LIB_DIR"
@@ -533,7 +534,7 @@ python -c "from huggingface_hub import interpreter_login; interpreter_login()"
 
 # Encapsulating the download wrapper so it interfaces cleanly with your UI spinner
 download_pipeline_models() {
-    if ! conda run -n "$CONDA_NAME" python3 "$SCRIPT_DIR/Server/main.py" download; then
+    if ! conda run -n "$CONDA_NAME" python3 "$PROJECT_DIR/server/main.py" download; then
         error "Error: failed to download models. Access may be required on Hugging Face" >&2
         error "Models will be downloaded later when running pipeline" >&2
     fi
@@ -554,7 +555,7 @@ setup_stable_point() {
     run_in_env pip install transformers==4.42.3
     clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
-    run_in_env pip install -r "$SCRIPT_DIR/requirements-stable3d.txt"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-stable3d.txt"
     run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
@@ -574,7 +575,7 @@ run_step "Installing Stable Point 3D" \
 setup_cubediff() {
     create_env "cubediff"
     clone_if_needed https://github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
-    run_in_env pip install -r "$SCRIPT_DIR/requirements-cubediff.txt"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-cubediff.txt"
     ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
     stop_env
@@ -591,7 +592,7 @@ setup_dreamcube() {
     create_env "dreamcube"
 
     clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
-    run_in_env pip install -r "$SCRIPT_DIR/requirements-dreamcube.txt"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-dreamcube.txt"
     run_in_env pip install ninja wheel setuptools
     run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
     run_in_env pip install peft
@@ -610,7 +611,7 @@ run_step "Installing DreamCube" \
 setup_lama() {
     create_env "lama" 3.10
     clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
-    run_in_env pip install -r "$SCRIPT_DIR/requirements-lama.txt"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-lama.txt"
     run_in_env pip install torchvision
     ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
 
