@@ -8,14 +8,14 @@ def _server_path() -> Path:
     current = start.parent
     server_path = None
 
-    # Walk upward until we find "Server"
+    # Walk upward until we find "server"
     for parent in [current] + list(current.parents):
-        if parent.name == "Server":
+        if parent.name == "server":
             server_path = parent
             break
 
     if server_path is None:
-        raise RuntimeError("Could not find 'Server' directory in path")
+        raise RuntimeError("Could not find 'server' directory in path")
 
     return server_path
 
