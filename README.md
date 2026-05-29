@@ -94,7 +94,7 @@ Run the generation pipeline on a single image without starting the server:
 ./frame.sh run path/to/image.jpg
 ```
 
-The default image (when called with no arguments) is `samples/Paris.jpg`.
+The input path is optional and defaults to `samples/Paris.jpg`.
 
 **Options:**
 
@@ -152,7 +152,8 @@ Commands:
 Pass `-h` or `--help` anywhere to see options:
 
 ```bash
-./frame.sh -h              # global help
+./frame.sh                 # global help (no subcommand)
+./frame.sh -h              # global help (explicit)
 ./frame.sh run -h          # run options
 ./frame.sh server -h       # server options
 ./frame.sh remote -h       # remote options

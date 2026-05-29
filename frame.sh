@@ -87,7 +87,6 @@ Environment variables:
   REMOTE_USER, REMOTE_HOST, REMOTE_DIR, ENV, PORT, ASSET_PORT
 
 Examples:
-  $(basename "$0")
   $(basename "$0") run samples/Iceland.jpg
   $(basename "$0") run samples/Paris.jpg --output ./out --debug true
   $(basename "$0") server --port 9090
@@ -150,7 +149,7 @@ build_global_args() {
 # ---------------------------------------------------------------------------
 # Parse global options + detect subcommand
 # ---------------------------------------------------------------------------
-SUBCOMMAND="run"
+SUBCOMMAND=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -163,6 +162,10 @@ while [[ $# -gt 0 ]]; do
     *)  break ;;   # positional — treat as run INPUT
   esac
 done
+
+if [[ -z "$SUBCOMMAND" ]]; then
+  usage; exit 0
+fi
 
 # ---------------------------------------------------------------------------
 # Subcommand: run
