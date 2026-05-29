@@ -536,6 +536,7 @@ setup_lux_dit() {
     create_env "lux-dit" 3.10
     install_torch
     run_in_env pip install -r "$LIB_DIR/LuxDiT/requirements.txt"
+    run_in_env pip install --no-build-isolation git+https://github.com/NVlabs/nvdiffrast.git
 
     if [ ! -d "$CHECKPOINT_DIR/LuxDiT" ]; then
         run_in_env python "$LIB_DIR/LuxDiT/download_weights.py" --repo_id nvidia/LuxDiT --local_dir "$CHECKPOINT_DIR/LuxDiT"

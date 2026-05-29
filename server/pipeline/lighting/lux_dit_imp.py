@@ -66,7 +66,7 @@ class LuxDiTServer(RemoteServer):
 
         # Always use the locally-downloaded fine-tuned transformer
         transformer = CustomCogVideoXTransformer3DModel.from_pretrained(
-            str(checkpoint_dir),
+            str(checkpoint_dir) + "/luxdit_video",
             subfolder="transformer",
             torch_dtype=weight_dtype,
             device=self.device,
