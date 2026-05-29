@@ -162,6 +162,10 @@ stop_env() {
     CURRENT_ENV=""
 }
 
+install_torch() {
+    run_in_env pip install torch==2.10.0 torchvision==0.25.0 torchaudio --extra-index-url "$TORCH_URL"
+}
+
 run_in_env() {
     if [[ -z "${CURRENT_ENV:-}" ]]; then
         error "run_in_env called before create_env"
@@ -492,6 +496,7 @@ setup_recognize_anything() {
     download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/blob/main/ram_plus_swin_large_14m.pth" "recognize_anything"
 
     create_env "recognize" 3.10
+    install_torch
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
     stop_env
 }
@@ -507,6 +512,7 @@ setup_lux_dit() {
     clone_if_needed https://github.com/nv-tlabs/LuxDiT.git "$LIB_DIR/LuxDiT"
 
     create_env "lux-dit" 3.10
+    install_torch
     run_in_env pip install -r "$LIB_DIR/LuxDiT/requirements.txt"
 
     if [ ! -d "$CHECKPOINT_DIR/LuxDiT" ]; then
