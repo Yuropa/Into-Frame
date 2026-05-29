@@ -480,6 +480,7 @@ setup_depth_anything() {
     perl -pi -e 's/.*"xformers".*//g' "$LIB_DIR/depth-anything-3/pyproject.toml"
 
     create_env "depthanything" 3.10
+    install_torch
     run_in_env pip install -e "$LIB_DIR/depth-anything-3"
     stop_env
 }
@@ -557,6 +558,7 @@ run_step "Installing Updated Pillow" \
 
 setup_stable_point() {
     create_env "stablepoint" 3.12
+    install_torch
     run_in_env pip install transformers==4.42.3
     clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
@@ -615,9 +617,9 @@ run_step "Installing DreamCube" \
 
 setup_lama() {
     create_env "lama" 3.10
+    install_torch
     clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
     run_in_env pip install -r "$PROJECT_DIR/requirements-lama.txt"
-    run_in_env pip install torchvision
     ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
 
     LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
