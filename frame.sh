@@ -19,7 +19,7 @@ DEBUG=""
 CONFIG=""
 
 # --- run defaults ---
-INPUT="samples/Paris.jpg"
+INPUT="$SCRIPT_DIR/samples/Paris.jpg"
 
 # --- server defaults ---
 HOST="localhost"
@@ -191,6 +191,11 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
     esac
   done
 
+  # Resolve relative paths before cd changes the working directory
+  [[ "$INPUT" != /* ]] && INPUT="$PWD/$INPUT"
+  [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
+  [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
+
   activate_conda "$ENV"
   cd "$SERVER_DIR"
 
@@ -216,6 +221,9 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
       *) echo "Unknown server option: $1" >&2; exit 1 ;;
     esac
   done
+
+  [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
+  [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
 
   activate_conda "$ENV"
   cd "$SERVER_DIR"
