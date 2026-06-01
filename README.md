@@ -145,6 +145,7 @@ Commands:
   download  Download all models required by the pipeline
   remote    Start the server on a remote machine via SSH
   setup     Install dependencies and configure conda environments
+  clear     Remove cached files from the output directory
 ```
 
 `--env` overrides the conda environment name (default: `frame`). `--seed` accepts a bare integer or `STAGE:VALUE` pairs and is repeatable.
@@ -157,6 +158,22 @@ Pass `-h` or `--help` anywhere to see options:
 ./frame.sh run -h          # run options
 ./frame.sh server -h       # server options
 ./frame.sh remote -h       # remote options
+```
+
+---
+
+## Clearing Output
+
+To remove all cached files from the output directory:
+
+```bash
+./frame.sh clear
+```
+
+By default this clears `./output`. Pass `--output` to target a different directory:
+
+```bash
+./frame.sh clear --output ./my-output
 ```
 
 ---

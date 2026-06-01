@@ -44,6 +44,7 @@ Subcommands (default: run):
   download  Download all models for the pipeline
   remote    Start the server on a remote machine via SSH with port forwarding
   setup     Install dependencies and set up the conda environments
+  clear     Remove cached output files
 
 Global options:
   --env ENV          Conda environment name  (default: ${ENV})
@@ -66,6 +67,9 @@ server options:
 
 download options:
   --config PATH      Pipeline config YAML      (default: server/config.yaml)
+
+clear options:
+  -o, --output DIR   Output directory to clear  (default: ${OUTPUT})
 
 remote options (SSH + port forwarding, then starts server on the remote):
   --user USER        Remote SSH username       (default: ${REMOTE_USER})
@@ -96,6 +100,8 @@ Examples:
   $(basename "$0") setup
   $(basename "$0") setup -f -v
   $(basename "$0") --env myenv run samples/Paris.jpg --config config_sam3d_test.yaml
+  $(basename "$0") clear
+  $(basename "$0") clear --output ./my-output
 EOF
 }
 
@@ -156,7 +162,7 @@ while [[ $# -gt 0 ]]; do
     --env)   ENV="$2";          shift 2 ;;
     --seed)  SEED_ARGS+=("$2"); shift 2 ;;
     -h|--help) usage; exit 0 ;;
-    run|server|download|remote|setup)
+    run|server|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
     -*) break ;;   # unknown global flag — let subcommand parser handle it
     *)  break ;;   # positional — treat as run INPUT
@@ -252,4 +258,26 @@ elif [[ "$SUBCOMMAND" == "remote" ]]; then
 # ---------------------------------------------------------------------------
 elif [[ "$SUBCOMMAND" == "setup" ]]; then
   exec "$SCRIPTS_DIR/setup.sh" "$@"
+
+# ---------------------------------------------------------------------------
+# Subcommand: clear
+# ---------------------------------------------------------------------------
+elif [[ "$SUBCOMMAND" == "clear" ]]; then
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      -o|--output) OUTPUT="$2"; shift 2 ;;
+      -h|--help)   usage; exit 0 ;;
+      *) echo "Unknown clear option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  TARGET="$SCRIPT_DIR/$OUTPUT"
+  if [[ ! -d "$TARGET" ]]; then
+    echo "Output directory does not exist: $TARGET"
+    exit 0
+  fi
+
+  echo "Clearing output: $TARGET"
+  rm -rf "${TARGET:?}"/*
+  echo "Done."
 fi
