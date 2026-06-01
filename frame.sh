@@ -69,7 +69,7 @@ download options:
   --config PATH      Pipeline config YAML      (default: server/config.yaml)
 
 clear options:
-  -o, --output DIR   Output directory to clear  (default: ${OUTPUT})
+  -o, --output DIR   Output directory to clear  (default: server/${OUTPUT})
 
 remote options (SSH + port forwarding, then starts server on the remote):
   --user USER        Remote SSH username       (default: ${REMOTE_USER})
@@ -271,7 +271,7 @@ elif [[ "$SUBCOMMAND" == "clear" ]]; then
     esac
   done
 
-  TARGET="$SCRIPT_DIR/$OUTPUT"
+  TARGET="$SERVER_DIR/$OUTPUT"
   if [[ ! -d "$TARGET" ]]; then
     echo "Output directory does not exist: $TARGET"
     exit 0
