@@ -119,11 +119,14 @@ else
 fi
 
 CONDA_NAME="frame"
-BASE_ENV="frame-base"
-BASE_ENV_310="frame-base-310"
+BASE_ENV_PREFIX="frame-base"
+DEFAULT_PYTHON="3.12"
+TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "$BASE_ENV_310" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
+for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
+unset _v
 LIB_DIR="$PROJECT_DIR/lib"
 CHECKPOINT_DIR="$PROJECT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
@@ -136,65 +139,81 @@ load_conda() {
     eval "$(conda shell.bash hook)" 2>/dev/null || true
 }
 
-download_torch_wheels() {
-    mkdir -p "$TORCH_WHEEL_DIR"
-    local check=("$TORCH_WHEEL_DIR"/torch-2.10.0*.whl)
-    if [ ! -f "${check[0]}" ]; then
-        info "Downloading torch wheels to cache (one-time)..."
-        conda run --no-capture-output -n "$BASE_ENV" pip download \
-            torch==2.10.0 torchvision==0.25.0 torchaudio \
-            --extra-index-url "$TORCH_URL" \
-            -d "$TORCH_WHEEL_DIR"
+_torch_base_name() {
+    echo "${BASE_ENV_PREFIX}-${1//./}"
+}
+
+_torch_wheel_dir() {
+    echo "$TORCH_WHEEL_DIR/$1"
+}
+
+_download_torch_wheels() {
+    local version="$1"
+    local cache_dir
+    cache_dir="$(_torch_wheel_dir "$version")"
+    mkdir -p "$cache_dir"
+
+    local check=("$cache_dir"/torch-2.10.0*.whl)
+    if [ -f "${check[0]}" ]; then
+        return 0
     fi
-}
 
-create_base_env() {
-    conda create -y -q -n "$BASE_ENV" python=3.12 pip setuptools wheel
-    download_torch_wheels
-    conda run --no-capture-output -n "$BASE_ENV" pip install \
+    info "Downloading torch wheels for Python $version (one-time)..."
+    local tmp_env="${BASE_ENV_PREFIX}-dl-tmp"
+    conda create -y -q -n "$tmp_env" "python=$version" pip 2>/dev/null || true
+    conda run --no-capture-output -n "$tmp_env" pip download \
         torch==2.10.0 torchvision==0.25.0 torchaudio \
         --extra-index-url "$TORCH_URL" \
-        --find-links "$TORCH_WHEEL_DIR"
+        -d "$cache_dir"
+    conda env remove -n "$tmp_env" --yes 2>/dev/null || true
 }
 
-create_base_env_310() {
-    conda create -y -q -n "$BASE_ENV_310" python=3.10 pip setuptools wheel
-    conda run --no-capture-output -n "$BASE_ENV_310" pip install \
+ensure_torch_base() {
+    local version="$1"
+    local base
+    base="$(_torch_base_name "$version")"
+
+    if conda env list | grep -qE "^${base}[[:space:]]"; then
+        return 0
+    fi
+
+    _download_torch_wheels "$version"
+    local cache_dir
+    cache_dir="$(_torch_wheel_dir "$version")"
+
+    conda create -y -q -n "$base" "python=$version" pip setuptools wheel
+    conda run --no-capture-output -n "$base" pip install \
         torch==2.10.0 torchvision==0.25.0 torchaudio \
         --extra-index-url "$TORCH_URL" \
-        --find-links "$TORCH_WHEEL_DIR"
+        --find-links "$cache_dir" \
+        --no-index
+}
+
+setup_torch_bases() {
+    for version in "${TORCH_BASE_VERSIONS[@]}"; do
+        info "Setting up torch base for Python $version..."
+        ensure_torch_base "$version"
+    done
 }
 
 create_env() {
     local name="$1"
-    local version="${2:-}"
+    local version="${2:-$DEFAULT_PYTHON}"
 
     CURRENT_ENV="$name"
     load_conda
     conda deactivate
 
-    if [[ "$version" == "3.10" ]]; then
-        conda create -y -q --name "$name" --clone "$BASE_ENV_310"
-    elif [[ -n "$version" ]]; then
-        conda create -y -q -n "$name" "python=$version" pip setuptools wheel
-    else
-        conda create -y -q --name "$name" --clone "$BASE_ENV"
-    fi
-    conda activate "$name" 
+    ensure_torch_base "$version"
+    conda create -y -q --name "$name" --clone "$(_torch_base_name "$version")"
+    conda activate "$name"
 }
 
 stop_env() {
     load_conda
     conda deactivate
-    conda activate "$CONDA_NAME" 
+    conda activate "$CONDA_NAME"
     CURRENT_ENV=""
-}
-
-install_torch() {
-    run_in_env pip install \
-        torch==2.10.0 torchvision==0.25.0 torchaudio \
-        --extra-index-url "$TORCH_URL" \
-        --find-links "$TORCH_WHEEL_DIR"
 }
 
 run_in_env() {
@@ -353,6 +372,10 @@ cleanup_if_needed() {
                 conda env remove --name "$env" --yes
             fi
         done
+        # Remove any torch base envs not in CONDA_ENVS (e.g. from version changes)
+        while IFS= read -r env; do
+            [[ -n "$env" ]] && conda env remove --name "$env" --yes
+        done < <(echo "$EXISTING_ENVS" | grep "^${BASE_ENV_PREFIX}-")
     fi
 }
 
@@ -381,11 +404,8 @@ setup_shell_env() {
 run_step "Setup Shell Environment" \
     setup_shell_env
 
-run_step "Creating Base Environment" \
-    create_base_env
-
-run_step "Creating Base Environment (Python 3.10)" \
-    create_base_env_310
+run_step "Creating Torch Base Environments" \
+    setup_torch_bases
 
 ## ===============
 ##    Main ENV
