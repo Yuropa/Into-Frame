@@ -242,10 +242,10 @@ source_shell_configs() {
 clone_if_needed() {
     local repo="$1"
     local dir="$2"
-    local extra="${3:-}"
+    shift 2
 
     if [ ! -d "$dir" ]; then
-        git clone --recursive $extra "$repo" "$dir"
+        git clone --recursive "$@" "$repo" "$dir"
     fi
 }
 
