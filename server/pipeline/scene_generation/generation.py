@@ -85,6 +85,11 @@ class SceneGenerationStage(PipelineStage):
 
                 metadata = context.input_object(f"metadata_{idx}")
 
+                if (metadata or {}).get("class") == "environment":
+                    self.log_info(f"Skipping environment object {idx}")
+                    self.advance_progress(generation_task)
+                    continue
+
                 if panorama_depth is not None and panorama is not None:
                     result = self.unproject_bbox_equirect(metadata["box"], panorama.width, panorama.height, pano_depth=panorama_depth, extrinsics=extrinsics)
                 else:

@@ -28,6 +28,10 @@ stages:
     stage: PanoramaInpaintingStage
     enabled: true
 
+  - name: Panorama Object Classification
+    stage: PanoramaObjectClassificationStage
+    enabled: true
+
   - name: Panorama Lighting
     stage: PanoramaLightingStage
     enabled: true
@@ -58,6 +62,16 @@ stages:
     z_far: null
     noise_amplitude: 0.05   # metres of peak noise displacement
 
+  - name: Panorama Asset Generation
+    stage: PanoramaAssetGenerationStage
+    enabled: true
+    billboard_distance_m: 10.0
+    generator_type: TRELLIS
+
+  - name: Scene Generation
+    stage: SceneGenerationStage
+    enabled: true
+
   - name: Object Recognition
     stage: RecognizeAnythingStage
     enabled: false
@@ -73,7 +87,3 @@ stages:
   - name: Mesh Generation
     stage: ModelGenerationStage
     enabled: false
-
-  - name: Scene Generation
-    stage: SceneGenerationStage
-    enabled: true
