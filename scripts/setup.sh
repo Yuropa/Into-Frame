@@ -142,19 +142,24 @@ _torch_base_name() {
     echo "${BASE_ENV_PREFIX}-${1//./}"
 }
 
+_has_torch() {
+    conda run --no-capture-output -n "$1" python -c "import torch" 2>/dev/null
+}
+
 ensure_torch_base() {
     local version="$1"
     local base
     base="$(_torch_base_name "$version")"
 
-    if conda env list | grep -qE "^${base}[[:space:]]"; then
-        return 0
+    if ! conda env list | grep -qE "^${base}[[:space:]]"; then
+        conda create -y -q -n "$base" "python=$version" pip setuptools wheel
     fi
 
-    conda create -y -q -n "$base" "python=$version" pip setuptools wheel
-    conda run --no-capture-output -n "$base" pip install \
-        torch==2.10.0 torchvision==0.25.0 torchaudio \
-        --extra-index-url "$TORCH_URL"
+    if ! _has_torch "$base"; then
+        conda run --no-capture-output -n "$base" pip install \
+            torch torchvision torchaudio \
+            --extra-index-url "$TORCH_URL"
+    fi
 }
 
 setup_torch_bases() {
@@ -172,13 +177,18 @@ create_env() {
     load_conda
     conda deactivate
 
+    ensure_torch_base "$version"
+
     if conda env list | grep -qE "^${name}[[:space:]]"; then
-        info "Environment '$name' already exists, skipping creation"
+        if ! _has_torch "$name"; then
+            conda run --no-capture-output -n "$name" pip install \
+                torch torchvision torchaudio \
+                --extra-index-url "$TORCH_URL"
+        fi
         conda activate "$name"
         return 0
     fi
 
-    ensure_torch_base "$version"
     conda create -y -q --name "$name" --clone "$(_torch_base_name "$version")"
     conda activate "$name"
 }
@@ -487,6 +497,7 @@ run_step "Downloading SAM 3D" \
 
 setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
+    perl -pi -e 's/.*auto.gptq.*//g; s/.*\btorch\b.*//g' "$LIB_DIR/SAM3D/requirements.txt"
 
     create_env "sam3d"
     run_in_env pip install -r "$LIB_DIR/SAM3D/requirements.txt"

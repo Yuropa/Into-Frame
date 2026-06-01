@@ -1,7 +1,7 @@
 from path_utils import add_project_paths, lib_path, checkpoints_path, add_system_path
 add_project_paths()
 
-add_system_path(lib_path() / "sam3")
+add_system_path(lib_path() / "SAM3D")
 
 from pathlib import Path
 from typing import Any
