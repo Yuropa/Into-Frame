@@ -158,7 +158,10 @@ ensure_torch_base() {
     if ! _has_torch "$base"; then
         conda run --no-capture-output -n "$base" pip install \
             torch torchvision torchaudio \
-            --extra-index-url "$TORCH_URL"
+            --extra-index-url "$TORCH_URL" \
+            || { error "pip install torch failed in '$base'"; exit 1; }
+        _has_torch "$base" \
+            || { error "torch installed but still not importable in '$base'"; exit 1; }
     fi
 }
 
@@ -183,7 +186,8 @@ create_env() {
         if ! _has_torch "$name"; then
             conda run --no-capture-output -n "$name" pip install \
                 torch torchvision torchaudio \
-                --extra-index-url "$TORCH_URL"
+                --extra-index-url "$TORCH_URL" \
+                || { error "pip install torch failed in '$name'"; exit 1; }
         fi
         conda activate "$name"
         return 0
@@ -203,10 +207,11 @@ stop_env() {
 run_in_env() {
     if [[ -z "${CURRENT_ENV:-}" ]]; then
         error "run_in_env called before create_env"
-        return 1
+        exit 1
     fi
 
-    conda run --no-capture-output -n "$CURRENT_ENV" "$@"
+    conda run --no-capture-output -n "$CURRENT_ENV" "$@" \
+        || { error "Command failed in '$CURRENT_ENV': $*"; exit 1; }
 }
 
 source_shell_configs() {
@@ -401,8 +406,10 @@ create_main_environment() {
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
-    conda run --no-capture-output -n frame pip install -r "$PROJECT_DIR/requirements.txt"
-    conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
+    conda run --no-capture-output -n frame pip install -r "$PROJECT_DIR/requirements.txt" \
+        || { error "pip install failed in 'frame'"; exit 1; }
+    conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git \
+        || { error "AlphaCLIP install failed in 'frame'"; exit 1; }
 
     mkdir -p "$LIB_DIR"
     mkdir -p "$CHECKPOINT_DIR"
