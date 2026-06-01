@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
@@ -178,7 +179,7 @@ create_env() {
 
     CURRENT_ENV="$name"
     load_conda
-    conda deactivate
+    conda deactivate || true
 
     ensure_torch_base "$version"
 
@@ -199,7 +200,7 @@ create_env() {
 
 stop_env() {
     load_conda
-    conda deactivate
+    conda deactivate || true
     conda activate "$CONDA_NAME"
     CURRENT_ENV=""
 }
@@ -226,7 +227,7 @@ source_shell_configs() {
   do
     if [ -f "$file" ]; then
       # shellcheck disable=SC1090
-      source "$file"
+      source "$file" || true
       found=1
     fi
   done
@@ -352,9 +353,9 @@ cleanup_if_needed() {
         conda init
         source_shell_configs
 
-        EXISTING_ENVS=$(conda env list --json | grep -o '"/[^" ]*' | xargs -L1 basename 2>/dev/null)
+        EXISTING_ENVS=$(conda env list --json | grep -o '"/[^" ]*' | xargs -L1 basename 2>/dev/null) || true
 
-        conda deactivate
+        conda deactivate || true
         for env in "${CONDA_ENVS[@]}"; do
             if echo "$EXISTING_ENVS" | grep -qxF "$env"; then
                 conda env remove --name "$env" --yes
@@ -504,10 +505,9 @@ run_step "Downloading SAM 3D" \
 
 setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
-    perl -pi -e 's/.*auto.gptq.*//g; s/.*\btorch\b.*//g' "$LIB_DIR/SAM3D/requirements.txt"
 
     create_env "sam3d"
-    run_in_env pip install -r "$LIB_DIR/SAM3D/requirements.txt"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-sam3d.txt"
     run_in_env pip install opencv-python
     stop_env
 }
