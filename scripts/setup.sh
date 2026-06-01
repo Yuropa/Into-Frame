@@ -483,6 +483,7 @@ setup_sam3d() {
 
     create_env "sam3d"
     run_in_env pip install -r "$LIB_DIR/SAM3D/requirements.txt"
+    run_in_env pip install opencv-python
     stop_env
 }
 
