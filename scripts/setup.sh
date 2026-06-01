@@ -120,9 +120,10 @@ fi
 
 CONDA_NAME="frame"
 BASE_ENV="frame-base"
+BASE_ENV_310="frame-base-310"
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
+CONDA_ENVS=("$CONDA_NAME" "$BASE_ENV" "$BASE_ENV_310" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
 LIB_DIR="$PROJECT_DIR/lib"
 CHECKPOINT_DIR="$PROJECT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
@@ -156,6 +157,14 @@ create_base_env() {
         --find-links "$TORCH_WHEEL_DIR"
 }
 
+create_base_env_310() {
+    conda create -y -q -n "$BASE_ENV_310" python=3.10 pip setuptools wheel
+    conda run --no-capture-output -n "$BASE_ENV_310" pip install \
+        torch==2.10.0 torchvision==0.25.0 torchaudio \
+        --extra-index-url "$TORCH_URL" \
+        --find-links "$TORCH_WHEEL_DIR"
+}
+
 create_env() {
     local name="$1"
     local version="${2:-}"
@@ -164,7 +173,9 @@ create_env() {
     load_conda
     conda deactivate
 
-    if [[ -n "$version" ]]; then
+    if [[ "$version" == "3.10" ]]; then
+        conda create -y -q --name "$name" --clone "$BASE_ENV_310"
+    elif [[ -n "$version" ]]; then
         conda create -y -q -n "$name" "python=$version" pip setuptools wheel
     else
         conda create -y -q --name "$name" --clone "$BASE_ENV"
@@ -373,6 +384,9 @@ run_step "Setup Shell Environment" \
 run_step "Creating Base Environment" \
     create_base_env
 
+run_step "Creating Base Environment (Python 3.10)" \
+    create_base_env_310
+
 ## ===============
 ##    Main ENV
 ## ===============
@@ -502,7 +516,6 @@ setup_depth_anything() {
     perl -pi -e 's/.*"xformers".*//g' "$LIB_DIR/depth-anything-3/pyproject.toml"
 
     create_env "depthanything" 3.10
-    install_torch
     run_in_env pip install -e "$LIB_DIR/depth-anything-3"
     stop_env
 }
@@ -519,7 +532,6 @@ setup_recognize_anything() {
     download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/blob/main/ram_plus_swin_large_14m.pth" "recognize_anything"
 
     create_env "recognize" 3.10
-    install_torch
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
     stop_env
 }
@@ -535,7 +547,6 @@ setup_lux_dit() {
     clone_if_needed https://github.com/nv-tlabs/LuxDiT.git "$LIB_DIR/LuxDiT"
 
     create_env "lux-dit" 3.10
-    install_torch
     run_in_env pip install -r "$LIB_DIR/LuxDiT/requirements.txt"
     run_in_env pip install --no-build-isolation git+https://github.com/NVlabs/nvdiffrast.git
 
@@ -580,8 +591,7 @@ run_step "Installing Updated Pillow" \
 ## ======================
 
 setup_stable_point() {
-    create_env "stablepoint" 3.12
-    install_torch
+    create_env "stablepoint"
     run_in_env pip install transformers==4.42.3
     clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
@@ -640,7 +650,6 @@ run_step "Installing DreamCube" \
 
 setup_lama() {
     create_env "lama" 3.10
-    install_torch
     clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
     run_in_env pip install -r "$PROJECT_DIR/requirements-lama.txt"
     ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
