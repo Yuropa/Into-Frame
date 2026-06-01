@@ -133,7 +133,6 @@ PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
-TORCH_WHEEL_DIR="$HOME/.cache/wheels/torch-2.10.0"
 
 load_conda() {
     eval "$(conda shell.bash hook)" 2>/dev/null || true
@@ -141,31 +140,6 @@ load_conda() {
 
 _torch_base_name() {
     echo "${BASE_ENV_PREFIX}-${1//./}"
-}
-
-_torch_wheel_dir() {
-    echo "$TORCH_WHEEL_DIR/$1"
-}
-
-_download_torch_wheels() {
-    local version="$1"
-    local cache_dir
-    cache_dir="$(_torch_wheel_dir "$version")"
-    mkdir -p "$cache_dir"
-
-    local check=("$cache_dir"/torch-2.10.0*.whl)
-    if [ -f "${check[0]}" ]; then
-        return 0
-    fi
-
-    info "Downloading torch wheels for Python $version (one-time)..."
-    local tmp_env="${BASE_ENV_PREFIX}-dl-tmp"
-    conda create -y -q -n "$tmp_env" "python=$version" pip 2>/dev/null || true
-    conda run --no-capture-output -n "$tmp_env" pip download \
-        torch==2.10.0 torchvision==0.25.0 torchaudio \
-        --extra-index-url "$TORCH_URL" \
-        -d "$cache_dir"
-    conda env remove -n "$tmp_env" --yes 2>/dev/null || true
 }
 
 ensure_torch_base() {
@@ -177,16 +151,10 @@ ensure_torch_base() {
         return 0
     fi
 
-    _download_torch_wheels "$version"
-    local cache_dir
-    cache_dir="$(_torch_wheel_dir "$version")"
-
     conda create -y -q -n "$base" "python=$version" pip setuptools wheel
     conda run --no-capture-output -n "$base" pip install \
         torch==2.10.0 torchvision==0.25.0 torchaudio \
-        --extra-index-url "$TORCH_URL" \
-        --find-links "$cache_dir" \
-        --no-index
+        --extra-index-url "$TORCH_URL"
 }
 
 setup_torch_bases() {
@@ -359,7 +327,6 @@ cleanup_if_needed() {
         fi
 
         rm -rf "$FLASH_WHEEL_DIR"
-        rm -rf "$TORCH_WHEEL_DIR"
 
         conda init
         source_shell_configs
