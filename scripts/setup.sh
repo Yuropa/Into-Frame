@@ -172,6 +172,12 @@ create_env() {
     load_conda
     conda deactivate
 
+    if conda env list | grep -qE "^${name}[[:space:]]"; then
+        info "Environment '$name' already exists, skipping creation"
+        conda activate "$name"
+        return 0
+    fi
+
     ensure_torch_base "$version"
     conda create -y -q --name "$name" --clone "$(_torch_base_name "$version")"
     conda activate "$name"
