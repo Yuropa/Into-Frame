@@ -25,6 +25,7 @@ OpenEXR
 # Geometry / math
 igraph
 scikit-image
+shapely
 
 # Vision / media
 decord
