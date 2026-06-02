@@ -28,6 +28,9 @@ from pipeline.panorama_asset_generation.generation import PanoramaAssetGeneratio
 from pipeline.lighting.lighting import PanoramaLightingStage
 from pipeline.recognize.recognize import RecognizeAnythingStage
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
+from pipeline.object_distribution.distribution import ObjectDistributionStage
+from pipeline.scene_population.population import ScenePopulationStage, ScenePopulationConfiguration
+from pipeline.linear_structures.linear_structures import LinearStructureStage, LinearStructureConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -157,6 +160,9 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "PanoramaObjectClassificationStage": PanoramaObjectClassificationStage,
     "PanoramaAssetGenerationStage": PanoramaAssetGenerationStage,
     "RecognizeAnythingStage": RecognizeAnythingStage,
+    "ObjectDistributionStage": ObjectDistributionStage,
+    "ScenePopulationStage": ScenePopulationStage,
+    "LinearStructureStage": LinearStructureStage,
 }
 
 
