@@ -134,6 +134,8 @@ PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
+P3D_WHEEL_DIR="$HOME/.cache/wheels/pytorch3d"
+P3D_COMMIT="75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
 load_conda() {
     eval "$(conda shell.bash hook)" 2>/dev/null || true
@@ -503,12 +505,32 @@ download_sam3d() {
 run_step "Downloading SAM 3D" \
     download_sam3d
 
+install_pytorch3d() {
+    mkdir -p "$P3D_WHEEL_DIR"
+
+    local matched_wheels=("$P3D_WHEEL_DIR"/pytorch3d-*.whl)
+
+    if [ -f "${matched_wheels[0]}" ]; then
+        info "Found pre-compiled pytorch3d wheel. Installing..."
+        run_in_env pip install "${matched_wheels[0]}"
+    else
+        warn "Building pytorch3d from source. This will take a while..."
+        run_in_env pip wheel --no-build-isolation \
+            "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@$P3D_COMMIT" \
+            -w "$P3D_WHEEL_DIR"
+
+        matched_wheels=("$P3D_WHEEL_DIR"/pytorch3d-*.whl)
+        run_in_env pip install "${matched_wheels[0]}"
+    fi
+}
+
 setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
 
     create_env "sam3d"
     run_in_env pip install -r "$PROJECT_DIR/requirements-sam3d.txt"
-    run_in_env pip install opencv-python
+    install_pytorch3d
+    run_in_env pip install -e "$LIB_DIR/SAM3D" --no-deps
     stop_env
 }
 
