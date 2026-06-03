@@ -106,7 +106,13 @@ class PanoramaInpaintingStage(PipelineStage):
             )
             inpainter.close()
 
-            context.add_panorama(output_key, Panorama(result_pil))
+            # Composite: only replace the masked region with LaMa's fill.
+            # LaMa reconstructs the entire image, so unmasked pixels in its output
+            # are slightly degraded each run — compositing prevents compounding noise.
+            result_array = np.array(result_pil.crop((0, 0, input_image.width, input_image.height)))
+            mask_3d = dilated[..., np.newaxis]
+            composited = (img_array * (1.0 - mask_3d) + result_array * mask_3d).astype(np.uint8)
+            context.add_panorama(output_key, Panorama(PILImage.fromarray(composited)))
 
             self.advance_progress(inpainting_task)
             self.finish_progress(inpainting_task)
