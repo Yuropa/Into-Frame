@@ -102,7 +102,7 @@ case "$ACTION" in
 
   pull)
     REMOTE_REPO="$(dirname "$REMOTE_DIR")"
-    REMOTE_CMD="git -C \"$REMOTE_REPO\" pull"
+    REMOTE_CMD="git -C $REMOTE_REPO pull"
 
     echo "Pulling latest on ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}..."
     # shellcheck disable=SC2086
@@ -111,7 +111,7 @@ case "$ACTION" in
 
   clear)
     REMOTE_TARGET="${REMOTE_DIR}/${OUTPUT#./}"
-    REMOTE_CMD="if [ -d \"$REMOTE_TARGET\" ]; then rm -rf \"${REMOTE_TARGET:?}\"/* && echo 'Done.'; else echo \"Output directory does not exist: $REMOTE_TARGET\"; fi"
+    REMOTE_CMD="if [ -d $REMOTE_TARGET ]; then rm -rf $REMOTE_TARGET/* && echo 'Done.'; else echo \"Output directory does not exist: $REMOTE_TARGET\"; fi"
 
     echo "Clearing output on ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_TARGET}..."
     # shellcheck disable=SC2086

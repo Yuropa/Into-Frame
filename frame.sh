@@ -263,7 +263,7 @@ elif [[ "$SUBCOMMAND" == "download" ]]; then
 # Subcommand: remote  (delegates to scripts/remote-server.sh)
 # ---------------------------------------------------------------------------
 elif [[ "$SUBCOMMAND" == "remote" ]]; then
-  exec "$SCRIPTS_DIR/remote-server.sh" --env "$ENV" "$@"
+  exec "$SCRIPTS_DIR/remote-server.sh" "$@" --env "$ENV"
 
 # ---------------------------------------------------------------------------
 # Subcommand: setup  (delegates to scripts/setup.sh)
