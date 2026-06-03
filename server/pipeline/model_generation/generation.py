@@ -18,7 +18,7 @@ class ModelGenerationConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        generator_type: str = "TRELLIS",
+        generator_type: str = "SAM3D",
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
