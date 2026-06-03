@@ -67,7 +67,7 @@ class PanoramaLightingStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        crop_fov = self._config.crop_fov_deg
+        crop_fov = self.config.crop_fov_deg
         if crop_fov > 0:
             img  = panorama.rgb()
             w, h = img.size
