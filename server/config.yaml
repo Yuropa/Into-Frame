@@ -28,10 +28,6 @@ stages:
     stage: PanoramaInpaintingStage
     enabled: true
 
-  - name: Panorama Object Classification
-    stage: PanoramaObjectClassificationStage
-    enabled: true
-
   - name: Panorama Lighting
     stage: PanoramaLightingStage
     enabled: true
