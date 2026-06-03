@@ -1,0 +1,4 @@
+# pytorch3d is intentionally absent — setup.sh builds it from source with a
+# CUDA 13 patch (see install_pytorch3d). Installing it directly from this file
+# would bypass the patch and fail to link on sm_89+ / CUDA 13.
+flash_attn==2.8.3

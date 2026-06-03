@@ -134,6 +134,7 @@ PACKAGES_DIR="$LIB_DIR/packages"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
+FLASH_VERSION_SAM3D="2.8.3"
 P3D_WHEEL_DIR="$HOME/.cache/wheels/pytorch3d"
 P3D_COMMIT="75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
@@ -515,9 +516,28 @@ install_pytorch3d() {
         run_in_env pip install "${matched_wheels[0]}"
     else
         warn "Building pytorch3d from source. This will take a while..."
-        run_in_env pip wheel --no-build-isolation \
-            "pytorch3d @ git+https://github.com/facebookresearch/pytorch3d.git@$P3D_COMMIT" \
-            -w "$P3D_WHEEL_DIR"
+
+        # Clone at pinned commit and build as a pure-Python wheel by making
+        # setup.py believe CUDA is unavailable. sam3d_objects only uses pytorch3d's
+        # pure-Python APIs (look_at_view_transform, Transform3d, quaternion_*)
+        # so the _C CUDA extension is not needed.
+        local build_dir
+        build_dir="$(mktemp -d)"
+        git clone https://github.com/facebookresearch/pytorch3d.git "$build_dir"
+        git -C "$build_dir" checkout "$P3D_COMMIT"
+        python3 -c "
+import pathlib
+p = pathlib.Path('$build_dir/setup.py')
+# Prepend a patch so torch.cuda.is_available() returns False, causing setup.py
+# to skip the _C CUDA extension entirely. sam3d_objects only uses pytorch3d's
+# pure-Python APIs (look_at_view_transform, Transform3d, quaternion_*) which
+# don't need _C. This avoids the Pulsar linker failure on CUDA 13 / sm_89+.
+p.write_text(
+    'import torch as _t; _t.cuda.is_available = lambda: False\n' + p.read_text()
+)
+"
+        run_in_env pip wheel --no-build-isolation "$build_dir" -w "$P3D_WHEEL_DIR"
+        rm -rf "$build_dir"
 
         matched_wheels=("$P3D_WHEEL_DIR"/pytorch3d-*.whl)
         run_in_env pip install "${matched_wheels[0]}"
@@ -529,8 +549,87 @@ setup_sam3d() {
 
     create_env "sam3d"
     run_in_env pip install -r "$PROJECT_DIR/requirements-sam3d.txt"
+
+    local sam3d_flash_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION_SAM3D"*.whl)
+    if [ ! -f "${sam3d_flash_wheels[0]}" ]; then
+        warn "Building flash-attn $FLASH_VERSION_SAM3D for sam3d. This will take a while..."
+        MAX_JOBS=4 run_in_env pip wheel flash-attn=="$FLASH_VERSION_SAM3D" \
+            -w "$FLASH_WHEEL_DIR" --no-build-isolation
+    fi
+
+    run_in_env pip install -r "$PROJECT_DIR/requirements-p3d.txt" \
+        --find-links "$FLASH_WHEEL_DIR" --no-build-isolation
     install_pytorch3d
+    # Install SAM3D's own deps one by one, skipping known-broken or incompatible packages.
+    # NOTE: use conda run directly (not run_in_env) so failures are tolerated — run_in_env
+    # calls exit 1 on failure, which would terminate the whole script.
+    while IFS= read -r pkg; do
+        [[ -z "$pkg" || "$pkg" == \#* ]] && continue
+        # bpy: not on PyPI
+        # *+cu121*: version pinned to CUDA 12.1 (we have cu13 variants, e.g. torchaudio)
+        # cuda-python==12.1.0: never published on PyPI
+        # nvidia-pyindex: broken setup.py; just adds NVIDIA package index, not a runtime dep
+        # Note: spconv-cu121 is intentionally NOT skipped — no cu130 build exists, and
+        #       cu121 wheels run fine on CUDA 13 via forward compatibility.
+        [[ "$pkg" == bpy* || "$pkg" == *+cu121* || \
+           "$pkg" == "cuda-python==12.1.0" || "$pkg" == nvidia-pyindex* ]] && {
+            warn "Skipping incompatible dep: $pkg"
+            continue
+        }
+        conda run --no-capture-output -n "$CURRENT_ENV" pip install "$pkg" --quiet \
+            || warn "Skipped dep (incompatible): $pkg"
+    done < "$LIB_DIR/SAM3D/requirements.txt"
+    # Install inference-only deps (gsplat, seaborn). Skip kaolin — handled by stub below.
+    # Skip gradio — it's a UI dep not needed for server inference.
+    # gsplat's setup.py imports torch to detect CUDA arch, so --no-build-isolation is required.
+    run_in_env pip install --no-build-isolation \
+        "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7" \
+        seaborn==0.13.2
     run_in_env pip install -e "$LIB_DIR/SAM3D" --no-deps
+    # SAM3D's requirements include nvidia-nccl-cu12 which overwrites the cu13 NCCL that
+    # PyTorch was compiled against. ncclCommResume was added after 2.21.5 (cu12), so we
+    # must force cu13 back after all deps are installed.
+    run_in_env pip install --upgrade nvidia-nccl-cu13
+    # SAM3D pins opencv-python==4.9.0.80 which is a NumPy 1.x build; upgrade to get a
+    # NumPy 2-compatible wheel.
+    run_in_env pip install --upgrade "opencv-python>=4.9.0.80"
+    # SAM3D pins xformers==0.0.28.post3 (built for torch 2.5.1+cu121). The triton JIT API
+    # changed in torch 2.12, breaking xformers' vararg kernel unrolling. Upgrade to 0.0.35
+    # which supports torch>=2.10 and ships a py-none (pure-Python) wheel.
+    run_in_env pip install xformers==0.0.35
+    # kaolin has no wheels for torch 2.x / CUDA 13. The only usage in sam3d_objects is
+    # kaolin.utils.testing.check_tensor (a pure-Python shape validator in flexicubes.py).
+    # Install a minimal stub instead of the full library.
+    local py_ver
+    py_ver=$(conda run -n "$CURRENT_ENV" python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local kaolin_dir="$HOME/miniconda3/envs/$CURRENT_ENV/lib/python${py_ver}/site-packages/kaolin"
+    mkdir -p "$kaolin_dir/utils"
+    printf '# Minimal kaolin stub — only kaolin.utils.testing.check_tensor is used.\n' > "$kaolin_dir/__init__.py"
+    printf '' > "$kaolin_dir/utils/__init__.py"
+    cat > "$kaolin_dir/utils/testing.py" << 'PYEOF'
+import torch
+
+def check_tensor(obj, shape=None, dtype=None, throw=True):
+    if not isinstance(obj, torch.Tensor):
+        if throw:
+            raise TypeError(f"Expected torch.Tensor, got {type(obj)}")
+        return False
+    if shape is not None:
+        if len(obj.shape) != len(shape):
+            if throw:
+                raise ValueError(f"Shape rank mismatch: expected {len(shape)}, got {len(obj.shape)}")
+            return False
+        for i, (actual, expected) in enumerate(zip(obj.shape, shape)):
+            if expected is not None and actual != expected:
+                if throw:
+                    raise ValueError(f"Dim {i}: expected {expected}, got {actual}")
+                return False
+    if dtype is not None and obj.dtype != dtype:
+        if throw:
+            raise TypeError(f"dtype mismatch: expected {dtype}, got {obj.dtype}")
+        return False
+    return True
+PYEOF
     stop_env
 }
 
@@ -667,7 +766,7 @@ setup_dreamcube() {
     clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
     run_in_env pip install -r "$PROJECT_DIR/requirements-dreamcube.txt"
     run_in_env pip install ninja wheel setuptools
-    run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+    install_pytorch3d
     run_in_env pip install peft
     ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
 
