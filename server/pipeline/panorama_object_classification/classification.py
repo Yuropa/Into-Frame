@@ -36,8 +36,8 @@ def _classify_caption(caption: str) -> str:
     words = set(caption.lower().replace(",", " ").replace(".", " ").replace("'", " ").split())
     obj_score = sum(1 for kw in _OBJECT_KEYWORDS if kw in words)
     env_score = sum(1 for kw in _ENVIRONMENT_KEYWORDS if kw in words)
-    # Prefer 'object' on ties or no match — it's safer to include than to discard
-    return "object" if obj_score >= env_score else "environment"
+    # Require a positive object signal to remove something; unknown/ambiguous → keep
+    return "object" if obj_score > env_score else "environment"
 
 
 class PanoramaObjectClassificationStage(PipelineStage):
