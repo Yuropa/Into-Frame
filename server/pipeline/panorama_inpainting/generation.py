@@ -109,8 +109,11 @@ class PanoramaInpaintingStage(PipelineStage):
             # Composite: only replace the masked region with LaMa's fill.
             # LaMa reconstructs the entire image, so unmasked pixels in its output
             # are slightly degraded each run — compositing prevents compounding noise.
+            # Feather the mask boundary so the blend is gradual rather than a hard seam.
             result_array = np.array(result_pil.crop((0, 0, input_image.width, input_image.height)))
-            mask_3d = dilated[..., np.newaxis]
+            from PIL import ImageFilter
+            feathered_mask = mask_pil.filter(ImageFilter.GaussianBlur(radius=8))
+            mask_3d = np.array(feathered_mask).astype(np.float32)[..., np.newaxis] / 255.0
             composited = (img_array * (1.0 - mask_3d) + result_array * mask_3d).astype(np.uint8)
             context.add_panorama(output_key, Panorama(PILImage.fromarray(composited)))
 
