@@ -579,11 +579,12 @@ setup_sam3d() {
         conda run --no-capture-output -n "$CURRENT_ENV" pip install "$pkg" --quiet \
             || warn "Skipped dep (incompatible): $pkg"
     done < "$LIB_DIR/SAM3D/requirements.txt"
-    # Install inference-only deps (gsplat, seaborn). Skip kaolin — handled by stub below.
-    # Skip gradio — it's a UI dep not needed for server inference.
-    # gsplat's setup.py imports torch to detect CUDA arch, so --no-build-isolation is required.
+    # Install inference-only deps (gsplat, nvdiffrast, seaborn).
+    # Skip kaolin — handled by stub below. Skip gradio — UI dep, not needed for inference.
+    # gsplat and nvdiffrast both import torch at build time, so --no-build-isolation is required.
     run_in_env pip install --no-build-isolation \
         "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7" \
+        "git+https://github.com/NVlabs/nvdiffrast.git" \
         seaborn==0.13.2
     run_in_env pip install -e "$LIB_DIR/SAM3D" --no-deps
     # SAM3D's requirements include nvidia-nccl-cu12 which overwrites the cu13 NCCL that
