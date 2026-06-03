@@ -3416,7 +3416,7 @@ MonoBehaviour:
   directionalLight: {fileID: 1815318736}
   camera: {fileID: 877652245}
   skybox: {fileID: 341509118}
-  environmentLighting: {fileID: 0}
+  environmentLighting: {fileID: 1862969864}
 --- !u!114 &1862969861
 MonoBehaviour:
   m_ObjectHideFlags: 0

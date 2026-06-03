@@ -51,7 +51,9 @@ public class EnvironmentLighting : MonoBehaviour
         _envMaterial.SetFloat("_Mapping",   0);   // 0 = 360 degrees equirect
         _envMaterial.SetFloat("_Exposure",  1f);
 
-        // Temporarily swap skybox so RenderProbe captures the estimated env map
+        // Swap the skybox to the estimated env map so the probe captures it,
+        // then restore afterward. Do NOT call DynamicGI.UpdateEnvironment() on
+        // restore — that would undo the ambient update we just applied.
         Material savedSkybox = RenderSettings.skybox;
         RenderSettings.skybox = _envMaterial;
         DynamicGI.UpdateEnvironment();
@@ -63,7 +65,6 @@ public class EnvironmentLighting : MonoBehaviour
         }
 
         RenderSettings.skybox = savedSkybox;
-        DynamicGI.UpdateEnvironment();
 
         Debug.Log("[EnvironmentLighting] Reflection probe updated from estimated environment map");
     }
