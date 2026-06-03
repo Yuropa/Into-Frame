@@ -72,6 +72,7 @@ clear options:
   -o, --output DIR   Output directory to clear  (default: server/${OUTPUT})
 
 remote options (SSH + port forwarding, then starts server on the remote):
+  SUBCOMMAND         server (default), pull, or clear
   --user USER        Remote SSH username       (default: ${REMOTE_USER})
   --host HOST        Remote hostname or IP     (default: ${REMOTE_HOST})
   --dir DIR          Remote project directory  (default: ${REMOTE_DIR})
@@ -79,8 +80,9 @@ remote options (SSH + port forwarding, then starts server on the remote):
   --asset-port PORT  Asset server port         (default: ${ASSET_PORT})
   --ssh-port PORT    SSH port                  (default: 22)
   --key PATH         SSH private key path      (default: none)
-  -d, --debug BOOL   Save intermediate files on remote
-  --config PATH      Remote pipeline config YAML
+  -d, --debug BOOL   Save intermediate files on remote   [server only]
+  --config PATH      Remote pipeline config YAML         [server only]
+  -o, --output DIR   Output directory to clear           [clear only]
 
 setup options (passed directly to scripts/setup.sh):
   -f                 Force clean reinstall (removes existing envs)
@@ -97,6 +99,9 @@ Examples:
   $(basename "$0") download
   $(basename "$0") remote --host 192.168.1.10 --user admin
   $(basename "$0") remote --host 192.168.1.10 --ssh-port 2222 --key ~/.ssh/id_rsa
+  $(basename "$0") remote pull --host 192.168.1.10
+  $(basename "$0") remote clear --host 192.168.1.10
+  $(basename "$0") remote clear --host 192.168.1.10 --output ./my-output
   $(basename "$0") setup
   $(basename "$0") setup -f -v
   $(basename "$0") --env myenv run samples/Paris.jpg --config config_sam3d_test.yaml
@@ -258,7 +263,6 @@ elif [[ "$SUBCOMMAND" == "download" ]]; then
 # Subcommand: remote  (delegates to scripts/remote-server.sh)
 # ---------------------------------------------------------------------------
 elif [[ "$SUBCOMMAND" == "remote" ]]; then
-  # Pass --env from the global flag and forward all remaining args
   exec "$SCRIPTS_DIR/remote-server.sh" --env "$ENV" "$@"
 
 # ---------------------------------------------------------------------------
