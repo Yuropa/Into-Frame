@@ -16,6 +16,7 @@ class Object3D():
         self.type = ""
         self.texture = ""
         self.mesh = ""
+        self.name = ""
         self.position = vec3()
         self.rotation = vec3()
         self.scale = vec3(1.0, 1.0, 1.0)
@@ -37,7 +38,8 @@ class Object3D():
             "scale":    self.scale,
             "type":     self.type,
             "texture":  self.texture,
-            "mesh":     self.mesh
+            "mesh":     self.mesh,
+            "name":     self.name
         }
     
     @classmethod
@@ -71,4 +73,5 @@ class Object3D():
         obj.position = data["position"]
         obj.rotation = data["rotation"]
         obj.scale = data["scale"]
+        obj.name = data["name"]
         return obj

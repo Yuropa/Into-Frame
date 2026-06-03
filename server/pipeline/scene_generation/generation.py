@@ -113,6 +113,7 @@ class SceneGenerationStage(PipelineStage):
                         y=position[1],
                         z=position[2],
                     )
+                    mesh_obj.name = mesh_name
                     scene.add_object(mesh_obj)
                 else:
                     self.log_info(f"Creating billboard for {idx}")
@@ -124,6 +125,7 @@ class SceneGenerationStage(PipelineStage):
                         y=position[1],
                         z=position[2],
                     )
+                    billboard.name = mesh_name
                     scene.add_object(billboard)
                 self.advance_progress(generation_task)
 
