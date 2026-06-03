@@ -85,10 +85,17 @@ class TerrainMeshGenerator:
 
         # ── Colour / texture ──────────────────────────────────────────────
         if panorama is not None:
-            vertex_colors = panorama.sample_3d(vertices)
+            baked = TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far)
+            u = ((X_pos + x_half) / (2.0 * x_half)).clip(0.0, 1.0).astype(np.float32)
+            v = ((Z_pos + z_far)  / (2.0 * z_far )).clip(0.0, 1.0).astype(np.float32)
+            uv = np.stack([u, v], axis=-1)
+            material = trimesh.visual.material.PBRMaterial(
+                baseColorTexture=baked,
+                baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+            )
+            visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
             tri_mesh = trimesh.Trimesh(
-                vertices=vertices, faces=faces,
-                vertex_colors=vertex_colors, process=False,
+                vertices=vertices, faces=faces, visual=visual, process=False,
             )
             _ = tri_mesh.vertex_normals
         elif texture is not None and intrinsics is not None:
@@ -200,6 +207,40 @@ class TerrainMeshGenerator:
         return np.concatenate([pts, boundary_pts])
 
     # ── Colour helpers ────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _bake_topdown_texture(
+        panorama,
+        height_map: np.ndarray,
+        x_half: float,
+        z_far: float,
+        tex_size: int = 1024,
+    ) -> PIL.Image.Image:
+        """
+        Rasterise the panorama into a top-down orthographic texture.
+
+        For each texel, compute its world XZ position, sample the terrain
+        height there, then call panorama.sample_3d — which already handles
+        near-nadir hole-filling — to get the colour.  The result is a PIL
+        image that can be used as a PBR base-colour texture with simple
+        orthographic UVs (u = (X+x_half)/(2*x_half), v = (Z+z_far)/(2*z_far)).
+        """
+        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        ug, vg = np.meshgrid(us, vs)
+
+        X = (ug.ravel() - 0.5) * (2.0 * x_half)
+        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
+
+        h_hm, w_hm = height_map.shape
+        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
+        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
+        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
+        Y = np.nan_to_num(Y, nan=0.0)
+
+        grid_verts = np.stack([X, Y, Z], axis=-1)
+        rgba = panorama.sample_3d(grid_verts)
+        return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
 
     @staticmethod
     def _uvs_pinhole(
