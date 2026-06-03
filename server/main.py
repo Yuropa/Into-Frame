@@ -65,7 +65,7 @@ def create_parser():
         '-d',
         '--debug',
         help="Saves intermediate files for debugg",
-        default=False,
+        default=True,
         type=bool
     )
     server_parser.add_argument(

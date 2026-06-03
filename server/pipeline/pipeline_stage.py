@@ -149,7 +149,9 @@ class PipelineStage:
         return self.progress.add_task("  " + label, total=count)
 
     def advance_progress(self, sub_task):
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
         sub_total = task.total if task.total is not None else task.completed + 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
         # Snap to the next integer step — only advance what remains so progress
@@ -162,7 +164,9 @@ class PipelineStage:
 
     def update_progress(self, sub_task, fraction: float):
         """Set a sub-task to an absolute fraction [0, 1] of completion and advance the main task by the delta."""
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
         total = task.total if task.total is not None else 1
         new_completed = min(fraction * total, total)
         delta = new_completed - task.completed
@@ -179,9 +183,9 @@ class PipelineStage:
         integer step, so the subsequent advance_progress call can snap the last bit
         without double-counting the main task.
         """
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
-        total = task.total if task.total is not None else 1
-        start_frac = task.completed / total
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        total = task.total if task is not None else 1
+        start_frac = (task.completed / total) if task is not None else 0.0
         remaining_span = 1.0 - start_frac - 1e-6  # leave a sliver for advance_progress
 
         def callback(fraction: float, label: str = ""):
@@ -191,7 +195,9 @@ class PipelineStage:
 
     def finish_progress(self, task):
         # Snap main task forward by whatever fraction this stage didn't account for
-        t = next(t for t in self.progress.tasks if t.id == task)
+        t = next((t for t in self.progress.tasks if t.id == task), None)
+        if t is None:
+            return
         sub_total = t.total if t.total is not None else 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
         remaining = (sub_total - t.completed) / (sub_total * total_tasks)
