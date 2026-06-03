@@ -10,6 +10,7 @@ public class PanoramaSkybox : MonoBehaviour
     public float rotation = 0.0f;
 
     private Material skyboxMaterial;
+    private Texture2D currentTexture;
 
     [Header("Assets")]
     public GameObject server;
@@ -80,6 +81,7 @@ public class PanoramaSkybox : MonoBehaviour
         // Create a Panoramic skybox material
         skyboxMaterial = new Material(Shader.Find("Skybox/Panoramic"));
         skyboxMaterial.SetFloat("_Mapping", 0);
+        currentTexture = texture;
         skyboxMaterial.SetTexture("_MainTex", texture);
         skyboxMaterial.SetFloat("_Exposure", exposure);
         skyboxMaterial.SetFloat("_Rotation", rotation);
