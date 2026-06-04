@@ -1,6 +1,9 @@
 from path_utils import add_project_paths
 add_project_paths()
 
+import warnings
+warnings.filterwarnings("ignore", message="No LoRA keys associated to CLIPTextModel")
+
 import torch
 import cv2
 import numpy as np

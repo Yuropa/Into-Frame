@@ -271,6 +271,7 @@ class PanoGenerator(RemoteServer):
             str(checkpoints_path() / "layer_pano_3d"),
             weight_name="pano_lora_720*1440_v1.safetensors",
             adapter_name="pano",
+            prefix=None,
         )
 
         self.base_pipeline.load_ip_adapter(
