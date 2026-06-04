@@ -1,4 +1,5 @@
 import torch
+from typing import Optional
 from pathlib import Path
 from PIL import Image as PILImage
 from remote_connection.remote_client import RemoteClient
@@ -19,7 +20,7 @@ class ImagePanoramaWorldGen(RemoteClient):
     def pano(
         self,
         input: PILImage,
-        depth: PILImage | None,
+        depth: Optional[PILImage],
         temp_path: Path,
         fov: float = 60.0,
         caption: str = "",
