@@ -12,7 +12,7 @@ from PIL import Image
 from remote_connection.remote_server import RemoteServer
 from worldgen.pano_gen import build_pano_fill_model, gen_pano_fill_image
 from worldgen.pano_depth import build_depth_model, pred_depth
-from worldgen.utils.general_utils import map_image_to_pano
+from pano_utils import map_image_to_pano
 
 
 def _auto_low_vram() -> bool:
