@@ -1,6 +1,18 @@
 import SwiftUI
 
 struct SettingsView: View {
+    var body: some View {
+        TabView {
+            ServerSettingsPane()
+                .tabItem {
+                    Label("Server", systemImage: "network")
+                }
+        }
+        .frame(width: 420, height: 220)
+    }
+}
+
+private struct ServerSettingsPane: View {
     @Environment(AppModel.self) private var appModel
 
     @State private var wsURL    = ""
@@ -8,56 +20,37 @@ struct SettingsView: View {
     @State private var didReconnect = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("Server Settings")
-                .font(.headline)
+        Form {
+            TextField("WebSocket URL", text: $wsURL)
+                .fontDesign(.monospaced)
+                .autocorrectionDisabled()
 
-            field("WebSocket URL",
-                  placeholder: SceneClient.defaultServerURL,
-                  text: $wsURL)
+            TextField("Asset Server URL", text: $assetURL)
+                .fontDesign(.monospaced)
+                .autocorrectionDisabled()
 
-            field("Asset Server URL",
-                  placeholder: AssetServer.defaultBaseURL,
-                  text: $assetURL)
-
-            Divider()
-
-            HStack(spacing: 10) {
+            HStack {
                 Button("Reset Defaults") {
                     wsURL    = SceneClient.defaultServerURL
                     assetURL = AssetServer.defaultBaseURL
                 }
-                .buttonStyle(.bordered)
 
                 Spacer()
 
                 Button {
                     saveAndReconnect()
                 } label: {
-                    Label(didReconnect ? "Reconnected" : "Save & Reconnect",
-                          systemImage: didReconnect ? "checkmark" : "arrow.clockwise")
+                    Label(
+                        didReconnect ? "Reconnected" : "Save & Reconnect",
+                        systemImage: didReconnect ? "checkmark" : "arrow.clockwise"
+                    )
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(didReconnect)
             }
         }
-        .padding(16)
-        .frame(width: 300)
+        .formStyle(.grouped)
         .onAppear { loadSaved() }
-    }
-
-    @ViewBuilder
-    private func field(_ label: String, placeholder: String, text: Binding<String>) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(label)
-                .font(.caption)
-                .fontWeight(.medium)
-                .foregroundStyle(.secondary)
-            TextField(placeholder, text: text)
-                .textFieldStyle(.roundedBorder)
-                .fontDesign(.monospaced)
-                .autocorrectionDisabled()
-        }
     }
 
     private func loadSaved() {
@@ -74,9 +67,7 @@ struct SettingsView: View {
 
         appModel.sceneManager.reconnect(websocketURL: ws, assetBaseURL: asset)
 
-        withAnimation {
-            didReconnect = true
-        }
+        withAnimation { didReconnect = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation { didReconnect = false }
         }
