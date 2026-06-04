@@ -45,6 +45,11 @@ struct InfoFrameApp: App {
             AppCommands()
         }
 
+        Settings {
+            SettingsView()
+                .environment(appModel)
+        }
+
         Window("About Into Frame", id: "about") {
             AboutView()
         }

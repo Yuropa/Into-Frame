@@ -15,8 +15,10 @@ class SceneClient {
     var progressStep: String = ""
     var progressPercent: Float = 0
 
-    private let serverURL: URL
+    private var serverURL: URL
     private let reconnectDelay: TimeInterval
+
+    static let defaultServerURL = "ws://localhost:8080"
     private var webSocketTask: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private let logger = Logger(subsystem: "com.intoframe", category: "SceneClient")
@@ -28,12 +30,12 @@ class SceneClient {
     var onProgress: ((SceneProgressPayload) -> Void)?
 
     private static func configuredWebSocketURL() -> URL {
+        if let s = UserDefaults.standard.string(forKey: "serverWSURL"),
+           let url = URL(string: s) { return url }
         if let dict = Bundle.main.infoDictionary,
-           let urlString = dict["ServerWSURL"] as? String,
-           let url = URL(string: urlString) {
-            return url
-        }
-        return URL(string: "ws://localhost:8080")!
+           let s = dict["ServerWSURL"] as? String,
+           let url = URL(string: s) { return url }
+        return URL(string: defaultServerURL)!
     }
 
     var serverURLString: String { serverURL.absoluteString }
@@ -41,6 +43,11 @@ class SceneClient {
     init(serverURL: URL = SceneClient.configuredWebSocketURL(), reconnectDelay: TimeInterval = 3) {
         self.serverURL = serverURL
         self.reconnectDelay = reconnectDelay
+    }
+
+    func reconnect(to url: URL) {
+        serverURL = url
+        connect()
     }
 
     func connect() {

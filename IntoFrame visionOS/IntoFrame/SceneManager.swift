@@ -4,7 +4,7 @@ import os
 @MainActor
 @Observable
 class SceneManager {
-    let assetServer = AssetServer()
+    var assetServer = AssetServer()
     let client = SceneClient()
 
     var sceneObjects: [String: SceneObject] = [:]
@@ -35,6 +35,21 @@ class SceneManager {
 
     func connect() {
         client.connect()
+    }
+
+    func reconnect(websocketURL: String, assetBaseURL: String) {
+        if let url = URL(string: assetBaseURL) {
+            assetServer = AssetServer(baseURL: url)
+        }
+        sceneObjects.removeAll()
+        downloadedAssets.removeAll()
+        sceneParams = nil
+        isLoading = false
+        totalAssets = 0
+        completedAssets = 0
+        if let url = URL(string: websocketURL) {
+            client.reconnect(to: url)
+        }
     }
 
     // MARK: - Scene Init

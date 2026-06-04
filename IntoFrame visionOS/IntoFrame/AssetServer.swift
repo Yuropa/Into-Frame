@@ -1,15 +1,17 @@
 import Foundation
 
 struct AssetServer: Sendable {
-    let baseURL: URL
+    var baseURL: URL
+
+    static let defaultBaseURL = "http://localhost:3000/assets/"
 
     private static func configuredBaseURL() -> URL {
+        if let s = UserDefaults.standard.string(forKey: "assetBaseURL"),
+           let url = URL(string: s) { return url }
         if let dict = Bundle.main.infoDictionary,
-           let urlString = dict["AssetBaseURL"] as? String,
-           let url = URL(string: urlString) {
-            return url
-        }
-        return URL(string: "http://localhost:3000/assets/")!
+           let s = dict["AssetBaseURL"] as? String,
+           let url = URL(string: s) { return url }
+        return URL(string: defaultBaseURL)!
     }
 
     init(baseURL: URL = AssetServer.configuredBaseURL()) {
