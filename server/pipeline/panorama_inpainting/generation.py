@@ -4,6 +4,7 @@ from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.panorama_object_classification.classification import _classify_caption
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
 import numpy as np
@@ -30,6 +31,7 @@ class PanoramaInpaintingStage(PipelineStage):
         super().__init__(config)
         self._seg = None
         self._captioner = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
         return self.keys({
@@ -50,10 +52,10 @@ class PanoramaInpaintingStage(PipelineStage):
         # Segment
         segmenting_task = self.create_progress(2, "Segmenting Panorama...")
         if self._seg is None:
-            self._seg = ImageSeg(self.device)
+            self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)
 
-        result = self._seg.segment(input_image)
+        result = self._seg.segment(input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task))
 
         # Classify each crop and collect masks for objects only
         if self._captioner is None:
@@ -152,6 +154,8 @@ class PanoramaInpaintingStage(PipelineStage):
         )
 
     def clean_up(self):
-        self._seg = None
+        if self._seg is not None:
+            self._seg.close()
+            self._seg = None
         self._captioner = None
         super().clean_up()

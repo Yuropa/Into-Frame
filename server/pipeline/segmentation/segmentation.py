@@ -4,6 +4,7 @@ from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.mask_inpainting import MaskInPainting
+from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 import numpy as np
 from PIL import Image as PILImage
@@ -27,6 +28,7 @@ class SegmentationStage(PipelineStage):
         self._seg = None
         self._foreground_seg = None
         self._mask_inpainting = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
         return self.keys({
@@ -97,10 +99,10 @@ class SegmentationStage(PipelineStage):
         #Segmentation
         segmenting_task = self.create_progress(2, "Segmenting...")
         if self._seg is None:
-            self._seg = ImageSeg(self.device)
+            self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)
 
-        result = self._seg.segment(input_image)
+        result = self._seg.segment(input_image, self.temp)
         store_segmentation_result(result)
 
         self.advance_progress(segmenting_task)
@@ -130,7 +132,9 @@ class SegmentationStage(PipelineStage):
         return ImageSeg.model_names() + ForegroundSeg.model_names() + MaskInPainting.model_names()
 
     def clean_up(self):
-        self._seg = None
+        if self._seg is not None:
+            self._seg.close()
+            self._seg = None
         self._foreground_seg = None
         self._mask_inpainting = None
         super().clean_up()
