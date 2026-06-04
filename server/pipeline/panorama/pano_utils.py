@@ -11,6 +11,7 @@ the nearest filled pixel in 2D UV space in O(n) time with negligible memory.
 All other logic is identical to the upstream function.
 """
 
+import math
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -19,6 +20,26 @@ from scipy.ndimage import distance_transform_edt
 from skimage import measure, draw
 
 from worldgen.utils.general_utils import resize_img_and_rays, pano_unit_rays, fill_mask_from_contour
+
+DEFAULT_HFOV_DEG = 60.0
+
+
+def perspective_rays(h: int, w: int, hfov_deg: float, device) -> torch.Tensor:
+    """Per-pixel unit rays for a perspective camera looking along +Z, Y-up."""
+    hfov = math.radians(hfov_deg)
+    vfov = 2 * math.atan(math.tan(hfov / 2) * h / w)
+
+    u = (torch.arange(w, device=device).float() + 0.5) / w   # [0, 1]
+    v = (torch.arange(h, device=device).float() + 0.5) / h   # [0, 1]
+    vv, uu = torch.meshgrid(v, u, indexing="ij")
+
+    phi   = (uu - 0.5) * hfov          # left → right
+    theta = (vv - 0.5) * vfov          # image row 0 → negative theta → top of panorama
+
+    x = torch.cos(theta) * torch.sin(phi)
+    y = torch.sin(theta)
+    z = torch.cos(theta) * torch.cos(phi)
+    return F.normalize(torch.stack([x, y, z], dim=-1), dim=-1)  # (H, W, 3)
 
 
 def map_image_to_pano(predictions: dict,

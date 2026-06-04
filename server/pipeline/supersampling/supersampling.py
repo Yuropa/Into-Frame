@@ -1,19 +1,21 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.supersampling.image_supersampling import SuperSample
-from pipeline.pipeline_context import PipelineContext
+from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.image_utils import Image
-import numpy as np
-import PIL
+from util.panorama_utils import Panorama
+
 
 class SupersamplingStage(PipelineStage):
     """
-    Upsamples each object crop produced by SegmentationStage using a
-    super-resolution model, replacing the crops in context with higher-res versions.
+    Upsamples an image or panorama from the input key and writes the result to
+    the output key using a Swin2SR super-resolution model.
 
-    Reads/writes dynamic context keys per object (index i):
-      crop_{i}  → Image  (read as input, overwritten with upsampled result)
+    Key mapping (override in config YAML via `keys:`):
+      input  (SemanticKey.INPUT)  — context key to read from
+      output (SemanticKey.OUTPUT) — context key to write to
 
-    Also reads: count (object) → number of crops to process
+    The stage auto-detects whether the value is a Panorama or Image and
+    preserves that type on write.
     """
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -21,26 +23,36 @@ class SupersamplingStage(PipelineStage):
         self._samp = None
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        count = context.input_object("count")
-        if count is None:
-            return False
-        return all(context.input_image(f"crop_{i}") is not None for i in range(count))
+        out_key = self.output_key()
+        return (
+            context.input_panorama(out_key) is not None
+            or context.input_image(out_key) is not None
+        )
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        count = context.input_object("count")
+        task = self.create_progress(2, "Supersampling...")
 
-        segmenting_task = self.create_progress(count + 1, "Supersampling...")
         if self._samp is None:
             self._samp = SuperSample(self.device)
-        self.advance_progress(segmenting_task)
+        self.advance_progress(task)
 
-        for i in range(count):
-            input_image = context.input_image(f"crop_{i}")
-            result = self._samp.supersample(input_image)
+        in_key = self.input_key()
+        out_key = self.output_key()
 
-            context.add_image(f"crop_{i}", result)
-            self.advance_progress(segmenting_task)
-        self.finish_progress(segmenting_task)
+        panorama = context.input_panorama(in_key)
+        if panorama is not None:
+            upsampled = self._samp.supersample(Image(panorama.image))
+            context.add_panorama(out_key, Panorama(upsampled.image))
+        else:
+            image = context.input_image(in_key)
+            upsampled = self._samp.supersample(image)
+            context.add_image(out_key, upsampled)
+
+        if self.temp is not None:
+            upsampled.image.save(self.temp / f"{out_key}_supersampled.png")
+
+        self.advance_progress(task)
+        self.finish_progress(task)
         return context
 
     def model_names(self) -> list[str]:

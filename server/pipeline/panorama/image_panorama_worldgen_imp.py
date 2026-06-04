@@ -12,7 +12,7 @@ from PIL import Image
 from remote_connection.remote_server import RemoteServer
 from worldgen.pano_gen import build_pano_fill_model, gen_pano_fill_image
 from worldgen.pano_depth import build_depth_model, pred_depth
-from pano_utils import map_image_to_pano
+from pano_utils import map_image_to_pano, perspective_rays, DEFAULT_HFOV_DEG
 
 
 def _auto_low_vram() -> bool:
@@ -36,9 +36,15 @@ class WorldGenPanoGenerator(RemoteServer):
             for k, v in cube_dict.items()
         }
 
-    def _pano(self, input_image: Image.Image, seed: int) -> dict:
+    def _pano(self, input_image: Image.Image, seed: int, temp_path: Path, hfov_deg: float = DEFAULT_HFOV_DEG) -> dict:
         self.report_progress(0.05, "Computing depth...")
         predictions = pred_depth(self.depth_model, input_image)
+
+        # pred_depth assigns full-sphere equirectangular rays, which would
+        # stretch the perspective input across the entire panorama. Replace with
+        # rays matching the actual camera FOV so it occupies the right region.
+        h, w = predictions["rgb"].shape[:2]
+        predictions["rays"] = perspective_rays(h, w, hfov_deg, device=predictions["rgb"].device)
 
         self.report_progress(0.2, "Projecting image to panorama space...")
         pano_cond_img, cond_mask = map_image_to_pano(predictions, device=self.device)
@@ -74,7 +80,8 @@ class WorldGenPanoGenerator(RemoteServer):
                 input_image = input.get("image")
                 if isinstance(input_image, np.ndarray):
                     input_image = Image.fromarray(input_image)
-                return self._pano(input_image, seed=int(input.get("seed", 0)))
+                fov = float(input.get("fov") or DEFAULT_HFOV_DEG)
+                return self._pano(input_image, seed=int(input.get("seed", 0)), temp_path=temp_path, hfov_deg=fov)
             except Exception:
                 traceback.print_exc()
                 raise
