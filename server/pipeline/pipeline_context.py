@@ -234,6 +234,11 @@ class PipelineContext():
     def input_lighting(self, name: ContextKeyName) -> Optional[SceneLighting]:
         return self._value(name, self._previous_stage).lighting()
 
+    def has_stage_output(self, name: ContextKeyName) -> bool:
+        """True only if the current stage has already written this key (cache hit for this stage)."""
+        stage = self._current_stage
+        return stage in self._stage_state and name in self._stage_state[stage]
+
     # Persistence
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,21 @@
+# WorldGen panorama iteration config.
+#
+# Minimal pipeline: depth → WorldGen panorama.
+# All downstream stages are disabled so you can inspect the panorama output directly.
+
+stages:
+  - name: Depth Generation
+    stage: DepthStage
+
+  - name: Panorama
+    stage: PanoramaStage
+    generator_type: WORLDGEN
+
+  - name: Panorama Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
+
+  - name: Panorama Cubemap
+    stage: PanoramaToCubemapStage

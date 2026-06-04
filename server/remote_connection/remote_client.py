@@ -7,6 +7,7 @@ import tempfile
 import shutil
 import base64
 import os
+import time
 from io import BytesIO
 
 from typing import Any, Callable, Optional
@@ -45,7 +46,21 @@ class RemoteClient():
 
         return env
 
+    @staticmethod
+    def _verify_conda_env(conda_env: str) -> None:
+        result = subprocess.run(
+            ["conda", "env", "list", "--json"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to query conda environments: {result.stderr}")
+        envs = parse_json(result.stdout).get("envs", [])
+        env_names = [Path(e).name for e in envs]
+        if conda_env not in env_names:
+            raise RuntimeError(f"Conda environment '{conda_env}' not found. Available: {env_names}")
+
     def __init__(self, device: torch.device, conda_env: str, script_path: Path, env_options: Optional[dict] = None) -> None:
+        self._verify_conda_env(conda_env)
         self.process = None
         self.device = device
         self.script_path = script_path
@@ -82,13 +97,20 @@ class RemoteClient():
         self._make_capture_thread(self.process.stdout, self._stdout_lines, self._stdout_lock, "out").start()
         self._make_capture_thread(self.process.stderr, self._stderr_lines, self._stderr_lock, "err").start()
 
-        self.server_sock.settimeout(60)
-        try:
-            self.conn, _ = self.server_sock.accept()
-        except socket.timeout:
-            if self.process.poll() is not None:
-                raise RuntimeError(f"Subprocess died while waiting:\n{self._get_stderr()}")
-            raise RuntimeError("Timed out waiting for subprocess to connect")
+        self.server_sock.settimeout(1)
+        deadline = time.time() + 60
+        while True:
+            try:
+                self.conn, _ = self.server_sock.accept()
+                break
+            except socket.timeout:
+                if self.process.poll() is not None:
+                    raise RuntimeError(
+                        f"Subprocess exited (code {self.process.returncode}) before connecting "
+                        f"(conda env '{conda_env}' may not exist):\n{self._get_stderr()}"
+                    )
+                if time.time() > deadline:
+                    raise RuntimeError("Timed out waiting for subprocess to connect")
 
         self.json_pipe = self.conn.makefile('r')
         self.json_out = self.conn.makefile('w')

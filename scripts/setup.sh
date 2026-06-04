@@ -125,7 +125,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -835,6 +835,35 @@ setup_depth_pano() {
 
 run_step "Install Depth Any Panoramas" \
     setup_depth_pano
+
+## ============
+##    WorldGen
+## ============
+
+setup_worldgen() {
+    clone_if_needed https://github.com/ZiYang-xie/WorldGen.git "$LIB_DIR/WorldGen"
+
+    create_env "worldgen" 3.12
+    run_in_env pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url "$TORCH_URL"
+    run_in_env pip install -r "$PROJECT_DIR/requirements-worldgen.txt"
+    run_in_env pip install git+https://github.com/mit-han-lab/nunchaku.git
+    run_in_env pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git
+
+    run_in_env pip uninstall -y xformers
+    run_in_env pip install ninja cmake setuptools wheel
+    export TORCH_CUDA_ARCH_LIST="12.0"
+    run_in_env pip install --no-build-isolation git+https://github.com/facebookresearch/xformers.git
+    unset TORCH_CUDA_ARCH_LIST
+
+    run_in_env pip install --no-deps git+https://github.com/EnVision-Research/DA-2.git#subdirectory=src
+
+    ln -sf "$LIB_DIR/WorldGen/src/worldgen" "$PACKAGES_DIR/worldgen"
+
+    stop_env
+}
+
+run_step "Installing WorldGen" \
+    setup_worldgen
 
 ## ============
 ##    End

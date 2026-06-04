@@ -16,6 +16,7 @@ from pipeline.segmentation.segmentation import SegmentationStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
 from pipeline.panorama.panorama import PanoramaStage
+from pipeline.panorama.panorama_to_cubemap import PanoramaToCubemapStage
 from pipeline.scene_generation.generation import SceneGenerationStage
 from pipeline.model_generation.generation import ModelGenerationStage
 from pipeline.foreground_inpainting.generation import ForegroundInpainting
@@ -144,6 +145,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "CaptioningStage": CaptioningStage,
     "DepthStage": DepthStage,
     "PanoramaStage": PanoramaStage,
+    "PanoramaToCubemapStage": PanoramaToCubemapStage,
     "PanoramaDepthStage": PanoramaDepthStage,
     "PanoramaLightingStage": PanoramaLightingStage,
     "HeightMapStage": HeightMapStage,
