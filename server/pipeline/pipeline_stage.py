@@ -1,0 +1,213 @@
+import torch
+from typing import Optional, Any, Tuple, TypeAlias
+from logging import Logger
+from pathlib import Path
+from rich.progress import Progress
+from pipeline.pipeline_context import PipelineContext, ContextKeyName
+from util.device_utils import clean_device_cache
+from enum import StrEnum
+
+class SemanticKey(StrEnum):
+    INPUT = "input"
+    OUTPUT = "output"
+    CAPTION = "caption"
+    INTRINSICS = "intrinsics"
+    EXTRINSICS = "extrinsics"
+    CUBEMAP = "cubemap"
+    OBJECT_COUNT = "count"
+    DEPTH = "depth"
+    PANORAMA = "panorama"
+
+SemanticKeyName: TypeAlias = SemanticKey | str
+
+class PipelineStageConfiguration:
+    """Base configuration passed to every pipeline stage (name, device, dtype, logger, key overrides)."""
+
+    def __init__(
+            self,
+            name: str,
+            device: torch.device,
+            torch_dtype: Any,
+            log: Logger,
+            keys: dict[SemanticKeyName, ContextKeyName] | None = None,
+            seed: int = 0,
+            ):
+        self.name = name
+        self.device = device
+        self.torch_dtype = torch_dtype
+        self.log = log
+        self.keys = keys or {}
+        self.seed = seed
+
+class PipelineStage:
+    """
+    Base class for all pipeline stages.
+
+    Subclasses implement run() to read from PipelineContext, process data, and write results back.
+    Override has_expected_output() to enable caching (stage is skipped if it returns True).
+    Override model_names() to declare HuggingFace repos that must be present before the pipeline runs.
+    Override config_class() to advertise a stage-specific PipelineStageConfiguration subclass.
+    Use create_progress/advance_progress/finish_progress for consistent progress reporting.
+    """
+
+    @classmethod
+    def config_class(cls) -> type['PipelineStageConfiguration']:
+        return PipelineStageConfiguration
+
+    def __init__(self, config: PipelineStageConfiguration) -> None:
+        self.name = config.name
+        self.config = config
+        self.device = config.device
+        self.torch_dtype = config.torch_dtype
+        self.seed = config.seed
+        self.total_tasks = None
+
+    def input_key(self, default_input_key: Optional[ContextKeyName] = None) -> ContextKeyName:    
+        return self._resolve_key(SemanticKey.INPUT, default_input_key)
+
+    def output_key(self, default: ContextKeyName | None = None) -> ContextKeyName:
+        return self._resolve_key(SemanticKey.OUTPUT, default)
+
+    def _resolve_key(self, semantic: SemanticKey, default: ContextKeyName | None) -> ContextKeyName:
+        key = self.config.keys.get(semantic)
+        if key is not None:
+            return key
+        elif default is not None:
+            return default
+        else:
+            raise RuntimeError(f"No key found for '{semantic}'")
+
+    def keys(self, defaults: dict[SemanticKeyName, ContextKeyName] = {}) -> tuple[ContextKeyName, ...]:
+        return tuple(self._resolve_key(s, defaults.get(s)) for s in defaults)
+
+    def keys_dict(self, **defaults: ContextKeyName) -> dict[SemanticKey, ContextKeyName]:
+        return {s: self._resolve_key(s, defaults.get(s)) for s in SemanticKey}
+
+    def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
+        if output_root is not None:
+            self.output = output_root / self.name
+            self.output.mkdir(parents=True, exist_ok=True)
+        else:
+            self.output = None
+
+        if temp is not None:
+            self.temp = temp / self.name
+            self.temp.mkdir(parents=True, exist_ok=True)    
+        else:
+            self.temp = None
+
+    def model_names(self) -> list[str]:
+        return []
+
+    def _log_memory_usage(self, value):
+        mb = value / 1024 / 1024
+
+        if mb < 2048:  # less than 2GB
+            formatted = f"{mb:.0f} MB"
+        else:
+            gb = mb / 1024.0
+            formatted = f"{gb:.1f} GB"
+
+
+        BOLD = "\033[1m"
+        BLUE = "\033[94m"
+        RESET = "\033[0m"
+        
+        print(f"{BLUE}Peak Memory({self.name}): {BOLD}{formatted}{RESET}")
+
+    def log_memory_usage(self):
+        if self.device.type == "cuda":
+            self._log_memory_usage(torch.cuda.max_memory_allocated())
+        elif self.device.type == "mps":
+            self._log_memory_usage(torch.mps.driver_allocated_memory())
+
+    def clean_up(self):
+        clean_device_cache(self.device)
+
+    def log_info(self, message):
+        self.config.log.info(message)
+
+    def log_warning(self, message):
+        self.config.log.warning(message)
+
+    def log_error(self, message):
+        self.config.log.error(message)
+
+    def run(self, context: PipelineContext) -> PipelineContext:
+        return context
+
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        return False
+
+    def set_total_tasks(self, count: int):
+        self.total_tasks = count
+
+    def create_progress(self, count: int, label: Optional[str] = None):
+        if label is None:
+            label = self.name
+
+        return self.progress.add_task("  " + label, total=count)
+
+    def advance_progress(self, sub_task):
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
+        sub_total = task.total if task.total is not None else task.completed + 1
+        total_tasks = self.total_tasks if self.total_tasks is not None else 1
+        # Snap to the next integer step — only advance what remains so progress
+        # callbacks that already partially filled this step don't cause over-counting.
+        next_step = min(int(task.completed) + 1, int(sub_total))
+        delta = next_step - task.completed
+        if delta > 1e-9:
+            self.progress.update(sub_task, completed=float(next_step))
+            self.progress.advance(self.main_task, delta / (sub_total * total_tasks))
+
+    def update_progress(self, sub_task, fraction: float):
+        """Set a sub-task to an absolute fraction [0, 1] of completion and advance the main task by the delta."""
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
+        total = task.total if task.total is not None else 1
+        new_completed = min(fraction * total, total)
+        delta = new_completed - task.completed
+        if delta > 0:
+            self.progress.update(sub_task, completed=new_completed)
+            total_tasks = self.total_tasks if self.total_tasks is not None else 1
+            self.progress.advance(self.main_task, delta / (total * total_tasks))
+
+    def make_progress_callback(self, sub_task):
+        """Return a (fraction, label) → None callable for passing to remote calls.
+
+        Maps the incoming fraction [0, 1] to the sub-task's remaining range from
+        its current completed position up to (but not quite reaching) the next
+        integer step, so the subsequent advance_progress call can snap the last bit
+        without double-counting the main task.
+        """
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        total = task.total if task is not None else 1
+        start_frac = (task.completed / total) if task is not None else 0.0
+        remaining_span = 1.0 - start_frac - 1e-6  # leave a sliver for advance_progress
+
+        def callback(fraction: float, label: str = ""):
+            mapped = start_frac + max(0.0, min(1.0, fraction)) * remaining_span
+            self.update_progress(sub_task, mapped)
+        return callback
+
+    def finish_progress(self, task):
+        # Snap main task forward by whatever fraction this stage didn't account for
+        t = next((t for t in self.progress.tasks if t.id == task), None)
+        if t is None:
+            return
+        sub_total = t.total if t.total is not None else 1
+        total_tasks = self.total_tasks if self.total_tasks is not None else 1
+        remaining = (sub_total - t.completed) / (sub_total * total_tasks)
+        if remaining > 0:
+            self.progress.advance(self.main_task, remaining)
+        self.progress.remove_task(task)
+
+    def _set_progress(self, progress: Progress, main_task):
+        self.progress = progress
+        self.main_task = main_task
+
+    
+    

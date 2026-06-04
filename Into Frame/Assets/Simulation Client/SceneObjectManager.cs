@@ -215,7 +215,7 @@ public class SceneObjectManager : MonoBehaviour
 
     private void SpawnMeshImmediate(SceneObject data)
     {
-        var container = new GameObject($"[mesh] {data.id[..6]}");
+        var container = new GameObject($"[mesh] {data.id[..6]} ({data.name})");
         container.transform.position   = ToVec3(data.position);
         container.transform.rotation   = ToQuat(data.rotation);
         container.transform.localScale = ToVec3(data.scale);

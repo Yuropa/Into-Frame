@@ -1,0 +1,51 @@
+from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
+from pipeline.supersampling.image_supersampling import SuperSample
+from pipeline.pipeline_context import PipelineContext
+from util.image_utils import Image
+import numpy as np
+import PIL
+
+class SupersamplingStage(PipelineStage):
+    """
+    Upsamples each object crop produced by SegmentationStage using a
+    super-resolution model, replacing the crops in context with higher-res versions.
+
+    Reads/writes dynamic context keys per object (index i):
+      crop_{i}  → Image  (read as input, overwritten with upsampled result)
+
+    Also reads: count (object) → number of crops to process
+    """
+
+    def __init__(self, config: PipelineStageConfiguration) -> None:
+        super().__init__(config)
+        self._samp = None
+
+    def has_expected_output(self, context: PipelineContext) -> bool:
+        count = context.input_object("count")
+        if count is None:
+            return False
+        return all(context.input_image(f"crop_{i}") is not None for i in range(count))
+
+    def run(self, context: PipelineContext) -> PipelineContext:
+        count = context.input_object("count")
+
+        segmenting_task = self.create_progress(count + 1, "Supersampling...")
+        if self._samp is None:
+            self._samp = SuperSample(self.device)
+        self.advance_progress(segmenting_task)
+
+        for i in range(count):
+            input_image = context.input_image(f"crop_{i}")
+            result = self._samp.supersample(input_image)
+
+            context.add_image(f"crop_{i}", result)
+            self.advance_progress(segmenting_task)
+        self.finish_progress(segmenting_task)
+        return context
+
+    def model_names(self) -> list[str]:
+        return SuperSample.model_names()
+
+    def clean_up(self):
+        super().clean_up()
+        self._samp = None

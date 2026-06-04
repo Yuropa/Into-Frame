@@ -21,6 +21,9 @@ public class SceneParamManager : MonoBehaviour
     [Header("Skybox")]
     public GameObject skybox;
 
+    [Header("Lighting")]
+    public EnvironmentLighting environmentLighting;
+
     public void ApplyParams(SceneParams p)
     {
         if (p == null) return;
@@ -32,6 +35,13 @@ public class SceneParamManager : MonoBehaviour
             _targetColor = c;
         }
 
+
+        Camera cam = camera != null ? camera.GetComponent<Camera>() : Camera.main;
+        if (cam != null)
+        {
+            if (p.nearClipPlane > 0f) cam.nearClipPlane = p.nearClipPlane;
+            if (p.farClipPlane  > 0f) cam.farClipPlane  = p.farClipPlane;
+        }
 
         if (p.extrinsics != null)
         {
@@ -53,8 +63,11 @@ public class SceneParamManager : MonoBehaviour
 
         if (p.skybox != null)
         {
-            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox);
+            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox, p.skyboxRotation);
         }
+
+        if (environmentLighting != null)
+            environmentLighting.Apply(p.lighting);
     }
 
     private void Update()

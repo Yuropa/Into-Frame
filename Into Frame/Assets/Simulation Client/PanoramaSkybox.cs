@@ -7,8 +7,10 @@ public class PanoramaSkybox : MonoBehaviour
     [Header("Skybox Settings")]
     public string imageName;
     public float exposure = 1.0f;
+    public float rotation = 0.0f;
 
     private Material skyboxMaterial;
+    private Texture2D currentTexture;
 
     [Header("Assets")]
     public GameObject server;
@@ -17,6 +19,12 @@ public class PanoramaSkybox : MonoBehaviour
     {
         if (!string.IsNullOrEmpty(imageName))
             LoadFromName(imageName);
+    }
+
+    public void LoadFromName(string name, float rotationDegrees = 0f)
+    {
+        rotation = rotationDegrees;
+        LoadFromName(name);
     }
 
     public void LoadFromName(string name)
@@ -66,12 +74,17 @@ public class PanoramaSkybox : MonoBehaviour
         // Panorama textures need to wrap horizontally
         texture.wrapModeU = TextureWrapMode.Repeat;
         texture.wrapModeV = TextureWrapMode.Clamp;
+        texture.filterMode = FilterMode.Trilinear;
+        texture.anisoLevel = 4;
         texture.Apply();
 
         // Create a Panoramic skybox material
         skyboxMaterial = new Material(Shader.Find("Skybox/Panoramic"));
+        skyboxMaterial.SetFloat("_Mapping", 0);
+        currentTexture = texture;
         skyboxMaterial.SetTexture("_MainTex", texture);
         skyboxMaterial.SetFloat("_Exposure", exposure);
+        skyboxMaterial.SetFloat("_Rotation", rotation);
 
         // Apply to the scene
         RenderSettings.skybox = skyboxMaterial;
@@ -84,7 +97,7 @@ public class PanoramaSkybox : MonoBehaviour
 
     void OnDestroy()
     {
-        if (skyboxMaterial != null)
-            Destroy(skyboxMaterial);
+        if (skyboxMaterial != null) Destroy(skyboxMaterial);
+        if (currentTexture != null) Destroy(currentTexture);
     }
 }

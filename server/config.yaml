@@ -1,0 +1,85 @@
+# Pipeline stage configuration.
+#
+# Each entry controls one stage in the pipeline:
+#
+#   name     – display name used in logs and progress output
+#   stage    – class name from the stage registry (see pipeline.py STAGE_REGISTRY)
+#   enabled  – set to false to skip a stage without removing it
+#   keys     – optional map of semantic keys to context keys, overriding defaults
+#              (key names match SemanticKey enum values: input, output, depth, etc.)
+#   <rest>   – stage-specific parameters forwarded to the stage's Configuration class
+#
+# Stages run in the order listed here.
+
+stages:
+  - name: Captioning
+    stage: CaptioningStage
+    enabled: true
+
+  - name: Depth Generation
+    stage: DepthStage
+    enabled: true
+
+  - name: Panorama
+    stage: PanoramaStage
+    enabled: true
+
+  - name: Panorama Inpainting
+    stage: PanoramaInpaintingStage
+    enabled: true
+
+  - name: Panorama Lighting
+    stage: PanoramaLightingStage
+    enabled: true
+
+  - name: Panorama Depth
+    stage: PanoramaDepthStage
+    enabled: true
+
+  - name: Height Map
+    stage: HeightMapStage
+    enabled: true
+    # Panorama depth is equirectangular (radial distances); use spherical unprojection.
+    keys:
+      depth: panorama_depth
+      intrinsics: intrinsics
+    grid_size_meters: 100.0      # side length of the output grid in metres
+    grid_resolution: 512         # grid cells per side
+    ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground
+    use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
+    smooth_sigma: 8.0            # distance-weighted smoothing: 0 at centre → this value (px) at corners
+
+  - name: Terrain Mesh
+    stage: TerrainMeshStage
+    enabled: true
+    inner_min_dist: 0.25    # metres between samples in the inner region (~20 m radius)
+    outer_min_dist: 1.5     # metres between samples across the full domain
+    n_boundary: 16          # anchor points per edge of the domain rectangle
+    z_far: null
+    noise_amplitude: 0.05   # metres of peak noise displacement
+
+  - name: Panorama Asset Generation
+    stage: PanoramaAssetGenerationStage
+    enabled: true
+    billboard_distance_m: 30.0
+    generator_type: SAM3D
+
+  - name: Scene Generation
+    stage: SceneGenerationStage
+    enabled: true
+
+  - name: Object Recognition
+    stage: RecognizeAnythingStage
+    enabled: false
+
+  - name: Foreground Inpainting
+    stage: ForegroundInpainting
+    enabled: false
+
+  - name: Object Segmentation
+    stage: SegmentationStage
+    enabled: false
+
+  - name: Mesh Generation
+    stage: ModelGenerationStage
+    enabled: false

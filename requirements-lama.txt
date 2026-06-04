@@ -1,0 +1,17 @@
+pyyaml
+tqdm
+numpy<2.0
+easydict
+scikit-image
+scikit-learn
+opencv-python
+joblib
+matplotlib
+pandas
+albumentations==0.5.2
+tabulate
+packaging
+webdataset
+hydra-core
+kornia
+pytorch-lightning
