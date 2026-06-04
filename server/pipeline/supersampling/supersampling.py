@@ -1,6 +1,7 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
-from pipeline.supersampling.image_supersampling import SuperSample
+from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
 
@@ -21,6 +22,7 @@ class SupersamplingStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._samp = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.has_stage_output(self.output_key())
@@ -29,7 +31,7 @@ class SupersamplingStage(PipelineStage):
         task = self.create_progress(2, "Supersampling...")
 
         if self._samp is None:
-            self._samp = SuperSample(self.device)
+            self._samp = ImageSupersampling(self.preferred_device)
         self.advance_progress(task)
 
         in_key = self.input_key()
@@ -37,11 +39,11 @@ class SupersamplingStage(PipelineStage):
 
         panorama = context.input_panorama(in_key)
         if panorama is not None:
-            upsampled = self._samp.supersample(Image(panorama.image))
+            upsampled = self._samp.supersample(Image(panorama.image), self.temp, on_progress=self.make_progress_callback(task))
             context.add_panorama(out_key, Panorama(upsampled.image))
         else:
             image = context.input_image(in_key)
-            upsampled = self._samp.supersample(image)
+            upsampled = self._samp.supersample(image, self.temp, on_progress=self.make_progress_callback(task))
             context.add_image(out_key, upsampled)
 
         if self.temp is not None:
@@ -54,7 +56,7 @@ class SupersamplingStage(PipelineStage):
         return context
 
     def model_names(self) -> list[str]:
-        return SuperSample.model_names()
+        return ImageSupersampling.model_names()
 
     def clean_up(self):
         super().clean_up()
