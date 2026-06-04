@@ -2,6 +2,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_depth.pano_depth import PanoramaDepth
 from util.depth_utils import Depth
+from util.device_utils import DeviceStrategy, preferred_device
 
 
 class PanoramaDepthStage(PipelineStage):
@@ -16,6 +17,7 @@ class PanoramaDepthStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._depth = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
         return self.keys({
@@ -29,7 +31,7 @@ class PanoramaDepthStage(PipelineStage):
         task = self.create_progress(2, "Panorama Depth...")
 
         if self._depth is None:
-            self._depth = PanoramaDepth(self.device)
+            self._depth = PanoramaDepth(self.preferred_device)
         self.advance_progress(task)
 
         input_panorama = context.input_panorama(input_key)

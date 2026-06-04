@@ -827,6 +827,9 @@ setup_depth_pano() {
     create_env "depthpano"
     clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
     run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
+    # DAP's requirements.txt pins torch==2.7.1 without a CUDA suffix, which resolves
+    # to the cu126 wheel and overwrites the cu130 base. Reinstall with the correct index.
+    run_in_env pip install torch torchvision torchaudio --extra-index-url "$TORCH_URL"
 
     download_checkpoint "https://huggingface.co/Insta360-Research/DAP-weights/resolve/main/model.pth" "depth_pano"
 
