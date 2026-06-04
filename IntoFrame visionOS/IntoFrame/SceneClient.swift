@@ -36,6 +36,8 @@ class SceneClient {
         return URL(string: "ws://localhost:8080")!
     }
 
+    var serverURLString: String { serverURL.absoluteString }
+
     init(serverURL: URL = SceneClient.configuredWebSocketURL(), reconnectDelay: TimeInterval = 3) {
         self.serverURL = serverURL
         self.reconnectDelay = reconnectDelay
