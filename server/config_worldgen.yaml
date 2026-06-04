@@ -6,20 +6,16 @@
 stages:
   - name: Depth Generation
     stage: DepthStage
-    enabled: true
 
   - name: Panorama
     stage: PanoramaStage
-    enabled: true
     generator_type: WORLDGEN
 
   - name: Panorama Supersampling
     stage: SupersamplingStage
-    enabled: true
     keys:
       input: panorama
       output: panorama
 
   - name: Panorama Cubemap
     stage: PanoramaToCubemapStage
-    enabled: true
