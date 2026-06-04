@@ -27,6 +27,6 @@ class ImagePanoramaWorldGen(RemoteClient):
         seed: int = 0,
         on_progress=None,
     ) -> PanoramaOutput:
-        data = {"image": input, "seed": seed, "fov": fov}
+        data = {"image": input, "seed": seed, "fov": fov, "caption": caption}
         values = self.send(action="pano", input=data, temp_path=temp_path, on_progress=on_progress)
         return PanoramaOutput(values=values)
