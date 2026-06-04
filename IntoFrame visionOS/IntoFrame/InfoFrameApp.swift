@@ -40,6 +40,12 @@ struct InfoFrameApp: App {
                 .environment(appModel)
         }
 
+        WindowGroup("Preview", id: "mac-preview") {
+            MacDebugView()
+                .environment(appModel)
+        }
+        .defaultSize(width: 960, height: 640)
+
         RemoteImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }

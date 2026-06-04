@@ -19,6 +19,7 @@ struct Vec3: Codable, Sendable {
 struct SceneObject: Codable, Identifiable, Sendable {
     var id: String
     var type: String
+    var name: String?
     var texture: String?
     var mesh: String?
     var position: Vec3?
@@ -31,13 +32,24 @@ struct ExtrinsicsParams: Codable, Sendable {
     var translation: [Float]
 }
 
+struct SceneLightingData: Codable, Sendable {
+    var ldr: String?
+    var log: String?
+    var width: Int?
+    var height: Int?
+}
+
 struct SceneParams: Codable, Sendable {
     var ambientColor: String?
     var gravity: Float?
     var timeScale: Float?
     var skybox: String?
+    var skyboxRotation: Float?
+    var nearClipPlane: Float?
+    var farClipPlane: Float?
     var objects: [SceneObject]?
     var extrinsics: ExtrinsicsParams?
+    var lighting: SceneLightingData?
 }
 
 struct SceneInitPayload: Codable, Sendable {

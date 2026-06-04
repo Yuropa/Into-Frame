@@ -51,8 +51,8 @@ class SceneManager {
 
         var assetNames: Set<String> = []
         for obj in objects {
-            if let mesh = obj.mesh { assetNames.insert(mesh) }
-            if let texture = obj.texture { assetNames.insert(texture) }
+            if let mesh = obj.mesh, !mesh.isEmpty { assetNames.insert(mesh) }
+            if let texture = obj.texture, !texture.isEmpty { assetNames.insert(texture) }
         }
         if let skybox = payload.scene.skybox {
             assetNames.insert(skybox)
@@ -116,12 +116,12 @@ class SceneManager {
 
         Task {
             let server = assetServer
-            if let mesh = obj.mesh, downloadedAssets[mesh] == nil {
+            if let mesh = obj.mesh, !mesh.isEmpty, downloadedAssets[mesh] == nil {
                 if let data = try? await server.fetchResource(mesh) {
                     downloadedAssets[mesh] = data
                 }
             }
-            if let texture = obj.texture, downloadedAssets[texture] == nil {
+            if let texture = obj.texture, !texture.isEmpty, downloadedAssets[texture] == nil {
                 if let data = try? await server.fetchResource(texture) {
                     downloadedAssets[texture] = data
                 }

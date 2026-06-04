@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
 
     @Environment(AppModel.self) private var appModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 20) {
@@ -43,6 +44,11 @@ struct ContentView: View {
             }
 
             ToggleImmersiveSpaceButton()
+
+            Button("Open Preview Window") {
+                openWindow(id: "mac-preview")
+            }
+            .buttonStyle(.bordered)
 
             if !appModel.sceneManager.sceneObjects.isEmpty {
                 Text("\(appModel.sceneManager.sceneObjects.count) objects in scene")
