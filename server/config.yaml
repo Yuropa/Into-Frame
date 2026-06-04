@@ -20,6 +20,13 @@ stages:
 
   - name: Panorama
     stage: PanoramaStage
+    generator_type: WORLDGEN
+
+  - name: Panorama Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
@@ -73,3 +80,6 @@ stages:
   - name: Mesh Generation
     stage: ModelGenerationStage
     enabled: false
+
+  - name: Panorama Cubemap
+    stage: PanoramaToCubemapStage

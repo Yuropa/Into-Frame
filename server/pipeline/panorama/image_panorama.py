@@ -16,7 +16,7 @@ class PanoramaGeneratorType(Enum):
 
     @classmethod
     def default(cls):
-        return cls.FLUX
+        return cls.WORLDGEN
 
 class ImagePanorama:
     def __init__(self, device: torch.device, type: PanoramaGeneratorType = PanoramaGeneratorType.default()) -> None:
