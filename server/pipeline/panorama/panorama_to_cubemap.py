@@ -45,7 +45,7 @@ class PanoramaToCubemapStage(PipelineStage):
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, cubemap_key = self._resolved_keys()
-        return context.input_cubemap(cubemap_key) is not None
+        return context.has_stage_output(cubemap_key)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         task = self.create_progress(1, "Rebuilding cubemap...")
@@ -56,6 +56,9 @@ class PanoramaToCubemapStage(PipelineStage):
         if panorama is not None:
             cubemap = panorama.to_cubemap(face_w=self.config.face_w)
             context.add_cubemap(cubemap_key, cubemap)
+
+            if self.output is not None:
+                cubemap.save(self.output / cubemap_key)
 
         self.finish_progress(task)
         return context

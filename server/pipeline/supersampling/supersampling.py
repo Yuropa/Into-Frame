@@ -23,11 +23,7 @@ class SupersamplingStage(PipelineStage):
         self._samp = None
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        out_key = self.output_key()
-        return (
-            context.input_panorama(out_key) is not None
-            or context.input_image(out_key) is not None
-        )
+        return context.has_stage_output(self.output_key())
 
     def run(self, context: PipelineContext) -> PipelineContext:
         task = self.create_progress(2, "Supersampling...")
@@ -50,6 +46,8 @@ class SupersamplingStage(PipelineStage):
 
         if self.temp is not None:
             upsampled.image.save(self.temp / f"{out_key}_supersampled.png")
+        if self.output is not None:
+            upsampled.image.save(self.output / f"{out_key}.png")
 
         self.advance_progress(task)
         self.finish_progress(task)
