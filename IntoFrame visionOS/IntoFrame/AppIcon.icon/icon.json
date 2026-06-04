@@ -15,13 +15,25 @@
       "layers" : [
         {
           "blend-mode" : "normal",
-          "fill" : "automatic",
+          "fill-specializations" : [
+            {
+              "value" : {
+                "solid" : "display-p3:0.12343,0.25435,0.24764,1.00000"
+              }
+            },
+            {
+              "appearance" : "dark",
+              "value" : {
+                "solid" : "display-p3:0.49438,0.84814,0.82456,1.00000"
+              }
+            }
+          ],
           "glass" : true,
           "image-name" : "Image.svg",
           "name" : "Image",
-          "opacity" : 0.75,
+          "opacity" : 1,
           "position" : {
-            "scale" : 30,
+            "scale" : 25.85,
             "translation-in-points" : [
               0,
               0
