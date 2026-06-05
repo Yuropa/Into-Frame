@@ -52,16 +52,6 @@
               0
             ]
           }
-        },
-        {
-          "hidden" : true,
-          "image-name" : "photo.artframe.svg",
-          "name" : "photo.artframe"
-        },
-        {
-          "hidden" : true,
-          "image-name" : "SVG Image.svg",
-          "name" : "SVG Image"
         }
       ],
       "shadow" : {
