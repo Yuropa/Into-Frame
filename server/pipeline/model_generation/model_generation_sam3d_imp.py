@@ -52,8 +52,8 @@ class ModelGenerator(ModelGeneratorBase):
             mask=None,
             seed=seed,
             with_mesh_postprocess=True,
-            with_texture_baking=False,
-            use_vertex_color=True,
+            with_texture_baking=True,
+            use_vertex_color=False,
         )
         return output["glb"]
 

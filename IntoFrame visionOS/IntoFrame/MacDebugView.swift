@@ -23,10 +23,53 @@ struct MacDebugView: View {
                         .foregroundStyle(.white)
                 }
 
+                if showPipelineProgress {
+                    let step = appModel.sceneManager.client.progressStep
+                    let pct  = appModel.sceneManager.client.progressPercent
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(step.isEmpty ? "Processing…" : step)
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.85))
+                                .lineLimit(1)
+                            Spacer()
+                            Text("\(Int(pct * 100))%")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(.white.opacity(0.15)).frame(height: 3)
+                                Capsule().fill(.white.opacity(0.7))
+                                    .frame(width: geo.size.width * CGFloat(pct), height: 3)
+                            }
+                        }
+                        .frame(height: 3)
+                    }
+                }
+
                 if appModel.sceneManager.isLoading {
-                    Text("Downloading \(appModel.sceneManager.completedAssets)/\(appModel.sceneManager.totalAssets)")
-                        .font(.caption2)
-                        .foregroundStyle(.white.opacity(0.7))
+                    let done  = appModel.sceneManager.completedAssets
+                    let total = appModel.sceneManager.totalAssets
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text("Downloading assets")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.85))
+                            Spacer()
+                            Text("\(done)/\(total)")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.white.opacity(0.6))
+                        }
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(.white.opacity(0.15)).frame(height: 3)
+                                Capsule().fill(.white.opacity(0.7))
+                                    .frame(width: geo.size.width * CGFloat(done) / CGFloat(max(total, 1)), height: 3)
+                            }
+                        }
+                        .frame(height: 3)
+                    }
                 }
 
                 if !appModel.sceneManager.sceneObjects.isEmpty {
@@ -47,6 +90,11 @@ struct MacDebugView: View {
             .padding(12)
         }
         .frame(minWidth: 640, minHeight: 480)
+    }
+
+    private var showPipelineProgress: Bool {
+        let p = appModel.sceneManager.client.progressPercent
+        return p > 0 && p < 1
     }
 
     private var statusColor: Color {
