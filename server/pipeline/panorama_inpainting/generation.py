@@ -1,8 +1,7 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
-from pipeline.captioning.image_captioning import ImageCaptioning
-from pipeline.panorama_object_classification.classification import _classify_caption
+from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -14,14 +13,14 @@ from scipy.ndimage import binary_dilation
 class PanoramaInpaintingStage(PipelineStage):
     """
     Segments foreground objects in the panorama, classifies each crop as
-    'object' or 'environment', then inpaints only the object regions.
+    'object' or 'environment' using CLIP, then inpaints only the object regions.
 
     Input key  (SemanticKey.PANORAMA) → ContextKey.PANORAMA  (Panorama)
     Output key (SemanticKey.OUTPUT)   → ContextKey.PANORAMA  (Panorama, objects removed)
 
     Dynamic context keys per detected object (index i):
       crop_{i}     → Image
-      metadata_{i} → {"box": [...], "score": float, "class": str, "caption": str}
+      metadata_{i} → {"box": [...], "score": float, "class": str, "type": str}
 
     Also writes ContextKey.OBJECT_COUNT so downstream stages can consume
     the same crop/metadata keys without re-running segmentation.
@@ -30,7 +29,7 @@ class PanoramaInpaintingStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._seg = None
-        self._captioner = None
+        self._classifier = None
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
@@ -58,21 +57,20 @@ class PanoramaInpaintingStage(PipelineStage):
         result = self._seg.segment(input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task))
 
         # Classify each crop and collect masks for objects only
-        if self._captioner is None:
-            self._captioner = ImageCaptioning(self.device)
+        if self._classifier is None:
+            self._classifier = ImageClipClassifier(self.preferred_device)
 
         object_masks = []
         classify_task = self.create_progress(result.length, "Classifying objects...")
         for idx, crop in enumerate(result.masked_images(input_image)):
-            caption = self._captioner.caption(crop.image)
-            cls = _classify_caption(caption)
+            obj_type, cls = self._classifier.classify(crop.image)
 
             context.add_image(f"crop_{idx}", crop.image)
             context.add_object(f"metadata_{idx}", {
-                "box":     [float(x) for x in crop.box],
-                "score":   float(crop.score),
-                "class":   cls,
-                "caption": caption,
+                "box":   [float(x) for x in crop.box],
+                "score": float(crop.score),
+                "class": cls,
+                "type":  obj_type,
             })
             if self.temp is not None:
                 crop.image.save(self.temp / f"crop_{idx}.png")
@@ -83,7 +81,7 @@ class PanoramaInpaintingStage(PipelineStage):
                     np.array(crop.mask).astype(np.float32) / 255.0
                 )
 
-            self.log_info(f"  crop_{idx}: '{caption}' → {cls}")
+            self.log_info(f"  crop_{idx}: {obj_type} → {cls}")
             self.advance_progress(classify_task)
 
         self.finish_progress(classify_task)
@@ -150,12 +148,12 @@ class PanoramaInpaintingStage(PipelineStage):
         return (
             ImageSeg.model_names()
             + InPainting.model_names(type=InPaintingType.LAMA)
-            + ImageCaptioning.model_names()
+            + ImageClipClassifier.model_names()
         )
 
     def clean_up(self):
         if self._seg is not None:
             self._seg.close()
             self._seg = None
-        self._captioner = None
+        self._classifier = None
         super().clean_up()

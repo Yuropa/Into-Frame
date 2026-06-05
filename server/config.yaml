@@ -31,9 +31,6 @@ stages:
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
 
-  - name: Object Typing
-    stage: ObjectTypingStage
-
   - name: Panorama Lighting
     stage: PanoramaLightingStage
 

@@ -1,7 +1,10 @@
 from util.image_utils import Image
-from pipeline.object_typing.categories import OBJECT_CATEGORIES
+from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 from transformers import CLIPProcessor, CLIPModel
 import torch
+
+_OBJECT_LABELS = frozenset(OBJECT_CATEGORIES.keys())
+_ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 
 
 class ImageClipClassifier:
@@ -16,7 +19,7 @@ class ImageClipClassifier:
         # Pre-compute text embeddings once — reused for every image
         all_prompts: list[str] = []
         self._category_slices: list[tuple[str, int, int]] = []
-        for label, prompts in OBJECT_CATEGORIES.items():
+        for label, prompts in _ALL_CATEGORIES.items():
             start = len(all_prompts)
             all_prompts.extend(prompts)
             self._category_slices.append((label, start, len(all_prompts)))
@@ -30,7 +33,9 @@ class ImageClipClassifier:
     def model_names(cls) -> list[str]:
         return [cls.MODEL_NAME]
 
-    def classify(self, image: Image) -> str:
+    def classify(self, image: Image) -> tuple[str, str]:
+        """Returns (type, class) where type is the winning category label and
+        class is 'object' or 'environment' depending on which dict it came from."""
         inputs = self.processor(images=image.rgb(), return_tensors="pt").to(self.device)
         with torch.no_grad():
             image_features = self.model.get_image_features(**inputs)
@@ -42,4 +47,5 @@ class ImageClipClassifier:
             self._category_slices,
             key=lambda t: sims[t[1]:t[2]].max().item()
         )[0]
-        return best_label
+        cls = "object" if best_label in _OBJECT_LABELS else "environment"
+        return best_label, cls
