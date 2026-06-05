@@ -36,6 +36,8 @@ stages:
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
+    keys:
+      input: panorama_terrain
 
   - name: Height Map
     stage: HeightMapStage
