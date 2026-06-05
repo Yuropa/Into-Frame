@@ -68,8 +68,10 @@ class PanoramaInpaintingStage(PipelineStage):
         if self._classifier is None:
             self._classifier = ImageClipClassifier(self.preferred_device)
 
-        dilation_factor = 20
-        struct = np.ones((dilation_factor * 2 + 1, dilation_factor * 2 + 1))
+        # Small dilation for LaMa's input mask only — gives it a clean fill boundary.
+        # Write-back uses the raw SAM mask directly to avoid over-expanding.
+        lama_dilation = 8
+        lama_struct = np.ones((lama_dilation * 2 + 1, lama_dilation * 2 + 1))
 
         # Iterative extract-and-inpaint: segment → extract crops → inpaint → repeat
         # until segmentation finds nothing. terrain_pil tracks the progressively
@@ -149,7 +151,7 @@ class PanoramaInpaintingStage(PipelineStage):
             union = np.zeros((h, w), dtype=np.float32)
             for mask_array, _ in pass_objects:
                 union = np.maximum(union, mask_array)
-            union_dilated = binary_dilation(union > 0.5, structure=struct).astype(np.float32)
+            union_dilated = binary_dilation(union > 0.5, structure=lama_struct).astype(np.float32)
 
             full_mask_pil = PILImage.fromarray((union_dilated * 255).astype(np.uint8), mode="L")
             masked_pil = PILImage.fromarray((terrain_arr * (1.0 - union_dilated[..., np.newaxis])).astype(np.uint8))
@@ -169,21 +171,21 @@ class PanoramaInpaintingStage(PipelineStage):
             result_arr = np.array(result_pil)
 
             # Composite result back per object — only within each object's bbox.
+            # Use the raw SAM mask (no extra dilation) so we don't expand beyond
+            # the actual object boundary; just blur it slightly for a smooth edge.
             for mask_array, box in pass_objects:
                 bx, by, bw, bh = box
-                pad = 32
-                left   = max(0, int(bx - pad))
-                top    = max(0, int(by - pad))
-                right  = min(w, int(bx + bw + pad))
-                bottom = min(h, int(by + bh + pad))
+                left   = max(0, int(bx))
+                top    = max(0, int(by))
+                right  = min(w, int(bx + bw))
+                bottom = min(h, int(by + bh))
 
                 region_mask = mask_array[top:bottom, left:right]
-                region_dilated = binary_dilation(region_mask > 0.5, structure=struct).astype(np.float32)
-                if region_dilated.sum() == 0:
+                if region_mask.sum() == 0:
                     continue
 
-                region_mask_pil = PILImage.fromarray((region_dilated * 255).astype(np.uint8), mode="L")
-                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=8))).astype(np.float32)[..., np.newaxis] / 255.0
+                region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
+                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
 
                 orig_region   = terrain_arr[top:bottom, left:right]
                 result_region = result_arr[top:bottom, left:right]
@@ -214,9 +216,8 @@ class PanoramaInpaintingStage(PipelineStage):
             obj_union = np.zeros((h, w), dtype=np.float32)
             for m in all_object_masks:
                 obj_union = np.maximum(obj_union, m)
-            obj_dilated = binary_dilation(obj_union > 0.5, structure=struct).astype(np.float32)
-            obj_mask_pil = PILImage.fromarray((obj_dilated * 255).astype(np.uint8), mode="L")
-            obj_feathered = np.array(obj_mask_pil.filter(ImageFilter.GaussianBlur(radius=8))).astype(np.float32)[..., np.newaxis] / 255.0
+            obj_mask_pil = PILImage.fromarray((obj_union * 255).astype(np.uint8), mode="L")
+            obj_feathered = np.array(obj_mask_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
             terrain_final_arr = np.array(terrain_pil)
             visual_composited = (original_array * (1.0 - obj_feathered) + terrain_final_arr * obj_feathered).astype(np.uint8)
             context.add_panorama(output_key, Panorama(PILImage.fromarray(visual_composited)))
