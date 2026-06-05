@@ -26,7 +26,8 @@ class ImageClipClassifier:
 
         text_inputs = self.processor(text=all_prompts, return_tensors="pt", padding=True).to(device)
         with torch.no_grad():
-            text_features = self.model.get_text_features(**text_inputs)
+            text_out = self.model.text_model(**text_inputs)
+            text_features = self.model.text_projection(text_out.pooler_output)
             self._text_features = text_features / text_features.norm(dim=-1, keepdim=True)
 
     @classmethod
@@ -38,7 +39,8 @@ class ImageClipClassifier:
         class is 'object' or 'environment' depending on which dict it came from."""
         inputs = self.processor(images=image.rgb(), return_tensors="pt").to(self.device)
         with torch.no_grad():
-            image_features = self.model.get_image_features(**inputs)
+            vision_out = self.model.vision_model(**inputs)
+            image_features = self.model.visual_projection(vision_out.pooler_output)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         # Per-category score = max cosine similarity across that category's prompts
