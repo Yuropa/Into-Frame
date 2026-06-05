@@ -13,6 +13,7 @@ class SceneManager {
     var totalAssets = 0
     var completedAssets = 0
     var isLoading = false
+    private var pendingDownloads = 0
 
     var onSceneReady: (([SceneObject], [String: Data], SceneParams?) -> Void)?
 
@@ -47,6 +48,7 @@ class SceneManager {
         isLoading = false
         totalAssets = 0
         completedAssets = 0
+        pendingDownloads = 0
         if let url = URL(string: websocketURL) {
             client.reconnect(to: url)
         }
@@ -75,6 +77,7 @@ class SceneManager {
 
         totalAssets = assetNames.count
         completedAssets = 0
+        pendingDownloads = 0
         isLoading = assetNames.count > 0
 
         for obj in objects {
@@ -129,17 +132,33 @@ class SceneManager {
 
         sceneObjects[obj.id] = obj
 
+        let needsMesh = obj.mesh.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let needsTexture = obj.texture.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let count = (needsMesh ? 1 : 0) + (needsTexture ? 1 : 0)
+
+        if count > 0 {
+            totalAssets += count
+            pendingDownloads += count
+            isLoading = true
+        }
+
         Task {
             let server = assetServer
-            if let mesh = obj.mesh, !mesh.isEmpty, downloadedAssets[mesh] == nil {
+            if needsMesh, let mesh = obj.mesh {
                 if let data = try? await server.fetchResource(mesh) {
                     downloadedAssets[mesh] = data
                 }
+                completedAssets += 1
+                pendingDownloads -= 1
+                if pendingDownloads == 0 { isLoading = false }
             }
-            if let texture = obj.texture, !texture.isEmpty, downloadedAssets[texture] == nil {
+            if needsTexture, let texture = obj.texture {
                 if let data = try? await server.fetchResource(texture) {
                     downloadedAssets[texture] = data
                 }
+                completedAssets += 1
+                pendingDownloads -= 1
+                if pendingDownloads == 0 { isLoading = false }
             }
             onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
         }
