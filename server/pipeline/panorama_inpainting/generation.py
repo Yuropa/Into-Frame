@@ -17,8 +17,10 @@ class PanoramaInpaintingStage(PipelineStage):
     found (up to max_passes=10). This ensures objects occluded behind others are
     also captured in later passes.
 
-    Each pass runs one LaMa inpaint call over the union of all masks found in that
-    pass. Two panoramas are derived from the accumulated result:
+    Each pass runs one LaMa call with the full panorama as input (for colour/texture
+    context), then composites the result back per object using only each object's
+    bounding-box region — so the rest of the image is never overwritten.
+    Two panoramas are derived from the accumulated result:
 
       ContextKey.PANORAMA         — foreground objects removed only; environment
                                     features kept at original pixels (for lighting /
@@ -89,25 +91,28 @@ class PanoramaInpaintingStage(PipelineStage):
 
             self.log_info(f"Pass {pass_num + 1}: {result.length} object(s) found")
 
-            # Classify and save crops; accumulate this pass's masks
-            pass_masks = []
+            # Classify and save crops; track (mask, box) pairs for inpainting
+            pass_objects = []  # (mask_array, box) for every crop this pass
             classify_task = self.create_progress(result.length, f"Classifying (pass {pass_num + 1})...")
             for i, crop in enumerate(result.masked_images(Image(terrain_pil))):
                 obj_type, cls = self._classifier.classify(crop.image)
                 idx = global_idx + i
+                box = [float(x) for x in crop.box]
 
                 context.add_image(f"crop_{idx}", crop.image)
                 context.add_object(f"metadata_{idx}", {
-                    "box":   [float(x) for x in crop.box],
+                    "box":   box,
                     "score": float(crop.score),
                     "class": cls,
                     "type":  obj_type,
                 })
                 if self.temp is not None:
                     crop.image.save(self.temp / f"crop_{idx}.png")
+                    caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\npass: {pass_num + 1}\n"
+                    (self.temp / f"crop_{idx}.txt").write_text(caption)
 
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
-                pass_masks.append(mask_array)
+                pass_objects.append((mask_array, box))
                 if cls == "object":
                     all_object_masks.append(mask_array)
 
@@ -116,34 +121,59 @@ class PanoramaInpaintingStage(PipelineStage):
             self.finish_progress(classify_task)
             global_idx += result.length
 
-            # Inpaint all masks found in this pass out of terrain_pil
+            # One LaMa call with the full panorama so it has complete context for
+            # colour/texture matching. Write-back is limited per object to its
+            # bounding-box region so the rest of the image is never touched.
             inpaint_task = self.create_progress(2, f"Inpainting (pass {pass_num + 1})...")
+            terrain_arr = np.array(terrain_pil)
 
             union = np.zeros((h, w), dtype=np.float32)
-            for m in pass_masks:
-                union = np.maximum(union, m)
-            dilated = binary_dilation(union > 0.5, structure=struct).astype(np.float32)
+            for mask_array, _ in pass_objects:
+                union = np.maximum(union, mask_array)
+            union_dilated = binary_dilation(union > 0.5, structure=struct).astype(np.float32)
 
-            mask_pil = PILImage.fromarray((dilated * 255).astype(np.uint8), mode="L")
-            terrain_arr = np.array(terrain_pil)
-            masked_pil = PILImage.fromarray((terrain_arr * (1.0 - dilated[..., np.newaxis])).astype(np.uint8))
-            self.advance_progress(inpaint_task)
+            full_mask_pil = PILImage.fromarray((union_dilated * 255).astype(np.uint8), mode="L")
+            masked_pil = PILImage.fromarray((terrain_arr * (1.0 - union_dilated[..., np.newaxis])).astype(np.uint8))
 
             inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
             result_pil = inpainter.inpaint(
                 masked_pil,
-                mask_pil,
+                full_mask_pil,
                 temp_path=self.temp,
                 prompt="no objects, clean background, seamless, empty landscape",
                 guidance_scale=2.0,
                 strength=1.0,
             )
             inpainter.close()
+            self.advance_progress(inpaint_task)
 
-            result_arr = np.array(result_pil.crop((0, 0, w, h)))
-            feathered = np.array(mask_pil.filter(ImageFilter.GaussianBlur(radius=8))).astype(np.float32)[..., np.newaxis] / 255.0
-            composited = (terrain_arr * (1.0 - feathered) + result_arr * feathered).astype(np.uint8)
-            terrain_pil = PILImage.fromarray(composited)
+            result_arr = np.array(result_pil)
+
+            # Composite result back per object — only within each object's bbox.
+            for mask_array, box in pass_objects:
+                bx, by, bw, bh = box
+                pad = 32
+                left   = max(0, int(bx - pad))
+                top    = max(0, int(by - pad))
+                right  = min(w, int(bx + bw + pad))
+                bottom = min(h, int(by + bh + pad))
+
+                region_mask = mask_array[top:bottom, left:right]
+                region_dilated = binary_dilation(region_mask > 0.5, structure=struct).astype(np.float32)
+                if region_dilated.sum() == 0:
+                    continue
+
+                region_mask_pil = PILImage.fromarray((region_dilated * 255).astype(np.uint8), mode="L")
+                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=8))).astype(np.float32)[..., np.newaxis] / 255.0
+
+                orig_region   = terrain_arr[top:bottom, left:right]
+                result_region = result_arr[top:bottom, left:right]
+                terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + result_region * feathered).astype(np.uint8)
+
+            terrain_pil = PILImage.fromarray(terrain_arr)
+
+            if self.temp is not None:
+                terrain_pil.save(self.temp / f"panorama_pass_{pass_num + 1}.png")
 
             self.advance_progress(inpaint_task)
             self.finish_progress(inpaint_task)
