@@ -586,6 +586,16 @@ setup_sam3d() {
         "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7" \
         "git+https://github.com/NVlabs/nvdiffrast.git" \
         seaborn==0.13.2
+    # SAM3D's gaussian_render.py uses kernel_size + subpixel_offset, which are Mip-Splatting
+    # extensions not in the upstream graphdeco-inria fork. Clone mip-splatting shallowly and
+    # install from its diff-gaussian-rasterization submodule.
+    # Also patch rasterizer_impl.h: CUDA 13 + C++20 no longer implicitly includes <cstdint>.
+    local dgr_build_dir
+    dgr_build_dir="$(mktemp -d)"
+    git clone --depth 1 --recursive https://github.com/autonomousvision/mip-splatting.git "$dgr_build_dir"
+    sed -i '1s/^/#include <cstdint>\n/' "$dgr_build_dir/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.h"
+    run_in_env pip install --no-build-isolation "$dgr_build_dir/submodules/diff-gaussian-rasterization"
+    rm -rf "$dgr_build_dir"
     run_in_env pip install -e "$LIB_DIR/SAM3D" --no-deps
     # SAM3D's requirements include nvidia-nccl-cu12 which overwrites the cu13 NCCL that
     # PyTorch was compiled against. ncclCommResume was added after 2.21.5 (cu12), so we
