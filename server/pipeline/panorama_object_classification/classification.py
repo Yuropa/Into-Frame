@@ -3,31 +3,8 @@ from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 
-# Derived from shared category keys plus synonyms that appear in captions but aren't category names.
-_ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys()) | frozenset({
-    "cloud", "ceiling", "roof", "rooftop", "walls", "floor", "terrain", "earth",
-    "pavement", "sidewalk", "path", "asphalt", "cobblestone", "street",
-    "lawn", "field", "meadow",
-    "foliage", "trees", "bush", "shrub", "leaves", "branch", "branches",
-    "vegetation", "plant", "plants", "hedge", "jungle",
-    "sea", "pond", "stream", "puddle",
-    "hill", "cliff", "boulder", "stone",
-    "buildings", "architecture", "house", "facade", "exterior", "structure",
-    "concrete", "landscape", "scenery", "horizon", "background",
-    "shadow", "reflection", "surface", "texture", "pattern",
-})
-
-_OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys()) | frozenset({
-    "people", "man", "woman", "child", "boy", "girl", "human", "crowd", "figure",
-    "vehicle", "bike", "scooter", "van", "airplane", "tram",
-    "dog", "cat", "bird", "horse", "sheep", "cow", "elephant", "bear", "deer",
-    "couch", "sofa", "desk", "furniture", "stool",
-    "signpost", "pole", "lamp", "lamppost", "fire", "hydrant",
-    "trash", "bin", "can", "barrel", "box", "container", "dumpster",
-    "backpack", "bag", "suitcase",
-    "statue", "sculpture",
-    "ball", "toy", "trolley",
-})
+_ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys())
+_OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
 def _classify_caption(caption: str) -> str:
