@@ -78,16 +78,34 @@ class PanoramaInpaintingStage(PipelineStage):
         all_object_masks = []  # accumulated across passes for the visual panorama
         global_idx = 0
         max_passes = 10
+        initial_passes = 3
+        tasks_per_pass = 3  # seg + classify + inpaint
+        passes_allocated = initial_passes
+        fraction_advanced = 0.0
+        self.set_total_tasks(passes_allocated * tasks_per_pass)
 
         for pass_num in range(max_passes):
             seg_task = self.create_progress(2, f"Segmenting (pass {pass_num + 1})...")
             result = self._seg.segment(Image(terrain_pil), self.temp, on_progress=self.make_progress_callback(seg_task))
             self.advance_progress(seg_task)
             self.finish_progress(seg_task)
+            fraction_advanced += 1.0 / self.total_tasks
 
             if result.length == 0:
                 self.log_info(f"Pass {pass_num + 1}: nothing found, stopping")
                 break
+
+            # If this is the last allocated pass and there are still objects, extend
+            # the budget before classify/inpaint consume the remaining fraction.
+            # new_total_tasks = remaining_tasks / (1 - fraction_advanced) keeps the
+            # math correct so future tasks fill exactly the remaining bar fraction.
+            if pass_num == passes_allocated - 1 and pass_num + 1 < max_passes:
+                new_allocated = min(passes_allocated + initial_passes, max_passes)
+                remaining_tasks = new_allocated * tasks_per_pass - (pass_num * tasks_per_pass + 1)
+                remaining_fraction = 1.0 - fraction_advanced
+                if remaining_tasks > 0 and remaining_fraction > 1e-9:
+                    self.set_total_tasks(remaining_tasks / remaining_fraction)
+                passes_allocated = new_allocated
 
             self.log_info(f"Pass {pass_num + 1}: {result.length} object(s) found")
 
@@ -119,6 +137,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 self.log_info(f"  crop_{idx}: {obj_type} → {cls}")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
+            fraction_advanced += 1.0 / self.total_tasks
             global_idx += result.length
 
             # One LaMa call with the full panorama so it has complete context for
@@ -177,6 +196,12 @@ class PanoramaInpaintingStage(PipelineStage):
 
             self.advance_progress(inpaint_task)
             self.finish_progress(inpaint_task)
+            fraction_advanced += 1.0 / self.total_tasks
+
+        # Snap main task to 1.0 for this stage.
+        remaining = 1.0 - fraction_advanced
+        if remaining > 1e-9:
+            self.progress.advance(self.main_task, remaining)
 
         context.add_object(ContextKey.OBJECT_COUNT, global_idx)
 
