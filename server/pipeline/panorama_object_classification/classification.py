@@ -1,34 +1,32 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 
-_ENVIRONMENT_KEYWORDS = frozenset({
-    "sky", "cloud", "clouds", "ceiling", "roof", "rooftop",
-    "wall", "walls", "floor", "ground", "terrain", "earth",
-    "road", "pavement", "sidewalk", "path", "asphalt", "cobblestone", "street",
-    "grass", "lawn", "field", "meadow",
-    "water", "ocean", "sea", "lake", "river", "pond", "stream", "puddle",
-    "mountain", "hill", "cliff",
-    "dirt", "sand", "snow", "ice", "mud",
-    "building", "buildings", "architecture", "house", "facade", "exterior", "structure",
+# Derived from shared category keys plus synonyms that appear in captions but aren't category names.
+_ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys()) | frozenset({
+    "cloud", "ceiling", "roof", "rooftop", "walls", "floor", "terrain", "earth",
+    "pavement", "sidewalk", "path", "asphalt", "cobblestone", "street",
+    "lawn", "field", "meadow",
+    "foliage", "trees", "bush", "shrub", "leaves", "branch", "branches",
+    "vegetation", "plant", "plants", "hedge", "jungle",
+    "sea", "pond", "stream", "puddle",
+    "hill", "cliff", "boulder", "stone",
+    "buildings", "architecture", "house", "facade", "exterior", "structure",
     "concrete", "landscape", "scenery", "horizon", "background",
     "shadow", "reflection", "surface", "texture", "pattern",
 })
 
-_OBJECT_KEYWORDS = frozenset({
-    "person", "people", "man", "woman", "child", "boy", "girl", "human", "crowd", "figure",
-    "car", "vehicle", "truck", "bus", "bicycle", "motorcycle", "bike", "scooter", "van",
-    "boat", "ship", "airplane", "train", "tram",
-    "animal", "dog", "cat", "bird", "horse", "sheep", "cow", "elephant", "bear", "deer",
-    "chair", "table", "bench", "couch", "sofa", "desk", "furniture", "stool",
-    "sign", "signpost", "pole", "lamp", "lamppost", "streetlight", "fire", "hydrant",
+_OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys()) | frozenset({
+    "people", "man", "woman", "child", "boy", "girl", "human", "crowd", "figure",
+    "vehicle", "bike", "scooter", "van", "airplane", "tram",
+    "dog", "cat", "bird", "horse", "sheep", "cow", "elephant", "bear", "deer",
+    "couch", "sofa", "desk", "furniture", "stool",
+    "signpost", "pole", "lamp", "lamppost", "fire", "hydrant",
     "trash", "bin", "can", "barrel", "box", "container", "dumpster",
-    "umbrella", "backpack", "bag", "suitcase", "luggage",
-    "statue", "sculpture", "monument",
-    "ball", "toy", "cart", "trolley",
-    "tree", "trees", "bush", "shrub", "hedge",
-    "plant", "plants", "foliage", "vegetation", "leaves", "branch", "branches", "forest", "jungle",
-    "rock", "rocks", "boulder", "stone",
+    "backpack", "bag", "suitcase",
+    "statue", "sculpture",
+    "ball", "toy", "trolley",
 })
 
 
