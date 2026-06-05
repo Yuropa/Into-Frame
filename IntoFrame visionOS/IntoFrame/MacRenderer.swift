@@ -357,7 +357,8 @@ final class MacRenderer: NSObject, MTKViewDelegate {
 
     private func loadMeshFromData(_ data: Data, name: String,
                                    vertexDescriptor: MDLVertexDescriptor) -> (mesh: MTKMesh, texture: MTLTexture?)? {
-        let ext = (name as NSString).pathExtension.isEmpty ? "usdz" : (name as NSString).pathExtension
+        let nameExt = (name as NSString).pathExtension
+        let ext = nameExt.isEmpty ? Renderer.detectMeshExtension(from: data) : nameExt
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + "." + ext)
         do {

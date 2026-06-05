@@ -646,7 +646,8 @@ actor Renderer {
     }
 
     private func loadMeshFromData(_ data: Data, name: String, vertexDescriptor: MDLVertexDescriptor) -> (mesh: MTKMesh, texture: MTLTexture?)? {
-        let ext = (name as NSString).pathExtension.isEmpty ? "usdz" : (name as NSString).pathExtension
+        let nameExt = (name as NSString).pathExtension
+        let ext = nameExt.isEmpty ? Self.detectMeshExtension(from: data) : nameExt
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
         do {
             try data.write(to: tempURL)
@@ -665,6 +666,14 @@ actor Renderer {
         }
     }
 
+    static func detectMeshExtension(from data: Data) -> String {
+        // GLB binary magic: "glTF" = 0x67 0x6C 0x54 0x46
+        if data.count >= 4 && data[0] == 0x67 && data[1] == 0x6C && data[2] == 0x54 && data[3] == 0x46 {
+            return "glb"
+        }
+        return "usdz"
+    }
+
     static func extractTexture(from mdlMesh: MDLMesh, device: MTLDevice) -> MTLTexture? {
         let loader = MTKTextureLoader(device: device)
         let options: [MTKTextureLoader.Option: Any] = [
@@ -675,9 +684,9 @@ actor Renderer {
         guard let submeshes = mdlMesh.submeshes else { return nil }
         for case let sub as MDLSubmesh in submeshes {
             guard let mat = sub.material else { continue }
-            for semantic in [MDLMaterialSemantic.baseColor, .diffuse] {
+            for semantic in [MDLMaterialSemantic.baseColor, .emission, .ambientOcclusion] {
                 guard let prop = mat.property(with: semantic),
-                      prop.type == .texture,
+                      prop.type == MDLMaterialPropertyType.texture,
                       let sampler = prop.textureSamplerValue,
                       let mdlTex = sampler.texture,
                       let tex = try? loader.newTexture(texture: mdlTex, options: options) else { continue }

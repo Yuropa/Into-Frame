@@ -155,7 +155,29 @@ class SceneManager {
         if let mesh = changes.mesh { existing.mesh = mesh }
 
         sceneObjects[update.id] = existing
-        onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+
+        let needsMesh = changes.mesh.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let needsTexture = changes.texture.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+
+        guard needsMesh || needsTexture else {
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+            return
+        }
+
+        Task {
+            let server = assetServer
+            if needsMesh, let mesh = changes.mesh {
+                if let data = try? await server.fetchResource(mesh) {
+                    downloadedAssets[mesh] = data
+                }
+            }
+            if needsTexture, let texture = changes.texture {
+                if let data = try? await server.fetchResource(texture) {
+                    downloadedAssets[texture] = data
+                }
+            }
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+        }
     }
 
     private func handleDestroy(_ id: String) {
