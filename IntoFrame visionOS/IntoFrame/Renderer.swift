@@ -549,18 +549,23 @@ actor Renderer {
 
         for obj in data.objects {
             let objMesh: MTKMesh
+            var meshTexture: MTLTexture? = nil
+
             if obj.type == "billboard" {
                 guard let m = createBillboardMesh(vertexDescriptor: mdlVertexDescriptor) else { continue }
                 objMesh = m
             } else if let meshName = obj.mesh, !meshName.isEmpty, let meshData = data.assets[meshName] {
-                guard let m = loadMeshFromData(meshData, name: meshName, vertexDescriptor: mdlVertexDescriptor) else { continue }
-                objMesh = m
+                guard let result = loadMeshFromData(meshData, name: meshName, vertexDescriptor: mdlVertexDescriptor) else { continue }
+                objMesh = result.mesh
+                meshTexture = result.texture
             } else {
                 continue
             }
 
             let objTexture: MTLTexture
-            if let texName = obj.texture, !texName.isEmpty, let texData = data.assets[texName] {
+            if let tex = meshTexture {
+                objTexture = tex
+            } else if let texName = obj.texture, !texName.isEmpty, let texData = data.assets[texName] {
                 objTexture = (try? textureLoader.newTexture(data: texData, options: textureOptions)) ?? colorMap
             } else {
                 objTexture = colorMap
@@ -640,7 +645,7 @@ actor Renderer {
         return tex
     }
 
-    private func loadMeshFromData(_ data: Data, name: String, vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {
+    private func loadMeshFromData(_ data: Data, name: String, vertexDescriptor: MDLVertexDescriptor) -> (mesh: MTKMesh, texture: MTLTexture?)? {
         let ext = (name as NSString).pathExtension.isEmpty ? "usdz" : (name as NSString).pathExtension
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
         do {
@@ -649,12 +654,37 @@ actor Renderer {
 
             let allocator = MTKMeshBufferAllocator(device: device)
             let asset = MDLAsset(url: tempURL, vertexDescriptor: vertexDescriptor, bufferAllocator: allocator)
+            asset.loadTextures()
             guard let mdlMesh = asset.childObjects(of: MDLMesh.self).first as? MDLMesh else { return nil }
             mdlMesh.vertexDescriptor = vertexDescriptor
-            return try MTKMesh(mesh: mdlMesh, device: device)
+            let mtkMesh = try MTKMesh(mesh: mdlMesh, device: device)
+            let texture = Self.extractTexture(from: mdlMesh, device: device)
+            return (mesh: mtkMesh, texture: texture)
         } catch {
             return nil
         }
+    }
+
+    static func extractTexture(from mdlMesh: MDLMesh, device: MTLDevice) -> MTLTexture? {
+        let loader = MTKTextureLoader(device: device)
+        let options: [MTKTextureLoader.Option: Any] = [
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue),
+            .SRGB: NSNumber(value: true)
+        ]
+        guard let submeshes = mdlMesh.submeshes else { return nil }
+        for case let sub as MDLSubmesh in submeshes {
+            guard let mat = sub.material else { continue }
+            for semantic in [MDLMaterialSemantic.baseColor, .diffuse] {
+                guard let prop = mat.property(with: semantic),
+                      prop.type == .texture,
+                      let sampler = prop.textureSamplerValue,
+                      let mdlTex = sampler.texture,
+                      let tex = try? loader.newTexture(texture: mdlTex, options: options) else { continue }
+                return tex
+            }
+        }
+        return nil
     }
 
     private func createBillboardMesh(vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {

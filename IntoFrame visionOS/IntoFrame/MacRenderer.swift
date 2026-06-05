@@ -286,6 +286,8 @@ final class MacRenderer: NSObject, MTKViewDelegate {
         var newRenderables: [SceneRenderable] = []
         for obj in data.objects {
             let objMesh: MTKMesh
+            var meshTexture: MTLTexture? = nil
+
             if obj.type == "billboard" {
                 guard let m = makeBillboardMesh(vertexDescriptor: mdlDesc) else {
                     print("[MacRenderer] billboard mesh creation failed for \(obj.id)")
@@ -293,12 +295,13 @@ final class MacRenderer: NSObject, MTKViewDelegate {
                 }
                 objMesh = m
             } else if let meshName = obj.mesh, !meshName.isEmpty, let meshData = data.assets[meshName] {
-                guard let m = loadMeshFromData(meshData, name: meshName,
-                                               vertexDescriptor: mdlDesc) else {
+                guard let result = loadMeshFromData(meshData, name: meshName,
+                                                    vertexDescriptor: mdlDesc) else {
                     print("[MacRenderer] mesh load failed for \(meshName) (type=\(obj.type))")
                     continue
                 }
-                objMesh = m
+                objMesh = result.mesh
+                meshTexture = result.texture
             } else {
                 let meshVal = obj.mesh ?? "nil"
                 let hasAsset = obj.mesh.flatMap { data.assets[$0] } != nil
@@ -307,7 +310,9 @@ final class MacRenderer: NSObject, MTKViewDelegate {
             }
 
             let objTexture: MTLTexture
-            if let texName = obj.texture, !texName.isEmpty, let texData = data.assets[texName] {
+            if let tex = meshTexture {
+                objTexture = tex
+            } else if let texName = obj.texture, !texName.isEmpty, let texData = data.assets[texName] {
                 objTexture = (try? textureLoader.newTexture(data: texData, options: texOptions)) ?? colorMap
             } else {
                 objTexture = colorMap
@@ -351,7 +356,7 @@ final class MacRenderer: NSObject, MTKViewDelegate {
     }
 
     private func loadMeshFromData(_ data: Data, name: String,
-                                   vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {
+                                   vertexDescriptor: MDLVertexDescriptor) -> (mesh: MTKMesh, texture: MTLTexture?)? {
         let ext = (name as NSString).pathExtension.isEmpty ? "usdz" : (name as NSString).pathExtension
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString + "." + ext)
@@ -360,9 +365,12 @@ final class MacRenderer: NSObject, MTKViewDelegate {
             defer { try? FileManager.default.removeItem(at: url) }
             let allocator = MTKMeshBufferAllocator(device: device)
             let asset = MDLAsset(url: url, vertexDescriptor: vertexDescriptor, bufferAllocator: allocator)
+            asset.loadTextures()
             guard let mdlMesh = asset.childObjects(of: MDLMesh.self).first as? MDLMesh else { return nil }
             mdlMesh.vertexDescriptor = vertexDescriptor
-            return try MTKMesh(mesh: mdlMesh, device: device)
+            let mtkMesh = try MTKMesh(mesh: mdlMesh, device: device)
+            let texture = Renderer.extractTexture(from: mdlMesh, device: device)
+            return (mesh: mtkMesh, texture: texture)
         } catch { return nil }
     }
 
