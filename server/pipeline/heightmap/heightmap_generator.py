@@ -1,10 +1,11 @@
 import numpy as np
+from collections import deque
 from scipy.interpolate import griddata
 from scipy.ndimage import gaussian_filter
+from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
 from scene.camera import CameraIntrinsics
-from typing import Optional
 
 
 class HeightMapGenerator:
@@ -17,6 +18,10 @@ class HeightMapGenerator:
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
         smooth_sigma: float = 0.0,
+        camera_height_meters: float = 1.0,
+        sky_mask: Optional[np.ndarray] = None,
+        flood_fill: bool = True,
+        flood_fill_max_step: float = 1.5,
     ) -> np.ndarray:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -26,32 +31,51 @@ class HeightMapGenerator:
           - values are Y in camera space (negative = below camera)
           - missing cells are filled by interpolation from neighbours
 
-        ground_y_max: Y threshold in camera space; points with Y <= this value are
-                      treated as ground (e.g. -0.5 means at least 0.5 m below camera).
-        grid_size_meters: side length of the square grid; both X and Z span ±half (centred at origin).
-        use_equirectangular: when True, treat depth as an equirectangular (360°) map
-                             where each pixel encodes a radial (Euclidean) distance.
-                             When False, treat depth as a rectilinear (pinhole) Z-depth
-                             map and use intrinsics to unproject.
+        camera_height_meters: assumed height of the camera above the ground plane
+                              (used to derive the Y floor filter and flood-fill seed).
+        ground_y_max: upper Y bound in camera space; points with Y <= this are ground
+                      candidates (e.g. -0.5 = at least 0.5 m below camera).
+        sky_mask: optional bool (H, W) array from the depth model where True = sky.
+                  Sky pixels are excluded before projection, preventing the horizon
+                  artefacts that come from sky pixels being assigned far depth values.
+        flood_fill: if True, BFS from the grid centre outward to keep only connected
+                    ground; stops at height discontinuities and empty cells (sky gaps).
+        flood_fill_max_step: maximum Y change (metres) between adjacent cells allowed
+                             during flood-fill; larger steps are treated as walls.
+        grid_size_meters: side length of the square grid; both X and Z span ±half.
+        use_equirectangular: treat depth as equirectangular (radial distances); otherwise
+                             use pinhole unprojection via intrinsics.
         """
-        d = depth.depth  # (H, W) float32, metric depth in metres
+        d = depth.depth.astype(np.float32)
+
+        # Mask sky pixels before projection. Sky pixels assigned far depth (e.g. 100 m)
+        # project near the horizon at Y ≈ -camera_height, polluting the height grid.
+        if sky_mask is not None and sky_mask.shape == d.shape:
+            d = d.copy()
+            d[sky_mask] = np.nan
+
         h, w = d.shape
 
         if use_equirectangular:
-            X, Y, Z = Panorama.equirectangular_unproject(depth)
+            X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
         else:
-            # Rectilinear (pinhole) unprojection — matches CameraIntrinsics.unproject
             cx = np.arange(w, dtype=np.float32)
             cy = np.arange(h, dtype=np.float32)
             cx, cy = np.meshgrid(cx, cy)
             X = (cx - intrinsics.px) * d / intrinsics.fx
-            Y = -((cy - intrinsics.py) * d / intrinsics.fy)  # flipped Y (Unity convention)
+            Y = -((cy - intrinsics.py) * d / intrinsics.fy)
             Z = d
 
         half = grid_size_meters / 2.0
 
+        # Floor filter: sky pixels assigned ~100 m depth project to Y << -camera_height.
+        # Allowing ±5 m of terrain variation around the expected ground plane catches
+        # hills and slopes while excluding any sky artefacts that slipped through.
+        ground_y_min = -(camera_height_meters + 5.0)
+
         ground_mask = (
             (Y <= ground_y_max)
+            & (Y >= ground_y_min)
             & (np.abs(Z) <= half)
             & (np.abs(X) <= half)
             & np.isfinite(d)
@@ -67,8 +91,8 @@ class HeightMapGenerator:
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
 
-        xi = np.digitize(Xg, x_edges) - 1  # column index
-        zi = np.digitize(Zg, z_edges) - 1  # row index
+        xi = np.digitize(Xg, x_edges) - 1
+        zi = np.digitize(Zg, z_edges) - 1
 
         in_bounds = (
             (xi >= 0) & (xi < grid_resolution)
@@ -85,10 +109,67 @@ class HeightMapGenerator:
         has_data = height_cnt > 0
         height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
 
+        # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
+        # the starting point with small height steps are kept; everything else is set to
+        # NaN and filled by nearest-neighbour extrapolation from the flood-fill boundary.
+        if flood_fill:
+            accepted = HeightMapGenerator._flood_fill_ground(
+                height_map, camera_height_meters, flood_fill_max_step
+            )
+            height_map[~accepted] = np.nan
+
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
         return result
+
+    @staticmethod
+    def _flood_fill_ground(
+        height_map: np.ndarray,
+        camera_height_meters: float,
+        max_step: float,
+    ) -> np.ndarray:
+        """
+        BFS from the grid centre outward; returns a bool mask of accepted cells.
+
+        A neighbour is accepted if it has data AND its height does not differ from
+        the current cell by more than max_step.  Empty cells (NaN) act as barriers
+        — sky-masked regions near the horizon naturally stop the fill.
+        """
+        grid_h, grid_w = height_map.shape
+        has_data = ~np.isnan(height_map)
+
+        start_r, start_c = grid_h // 2, grid_w // 2
+
+        # If the centre cell is empty, find the nearest filled cell to it.
+        if not has_data[start_r, start_c]:
+            ys, xs = np.where(has_data)
+            if len(ys) == 0:
+                return has_data
+            dist = np.hypot(ys - start_r, xs - start_c)
+            best = int(np.argmin(dist))
+            start_r, start_c = int(ys[best]), int(xs[best])
+
+        accepted = np.zeros((grid_h, grid_w), dtype=bool)
+        visited  = np.zeros((grid_h, grid_w), dtype=bool)
+        queue = deque()
+        queue.append((start_r, start_c))
+        visited[start_r, start_c] = True
+        accepted[start_r, start_c] = True
+
+        while queue:
+            r, c = queue.popleft()
+            cur_h = height_map[r, c]
+
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < grid_h and 0 <= nc < grid_w and not visited[nr, nc]:
+                    visited[nr, nc] = True
+                    if has_data[nr, nc] and abs(height_map[nr, nc] - cur_h) <= max_step:
+                        accepted[nr, nc] = True
+                        queue.append((nr, nc))
+
+        return accepted
 
     @staticmethod
     def _smooth_edge_preserving(
@@ -118,34 +199,26 @@ class HeightMapGenerator:
         """
         h, w = height_map.shape
 
-        # ── Distance weight ───────────────────────────────────────────────
         y = np.linspace(-1.0, 1.0, h, dtype=np.float32)[:, None]
         x = np.linspace(-1.0, 1.0, w, dtype=np.float32)[None, :]
         dist = np.clip(np.sqrt(y ** 2 + x ** 2) / np.sqrt(2.0), 0.0, 1.0)
 
-        # ── Flatness weight ───────────────────────────────────────────────
         gy, gx = np.gradient(height_map)
         grad_mag = np.sqrt(gx ** 2 + gy ** 2).astype(np.float32)
 
-        # Scale threshold by the 85th-percentile gradient so it adapts to the scene.
-        # tanh gives a smooth 0→1 ramp: near zero for flat areas, near 1 for edges.
         scale = np.percentile(grad_mag, 85) / edge_sensitivity + 1e-6
         edge_weight = np.tanh(grad_mag / scale)
-
-        # Blur the edge mask slightly to avoid halos at sharp transitions.
         edge_weight = gaussian_filter(edge_weight, sigma=2.0)
         flat_weight = (1.0 - edge_weight).clip(0.0, 1.0)
 
-        # ── Combined smoothing amount ─────────────────────────────────────
         smooth_weight = (dist * flat_weight).astype(np.float32)
 
-        # ── Scale-space blend ─────────────────────────────────────────────
         sigmas = np.linspace(0.0, max_sigma, n_levels + 1)
         levels = np.stack(
             [height_map if s == 0 else gaussian_filter(height_map, sigma=s)
              for s in sigmas],
             axis=0,
-        )  # (n_levels+1, H, W)
+        )
 
         idx  = smooth_weight * n_levels
         lo   = np.floor(idx).astype(np.int32).clip(0, n_levels - 1)

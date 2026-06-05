@@ -6,7 +6,8 @@ from remote_connection.remote_client import RemoteClient
 
 class DepthResult:
     def __init__(self, result: dict) -> None:
-        self.depth = result["depth"]  # float32 numpy array, values in metres
+        self.depth = result["depth"]        # float32 numpy array, values in metres
+        self.sky_mask = result.get("sky_mask")  # bool (H, W) array, True = sky; None if unavailable
 
 
 class PanoramaDepth(RemoteClient):

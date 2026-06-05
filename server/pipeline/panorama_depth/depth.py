@@ -47,6 +47,10 @@ class PanoramaDepthStage(PipelineStage):
                 f"({depth.width}×{depth.height})"
             )
             context.add_depth(output_key, depth)
+            if result.sky_mask is not None:
+                context.add_object(ContextKey.PANORAMA_SKY_MASK, result.sky_mask)
+                sky_pct = result.sky_mask.mean() * 100
+                self.log_info(f"Sky mask: {sky_pct:.1f}% sky pixels")
         else:
             self.log_warning("No panorama found — skipping panorama depth")
 
