@@ -7,11 +7,9 @@ _ENVIRONMENT_KEYWORDS = frozenset({
     "wall", "walls", "floor", "ground", "terrain", "earth",
     "road", "pavement", "sidewalk", "path", "asphalt", "cobblestone", "street",
     "grass", "lawn", "field", "meadow",
-    "foliage", "tree", "trees", "bush", "shrub", "leaves", "branch", "branches",
-    "vegetation", "plant", "plants", "hedge", "forest", "jungle",
     "water", "ocean", "sea", "lake", "river", "pond", "stream", "puddle",
-    "mountain", "hill", "cliff", "rock", "rocks", "boulder",
-    "stone", "dirt", "sand", "snow", "ice", "mud",
+    "mountain", "hill", "cliff",
+    "dirt", "sand", "snow", "ice", "mud",
     "building", "buildings", "architecture", "house", "facade", "exterior", "structure",
     "concrete", "landscape", "scenery", "horizon", "background",
     "shadow", "reflection", "surface", "texture", "pattern",
@@ -28,6 +26,9 @@ _OBJECT_KEYWORDS = frozenset({
     "umbrella", "backpack", "bag", "suitcase", "luggage",
     "statue", "sculpture", "monument",
     "ball", "toy", "cart", "trolley",
+    "tree", "trees", "bush", "shrub", "hedge",
+    "plant", "plants", "foliage", "vegetation", "leaves", "branch", "branches", "forest", "jungle",
+    "rock", "rocks", "boulder", "stone",
 })
 
 
