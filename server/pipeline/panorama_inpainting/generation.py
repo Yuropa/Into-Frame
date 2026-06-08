@@ -226,18 +226,31 @@ class PanoramaInpaintingStage(PipelineStage):
                     continue
 
                 obj_dilated = binary_dilation(mask_array > 0.5, structure=lama_struct).astype(np.float32)
-                obj_mask_pil = PILImage.fromarray((obj_dilated * 255).astype(np.uint8), mode="L")
+
+                # Crop to a padded bbox — LaMa only needs local context to fill the
+                # hole, so shipping the full panorama over IPC each call is wasteful.
+                pad     = max(64, int(max(bw, bh) * 0.5))
+                crop_y0 = max(0, top    - pad)
+                crop_y1 = min(h, bottom + pad)
+                crop_x0 = max(0, left   - pad)
+                crop_x1 = min(w, right  + pad)
+
+                lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
+                mask_crop = PILImage.fromarray(
+                    (obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1] * 255).astype(np.uint8), mode="L"
+                )
 
                 lama_pil = lama_inpainter.inpaint(
-                    PILImage.fromarray(current_arr),
-                    obj_mask_pil,
+                    lama_crop,
+                    mask_crop,
                     temp_path=self.temp,
                 )
                 lama_arr = np.array(lama_pil)
 
-                composited = current_arr.copy()
-                composited[obj_dilated > 0.5] = lama_arr[obj_dilated > 0.5]
-                current_arr = composited
+                crop_dilated = obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1]
+                composited = current_arr[crop_y0:crop_y1, crop_x0:crop_x1].copy()
+                composited[crop_dilated > 0.5] = lama_arr[crop_dilated > 0.5]
+                current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
 
                 lama_states.append((mask_array, box, obj_dilated))
                 self.advance_progress(inpaint_task)
