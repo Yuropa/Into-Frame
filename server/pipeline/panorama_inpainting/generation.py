@@ -143,7 +143,7 @@ class PanoramaInpaintingStage(PipelineStage):
             pass_objects = []  # (mask_array, box) for every crop this pass
             classify_task = self.create_progress(result.length, f"Classifying (pass {pass_num + 1})...")
             for i, crop in enumerate(result.masked_images(Image(terrain_pil))):
-                obj_type, cls = self._classifier.classify(crop.image)
+                obj_type, cls = self._classifier.classify(crop.cropped_image)
                 idx = global_idx + i
                 box = [float(x) for x in crop.box]
 
