@@ -10,6 +10,7 @@ SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 # --- Global defaults ---
 ENV="frame"
 SEED_ARGS=()
+VERBOSE=""
 
 # --- Shared defaults ---
 PORT="${PORT:-8080}"
@@ -49,6 +50,7 @@ Subcommands (default: run):
 Global options:
   --env ENV          Conda environment name  (default: ${ENV})
   --seed VALUE       Random seed (bare integer) or STAGE:VALUE pair; repeatable
+  -v, --verbose      Print logs to the terminal (default: file only)
   -h, --help         Show this help message
 
 run options:
@@ -154,6 +156,7 @@ build_global_args() {
   for s in "${SEED_ARGS[@]+"${SEED_ARGS[@]}"}"; do
     args+=("--seed" "$s")
   done
+  [[ -n "$VERBOSE" ]] && args+=("--verbose")
   echo "${args[@]+"${args[@]}"}"
 }
 
@@ -164,9 +167,10 @@ SUBCOMMAND=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --env)   ENV="$2";          shift 2 ;;
-    --seed)  SEED_ARGS+=("$2"); shift 2 ;;
-    -h|--help) usage; exit 0 ;;
+    --env)        ENV="$2";          shift 2 ;;
+    --seed)       SEED_ARGS+=("$2"); shift 2 ;;
+    -v|--verbose) VERBOSE="1";       shift   ;;
+    -h|--help)    usage; exit 0 ;;
     run|server|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
     -*) break ;;   # unknown global flag — let subcommand parser handle it

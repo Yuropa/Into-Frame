@@ -35,6 +35,12 @@ def create_parser():
             "A global seed is always generated and logged even if not supplied."
         ),
     )
+    parser.add_argument(
+        "-v", "--verbose",
+        action="store_true",
+        default=False,
+        help="Print logs to the terminal in addition to the log file (default: file only)",
+    )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -153,6 +159,7 @@ def _create_pipeline_config(args):
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
+        verbose=getattr(args, "verbose", False),
     )
 
     config.save_files = args.debug
@@ -192,6 +199,7 @@ def handle_download(args):
     config = PipelineConfiguration(
         output=None,
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
+        verbose=getattr(args, "verbose", False),
     )
 
     pipeline = Pipeline(

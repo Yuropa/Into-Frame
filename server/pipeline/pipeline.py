@@ -94,6 +94,7 @@ class PipelineConfiguration:
         output: Optional[str],
         seeds: Optional[SeedConfiguration] = None,
         config_path: Optional[Path] = None,
+        verbose: bool = False,
     ):
         if output is not None:
             self.output = Path(output)
@@ -109,14 +110,31 @@ class PipelineConfiguration:
 
         self.seeds = seeds if seeds is not None else SeedConfiguration()
         self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(message)s",
-            handlers=[RichHandler(rich_tracebacks=True)]
-        )
-        self.log = logging.getLogger("rich")
+        self.log = self._configure_logging(verbose)
         self.stages_yaml = self._load_stages_yaml(config_path)
+
+    def _configure_logging(self, verbose: bool) -> logging.Logger:
+        from datetime import datetime
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"pipeline-{timestamp}.log"
+        log_path = (self.temp / filename) if self.temp is not None else Path(filename)
+
+        root = logging.getLogger()
+        root.setLevel(logging.INFO)
+        root.handlers.clear()
+
+        file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+        file_handler.setFormatter(logging.Formatter(
+            "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"
+        ))
+        root.addHandler(file_handler)
+
+        if verbose:
+            console_handler = RichHandler(rich_tracebacks=True)
+            console_handler.setFormatter(logging.Formatter("%(message)s"))
+            root.addHandler(console_handler)
+
+        return logging.getLogger("pipeline")
 
     def _load_stages_yaml(self, config_path: Optional[Path]) -> list[dict]:
         if config_path is None or not config_path.exists():
