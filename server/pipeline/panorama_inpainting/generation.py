@@ -86,6 +86,7 @@ class PanoramaInpaintingStage(PipelineStage):
         super().__init__(config)
         self._seg = None
         self._classifier = None
+        self._captioner = None
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
@@ -114,7 +115,6 @@ class PanoramaInpaintingStage(PipelineStage):
         # Dilate the mask so LaMa/Flux have enough boundary material to blend into.
         # 50 px matches the research reference; gives clean seams without visible edges.
         lama_dilation = 50
-        lama_struct = np.ones((lama_dilation * 2 + 1, lama_dilation * 2 + 1))
 
         # Iterative extract-and-inpaint: segment → extract crops → inpaint → repeat
         # until segmentation finds nothing. terrain_pil tracks the progressively
@@ -236,7 +236,7 @@ class PanoramaInpaintingStage(PipelineStage):
             # --- Phase 1: LaMa structural fill ---
             # Per-object, accumulating — each call benefits from the previous
             # removals, and the small per-mask size keeps LaMa fast and sharp.
-            lama_states = []  # (mask_array, box, obj_dilated)
+            lama_states = []  # (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1)
             current_arr = np.array(terrain_pil)
 
             lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
@@ -249,24 +249,28 @@ class PanoramaInpaintingStage(PipelineStage):
 
                 region_mask = mask_array[top:bottom, left:right]
                 if region_mask.sum() == 0:
-                    lama_states.append((mask_array, box, None))
+                    lama_states.append((mask_array, box, None, None, None, None, None))
                     self.advance_progress(inpaint_task)
                     continue
 
-                obj_dilated = binary_dilation(mask_array > 0.5, structure=lama_struct).astype(np.float32)
-
-                # Crop to a padded bbox — LaMa only needs local context to fill the
-                # hole, so shipping the full panorama over IPC each call is wasteful.
+                # Compute crop coords before dilation so we dilate only the
+                # crop region, not the full panorama. A 101×101 struct applied
+                # to a 2048×1024 mask is O(H×W×K²) — very slow per object.
+                # iterations=50 on a small crop achieves the same 50px expansion
+                # at a fraction of the cost.
                 pad     = max(64, int(max(bw, bh) * 0.5))
                 crop_y0 = max(0, top    - pad)
                 crop_y1 = min(h, bottom + pad)
                 crop_x0 = max(0, left   - pad)
                 crop_x1 = min(w, right  + pad)
 
+                dilated_crop = binary_dilation(
+                    mask_array[crop_y0:crop_y1, crop_x0:crop_x1] > 0.5,
+                    iterations=lama_dilation,
+                ).astype(np.float32)
+
                 lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
-                mask_crop = PILImage.fromarray(
-                    (obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1] * 255).astype(np.uint8), mode="L"
-                )
+                mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
                 lama_pil = lama_inpainter.inpaint(
                     lama_crop,
@@ -275,12 +279,11 @@ class PanoramaInpaintingStage(PipelineStage):
                 )
                 lama_arr = np.array(lama_pil)
 
-                crop_dilated = obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1]
                 composited = current_arr[crop_y0:crop_y1, crop_x0:crop_x1].copy()
-                composited[crop_dilated > 0.5] = lama_arr[crop_dilated > 0.5]
+                composited[dilated_crop > 0.5] = lama_arr[dilated_crop > 0.5]
                 current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
 
-                lama_states.append((mask_array, box, obj_dilated))
+                lama_states.append((mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1))
                 self.advance_progress(inpaint_task)
 
             lama_inpainter.close()
@@ -288,9 +291,9 @@ class PanoramaInpaintingStage(PipelineStage):
             # Re-caption from the LaMa result: at this point the objects are already
             # structurally removed, so the caption no longer mentions them.  This
             # prevents Flux from regenerating the things we just extracted.
-            _captioner = ImageCaptioning(self.preferred_device)
-            raw_lama_caption = _captioner.caption(Image(PILImage.fromarray(current_arr)))
-            del _captioner
+            if self._captioner is None:
+                self._captioner = ImageCaptioning(self.preferred_device)
+            raw_lama_caption = self._captioner.caption(Image(PILImage.fromarray(current_arr)))
             caption = _environment_prompt(raw_lama_caption)
             self.log_info(f"Pass {pass_num + 1} fill caption: {caption!r}")
 
@@ -301,13 +304,17 @@ class PanoramaInpaintingStage(PipelineStage):
             # quality loss from downscaling first. Only falls back to scaling when
             # a single object crop itself exceeds flux_max.
             next_terrain_arr = np.array(terrain_pil)
-            valid_states = [(m, b, d) for m, b, d in lama_states if d is not None]
+            valid_states = [
+                (m, b, d, y0, y1, x0, x1)
+                for m, b, d, y0, y1, x0, x1 in lama_states
+                if d is not None
+            ]
 
             if valid_states:
                 flux_max = 1024
                 flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
 
-                for mask_array, box, obj_dilated in valid_states:
+                for mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1 in valid_states:
                     bx, by, bw, bh = box
                     left   = max(0, int(bx))
                     top    = max(0, int(by))
@@ -319,19 +326,11 @@ class PanoramaInpaintingStage(PipelineStage):
                         self.advance_progress(inpaint_task)
                         continue
 
-                    # Expand to give Flux surrounding scene context
-                    pad     = max(64, int(max(bw, bh) * 0.5))
-                    crop_y0 = max(0, top    - pad)
-                    crop_y1 = min(h, bottom + pad)
-                    crop_x0 = max(0, left   - pad)
-                    crop_x1 = min(w, right  + pad)
                     crop_h  = crop_y1 - crop_y0
                     crop_w  = crop_x1 - crop_x0
 
                     lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
-                    mask_crop = PILImage.fromarray(
-                        (obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1] * 255).astype(np.uint8), mode="L"
-                    )
+                    mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
                     # Scale only when the crop exceeds flux_max — most objects won't
                     if crop_w > flux_max or crop_h > flux_max:
@@ -435,4 +434,5 @@ class PanoramaInpaintingStage(PipelineStage):
             self._seg.close()
             self._seg = None
         self._classifier = None
+        self._captioner = None
         super().clean_up()
