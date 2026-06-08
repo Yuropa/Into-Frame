@@ -31,6 +31,12 @@ stages:
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
 
+  - name: Inpainting Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
+
   - name: Panorama Lighting
     stage: PanoramaLightingStage
 

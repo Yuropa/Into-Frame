@@ -19,6 +19,12 @@ stages:
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
 
+  - name: Inpainting Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
+
   - name: Mesh Generation
     stage: ModelGenerationStage
     generator_type: SAM3D

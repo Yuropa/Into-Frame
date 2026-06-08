@@ -191,21 +191,24 @@ class PanoramaInpaintingStage(PipelineStage):
             all_extracted_masks.extend(m for m, _ in pass_objects)
             manifest["passes"].append(pass_entry)
 
-            # Two-phase inpainting per object:
-            #   Phase 1 (LaMa)  — fast structural fill, one object at a time so
-            #                     each mask is small; accumulate sequentially so
-            #                     later calls benefit from earlier removals.
-            #   Phase 2 (Flux)  — perceptual refinement guided by the scene
-            #                     caption, using the LaMa result as context.
-            # Running the phases back-to-back (close LaMa before opening Flux)
-            # keeps both models off the GPU at the same time.
+            # Two-phase inpainting:
+            #   Phase 1 (LaMa)  — per-object structural fill, accumulating so each
+            #                     call benefits from prior removals. Small masks
+            #                     keep LaMa fast and structurally accurate.
+            #   Phase 2 (Flux)  — single call over the full-scene union mask on the
+            #                     accumulated LaMa result, downsampled to a resolution
+            #                     Flux handles well. Fills all regions coherently in
+            #                     one pass rather than independently per object.
+            # Models are closed between phases to avoid holding both on GPU.
             inpaint_task = self.create_progress(
                 len(pass_objects) * 2, f"Inpainting (pass {pass_num + 1})..."
             )
             caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
 
             # --- Phase 1: LaMa structural fill ---
-            lama_states = []  # (mask_array, box, obj_dilated, lama_composited_arr)
+            # Per-object, accumulating — each call benefits from the previous
+            # removals, and the small per-mask size keeps LaMa fast and sharp.
+            lama_states = []  # (mask_array, box, obj_dilated)
             current_arr = np.array(terrain_pil)
 
             lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
@@ -218,7 +221,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
                 region_mask = mask_array[top:bottom, left:right]
                 if region_mask.sum() == 0:
-                    lama_states.append((mask_array, box, None, None))
+                    lama_states.append((mask_array, box, None))
                     self.advance_progress(inpaint_task)
                     continue
 
@@ -236,50 +239,83 @@ class PanoramaInpaintingStage(PipelineStage):
                 composited[obj_dilated > 0.5] = lama_arr[obj_dilated > 0.5]
                 current_arr = composited
 
-                lama_states.append((mask_array, box, obj_dilated, current_arr.copy()))
+                lama_states.append((mask_array, box, obj_dilated))
                 self.advance_progress(inpaint_task)
 
             lama_inpainter.close()
 
-            # --- Phase 2: Flux perceptual refinement ---
+            # --- Phase 2: Flux perceptual refinement (per-object crop) ---
+            # Crop around each object with context padding so Flux always operates
+            # on a native-resolution region within its ~1MP training range. This
+            # avoids both the full-panorama resolution problem and the upsampling
+            # quality loss from downscaling first. Only falls back to scaling when
+            # a single object crop itself exceeds flux_max.
             next_terrain_arr = np.array(terrain_pil)
+            valid_states = [(m, b, d) for m, b, d in lama_states if d is not None]
 
-            flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
-            for mask_array, box, obj_dilated, lama_composited_arr in lama_states:
-                if lama_composited_arr is None:
+            if valid_states:
+                flux_max = 1024
+                flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
+
+                for mask_array, box, obj_dilated in valid_states:
+                    bx, by, bw, bh = box
+                    left   = max(0, int(bx))
+                    top    = max(0, int(by))
+                    right  = min(w, int(bx + bw))
+                    bottom = min(h, int(by + bh))
+
+                    region_mask = mask_array[top:bottom, left:right]
+                    if region_mask.sum() == 0:
+                        self.advance_progress(inpaint_task)
+                        continue
+
+                    # Expand to give Flux surrounding scene context
+                    pad     = max(64, int(max(bw, bh) * 0.5))
+                    crop_y0 = max(0, top    - pad)
+                    crop_y1 = min(h, bottom + pad)
+                    crop_x0 = max(0, left   - pad)
+                    crop_x1 = min(w, right  + pad)
+                    crop_h  = crop_y1 - crop_y0
+                    crop_w  = crop_x1 - crop_x0
+
+                    lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
+                    mask_crop = PILImage.fromarray(
+                        (obj_dilated[crop_y0:crop_y1, crop_x0:crop_x1] * 255).astype(np.uint8), mode="L"
+                    )
+
+                    # Scale only when the crop exceeds flux_max — most objects won't
+                    if crop_w > flux_max or crop_h > flux_max:
+                        scale     = flux_max / max(crop_w, crop_h)
+                        flux_w    = max(16, (int(crop_w * scale) // 16) * 16)
+                        flux_h    = max(16, (int(crop_h * scale) // 16) * 16)
+                        lama_crop = lama_crop.resize((flux_w, flux_h), PILImage.LANCZOS)
+                        mask_crop = mask_crop.resize((flux_w, flux_h), PILImage.NEAREST)
+
+                    flux_pil = flux_inpainter.inpaint(
+                        lama_crop,
+                        mask_crop,
+                        temp_path=self.temp,
+                        prompt=caption,
+                        num_inference_steps=28,
+                        guidance_scale=30.0,
+                    )
+
+                    # Flux aligns dims to 16px internally; resize back to crop dims
+                    if flux_pil.size != (crop_w, crop_h):
+                        flux_pil = flux_pil.resize((crop_w, crop_h), PILImage.LANCZOS)
+
+                    flux_crop_arr = np.array(flux_pil)
+
+                    region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
+                    feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=2))).astype(np.float32)[..., np.newaxis] / 255.0
+
+                    orig_region = next_terrain_arr[top:bottom, left:right]
+                    flux_region = flux_crop_arr[top - crop_y0 : bottom - crop_y0,
+                                                left - crop_x0 : right  - crop_x0]
+                    next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
                     self.advance_progress(inpaint_task)
-                    continue
 
-                bx, by, bw, bh = box
-                left   = max(0, int(bx))
-                top    = max(0, int(by))
-                right  = min(w, int(bx + bw))
-                bottom = min(h, int(by + bh))
-
-                region_mask = mask_array[top:bottom, left:right]
-                obj_mask_pil = PILImage.fromarray((obj_dilated * 255).astype(np.uint8), mode="L")
-
-                flux_pil = flux_inpainter.inpaint(
-                    PILImage.fromarray(lama_composited_arr),
-                    obj_mask_pil,
-                    temp_path=self.temp,
-                    prompt=caption,
-                    num_inference_steps=20,
-                    guidance_scale=30.0,
-                    strength=1.0,
-                )
-                flux_arr = np.array(flux_pil)
-
-                region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
-                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=2))).astype(np.float32)[..., np.newaxis] / 255.0
-
-                orig_region = next_terrain_arr[top:bottom, left:right]
-                flux_region = flux_arr[top:bottom, left:right]
-                next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
-
-                self.advance_progress(inpaint_task)
-
-            flux_inpainter.close()
+                flux_inpainter.close()
 
             terrain_pil = PILImage.fromarray(next_terrain_arr)
 
