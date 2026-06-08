@@ -8,8 +8,13 @@ from typing import Optional
 import logging
 import shutil
 import queue
+from collections import deque
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
+from rich.console import Group as RenderGroup
 from huggingface_hub import snapshot_download
 
 from pipeline.segmentation.segmentation import SegmentationStage
@@ -36,6 +41,35 @@ from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name, DeviceStrategy
 from util.image_utils import Image
+
+class _TailLogPanel(logging.Handler):
+    """
+    Logging handler that keeps the last N log messages and renders them as a
+    fixed-height Rich Panel above the progress bar in non-verbose mode.
+    """
+
+    def __init__(self, maxlines: int = 6):
+        super().__init__()
+        self._lines: deque[str] = deque(maxlen=maxlines)
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self._lines.append(self.format(record))
+        except Exception:
+            self.handleError(record)
+
+    def __rich__(self) -> Panel:
+        padded = list(self._lines) + [""] * (self._lines.maxlen - len(self._lines))
+        text = Text("\n".join(padded), style="dim", no_wrap=True, overflow="ellipsis")
+        return Panel(
+            text,
+            title="[dim]pipeline[/dim]",
+            border_style="dim",
+            padding=(0, 1),
+            height=self._lines.maxlen + 2,
+        )
+
 
 class SeedConfiguration:
     """
@@ -109,6 +143,7 @@ class PipelineConfiguration:
             self.temp = None
 
         self.seeds = seeds if seeds is not None else SeedConfiguration()
+        self.verbose = verbose
         self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
         self.log = self._configure_logging(verbose)
         self.stages_yaml = self._load_stages_yaml(config_path)
@@ -352,24 +387,43 @@ class Pipeline:
         monitor = PipelineMonitor(interval=0.25)
 
         with monitor.stage("Full Pipeline"):
-            with Progress(
-                SpinnerColumn(),
-                "[progress.description]{task.description}",
-                BarColumn(),
-                "[progress.percentage]{task.percentage:>3.0f}%",
-                TimeElapsedColumn(),
-            ) as progress:
-                task = progress.add_task("Processing...", total=len(self.stages))
+            if self.config.verbose:
+                progress = Progress(
+                    SpinnerColumn(),
+                    "[progress.description]{task.description}",
+                    BarColumn(),
+                    "[progress.percentage]{task.percentage:>3.0f}%",
+                    TimeElapsedColumn(),
+                )
+                live_ctx = progress
+            else:
+                progress = Progress(
+                    SpinnerColumn(),
+                    "[progress.description]{task.description}",
+                    BarColumn(),
+                    "[progress.percentage]{task.percentage:>3.0f}%",
+                    TimeElapsedColumn(),
+                    auto_refresh=False,
+                )
+                tail = _TailLogPanel(maxlines=6)
+                logging.getLogger().addHandler(tail)
+                live_ctx = Live(RenderGroup(tail, progress), refresh_per_second=4)
 
-                for stage in self.stages:
-                    self._run_stage(
-                        stage=stage,
-                        context=context,
-                        progress_queue=progress_queue,
-                        monitor=monitor,
-                        progress=progress,
-                        task=task,
-                    )
+            try:
+                with live_ctx:
+                    task = progress.add_task("Processing...", total=len(self.stages))
+                    for stage in self.stages:
+                        self._run_stage(
+                            stage=stage,
+                            context=context,
+                            progress_queue=progress_queue,
+                            monitor=monitor,
+                            progress=progress,
+                            task=task,
+                        )
+            finally:
+                if not self.config.verbose:
+                    logging.getLogger().removeHandler(tail)
 
         self._save_context(context)
         monitor.print_summary()
