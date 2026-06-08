@@ -42,6 +42,12 @@ from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name, DeviceStrategy
 from util.image_utils import Image
 
+class _PipelineFilter(logging.Filter):
+    """Only passes log records emitted by our own pipeline logger."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.name == "pipeline"
+
+
 class _TailLogPanel(logging.Handler):
     """
     Logging handler that keeps the last N log messages and renders them as a
@@ -52,6 +58,7 @@ class _TailLogPanel(logging.Handler):
         super().__init__()
         self._lines: deque[str] = deque(maxlen=maxlines)
         self.setFormatter(logging.Formatter("%(message)s"))
+        self.addFilter(_PipelineFilter())
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
@@ -167,7 +174,19 @@ class PipelineConfiguration:
         if verbose:
             console_handler = RichHandler(rich_tracebacks=True)
             console_handler.setFormatter(logging.Formatter("%(message)s"))
+            console_handler.addFilter(_PipelineFilter())
             root.addHandler(console_handler)
+        else:
+            # Suppress noisy third-party progress bars and HTTP chatter so
+            # they don't appear in the tail panel or bleed onto the terminal.
+            for noisy in ("httpx", "urllib3", "huggingface_hub", "transformers",
+                          "filelock", "diffusers", "accelerate"):
+                logging.getLogger(noisy).setLevel(logging.WARNING)
+            try:
+                from huggingface_hub.utils import disable_progress_bars
+                disable_progress_bars()
+            except Exception:
+                pass
 
         return logging.getLogger("pipeline")
 

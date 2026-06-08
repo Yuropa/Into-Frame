@@ -8,6 +8,7 @@ import shutil
 import base64
 import os
 import time
+import logging
 from io import BytesIO
 
 from typing import Any, Callable, Optional
@@ -15,6 +16,8 @@ from util.image_utils import Image
 from util.device_utils import device_id
 from util.json_utils import parse_json
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
+
+_log = logging.getLogger("pipeline.remote")
 
 class RemoteClient():
     def _readline_json(self, pipe):
@@ -31,7 +34,9 @@ class RemoteClient():
                 decoded = line.decode('utf-8', errors='replace')
                 with lock:
                     lines.append(decoded)
-                print(f"[{prefix}] {decoded}", end="", flush=True)
+                stripped = decoded.rstrip()
+                if stripped:
+                    _log.debug("[%s] %s", prefix, stripped)
             stream.close()
         return threading.Thread(target=_capture, args=(stream,), daemon=True)
 
@@ -123,7 +128,7 @@ class RemoteClient():
         if ready_status.status != "ready":
             raise RuntimeError(f"Unexpected startup message: {ready_line}")
 
-        print(f"Finished loading script {script_path}")
+        _log.info("Loaded %s", script_path.name)
 
     def __del__(self):
         if self.process is not None:
@@ -139,14 +144,12 @@ class RemoteClient():
 
     def dump_logs(self):
         tag = f"[{self.conda_env}]"
-
-        stdout = self._get_stdout()
-        stderr = self._get_stderr()
-
-        if stdout:
-            print(f"{tag}[stdout] {stdout}")
-        if stderr:
-            print(f"{tag}[stderr] {stderr}")
+        for line in self._get_stdout().splitlines():
+            if line.strip():
+                _log.debug("%s[stdout] %s", tag, line)
+        for line in self._get_stderr().splitlines():
+            if line.strip():
+                _log.debug("%s[stderr] %s", tag, line)
 
     def _check_for_errors(self):
         if self.process.poll() is not None:
@@ -190,8 +193,7 @@ class RemoteClient():
             error = getattr(response, "error", None)
             if error:
                 stack = getattr(response, "stack", None)
-                print(f"Encountered error {error}")
-                print(f"{stack}")
+                _log.error("Remote error: %s\n%s", error, stack or "")
                 raise RuntimeError(f"Remote error: {error}")
 
             self.dump_logs()
