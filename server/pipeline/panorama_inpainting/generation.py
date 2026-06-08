@@ -6,6 +6,7 @@ from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
+from util.json_utils import write_json
 from util.panorama_utils import Panorama
 import colorsys
 import numpy as np
@@ -99,6 +100,7 @@ class PanoramaInpaintingStage(PipelineStage):
         all_object_masks = []    # accumulated across passes for the visual panorama
         all_extracted_masks = [] # every detected mask, for the extraction overlay
         global_idx = 0
+        manifest = {"passes": []}
         max_passes = 1
         initial_passes = 1
         tasks_per_pass = 3  # seg + classify + inpaint
@@ -113,16 +115,25 @@ class PanoramaInpaintingStage(PipelineStage):
             self.finish_progress(seg_task)
             fraction_advanced += 1.0 / self.total_tasks
 
+            sam_detected = result.length
+            depth_filtered_out = 0
             depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
             if depth is not None:
-                before = result.length
                 result = DepthObjectFilter().filter(result, depth)
-                removed = before - result.length
-                if removed:
-                    self.log_info(f"Pass {pass_num + 1}: depth filter removed {removed}/{before} background mask(s)")
+                depth_filtered_out = sam_detected - result.length
+                if depth_filtered_out:
+                    self.log_info(f"Pass {pass_num + 1}: depth filter removed {depth_filtered_out}/{sam_detected} background mask(s)")
+
+            pass_entry = {
+                "pass": pass_num + 1,
+                "sam_detected": sam_detected,
+                "depth_filtered_out": depth_filtered_out,
+                "crops": [],
+            }
 
             if result.length == 0:
                 self.log_info(f"Pass {pass_num + 1}: nothing found, stopping")
+                manifest["passes"].append(pass_entry)
                 break
 
             # If this is the last allocated pass and there are still objects, extend
@@ -164,12 +175,21 @@ class PanoramaInpaintingStage(PipelineStage):
                 if cls == "object":
                     all_object_masks.append(mask_array)
 
+                pass_entry["crops"].append({
+                    "index": idx,
+                    "type":  obj_type,
+                    "class": cls,
+                    "score": round(float(crop.score), 3),
+                    "box":   [round(x, 1) for x in box],
+                })
+
                 self.log_info(f"  crop_{idx}: {obj_type} → {cls}")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks
             global_idx += result.length
             all_extracted_masks.extend(m for m, _ in pass_objects)
+            manifest["passes"].append(pass_entry)
 
             # Two-phase inpainting per object:
             #   Phase 1 (LaMa)  — fast structural fill, one object at a time so
@@ -276,9 +296,17 @@ class PanoramaInpaintingStage(PipelineStage):
 
         context.add_object(ContextKey.OBJECT_COUNT, global_idx)
 
-        if self.temp is not None and all_extracted_masks:
-            overlay = _draw_extraction_overlay(original_pil, all_extracted_masks)
-            overlay.save(self.temp / "extraction_overlay.png")
+        if self.temp is not None:
+            if all_extracted_masks:
+                overlay = _draw_extraction_overlay(original_pil, all_extracted_masks)
+                overlay.save(self.temp / "extraction_overlay.png")
+
+            manifest["total_crops"] = global_idx
+            manifest["caption"] = context.input_object(ContextKey.INPUT_CAPTION) or ""
+            manifest["passes_run"] = len(manifest["passes"])
+            manifest["image_size"] = {"width": w, "height": h}
+            with open(self.temp / "manifest.json", "w") as f:
+                write_json(manifest, f)
 
         # Terrain panorama: the result after all passes (clean ground plane).
         context.add_panorama(ContextKey.PANORAMA_TERRAIN, Panorama(terrain_pil))
