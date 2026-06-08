@@ -21,9 +21,9 @@ class ImageSegServer(RemoteServer):
         )
         self.mask_generator = SAM2AutomaticMaskGenerator(
             model=self.model,
-            points_per_side=32,
+            points_per_side=64,
             pred_iou_thresh=0.8,
-            stability_score_thresh=0.9,
+            stability_score_thresh=0.85,
             min_mask_region_area=100,
             box_nms_thresh=0.7,
         )
