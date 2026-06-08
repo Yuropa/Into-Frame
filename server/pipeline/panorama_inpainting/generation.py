@@ -79,8 +79,8 @@ class PanoramaInpaintingStage(PipelineStage):
         terrain_pil = original_pil
         all_object_masks = []  # accumulated across passes for the visual panorama
         global_idx = 0
-        max_passes = 10
-        initial_passes = 3
+        max_passes = 1
+        initial_passes = 1
         tasks_per_pass = 3  # seg + classify + inpaint
         passes_allocated = initial_passes
         fraction_advanced = 0.0
@@ -142,37 +142,24 @@ class PanoramaInpaintingStage(PipelineStage):
             fraction_advanced += 1.0 / self.total_tasks
             global_idx += result.length
 
-            # One LaMa call with the full panorama so it has complete context for
-            # colour/texture matching. Write-back is limited per object to its
-            # bounding-box region so the rest of the image is never touched.
-            inpaint_task = self.create_progress(2, f"Inpainting (pass {pass_num + 1})...")
-            terrain_arr = np.array(terrain_pil)
-
-            union = np.zeros((h, w), dtype=np.float32)
-            for mask_array, _ in pass_objects:
-                union = np.maximum(union, mask_array)
-            union_dilated = binary_dilation(union > 0.5, structure=lama_struct).astype(np.float32)
-
-            full_mask_pil = PILImage.fromarray((union_dilated * 255).astype(np.uint8), mode="L")
-            masked_pil = PILImage.fromarray((terrain_arr * (1.0 - union_dilated[..., np.newaxis])).astype(np.uint8))
-
-            inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
-            result_pil = inpainter.inpaint(
-                masked_pil,
-                full_mask_pil,
-                temp_path=self.temp,
-                prompt="no objects, clean background, seamless, empty landscape",
-                guidance_scale=2.0,
-                strength=1.0,
+            # Two-phase inpainting per object:
+            #   Phase 1 (LaMa)  — fast structural fill, one object at a time so
+            #                     each mask is small; accumulate sequentially so
+            #                     later calls benefit from earlier removals.
+            #   Phase 2 (Flux)  — perceptual refinement guided by the scene
+            #                     caption, using the LaMa result as context.
+            # Running the phases back-to-back (close LaMa before opening Flux)
+            # keeps both models off the GPU at the same time.
+            inpaint_task = self.create_progress(
+                len(pass_objects) * 2, f"Inpainting (pass {pass_num + 1})..."
             )
-            inpainter.close()
-            self.advance_progress(inpaint_task)
+            caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
 
-            result_arr = np.array(result_pil)
+            # --- Phase 1: LaMa structural fill ---
+            lama_states = []  # (mask_array, box, obj_dilated, lama_composited_arr)
+            current_arr = np.array(terrain_pil)
 
-            # Composite result back per object — only within each object's bbox.
-            # Use the raw SAM mask (no extra dilation) so we don't expand beyond
-            # the actual object boundary; just blur it slightly for a smooth edge.
+            lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
             for mask_array, box in pass_objects:
                 bx, by, bw, bh = box
                 left   = max(0, int(bx))
@@ -182,21 +169,74 @@ class PanoramaInpaintingStage(PipelineStage):
 
                 region_mask = mask_array[top:bottom, left:right]
                 if region_mask.sum() == 0:
+                    lama_states.append((mask_array, box, None, None))
+                    self.advance_progress(inpaint_task)
                     continue
 
+                obj_dilated = binary_dilation(mask_array > 0.5, structure=lama_struct).astype(np.float32)
+                obj_mask_pil = PILImage.fromarray((obj_dilated * 255).astype(np.uint8), mode="L")
+
+                lama_pil = lama_inpainter.inpaint(
+                    PILImage.fromarray(current_arr),
+                    obj_mask_pil,
+                    temp_path=self.temp,
+                )
+                lama_arr = np.array(lama_pil)
+
+                composited = current_arr.copy()
+                composited[obj_dilated > 0.5] = lama_arr[obj_dilated > 0.5]
+                current_arr = composited
+
+                lama_states.append((mask_array, box, obj_dilated, current_arr.copy()))
+                self.advance_progress(inpaint_task)
+
+            lama_inpainter.close()
+
+            # --- Phase 2: Flux perceptual refinement ---
+            next_terrain_arr = np.array(terrain_pil)
+
+            flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
+            for mask_array, box, obj_dilated, lama_composited_arr in lama_states:
+                if lama_composited_arr is None:
+                    self.advance_progress(inpaint_task)
+                    continue
+
+                bx, by, bw, bh = box
+                left   = max(0, int(bx))
+                top    = max(0, int(by))
+                right  = min(w, int(bx + bw))
+                bottom = min(h, int(by + bh))
+
+                region_mask = mask_array[top:bottom, left:right]
+                obj_mask_pil = PILImage.fromarray((obj_dilated * 255).astype(np.uint8), mode="L")
+
+                flux_pil = flux_inpainter.inpaint(
+                    PILImage.fromarray(lama_composited_arr),
+                    obj_mask_pil,
+                    temp_path=self.temp,
+                    prompt=caption,
+                    num_inference_steps=20,
+                    guidance_scale=30.0,
+                    strength=1.0,
+                )
+                flux_arr = np.array(flux_pil)
+
                 region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
-                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
+                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=2))).astype(np.float32)[..., np.newaxis] / 255.0
 
-                orig_region   = terrain_arr[top:bottom, left:right]
-                result_region = result_arr[top:bottom, left:right]
-                terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + result_region * feathered).astype(np.uint8)
+                orig_region = next_terrain_arr[top:bottom, left:right]
+                flux_region = flux_arr[top:bottom, left:right]
+                next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
 
-            terrain_pil = PILImage.fromarray(terrain_arr)
+                self.advance_progress(inpaint_task)
+
+            flux_inpainter.close()
+
+            terrain_pil = PILImage.fromarray(next_terrain_arr)
 
             if self.temp is not None:
                 terrain_pil.save(self.temp / f"panorama_pass_{pass_num + 1}.png")
 
-            self.advance_progress(inpaint_task)
             self.finish_progress(inpaint_task)
             fraction_advanced += 1.0 / self.total_tasks
 
@@ -239,6 +279,7 @@ class PanoramaInpaintingStage(PipelineStage):
         return (
             ImageSeg.model_names()
             + InPainting.model_names(type=InPaintingType.LAMA)
+            + InPainting.model_names(type=InPaintingType.FLUX)
             + ImageClipClassifier.model_names()
         )
 

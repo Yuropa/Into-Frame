@@ -34,7 +34,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
-from util.device_utils import preferred_device, device_name
+from util.device_utils import preferred_device, device_name, DeviceStrategy
 from util.image_utils import Image
 
 class SeedConfiguration:
@@ -108,7 +108,7 @@ class PipelineConfiguration:
             self.temp = None
 
         self.seeds = seeds if seeds is not None else SeedConfiguration()
-        self.device, self.torch_dtype = preferred_device()
+        self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
 
         logging.basicConfig(
             level=logging.INFO,
