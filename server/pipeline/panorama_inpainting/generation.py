@@ -3,6 +3,7 @@ from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
+from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -12,6 +13,28 @@ import colorsys
 import numpy as np
 from PIL import Image as PILImage, ImageFilter
 from scipy.ndimage import binary_dilation
+
+
+def _environment_prompt(scene_caption: str) -> str:
+    """
+    Strip object names from the scene caption so Flux doesn't regenerate what
+    was just removed. Keeps location/environment words (city names, terrain
+    descriptors) and drops specific object category terms.
+    """
+    from pipeline.object_typing.categories import OBJECT_CATEGORIES
+    import re
+
+    stop_words = set()
+    for key in OBJECT_CATEGORIES:
+        stop_words.add(key.replace("_", " "))
+        stop_words.add(key.replace("_", ""))
+
+    # Remove matched words, collapse whitespace
+    result = scene_caption
+    for word in sorted(stop_words, key=len, reverse=True):
+        result = re.sub(rf"\b{re.escape(word)}s?\b", "", result, flags=re.IGNORECASE)
+    result = re.sub(r"\s{2,}", " ", result).strip(" ,;.")
+    return result or "outdoor scene"
 
 
 def _draw_extraction_overlay(
@@ -88,9 +111,9 @@ class PanoramaInpaintingStage(PipelineStage):
         if self._classifier is None:
             self._classifier = ImageClipClassifier(self.preferred_device)
 
-        # Small dilation for LaMa's input mask only — gives it a clean fill boundary.
-        # Write-back uses the raw SAM mask directly to avoid over-expanding.
-        lama_dilation = 8
+        # Dilate the mask so LaMa/Flux have enough boundary material to blend into.
+        # 50 px matches the research reference; gives clean seams without visible edges.
+        lama_dilation = 50
         lama_struct = np.ones((lama_dilation * 2 + 1, lama_dilation * 2 + 1))
 
         # Iterative extract-and-inpaint: segment → extract crops → inpaint → repeat
@@ -203,7 +226,12 @@ class PanoramaInpaintingStage(PipelineStage):
             inpaint_task = self.create_progress(
                 len(pass_objects) * 2, f"Inpainting (pass {pass_num + 1})..."
             )
-            caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
+            # Use an environment-only fill prompt rather than the full scene caption.
+            # The scene caption names the objects we just removed (e.g. "Eiffel Tower"),
+            # and high guidance scale would cause Flux to regenerate them in the holes.
+            # A neutral prompt lets Flux fill from surrounding pixel context instead.
+            scene_caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
+            caption = _environment_prompt(scene_caption)
 
             # --- Phase 1: LaMa structural fill ---
             # Per-object, accumulating — each call benefits from the previous
@@ -256,6 +284,15 @@ class PanoramaInpaintingStage(PipelineStage):
                 self.advance_progress(inpaint_task)
 
             lama_inpainter.close()
+
+            # Re-caption from the LaMa result: at this point the objects are already
+            # structurally removed, so the caption no longer mentions them.  This
+            # prevents Flux from regenerating the things we just extracted.
+            _captioner = ImageCaptioning(self.preferred_device)
+            raw_lama_caption = _captioner.caption(Image(PILImage.fromarray(current_arr)))
+            del _captioner
+            caption = _environment_prompt(raw_lama_caption)
+            self.log_info(f"Pass {pass_num + 1} fill caption: {caption!r}")
 
             # --- Phase 2: Flux perceptual refinement (per-object crop) ---
             # Crop around each object with context padding so Flux always operates
@@ -310,7 +347,7 @@ class PanoramaInpaintingStage(PipelineStage):
                         temp_path=self.temp,
                         prompt=caption,
                         num_inference_steps=28,
-                        guidance_scale=30.0,
+                        guidance_scale=7.0,
                     )
 
                     # Flux aligns dims to 16px internally; resize back to crop dims
