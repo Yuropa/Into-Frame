@@ -434,5 +434,7 @@ class PanoramaInpaintingStage(PipelineStage):
             self._seg.close()
             self._seg = None
         self._classifier = None
-        self._captioner = None
-        super().clean_up()
+        if self._captioner is not None:
+            del self._captioner
+            self._captioner = None
+        super().clean_up()  # calls torch.cuda.empty_cache() after refs are dropped
