@@ -1,14 +1,33 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.segmentation.image_segmentation import ImageSeg
+from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
+import colorsys
 import numpy as np
 from PIL import Image as PILImage, ImageFilter
 from scipy.ndimage import binary_dilation
+
+
+def _draw_extraction_overlay(
+    image: PILImage.Image,
+    masks: list[np.ndarray],
+    opacity: float = 0.6,
+) -> PILImage.Image:
+    """Composite each extracted mask over `image` with a distinct hue-spaced color."""
+    canvas = np.array(image.convert("RGB"), dtype=np.float32)
+    n = len(masks)
+    for i, mask in enumerate(masks):
+        hue = i / n if n > 1 else 0.5
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.85, 1.0)
+        color = np.array([r * 255, g * 255, b * 255], dtype=np.float32)
+        alpha = np.clip(mask, 0.0, 1.0)[..., np.newaxis] * opacity
+        canvas = canvas * (1.0 - alpha) + color * alpha
+    return PILImage.fromarray(np.clip(canvas, 0, 255).astype(np.uint8))
 
 class PanoramaInpaintingStage(PipelineStage):
     """
@@ -77,7 +96,8 @@ class PanoramaInpaintingStage(PipelineStage):
         # until segmentation finds nothing. terrain_pil tracks the progressively
         # cleaned image; each pass removes whatever was found in that pass.
         terrain_pil = original_pil
-        all_object_masks = []  # accumulated across passes for the visual panorama
+        all_object_masks = []    # accumulated across passes for the visual panorama
+        all_extracted_masks = [] # every detected mask, for the extraction overlay
         global_idx = 0
         max_passes = 1
         initial_passes = 1
@@ -92,6 +112,14 @@ class PanoramaInpaintingStage(PipelineStage):
             self.advance_progress(seg_task)
             self.finish_progress(seg_task)
             fraction_advanced += 1.0 / self.total_tasks
+
+            depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+            if depth is not None:
+                before = result.length
+                result = DepthObjectFilter().filter(result, depth)
+                removed = before - result.length
+                if removed:
+                    self.log_info(f"Pass {pass_num + 1}: depth filter removed {removed}/{before} background mask(s)")
 
             if result.length == 0:
                 self.log_info(f"Pass {pass_num + 1}: nothing found, stopping")
@@ -141,6 +169,7 @@ class PanoramaInpaintingStage(PipelineStage):
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks
             global_idx += result.length
+            all_extracted_masks.extend(m for m, _ in pass_objects)
 
             # Two-phase inpainting per object:
             #   Phase 1 (LaMa)  — fast structural fill, one object at a time so
@@ -246,6 +275,10 @@ class PanoramaInpaintingStage(PipelineStage):
             self.progress.advance(self.main_task, remaining)
 
         context.add_object(ContextKey.OBJECT_COUNT, global_idx)
+
+        if self.temp is not None and all_extracted_masks:
+            overlay = _draw_extraction_overlay(original_pil, all_extracted_masks)
+            overlay.save(self.temp / "extraction_overlay.png")
 
         # Terrain panorama: the result after all passes (clean ground plane).
         context.add_panorama(ContextKey.PANORAMA_TERRAIN, Panorama(terrain_pil))
