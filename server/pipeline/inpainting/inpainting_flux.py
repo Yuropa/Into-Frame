@@ -68,4 +68,8 @@ class InPaintingFlux:
         return output
 
     def close(self):
-        pass
+        import gc
+        del self.pipeline
+        self.pipeline = None
+        gc.collect()
+        torch.cuda.empty_cache()
