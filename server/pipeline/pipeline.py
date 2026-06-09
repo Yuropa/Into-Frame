@@ -294,7 +294,10 @@ class Pipeline:
         else:
             output = None
 
-        if self.config.temp is not None:
+        if self.config.output is not None:
+            temp = self.config.output / input_name / "build"
+            temp.mkdir(parents=True, exist_ok=True)
+        elif self.config.temp is not None:
             temp = self.config.temp / input_name
             temp.mkdir(parents=True, exist_ok=True)
         else:
