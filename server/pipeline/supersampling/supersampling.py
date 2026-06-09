@@ -59,5 +59,7 @@ class SupersamplingStage(PipelineStage):
         return ImageSupersampling.model_names()
 
     def clean_up(self):
+        if self._samp is not None:
+            self._samp.close()
+            self._samp = None
         super().clean_up()
-        self._samp = None

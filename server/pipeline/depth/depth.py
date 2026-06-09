@@ -99,5 +99,7 @@ class DepthStage(PipelineStage):
         return ImageDepth.model_names()
 
     def clean_up(self):
+        if self._depth is not None:
+            self._depth.close()
+            self._depth = None
         super().clean_up()
-        self._depth = None

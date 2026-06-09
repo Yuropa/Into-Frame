@@ -55,5 +55,7 @@ class RecognizeAnythingStage(PipelineStage):
         return ImageRecognize.model_names()
 
     def clean_up(self):
+        if self._recognize is not None:
+            self._recognize.close()
+            self._recognize = None
         super().clean_up()
-        self._recognize = None

@@ -120,5 +120,7 @@ class PanoramaStage(PipelineStage):
         return ImagePanorama.model_names(self.config.generator_type)
 
     def clean_up(self):
+        if self._pano is not None:
+            self._pano.close()
+            self._pano = None
         super().clean_up()
-        self._pano = None

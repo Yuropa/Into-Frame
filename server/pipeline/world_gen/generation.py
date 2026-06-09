@@ -33,5 +33,7 @@ class WorldGenStage(PipelineStage):
         return WorldGen.model_names()
 
     def clean_up(self):
+        if self._gen is not None:
+            self._gen.close()
+            self._gen = None
         super().clean_up()
-        self._gen = None

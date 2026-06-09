@@ -107,5 +107,7 @@ class PanoramaLightingStage(PipelineStage):
         return LuxDiT.model_names()
 
     def clean_up(self):
+        if self._lux_dit is not None:
+            self._lux_dit.close()
+            self._lux_dit = None
         super().clean_up()
-        self._lux_dit = None
