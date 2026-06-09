@@ -55,31 +55,25 @@ def _draw_extraction_overlay(
 
 class PanoramaInpaintingStage(PipelineStage):
     """
-    Iteratively segments the panorama, extracts and classifies each crop, inpaints
-    the detected regions, then re-segments the result — repeating until nothing is
-    found (up to max_passes=10). This ensures objects occluded behind others are
-    also captured in later passes.
+    Segments the panorama, extracts and classifies each crop, then inpaints
+    the detected regions in two phases (LaMa structural fill → Flux perceptual
+    refinement).
 
-    Each pass runs one LaMa call with the full panorama as input (for colour/texture
-    context), then composites the result back per object using only each object's
-    bounding-box region — so the rest of the image is never overwritten.
-    Two panoramas are derived from the accumulated result:
+    Two panoramas are written:
 
-      ContextKey.PANORAMA         — foreground objects removed only; environment
-                                    features kept at original pixels (for lighting /
-                                    asset generation)
-      ContextKey.PANORAMA_TERRAIN — all detected regions removed across all passes
-                                    (clean ground plane for PanoramaDepthStage →
-                                    heightmap → terrain mesh)
+      ContextKey.PANORAMA         — foreground objects removed; environment pixels
+                                    kept at original (for lighting / asset generation)
+      ContextKey.PANORAMA_TERRAIN — all detected regions removed (clean ground plane
+                                    for PanoramaDepthStage → heightmap → terrain mesh)
 
     Input key  (SemanticKey.PANORAMA) → ContextKey.PANORAMA  (Panorama)
     Output key (SemanticKey.OUTPUT)   → ContextKey.PANORAMA  (Panorama, objects removed)
 
-    Dynamic context keys per detected crop (index i, accumulated across passes):
+    Dynamic context keys per detected crop (index i):
       crop_{i}     → Image
       metadata_{i} → {"box": [...], "score": float, "class": str, "type": str}
 
-    Also writes ContextKey.OBJECT_COUNT (total crops across all passes).
+    Also writes ContextKey.OBJECT_COUNT (total crops found).
     """
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -113,119 +107,85 @@ class PanoramaInpaintingStage(PipelineStage):
             self._classifier = ImageClipClassifier(self.preferred_device)
 
         # Dilate the mask so LaMa/Flux have enough boundary material to blend into.
-        # 50 px matches the research reference; gives clean seams without visible edges.
         lama_dilation = 50
 
-        # Iterative extract-and-inpaint: segment → extract crops → inpaint → repeat
-        # until segmentation finds nothing. terrain_pil tracks the progressively
-        # cleaned image; each pass removes whatever was found in that pass.
-        terrain_pil = original_pil
-        all_object_masks = []    # accumulated across passes for the visual panorama
-        all_extracted_masks = [] # every detected mask, for the extraction overlay
-        global_idx = 0
-        manifest = {"passes": []}
-        max_passes = 1
-        initial_passes = 1
-        tasks_per_pass = 3  # seg + classify + inpaint
-        passes_allocated = initial_passes
+        object_masks = []  # foreground-object masks for the visual panorama composite
+        all_masks = []     # every detected mask, for the extraction overlay
+        manifest = {"passes": [{"pass": 1, "crops": []}]}
         fraction_advanced = 0.0
-        self.set_total_tasks(passes_allocated * tasks_per_pass)
+        self.set_total_tasks(3)  # seg + classify + inpaint
 
-        for pass_num in range(max_passes):
-            seg_task = self.create_progress(2, f"Segmenting (pass {pass_num + 1})...")
-            result = self._seg.segment(Image(terrain_pil), self.temp, on_progress=self.make_progress_callback(seg_task))
-            self.advance_progress(seg_task)
-            self.finish_progress(seg_task)
-            fraction_advanced += 1.0 / self.total_tasks
+        seg_task = self.create_progress(2, "Segmenting...")
+        result = self._seg.segment(Image(original_pil), self.temp, on_progress=self.make_progress_callback(seg_task))
+        self.advance_progress(seg_task)
+        self.finish_progress(seg_task)
+        fraction_advanced += 1.0 / self.total_tasks
 
-            sam_detected = result.length
-            depth_filtered_out = 0
-            depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
-            if depth is not None:
-                result = DepthObjectFilter().filter(result, depth)
-                depth_filtered_out = sam_detected - result.length
-                if depth_filtered_out:
-                    self.log_info(f"Pass {pass_num + 1}: depth filter removed {depth_filtered_out}/{sam_detected} background mask(s)")
+        sam_detected = result.length
+        depth_filtered_out = 0
+        depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        if depth is not None:
+            result = DepthObjectFilter().filter(result, depth)
+            depth_filtered_out = sam_detected - result.length
+            if depth_filtered_out:
+                self.log_info(f"Depth filter removed {depth_filtered_out}/{sam_detected} background mask(s)")
 
-            pass_entry = {
-                "pass": pass_num + 1,
-                "sam_detected": sam_detected,
-                "depth_filtered_out": depth_filtered_out,
-                "crops": [],
-            }
+        manifest["passes"][0]["sam_detected"] = sam_detected
+        manifest["passes"][0]["depth_filtered_out"] = depth_filtered_out
 
-            if result.length == 0:
-                self.log_info(f"Pass {pass_num + 1}: nothing found, stopping")
-                manifest["passes"].append(pass_entry)
-                break
+        terrain_pil = original_pil
 
-            # If this is the last allocated pass and there are still objects, extend
-            # the budget before classify/inpaint consume the remaining fraction.
-            # new_total_tasks = remaining_tasks / (1 - fraction_advanced) keeps the
-            # math correct so future tasks fill exactly the remaining bar fraction.
-            if pass_num == passes_allocated - 1 and pass_num + 1 < max_passes:
-                new_allocated = min(passes_allocated + initial_passes, max_passes)
-                remaining_tasks = new_allocated * tasks_per_pass - (pass_num * tasks_per_pass + 1)
-                remaining_fraction = 1.0 - fraction_advanced
-                if remaining_tasks > 0 and remaining_fraction > 1e-9:
-                    self.set_total_tasks(remaining_tasks / remaining_fraction)
-                passes_allocated = new_allocated
-
-            self.log_info(f"Pass {pass_num + 1}: {result.length} object(s) found")
+        if result.length == 0:
+            self.log_info("Nothing found, skipping inpainting")
+        else:
+            self.log_info(f"{result.length} object(s) found")
 
             # Classify and save crops; track (mask, box) pairs for inpainting
-            pass_objects = []  # (mask_array, box) for every crop this pass
-            classify_task = self.create_progress(result.length, f"Classifying (pass {pass_num + 1})...")
-            for i, crop in enumerate(result.masked_images(Image(terrain_pil))):
+            pass_objects = []
+            classify_task = self.create_progress(result.length, "Classifying...")
+            for i, crop in enumerate(result.masked_images(Image(original_pil))):
                 obj_type, cls = self._classifier.classify(crop.cropped_image)
-                idx = global_idx + i
                 box = [float(x) for x in crop.box]
 
-                context.add_image(f"crop_{idx}", crop.image)
-                context.add_object(f"metadata_{idx}", {
+                context.add_image(f"crop_{i}", crop.image)
+                context.add_object(f"metadata_{i}", {
                     "box":   box,
                     "score": float(crop.score),
                     "class": cls,
                     "type":  obj_type,
                 })
                 if self.temp is not None:
-                    crop.image.save(self.temp / f"crop_{idx}.png")
-                    caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\npass: {pass_num + 1}\n"
-                    (self.temp / f"crop_{idx}.txt").write_text(caption)
+                    crop.image.save(self.temp / f"crop_{i}.png")
+                    crop_caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
+                    (self.temp / f"crop_{i}.txt").write_text(crop_caption)
 
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 pass_objects.append((mask_array, box))
                 if cls == "object":
-                    all_object_masks.append(mask_array)
+                    object_masks.append(mask_array)
 
-                pass_entry["crops"].append({
-                    "index": idx,
+                manifest["passes"][0]["crops"].append({
+                    "index": i,
                     "type":  obj_type,
                     "class": cls,
                     "score": round(float(crop.score), 3),
                     "box":   [round(x, 1) for x in box],
                 })
 
-                self.log_info(f"  crop_{idx}: {obj_type} → {cls}")
+                self.log_info(f"  crop_{i}: {obj_type} → {cls}")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks
-            global_idx += result.length
-            all_extracted_masks.extend(m for m, _ in pass_objects)
-            manifest["passes"].append(pass_entry)
+            all_masks.extend(m for m, _ in pass_objects)
 
             # Two-phase inpainting:
             #   Phase 1 (LaMa)  — per-object structural fill, accumulating so each
             #                     call benefits from prior removals. Small masks
             #                     keep LaMa fast and structurally accurate.
-            #   Phase 2 (Flux)  — single call over the full-scene union mask on the
-            #                     accumulated LaMa result, downsampled to a resolution
-            #                     Flux handles well. Fills all regions coherently in
-            #                     one pass rather than independently per object.
+            #   Phase 2 (Flux)  — per-object crop refinement on the LaMa result.
+            #                     Fills all regions perceptually in one pass.
             # Models are closed between phases to avoid holding both on GPU.
-            inpaint_task = self.create_progress(
-                len(pass_objects) * 2, f"Inpainting (pass {pass_num + 1})..."
-            )
+            inpaint_task = self.create_progress(len(pass_objects) * 2, "Inpainting...")
             # Use an environment-only fill prompt rather than the full scene caption.
             # The scene caption names the objects we just removed (e.g. "Eiffel Tower"),
             # and high guidance scale would cause Flux to regenerate them in the holes.
@@ -237,7 +197,7 @@ class PanoramaInpaintingStage(PipelineStage):
             # Per-object, accumulating — each call benefits from the previous
             # removals, and the small per-mask size keeps LaMa fast and sharp.
             lama_states = []  # (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1)
-            current_arr = np.array(terrain_pil)
+            current_arr = np.array(original_pil)
 
             lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
             for mask_array, box in pass_objects:
@@ -295,7 +255,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 self._captioner = ImageCaptioning(self.preferred_device)
             raw_lama_caption = self._captioner.caption(Image(PILImage.fromarray(current_arr)))
             caption = _environment_prompt(raw_lama_caption)
-            self.log_info(f"Pass {pass_num + 1} fill caption: {caption!r}")
+            self.log_info(f"Fill caption: {caption!r}")
 
             # --- Phase 2: Flux perceptual refinement (per-object crop) ---
             # Crop around each object with context padding so Flux always operates
@@ -303,7 +263,7 @@ class PanoramaInpaintingStage(PipelineStage):
             # avoids both the full-panorama resolution problem and the upsampling
             # quality loss from downscaling first. Only falls back to scaling when
             # a single object crop itself exceeds flux_max.
-            next_terrain_arr = np.array(terrain_pil)
+            next_terrain_arr = np.array(original_pil)
             valid_states = [
                 (m, b, d, y0, y1, x0, x1)
                 for m, b, d, y0, y1, x0, x1 in lama_states
@@ -369,43 +329,44 @@ class PanoramaInpaintingStage(PipelineStage):
             terrain_pil = PILImage.fromarray(next_terrain_arr)
 
             if self.temp is not None:
-                terrain_pil.save(self.temp / f"panorama_pass_{pass_num + 1}.png")
+                terrain_pil.save(self.temp / "panorama_inpainted.png")
 
             self.finish_progress(inpaint_task)
             fraction_advanced += 1.0 / self.total_tasks
 
-        # Snap main task to 1.0 for this stage.
+        # Snap main task to 1.0 (only needed when nothing was found and
+        # classify/inpaint tasks were skipped).
         remaining = 1.0 - fraction_advanced
         if remaining > 1e-9:
             self.progress.advance(self.main_task, remaining)
 
-        context.add_object(ContextKey.OBJECT_COUNT, global_idx)
+        crop_count = len(all_masks)
+        context.add_object(ContextKey.OBJECT_COUNT, crop_count)
 
         if self.temp is not None:
-            if all_extracted_masks:
-                overlay = _draw_extraction_overlay(original_pil, all_extracted_masks)
+            if all_masks:
+                overlay = _draw_extraction_overlay(original_pil, all_masks)
                 overlay.save(self.temp / "extraction_overlay.png")
 
-            manifest["total_crops"] = global_idx
+            manifest["total_crops"] = crop_count
             manifest["caption"] = context.input_object(ContextKey.INPUT_CAPTION) or ""
-            manifest["passes_run"] = len(manifest["passes"])
+            manifest["passes_run"] = 1
             manifest["image_size"] = {"width": w, "height": h}
             with open(self.temp / "manifest.json", "w") as f:
                 write_json(manifest, f)
 
-        # Terrain panorama: the result after all passes (clean ground plane).
+        # Terrain panorama: the result after inpainting (clean ground plane).
         context.add_panorama(ContextKey.PANORAMA_TERRAIN, Panorama(terrain_pil))
 
         # Visual panorama: original with only foreground-object regions filled from
-        # the final terrain image; environment features are left at their original pixels.
-        if all_object_masks:
+        # the terrain image; environment features are left at their original pixels.
+        if object_masks:
             obj_union = np.zeros((h, w), dtype=np.float32)
-            for m in all_object_masks:
+            for m in object_masks:
                 obj_union = np.maximum(obj_union, m)
             obj_mask_pil = PILImage.fromarray((obj_union * 255).astype(np.uint8), mode="L")
             obj_feathered = np.array(obj_mask_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
-            terrain_final_arr = np.array(terrain_pil)
-            visual_composited = (original_array * (1.0 - obj_feathered) + terrain_final_arr * obj_feathered).astype(np.uint8)
+            visual_composited = (original_array * (1.0 - obj_feathered) + np.array(terrain_pil) * obj_feathered).astype(np.uint8)
             context.add_panorama(output_key, Panorama(PILImage.fromarray(visual_composited)))
 
         return context
