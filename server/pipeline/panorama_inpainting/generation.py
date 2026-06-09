@@ -200,7 +200,7 @@ class PanoramaInpaintingStage(PipelineStage):
             current_arr = np.array(original_pil)
 
             lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
-            for mask_array, box in pass_objects:
+            for lama_idx, (mask_array, box) in enumerate(pass_objects):
                 bx, by, bw, bh = box
                 left   = max(0, int(bx))
                 top    = max(0, int(by))
@@ -243,6 +243,10 @@ class PanoramaInpaintingStage(PipelineStage):
                 composited[dilated_crop > 0.5] = lama_arr[dilated_crop > 0.5]
                 current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
 
+                if self.temp is not None:
+                    lama_pil.save(self.temp / f"debug_lama_crop_{lama_idx}.png")
+                    PILImage.fromarray(current_arr).save(self.temp / f"debug_lama_panorama_{lama_idx}.png")
+
                 lama_states.append((mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1))
                 self.advance_progress(inpaint_task)
 
@@ -274,7 +278,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 flux_max = 1024
                 flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
 
-                for mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1 in valid_states:
+                for flux_idx, (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1) in enumerate(valid_states):
                     bx, by, bw, bh = box
                     left   = max(0, int(bx))
                     top    = max(0, int(by))
@@ -322,6 +326,11 @@ class PanoramaInpaintingStage(PipelineStage):
                     flux_region = flux_crop_arr[top - crop_y0 : bottom - crop_y0,
                                                 left - crop_x0 : right  - crop_x0]
                     next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
+
+                    if self.temp is not None:
+                        flux_pil.save(self.temp / f"debug_flux_crop_{flux_idx}.png")
+                        PILImage.fromarray(next_terrain_arr).save(self.temp / f"debug_flux_panorama_{flux_idx}.png")
+
                     self.advance_progress(inpaint_task)
 
                 flux_inpainter.close()
