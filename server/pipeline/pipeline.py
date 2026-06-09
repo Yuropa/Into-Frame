@@ -41,6 +41,7 @@ from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name, DeviceStrategy
 from util.image_utils import Image
+from util.json_utils import write_json
 
 class _PipelineFilter(logging.Filter):
     """Only passes log records emitted by our own pipeline logger."""
@@ -379,6 +380,16 @@ class Pipeline:
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
         self.log_info(f"Seed: {self.config.seeds.describe()}")
         self.log_info(f"Running with input: {self.input}")
+
+        output, _ = self._create_output_directories()
+        if output is not None:
+            seed_data = {
+                "global_seed": self.config.seeds.global_seed,
+                "stage_seeds": self.config.seeds.stage_seeds,
+            }
+            with open(output / "seed.json", "w") as f:
+                write_json(seed_data, f)
+
         context = PipelineContext()
         input_image = self.input.image
 
