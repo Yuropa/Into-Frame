@@ -94,7 +94,6 @@ class InPaintingLama(RemoteServer):
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "inpaint":
-            print(f"Got input: {input}")
             image = input["image"]
             mask = input["mask"]
             prompt = input.get("prompt", "")

@@ -232,6 +232,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
                 mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
+                self.log_info(f"  LaMa: crop_{lama_idx} ({crop_x1 - crop_x0}×{crop_y1 - crop_y0}px)")
                 lama_pil = lama_inpainter.inpaint(
                     lama_crop,
                     mask_crop,
@@ -296,6 +297,7 @@ class PanoramaInpaintingStage(PipelineStage):
                     lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
                     mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
+                    self.log_info(f"  Flux: crop_{flux_idx} ({crop_w}×{crop_h}px)")
                     # Scale only when the crop exceeds flux_max — most objects won't
                     if crop_w > flux_max or crop_h > flux_max:
                         scale     = flux_max / max(crop_w, crop_h)

@@ -19,6 +19,7 @@ class InPaintingFlux:
         )
         
         offload_pipeline(device, self.pipeline)
+        self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod
     def model_names(cls) -> list[str]:
