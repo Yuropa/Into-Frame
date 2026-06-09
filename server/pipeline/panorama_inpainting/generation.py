@@ -144,10 +144,21 @@ class PanoramaInpaintingStage(PipelineStage):
             pass_objects = []
             classify_task = self.create_progress(result.length, "Classifying...")
             for i, crop in enumerate(result.masked_images(Image(original_pil))):
-                obj_type, cls = self._classifier.classify(crop.cropped_image)
                 box = [float(x) for x in crop.box]
 
-                context.add_image(f"crop_{i}", crop.image)
+                # Re-project the crop from equirectangular onto a flat perspective
+                # view centred on the object's bounding box.  This removes the
+                # horizontal stretching that equirectangular imposes near the poles
+                # so downstream stages (captioning, mesh generation) see undistorted
+                # geometry.  The mask is reprojected with the same sample coordinates
+                # so the RGBA alpha channel stays aligned.
+                mask_array = np.array(crop.mask).astype(np.float32) / 255.0
+                undistorted_pil = panorama.perspective_crop(box, mask=mask_array)
+                undistorted = Image(undistorted_pil)
+
+                obj_type, cls = self._classifier.classify(undistorted)
+
+                context.add_image(f"crop_{i}", undistorted)
                 context.add_object(f"metadata_{i}", {
                     "box":   box,
                     "score": float(crop.score),
@@ -155,11 +166,9 @@ class PanoramaInpaintingStage(PipelineStage):
                     "type":  obj_type,
                 })
                 if self.temp is not None:
-                    crop.image.save(self.temp / f"crop_{i}.png")
+                    undistorted_pil.save(self.temp / f"crop_{i}.png")
                     crop_caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
-
-                mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 pass_objects.append((mask_array, box))
                 if cls == "object":
                     object_masks.append(mask_array)
