@@ -58,8 +58,7 @@ class ModelGenerationStage(PipelineStage):
 
             cached_mesh = context.mesh(mesh_name)
             if cached_mesh is not None:
-                # Already cached
-                print(f"Using cached mesh for {image_name} vertices={cached_mesh.vertex_count} faces={cached_mesh.face_count}")
+                self.log_info(f"  {image_name}: cached ({cached_mesh.vertex_count}v {cached_mesh.face_count}f)")
                 self.advance_progress(generation_task)
                 continue
 
@@ -69,8 +68,7 @@ class ModelGenerationStage(PipelineStage):
 
             self.advance_progress(generation_task)
             context.add_mesh(mesh_name, mesh)
-
-            print(f"Generated mesh for {image_name} vertices={mesh.vertex_count} faces={mesh.face_count}")
+            self.log_info(f"  {image_name}: {mesh.vertex_count}v {mesh.face_count}f")
         
         gen.close()
         self.finish_progress(generation_task)

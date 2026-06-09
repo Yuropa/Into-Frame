@@ -50,8 +50,8 @@ class SegmentationStage(PipelineStage):
             for idx, crop in enumerate(result.masked_images(input_image)):
                 i = total_crops + idx
                 context.add_image(f"crop_{i}", crop.image)
+                self.log_info(f"  crop_{i}: box={[round(x, 1) for x in crop.box]} score={crop.score:.3f}")
 
-                print(f"Crop {crop.box}")
                 metadata = {
                     "box": [float(x) for x in crop.box],
                     "score": float(crop.score)
@@ -118,10 +118,7 @@ class SegmentationStage(PipelineStage):
     def _prepare_mask_and_image(self, original_image: Image, small_mask: np.ndarray, box, radius: float = 5):
         x, y, w, h = box
 
-        print(f"Shape mask {small_mask.shape}")
-        print(f"Box {box}")
-        
-        full_mask = PILImage.new("L", original_image.size, 0)    
+        full_mask = PILImage.new("L", original_image.size, 0)
         small_mask_pil = Image(small_mask).L(copy=True).resize((w, h))
         full_mask.paste(small_mask, (x, y))    
         full_mask = full_mask.filter(ImageFilter.GaussianBlur(radius=radius))

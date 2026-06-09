@@ -70,9 +70,8 @@ class RemoteServer(ABC):
             else:
                 temp_path = Path(request.temp_path)
                 try:
-                    print(f"Got request {request.action} input {request.input}")
-
                     temp_path.mkdir(parents=True, exist_ok=True)
+                    print(f"dispatch: {request.action}", flush=True)
                     result_object = self.perform(
                         action=request.action, 
                         temp_path=temp_path, 

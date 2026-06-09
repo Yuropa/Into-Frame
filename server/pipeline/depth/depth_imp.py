@@ -28,7 +28,6 @@ class DepthGenerator(RemoteServer):
         with torch.no_grad():
             result = self.model.inference([image])
         self.report_progress(1.0, "Done")
-        print(f"extrinsics {result.extrinsics} {type(result.extrinsics)}")
         return result
     
 if __name__ == "__main__":

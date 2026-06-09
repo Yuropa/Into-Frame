@@ -1,13 +1,16 @@
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.segmentation.foreground_segmentation import ForegroundSeg
-from util.image_utils import Image 
+from util.image_utils import Image
 from util.device_utils import clean_device_cache
 from pathlib import Path
 from PIL import Image as PILImage
 from scipy.ndimage import binary_dilation
+import logging
 import numpy as np
 import gc
 import torch
+
+_log = logging.getLogger("pipeline")
 
 class ForegroundInpaint:
     def __init__(self, device, torch_dtype, seed: int = 0):
@@ -32,7 +35,7 @@ class ForegroundInpaint:
                 mask = mask[..., 0]
 
             fill_pct = mask.mean()
-            print(f"Mask fill: {(fill_pct * 100):.2f}%  ({int(mask.sum())} / {mask.size} px)", flush=True)
+            _log.info(f"  mask_{idx}: fill={fill_pct * 100:.1f}% ({int(mask.sum())}/{mask.size} px)")
             self._save_mask(mask, temp_path / f"mask_{idx}.png")
 
             dilation_factor = 50

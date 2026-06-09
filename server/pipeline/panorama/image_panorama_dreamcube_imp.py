@@ -8,7 +8,6 @@ from typing import Any
 import numpy as np
 from PIL import Image
 import py360convert
-import traceback
 import torch
 from einops import rearrange
 
@@ -154,19 +153,10 @@ class PanoGenerator(RemoteServer):
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
-            try:
-                print(f"Got input: {input}")
-                image = input["image"]
-                depth = input["depth"]
-                caption = input.get("caption", "")
-                result = self.pano(temp_path, image, depth, caption=caption, seed=int(input.get("seed", 0)))
-
-                print(f"Got dream cube values {result}")
-                return result
-            except Exception as e:
-                print(f"Unable to generate dream cube values: {e}")
-                traceback.print_exc()
-                raise e
+            image = input["image"]
+            depth = input["depth"]
+            caption = input.get("caption", "")
+            return self.pano(temp_path, image, depth, caption=caption, seed=int(input.get("seed", 0)))
         raise ValueError(f"Unknown action: {action}")
 
 if __name__ == "__main__":

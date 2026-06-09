@@ -62,7 +62,6 @@ class PanoGenerator(RemoteServer):
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "pano":
-            print(f"Got input image {input}")
             image = input["image"]
             fov = input.get("fov_degrees", 60.0)
             caption = input["caption"]
