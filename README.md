@@ -50,6 +50,8 @@ chmod +x frame.sh
 > **Note:** The setup script downloads all required models automatically. If that step fails (e.g. missing Hugging Face access for gated models), you can re-run the download manually:
 > ```bash
 > ./frame.sh download
+> # or with a specific config:
+> ./frame.sh download --config server/config_alt.yaml
 > ```
 
 ### 2. Start the Generation Server
@@ -68,7 +70,8 @@ By default this binds to `localhost:8080`, with an asset server on port `3000`.
 | `--port` | `8080` | Generation server port |
 | `--asset-port` | `3000` | Asset server port |
 | `--output`, `-o` | `./output` | Output directory |
-| `--debug`, `-d` | `False` | Save intermediate pipeline files |
+| `--debug`, `-d` | `false` | Save intermediate pipeline files |
+| `--config` | `server/config.yaml` | Pipeline configuration YAML |
 
 ### 3. Connect a Client
 
@@ -88,21 +91,39 @@ The server URL defaults to `ws://localhost:8080` and can be overridden via the `
 
 ## Running the Pipeline Directly
 
-Run the generation pipeline on a single image without starting the server:
+Run the generation pipeline on a single image (or directory of images) and produce a `.frame` archive, without starting the full server:
 
 ```bash
 ./frame.sh run path/to/image.jpg
 ```
 
-The input path is optional and defaults to `samples/Paris.jpg`.
+The input path is optional and defaults to `samples/Paris.jpg`. You can also pass a directory to batch-process multiple images.
 
 **Options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--output`, `-o` | `./output` | Output directory |
-| `--debug`, `-d` | `True` | Save intermediate pipeline files |
+| `--debug`, `-d` | `true` | Save intermediate pipeline files |
 | `--config` | `server/config.yaml` | Pipeline configuration YAML |
+
+---
+
+## Serving a Scene Locally
+
+If you already have a `.frame` archive (produced by `run` or pulled from a remote), you can serve it as a local scene server without re-running the pipeline:
+
+```bash
+./frame.sh local ./output/Paris.frame
+```
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `localhost` | Host to bind the server |
+| `--port` | `8080` | Server port |
+| `--asset-port` | `3000` | Asset server port |
 
 ---
 
@@ -116,6 +137,14 @@ To run the generation server on a remote machine with local port forwarding (use
 
 This SSH-tunnels ports `8080` and `3000` to `localhost` so the clients connect as if the server were local.
 
+`remote` accepts an optional subcommand as its first argument:
+
+| Subcommand | Description |
+|------------|-------------|
+| `server` *(default)* | Start the remote server with port forwarding |
+| `pull` | Pull generated output files from the remote machine |
+| `clear` | Remove cached output files on the remote machine |
+
 **Options:**
 
 | Flag | Default | Description |
@@ -127,6 +156,9 @@ This SSH-tunnels ports `8080` and `3000` to `localhost` so the clients connect a
 | `--asset-port` | `3000` | Asset server port |
 | `--ssh-port` | `22` | SSH port |
 | `--key` | — | Path to SSH private key |
+| `--debug`, `-d` | — | Save intermediate files on remote *(server only)* |
+| `--config` | — | Remote pipeline config YAML *(server only)* |
+| `--output`, `-o` | — | Output directory to clear *(clear only)* |
 
 `REMOTE_USER`, `REMOTE_HOST`, `REMOTE_DIR`, `PORT`, and `ASSET_PORT` can also be set as environment variables.
 
@@ -137,18 +169,25 @@ This SSH-tunnels ports `8080` and `3000` to `localhost` so the clients connect a
 `frame.sh` is the unified entry point for all server operations. Global options apply to all subcommands.
 
 ```
-./frame.sh [--env ENV] [--seed VALUE] <command> [options]
+./frame.sh [--env ENV] [--seed VALUE] [-v] <command> [options]
 
 Commands:
-  run       Run the pipeline on an image (default: samples/Paris.jpg)
+  run       Run the pipeline on an image (or directory) and produce a .frame archive
   server    Start the local generation server
+  local     Serve an existing .frame archive without re-running the pipeline
   download  Download all models required by the pipeline
-  remote    Start the server on a remote machine via SSH
+  remote    Start the server on a remote machine via SSH (subcommands: server, pull, clear)
   setup     Install dependencies and configure conda environments
   clear     Remove cached files from the output directory
 ```
 
-`--env` overrides the conda environment name (default: `frame`). `--seed` accepts a bare integer or `STAGE:VALUE` pairs and is repeatable.
+**Global options:**
+
+| Flag | Description |
+|------|-------------|
+| `--env ENV` | Conda environment name (default: `frame`) |
+| `--seed VALUE` | Random seed — bare integer or `STAGE:VALUE` pair; repeatable |
+| `-v`, `--verbose` | Print logs to the terminal instead of a log file |
 
 Pass `-h` or `--help` anywhere to see options:
 
@@ -157,6 +196,7 @@ Pass `-h` or `--help` anywhere to see options:
 ./frame.sh -h              # global help (explicit)
 ./frame.sh run -h          # run options
 ./frame.sh server -h       # server options
+./frame.sh local -h        # local options
 ./frame.sh remote -h       # remote options
 ```
 
@@ -182,7 +222,7 @@ By default this clears `./output`. Pass `--output` to target a different directo
 
 ```
 into-frame/
-├── frame.sh             # Unified CLI — setup, run, server, remote
+├── frame.sh             # Unified CLI — setup, run, local, server, remote
 ├── server/
 │   ├── main.py          # Python entry point (server, run, download)
 │   ├── pipeline/        # AI generation pipeline stages
