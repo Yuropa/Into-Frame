@@ -1,6 +1,8 @@
 from util.image_utils import Image
 from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 from transformers import CLIPProcessor, CLIPModel
+from PIL import Image as PILImage
+import numpy as np
 import torch
 
 _OBJECT_LABELS = frozenset(OBJECT_CATEGORIES.keys())
@@ -34,10 +36,30 @@ class ImageClipClassifier:
     def model_names(cls) -> list[str]:
         return [cls.MODEL_NAME]
 
+    def _to_rgb(self, image: Image) -> PILImage.Image:
+        """Convert to RGB, filling transparent pixels with the mean opaque color.
+
+        PIL's default RGBA→RGB conversion fills alpha=0 areas with black, which
+        creates a dark silhouette of whatever was masked out. For a sky crop whose
+        mask has a tower-shaped hole, that silhouette triggers CLIP's "tower"
+        classification even though the actual content is sky. Using the mean opaque
+        color as the fill makes the hole blend into the dominant content instead."""
+        pil = image.image
+        if pil.mode != "RGBA":
+            return image.rgb()
+        arr = np.array(pil).astype(np.float32)
+        alpha = arr[..., 3:4] / 255.0
+        rgb = arr[..., :3]
+        opaque = arr[..., 3] > 128
+        mean_color = rgb[opaque].mean(axis=0) if opaque.any() else np.array([128.0, 128.0, 128.0])
+        background = np.ones_like(rgb) * mean_color
+        composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
+        return PILImage.fromarray(composited, mode="RGB")
+
     def classify(self, image: Image) -> tuple[str, str]:
         """Returns (type, class) where type is the winning category label and
         class is 'object' or 'environment' depending on which dict it came from."""
-        inputs = self.processor(images=image.rgb(), return_tensors="pt").to(self.device)
+        inputs = self.processor(images=self._to_rgb(image), return_tensors="pt").to(self.device)
         with torch.no_grad():
             vision_out = self.model.vision_model(**inputs)
             image_features = self.model.visual_projection(vision_out.pooler_output)
