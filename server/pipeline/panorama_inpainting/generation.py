@@ -165,19 +165,12 @@ class PanoramaInpaintingStage(PipelineStage):
             for i, crop in enumerate(result.masked_images(Image(original_pil))):
                 box = [float(x) for x in crop.box]
 
-                # Re-project the crop from equirectangular onto a flat perspective
-                # view centred on the object's bounding box.  This removes the
-                # horizontal stretching that equirectangular imposes near the poles
-                # so downstream stages (captioning, mesh generation) see undistorted
-                # geometry.  The mask is reprojected with the same sample coordinates
-                # so the RGBA alpha channel stays aligned.
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
-                undistorted_pil = panorama.perspective_crop(box, mask=mask_array)
-                undistorted = Image(undistorted_pil)
+                crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, cls = self._classifier.classify(undistorted)
+                obj_type, cls = self._classifier.classify(crop_image)
 
-                context.add_image(f"crop_{i}", undistorted)
+                context.add_image(f"crop_{i}", crop_image)
                 context.add_object(f"metadata_{i}", {
                     "box":   box,
                     "score": float(crop.score),
@@ -185,12 +178,12 @@ class PanoramaInpaintingStage(PipelineStage):
                     "type":  obj_type,
                 })
                 if self.temp is not None:
-                    undistorted_pil.save(self.temp / f"crop_{i}.png")
+                    crop_image.image.save(self.temp / f"crop_{i}.png")
                     crop_caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
-                pass_objects.append((mask_array, box))
                 if cls == "object":
                     object_masks.append(mask_array)
+                    pass_objects.append((mask_array, box))
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
