@@ -10,10 +10,16 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         LaMa call and a single Flux call on the full downscaled panorama —
         matching the LayerPano3D research baseline.  Useful for A/B testing
         against the per-object crop approach.
+
+    max_object_area_fraction (float, default 0.15):
+        Objects whose mask covers more than this fraction of the total panorama
+        pixels are skipped for inpainting — they are too large to fill plausibly.
+        Still classified and logged; just not removed.
     """
-    def __init__(self, *args, full_panorama: bool = False, **kwargs):
+    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, **kwargs):
         super().__init__(*args, **kwargs)
         self.full_panorama = full_panorama
+        self.max_object_area_fraction = max_object_area_fraction
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
@@ -182,8 +188,12 @@ class PanoramaInpaintingStage(PipelineStage):
                     crop_caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
                 if cls == "object":
-                    object_masks.append(mask_array)
-                    pass_objects.append((mask_array, box))
+                    mask_fraction = float(mask_array.sum()) / (h * w)
+                    if mask_fraction > self.config.max_object_area_fraction:
+                        self.log_info(f"  crop_{i}: skipping inpaint, mask too large ({mask_fraction:.1%} of panorama)")
+                    else:
+                        object_masks.append(mask_array)
+                        pass_objects.append((mask_array, box))
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
