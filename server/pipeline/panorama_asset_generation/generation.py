@@ -20,12 +20,12 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         billboard_distance_m: float = 10.0,
         generator_type: str = "TRELLIS",
-        lod_face_fraction: float = 0.25,
+        lod_max_error_fraction: float = 0.03,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.billboard_distance_m = float(billboard_distance_m)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
-        self.lod_face_fraction = float(lod_face_fraction)
+        self.lod_max_error_fraction = float(lod_max_error_fraction)
 
 
 class PanoramaAssetGenerationStage(PipelineStage):
@@ -101,10 +101,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
             temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
             super().clean_up()
             mesh = gen.meshify(crop, temp_path, seed=self.seed)
+            mesh = mesh.repair()
             context.add_mesh(f"mesh_{idx}", mesh)
 
             try:
-                lod = mesh.simplify(face_fraction=self.config.lod_face_fraction)
+                lod = mesh.simplify(max_error_fraction=self.config.lod_max_error_fraction)
                 if crop is not None:
                     lod.apply_crop_texture(crop.rgba())
                 context.add_mesh(f"mesh_lod_{idx}", lod)
