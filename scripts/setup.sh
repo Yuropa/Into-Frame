@@ -131,6 +131,7 @@ unset _v
 LIB_DIR="$PROJECT_DIR/lib"
 CHECKPOINT_DIR="$PROJECT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
+REQUIREMENTS_DIR="$PROJECT_DIR/requirements"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
@@ -410,7 +411,7 @@ create_main_environment() {
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
-    conda run --no-capture-output -n frame pip install -r "$PROJECT_DIR/requirements.txt" \
+    conda run --no-capture-output -n frame pip install -r "$REQUIREMENTS_DIR/requirements.txt" \
         || { error "pip install failed in 'frame'"; exit 1; }
     conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git \
         || { error "AlphaCLIP install failed in 'frame'"; exit 1; }
@@ -548,7 +549,7 @@ setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
 
     create_env "sam3d"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-sam3d.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-sam3d.txt"
 
     local sam3d_flash_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION_SAM3D"*.whl)
     if [ ! -f "${sam3d_flash_wheels[0]}" ]; then
@@ -557,7 +558,7 @@ setup_sam3d() {
             -w "$FLASH_WHEEL_DIR" --no-build-isolation
     fi
 
-    run_in_env pip install -r "$PROJECT_DIR/requirements-p3d.txt" \
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-p3d.txt" \
         --find-links "$FLASH_WHEEL_DIR" --no-build-isolation
     install_pytorch3d
     # Install SAM3D's own deps one by one, skipping known-broken or incompatible packages.
@@ -738,7 +739,7 @@ setup_stable_point() {
     run_in_env pip install transformers==4.42.3
     clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
-    run_in_env pip install -r "$PROJECT_DIR/requirements-stable3d.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-stable3d.txt"
     run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
@@ -758,7 +759,7 @@ run_step "Installing Stable Point 3D" \
 setup_cubediff() {
     create_env "cubediff"
     clone_if_needed https://github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-cubediff.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-cubediff.txt"
     ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
     stop_env
@@ -775,7 +776,7 @@ setup_dreamcube() {
     create_env "dreamcube"
 
     clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-dreamcube.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-dreamcube.txt"
     run_in_env pip install ninja wheel setuptools
     install_pytorch3d
     run_in_env pip install peft
@@ -794,7 +795,7 @@ run_step "Installing DreamCube" \
 setup_lama() {
     create_env "lama" 3.10
     clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-lama.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-lama.txt"
     ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
 
     LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
@@ -858,7 +859,7 @@ setup_worldgen() {
 
     create_env "worldgen" 3.12
     run_in_env pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url "$TORCH_URL"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-worldgen.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-worldgen.txt"
     run_in_env pip install git+https://github.com/mit-han-lab/nunchaku.git
     run_in_env pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git
 

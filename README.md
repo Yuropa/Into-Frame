@@ -232,8 +232,8 @@ into-frame/
 ├── scripts/
 │   ├── setup.sh         # Full environment install script
 │   └── remote-server.sh # Standalone remote SSH launcher
+├── requirements/        # Per-environment pip requirements
 ├── Into Frame/          # Unity client (C#)
 ├── IntoFrame visionOS/  # macOS client (Swift + Metal, Xcode)
-├── docs/                # Project website
-└── requirements*.txt    # Per-environment pip requirements
+└── docs/                # Project website
 ```
