@@ -20,10 +20,12 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         billboard_distance_m: float = 10.0,
         generator_type: str = "TRELLIS",
+        lod_face_fraction: float = 0.25,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.billboard_distance_m = float(billboard_distance_m)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
+        self.lod_face_fraction = float(lod_face_fraction)
 
 
 class PanoramaAssetGenerationStage(PipelineStage):
@@ -100,6 +102,16 @@ class PanoramaAssetGenerationStage(PipelineStage):
             super().clean_up()
             mesh = gen.meshify(crop, temp_path, seed=self.seed)
             context.add_mesh(f"mesh_{idx}", mesh)
+
+            try:
+                lod = mesh.simplify(face_fraction=self.config.lod_face_fraction)
+                if crop is not None:
+                    lod.apply_crop_texture(crop.rgba())
+                context.add_mesh(f"mesh_lod_{idx}", lod)
+                self.log_info(f"  crop_{idx}: LOD {mesh.face_count} → {lod.face_count} faces")
+            except Exception as e:
+                self.log_info(f"  crop_{idx}: LOD generation failed ({e}), skipping")
+
             self.advance_progress(asset_task)
 
         gen.close()
@@ -150,6 +162,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
             )
             if depth is not None and depth < threshold:
                 if context.mesh(f"mesh_{idx}") is None:
+                    return False
+                if context.mesh(f"mesh_lod_{idx}") is None:
                     return False
         return True
 
