@@ -286,6 +286,14 @@ class Pipeline:
 
         return stages
 
+    def context_path(self) -> Optional[Path]:
+        """Returns the persisted output directory for the last-run input, or None."""
+        if not hasattr(self, "input") or self.input is None:
+            return None
+        if self.config.output is None:
+            return None
+        return self.config.output / self.input.uuid_string()
+
     def _create_output_directories(self) -> tuple[Optional[Path], Optional[Path]]:
         input_name = self.input.uuid_string()
         if self.config.output is not None:

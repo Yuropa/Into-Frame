@@ -40,8 +40,9 @@ usage() {
 Usage: $(basename "$0") [GLOBAL OPTIONS] [SUBCOMMAND [OPTIONS]]
 
 Subcommands (default: run):
-  run       Run the pipeline on an image
+  run       Run the pipeline on an image and produce a .frame archive
   server    Start the local generation server
+  local     Serve a .frame archive as a local scene server (no pipeline needed)
   download  Download all models for the pipeline
   remote    Start the server on a remote machine via SSH with port forwarding
   setup     Install dependencies and set up the conda environments
@@ -70,6 +71,12 @@ server options:
 download options:
   --config PATH      Pipeline config YAML      (default: server/config.yaml)
 
+local options:
+  ARCHIVE            Path to the .frame archive (required)
+  --host HOST        Bind host                 (default: ${HOST})
+  --port PORT        Server port               (default: ${PORT})
+  --asset-port PORT  Asset server port         (default: ${ASSET_PORT})
+
 clear options:
   -o, --output DIR   Output directory to clear  (default: server/${OUTPUT})
 
@@ -97,6 +104,8 @@ Environment variables:
 Examples:
   $(basename "$0") run samples/Iceland.jpg
   $(basename "$0") run samples/Paris.jpg --output ./out --debug true
+  $(basename "$0") local ./output/Paris.frame
+  $(basename "$0") local ./output/Paris.frame --port 9090
   $(basename "$0") server --port 9090
   $(basename "$0") download
   $(basename "$0") remote --host 192.168.1.10 --user admin
@@ -171,7 +180,7 @@ while [[ $# -gt 0 ]]; do
     --seed)       SEED_ARGS+=("$2"); shift 2 ;;
     -v|--verbose) VERBOSE="1";       shift   ;;
     -h|--help)    usage; exit 0 ;;
-    run|server|download|remote|setup|clear)
+    run|server|local|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
     -*) break ;;   # unknown global flag — let subcommand parser handle it
     *)  break ;;   # positional — treat as run INPUT
@@ -241,6 +250,40 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
   [[ -n "$DEBUG"  ]] && ARGS+=(--debug "$DEBUG")
   [[ -n "$CONFIG" ]] && ARGS+=(--config "$CONFIG")
 
+  exec python3 main.py "${ARGS[@]}"
+
+# ---------------------------------------------------------------------------
+# Subcommand: local  (serve a .frame archive without running the pipeline)
+# ---------------------------------------------------------------------------
+elif [[ "$SUBCOMMAND" == "local" ]]; then
+  ARCHIVE=""
+
+  if [[ $# -gt 0 && "$1" != -* ]]; then
+    ARCHIVE="$1"; shift
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    case $1 in
+      --host)       HOST="$2";       shift 2 ;;
+      --port)       PORT="$2";       shift 2 ;;
+      --asset-port) ASSET_PORT="$2"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
+      *) echo "Unknown local option: $1" >&2; exit 1 ;;
+    esac
+  done
+
+  if [[ -z "$ARCHIVE" ]]; then
+    echo "Error: archive path required for 'local'" >&2
+    usage
+    exit 1
+  fi
+
+  [[ "$ARCHIVE" != /* ]] && ARCHIVE="$PWD/$ARCHIVE"
+
+  activate_conda "$ENV"
+  cd "$SERVER_DIR"
+
+  ARGS=($(build_global_args) local "$ARCHIVE" --host "$HOST" --port "$PORT" --asset-port "$ASSET_PORT")
   exec python3 main.py "${ARGS[@]}"
 
 # ---------------------------------------------------------------------------

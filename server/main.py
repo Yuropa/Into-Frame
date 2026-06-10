@@ -5,6 +5,7 @@ os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
 import asyncio
 import argparse
+import logging
 from pathlib import Path
 from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration, check_conda_env
 from pipeline.pipeline_input import PipelineInput
@@ -118,6 +119,35 @@ def create_parser():
         help="Path to pipeline configuration YAML (default: config.yaml)"
     )
 
+    # local
+    local_parser = subparsers.add_parser(
+        "local",
+        help="Serve a .frame archive as a local scene server (no pipeline required)"
+    )
+    local_parser.add_argument(
+        "archive",
+        type=str,
+        help="Path to the .frame archive produced by 'run'"
+    )
+    local_parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="Host to bind the server"
+    )
+    local_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to run the WebSocket server on"
+    )
+    local_parser.add_argument(
+        "--asset-port",
+        type=int,
+        default=3000,
+        help="Port to run the asset server on"
+    )
+
     # download
     download_parser = subparsers.add_parser(
         "download",
@@ -187,13 +217,61 @@ def handle_server(args):
 
 
 def handle_run(args):
-    pipeline = Pipeline(
-        config=_create_pipeline_config(args=args)
-    )
+    config = _create_pipeline_config(args=args)
+    pipeline = Pipeline(config=config)
 
     input = PipelineInput(args.input)
     runner = PipelineRunner(pipeline)
     runner.run(input)
+
+    if config.save_files:
+        context_dir = pipeline.context_path()
+        if context_dir and context_dir.exists():
+            from pipeline.archive import create_frame_archive
+            archive = create_frame_archive(
+                context_dir=context_dir,
+                input_path=Path(args.input),
+                output_dir=Path(args.output),
+                stage_order=[s.name for s in pipeline.stages],
+            )
+            print(f"\nArchive: {archive}")
+
+
+def handle_local(args):
+    import logging
+    import tempfile
+    from pipeline.archive import load_frame_archive
+
+    archive_path = Path(args.archive)
+    if not archive_path.exists():
+        print(f"Error: archive not found: {archive_path}")
+        return
+
+    log = logging.getLogger("pipeline")
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"
+        ))
+        log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+    log.info(f"Loading archive: {archive_path.name}")
+
+    with tempfile.TemporaryDirectory(prefix="frame-local-") as tmpdir:
+        context, _ = load_frame_archive(archive_path, Path(tmpdir))
+
+        asset_dir = Path(tmpdir) / "assets"
+        asset_dir.mkdir(exist_ok=True)
+
+        sim_config = SimulationServerConfiguration()
+        sim_config.log = log
+        sim_config.address = args.host
+        sim_config.port = args.port
+        sim_config.asset_port = args.asset_port
+
+        server = SimulationServer(sim_config, pipeline=None, context=context, asset_dir=asset_dir)
+        asyncio.run(server.run())
 
 def handle_download(args):
     config = PipelineConfiguration(
@@ -222,6 +300,8 @@ def main():
         handle_server(args)
     elif args.command == "run":
         handle_run(args)
+    elif args.command == "local":
+        handle_local(args)
     elif args.command == "download":
         handle_download(args)
 

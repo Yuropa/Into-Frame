@@ -30,13 +30,24 @@ class SimulationServerConfiguration():
 class SimulationServer():
     _context: Optional[PipelineContext]
 
-    def __init__(self, config: SimulationServerConfiguration, pipeline: Pipeline) -> None:
+    def __init__(
+        self,
+        config: SimulationServerConfiguration,
+        pipeline: Optional[Pipeline] = None,
+        context: Optional[PipelineContext] = None,
+        asset_dir: Optional[Path] = None,
+    ) -> None:
         self.config = config
         self.pipeline = pipeline
         self.log = config.log
         self.clients: set = set()
 
-        self.asset_dir = pipeline.config.temp / "assets"
+        if asset_dir is not None:
+            self.asset_dir = asset_dir
+        elif pipeline is not None:
+            self.asset_dir = pipeline.config.temp / "assets"
+        else:
+            raise ValueError("Either pipeline or asset_dir must be provided")
 
         self.scene = Scene()
 
@@ -44,7 +55,7 @@ class SimulationServer():
         self._client_connected = asyncio.Event()
 
         self._asset_server = web.Application()
-        self._context = None
+        self._context = context
 
     def port(self):
         return self.config.port
@@ -185,6 +196,16 @@ class SimulationServer():
         self._pipeline_task = asyncio.ensure_future(self._progress_scene())
 
     async def _progress_scene(self):
+        if self.pipeline is None:
+            # Local mode: serve from the pre-loaded context without running the pipeline.
+            if self._context is not None:
+                self.scene = self._context.scene(ContextKey.SCENE)
+                self.log.info("Serving pre-loaded scene")
+                await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+            else:
+                await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": "No context loaded"})
+            return
+
         self.log.info("Starting pipeline")
         progress_queue = queue.SimpleQueue()
 
