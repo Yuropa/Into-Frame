@@ -26,11 +26,18 @@ def create_frame_archive(
     }
     manifest_bytes = json.dumps(manifest, indent=2).encode()
 
+    def _exclude_build(tarinfo: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        # Strip per-stage build/ directories — intermediate files, not needed for playback.
+        parts = Path(tarinfo.name).parts
+        if "build" in parts:
+            return None
+        return tarinfo
+
     with tarfile.open(archive_path, "w:gz") as tar:
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))
-        tar.add(context_dir, arcname="context")
+        tar.add(context_dir, arcname="context", filter=_exclude_build)
 
     return archive_path
 

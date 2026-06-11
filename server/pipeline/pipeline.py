@@ -294,24 +294,13 @@ class Pipeline:
             return None
         return self.config.output / self.input.uuid_string()
 
-    def _create_output_directories(self) -> tuple[Optional[Path], Optional[Path]]:
+    def _create_output_directories(self) -> Optional[Path]:
         input_name = self.input.uuid_string()
         if self.config.output is not None:
             output = self.config.output / input_name
             output.mkdir(parents=True, exist_ok=True)
-        else:
-            output = None
-
-        if self.config.output is not None:
-            temp = self.config.output / input_name / "build"
-            temp.mkdir(parents=True, exist_ok=True)
-        elif self.config.temp is not None:
-            temp = self.config.temp / input_name
-            temp.mkdir(parents=True, exist_ok=True)
-        else:
-            temp = None
-
-        return output, temp
+            return output
+        return None
 
     def log_info(self, msg):
         self.config.log.info(msg)
@@ -347,7 +336,7 @@ class Pipeline:
     def _save_context(self, context: PipelineContext):
         if self.config.save_files:
             self.log_info("Writing context to disk")
-            output, _ = self._create_output_directories()
+            output = self._create_output_directories()
             if output is not None:
                 context.save(path=output)
 
@@ -357,8 +346,8 @@ class Pipeline:
             progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
 
     def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task) -> bool:
-        output_root, temp_root = self._create_output_directories()
-        stage.set_output(output_root, temp_root)
+        output_root = self._create_output_directories()
+        stage.set_output(output_root)
 
         with monitor.stage(stage.name):
             try:
@@ -392,7 +381,7 @@ class Pipeline:
         self.log_info(f"Seed: {self.config.seeds.describe()}")
         self.log_info(f"Running with input: {self.input}")
 
-        output, _ = self._create_output_directories()
+        output = self._create_output_directories()
         if output is not None:
             seed_data = {
                 "global_seed": self.config.seeds.global_seed,
@@ -407,7 +396,7 @@ class Pipeline:
         if self.config.output is not None and self.config.output.exists():
             self.log_info("Loading cached content")
             stage_order = [stage.name for stage in self.stages]
-            output, _ = self._create_output_directories()
+            output = self._create_output_directories()
             context.load(output, stage_order)
 
             orig_input_image = context.image(ContextKey.INPUT)
