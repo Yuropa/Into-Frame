@@ -122,46 +122,22 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Conda activation
+# Conda env check
 # ---------------------------------------------------------------------------
-activate_conda() {
+check_env() {
   local env="$1"
-  local conda_sh=""
-
-  if command -v conda &>/dev/null; then
-    local base
-    base="$(conda info --base 2>/dev/null || true)"
-    [[ -f "$base/etc/profile.d/conda.sh" ]] && conda_sh="$base/etc/profile.d/conda.sh"
-  fi
-
-  if [[ -z "$conda_sh" ]]; then
-    for candidate in \
-      "$HOME/miniconda3/etc/profile.d/conda.sh" \
-      "$HOME/anaconda3/etc/profile.d/conda.sh" \
-      "/opt/miniconda3/etc/profile.d/conda.sh" \
-      "/opt/anaconda3/etc/profile.d/conda.sh"; do
-      if [[ -f "$candidate" ]]; then
-        conda_sh="$candidate"
-        break
-      fi
-    done
-  fi
-
-  if [[ -z "$conda_sh" ]]; then
-    echo "Error: conda init script not found. Is conda installed?" >&2
+  if [[ "${CONDA_DEFAULT_ENV:-}" != "$env" ]]; then
+    echo "Error: wrong conda environment '${CONDA_DEFAULT_ENV:-none}'. Activate '$env' first:" >&2
+    echo "  conda activate $env" >&2
     exit 1
   fi
-
-  # shellcheck source=/dev/null
-  source "$conda_sh"
-  conda activate "$env"
 }
 
 # ---------------------------------------------------------------------------
 # Build python global-args array
 # ---------------------------------------------------------------------------
 build_global_args() {
-  local args=("--env" "$ENV")
+  local args=()
   for s in "${SEED_ARGS[@]+"${SEED_ARGS[@]}"}"; do
     args+=("--seed" "$s")
   done
@@ -214,7 +190,7 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
   [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
   [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
 
-  activate_conda "$ENV"
+  check_env "$ENV"
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) run "$INPUT" --output "$OUTPUT")
@@ -243,7 +219,7 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
   [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
   [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
 
-  activate_conda "$ENV"
+  check_env "$ENV"
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) server --host "$HOST" --port "$PORT" --asset-port "$ASSET_PORT" --output "$OUTPUT")
@@ -280,7 +256,7 @@ elif [[ "$SUBCOMMAND" == "local" ]]; then
 
   [[ "$ARCHIVE" != /* ]] && ARCHIVE="$PWD/$ARCHIVE"
 
-  activate_conda "$ENV"
+  check_env "$ENV"
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) local "$ARCHIVE" --host "$HOST" --port "$PORT" --asset-port "$ASSET_PORT")
@@ -298,7 +274,7 @@ elif [[ "$SUBCOMMAND" == "download" ]]; then
     esac
   done
 
-  activate_conda "$ENV"
+  check_env "$ENV"
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) download)

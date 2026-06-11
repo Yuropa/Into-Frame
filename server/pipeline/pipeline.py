@@ -116,6 +116,7 @@ def check_conda_env(expected: str = "frame"):
         )
         sys.exit(1)
 
+
 def _clear_directory(path: Path):
     if not path.exists():
         return

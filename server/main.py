@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
 import os
+import sys
+
+_env = os.environ.get("CONDA_DEFAULT_ENV")
+if _env != "frame":
+    print(
+        f"Error: wrong conda environment '{_env}'. "
+        f"Activate 'frame' first:\n  conda activate frame",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # Setting in case we run on macOS
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
@@ -7,7 +18,7 @@ import asyncio
 import argparse
 import logging
 from pathlib import Path
-from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration, check_conda_env
+from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration
 from pipeline.pipeline_input import PipelineInput
 from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
@@ -19,12 +30,6 @@ def create_parser():
         description="Generate immersive scenes from an image"
     )
 
-    parser.add_argument(
-        "--env",
-        type=str,
-        default="frame",
-        help="Expected conda environment name (default: frame)"
-    )
     parser.add_argument(
         "--seed",
         type=str,
@@ -293,8 +298,6 @@ def main():
     except SystemExit as e:
         print(f"{e}")
         return
-
-    check_conda_env(args.env)
 
     if args.command == "server":
         handle_server(args)
