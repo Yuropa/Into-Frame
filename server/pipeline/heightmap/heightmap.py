@@ -85,6 +85,7 @@ class HeightMapStage(PipelineStage):
         depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         self.advance_progress(task)
 
         if depth is None:
@@ -100,6 +101,9 @@ class HeightMapStage(PipelineStage):
         if sky_mask is not None:
             self.log_info("Using sky mask to exclude horizon artefacts")
 
+        if panorama_depth is not None:
+            self.log_info("Panorama depth available — will fill unseen terrain regions")
+
         height_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
@@ -112,6 +116,7 @@ class HeightMapStage(PipelineStage):
             sky_mask=sky_mask,
             flood_fill=cfg.flood_fill,
             flood_fill_max_step=cfg.flood_fill_max_step,
+            panorama_depth=panorama_depth,
         )
         self.advance_progress(task)
 

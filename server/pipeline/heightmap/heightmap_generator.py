@@ -22,6 +22,7 @@ class HeightMapGenerator:
         sky_mask: Optional[np.ndarray] = None,
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
+        panorama_depth: Optional[Depth] = None,
     ) -> np.ndarray:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -45,6 +46,9 @@ class HeightMapGenerator:
         grid_size_meters: side length of the square grid; both X and Z span ±half.
         use_equirectangular: treat depth as equirectangular (radial distances); otherwise
                              use pinhole unprojection via intrinsics.
+        panorama_depth: optional 360° equirectangular depth map (radial metres). After
+                        the primary depth is projected and flood-filled, any still-empty
+                        grid cells are filled from this source before interpolation.
         """
         d = depth.depth.astype(np.float32)
 
@@ -118,6 +122,20 @@ class HeightMapGenerator:
             )
             height_map[~accepted] = np.nan
 
+        # Fill remaining NaN cells from the panorama depth (360° coverage) before
+        # falling back to pure interpolation. Only cells that are still empty after
+        # the primary projection are touched, so rectilinear data always wins.
+        if panorama_depth is not None:
+            height_map = HeightMapGenerator._fill_from_panorama_depth(
+                height_map=height_map,
+                panorama_depth=panorama_depth,
+                sky_mask=sky_mask,
+                grid_size_meters=grid_size_meters,
+                grid_resolution=grid_resolution,
+                ground_y_max=ground_y_max,
+                ground_y_min=ground_y_min,
+            )
+
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
@@ -170,6 +188,72 @@ class HeightMapGenerator:
                         queue.append((nr, nc))
 
         return accepted
+
+    @staticmethod
+    def _fill_from_panorama_depth(
+        height_map: np.ndarray,
+        panorama_depth: "Depth",
+        sky_mask: Optional[np.ndarray],
+        grid_size_meters: float,
+        grid_resolution: int,
+        ground_y_max: float,
+        ground_y_min: float,
+    ) -> np.ndarray:
+        """
+        Project a 360° equirectangular depth map into empty (NaN) cells of height_map.
+
+        Only cells that are already NaN are written; existing data is never overwritten.
+        The same ground-plane filters used for the primary depth are applied so sky and
+        wall pixels in the panorama don't pollute the terrain grid.
+        """
+        missing = np.isnan(height_map)
+        if not np.any(missing):
+            return height_map
+
+        pd = panorama_depth.depth.astype(np.float32)
+        if sky_mask is not None and sky_mask.shape == pd.shape:
+            pd = pd.copy()
+            pd[sky_mask] = np.nan
+
+        X, Y, Z = Panorama.equirectangular_unproject(Depth(pd))
+
+        half = grid_size_meters / 2.0
+        ground_mask = (
+            (Y <= ground_y_max)
+            & (Y >= ground_y_min)
+            & (np.abs(Z) <= half)
+            & (np.abs(X) <= half)
+            & np.isfinite(pd)
+        )
+
+        Xg = X[ground_mask]
+        Yg = Y[ground_mask]
+        Zg = Z[ground_mask]
+
+        if len(Xg) == 0:
+            return height_map
+
+        x_edges = np.linspace(-half, half, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
+
+        xi = np.digitize(Xg, x_edges) - 1
+        zi = np.digitize(Zg, z_edges) - 1
+
+        in_bounds = (
+            (xi >= 0) & (xi < grid_resolution)
+            & (zi >= 0) & (zi < grid_resolution)
+        )
+        xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
+
+        pano_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
+        pano_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
+        np.add.at(pano_sum, (zi, xi), Yg)
+        np.add.at(pano_cnt, (zi, xi), 1)
+
+        has_pano = (pano_cnt > 0) & missing
+        result = height_map.copy()
+        result[has_pano] = (pano_sum[has_pano] / pano_cnt[has_pano]).astype(np.float32)
+        return result
 
     @staticmethod
     def _smooth_edge_preserving(
