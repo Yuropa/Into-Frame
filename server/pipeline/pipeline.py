@@ -165,6 +165,7 @@ class PipelineConfiguration:
 
     output: Optional[Path]
     save_files: bool = False
+    debug_archive: bool = False
 
     def __init__(
         self,

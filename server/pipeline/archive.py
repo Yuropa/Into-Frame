@@ -8,6 +8,7 @@ from PIL import Image as PILImage
 from pipeline.pipeline_context import PipelineContext
 
 EXTENSION = ".frame"
+DEBUG_EXTENSION = ".debug.frame"
 
 
 def _add_dir(tar: tarfile.TarFile, src_dir: Path, arcname: str, filter_fn) -> None:
@@ -61,6 +62,33 @@ def create_frame_archive(
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))
         _add_dir(tar, context_dir, arcname="context", filter_fn=_exclude_build)
+
+    return archive_path
+
+
+def create_debug_frame_archive(
+    context_dir: Path,
+    input_path: Path,
+    output_dir: Path,
+    stage_order: list[str],
+) -> Path:
+    """Package a pipeline context directory including build/ debug files into a .debug.frame archive."""
+    stem = Path(input_path).stem
+    archive_path = output_dir / f"{stem}{DEBUG_EXTENSION}"
+
+    manifest = {
+        "input_name": Path(input_path).name,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "stages": stage_order,
+        "debug": True,
+    }
+    manifest_bytes = json.dumps(manifest, indent=2).encode()
+
+    with tarfile.open(archive_path, "w:xz", preset=9) as tar:
+        info = tarfile.TarInfo(name="manifest.json")
+        info.size = len(manifest_bytes)
+        tar.addfile(info, io.BytesIO(manifest_bytes))
+        _add_dir(tar, context_dir, arcname="context", filter_fn=lambda t: t)
 
     return archive_path
 

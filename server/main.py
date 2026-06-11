@@ -105,6 +105,12 @@ def create_parser():
         type=bool
     )
     server_parser.add_argument(
+        '--debug-archive',
+        help="Also write a .debug.frame archive containing intermediate build files",
+        default=False,
+        action=argparse.BooleanOptionalAction,
+    )
+    server_parser.add_argument(
         "-o", "--output",
         type=str,
         default="./output",
@@ -140,6 +146,12 @@ def create_parser():
         help="Saves intermediate files for debugg",
         default=True,
         type=bool
+    )
+    run_parser.add_argument(
+        '--debug-archive',
+        help="Also write a .debug.frame archive containing intermediate build files",
+        default=True,
+        action=argparse.BooleanOptionalAction,
     )
     run_parser.add_argument(
         "--config",
@@ -222,6 +234,7 @@ def _create_pipeline_config(args):
     )
 
     config.save_files = args.debug
+    config.debug_archive = getattr(args, "debug_archive", False)
 
     return config
 
@@ -256,14 +269,23 @@ def handle_run(args):
     if config.save_files:
         context_dir = pipeline.context_path()
         if context_dir and context_dir.exists():
-            from pipeline.archive import create_frame_archive
+            from pipeline.archive import create_frame_archive, create_debug_frame_archive
+            stage_order = [s.name for s in pipeline.stages]
             archive = create_frame_archive(
                 context_dir=context_dir,
                 input_path=Path(args.input),
                 output_dir=Path(args.output),
-                stage_order=[s.name for s in pipeline.stages],
+                stage_order=stage_order,
             )
             print(f"\nArchive: {archive}")
+            if config.debug_archive:
+                debug_archive = create_debug_frame_archive(
+                    context_dir=context_dir,
+                    input_path=Path(args.input),
+                    output_dir=Path(args.output),
+                    stage_order=stage_order,
+                )
+                print(f"Debug archive: {debug_archive}")
 
 
 def handle_local(args):

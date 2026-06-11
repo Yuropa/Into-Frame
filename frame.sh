@@ -57,18 +57,21 @@ Global options:
   -h, --help         Show this help message
 
 run options:
-  INPUT              Input image or directory  (default: ${INPUT})
-  -o, --output DIR   Output directory          (default: ${OUTPUT})
-  -d, --debug BOOL   Save intermediate files   (default: true)
-  --config PATH      Pipeline config YAML      (default: server/config.yaml)
+  INPUT                  Input image or directory  (default: ${INPUT})
+  -o, --output DIR       Output directory          (default: ${OUTPUT})
+  -d, --debug BOOL       Save intermediate files   (default: true)
+  --debug-archive        Also write a .debug.frame archive with build/ files (default: on)
+  --no-debug-archive     Disable .debug.frame generation
+  --config PATH          Pipeline config YAML      (default: server/config.yaml)
 
 server options:
-  --host HOST        Bind host                 (default: ${HOST})
-  --port PORT        Server port               (default: ${PORT})
-  --asset-port PORT  Asset server port         (default: ${ASSET_PORT})
-  -o, --output DIR   Output directory          (default: ${OUTPUT})
-  -d, --debug BOOL   Save intermediate files   (default: false)
-  --config PATH      Pipeline config YAML      (default: server/config.yaml)
+  --host HOST            Bind host                 (default: ${HOST})
+  --port PORT            Server port               (default: ${PORT})
+  --asset-port PORT      Asset server port         (default: ${ASSET_PORT})
+  -o, --output DIR       Output directory          (default: ${OUTPUT})
+  -d, --debug BOOL       Save intermediate files   (default: false)
+  --debug-archive        Also write a .debug.frame archive with build/ files (default: off)
+  --config PATH          Pipeline config YAML      (default: server/config.yaml)
 
 download options:
   --config PATH      Pipeline config YAML      (default: server/config.yaml)
