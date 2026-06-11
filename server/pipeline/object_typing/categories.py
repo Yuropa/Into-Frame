@@ -34,12 +34,22 @@ OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "cart":         ["a photo of a cart or trolley", "a photo of a shopping cart", "a photo of a market stall cart"],
     "kiosk":        ["a photo of a kiosk or booth", "a photo of a ticket booth", "a photo of a street vendor stand"],
     "luggage":      ["a photo of luggage or a suitcase", "a photo of bags or backpacks", "a photo of a travel bag"],
+    "clouds":       ["a photo of clouds in the sky", "a photo of storm clouds", "a photo of white fluffy clouds",
+                     "a photo of cumulus clouds", "a photo of cirrus clouds", "a photo of dark storm clouds",
+                     "a photo of a cloudy sky", "a photo of cloud formations"],
     "other":        ["a photo of an unidentified object", "a miscellaneous item outdoors"],
 }
 
 ENVIRONMENT_CATEGORIES: Final[dict[str, list[str]]] = {
     "sky":          ["a photo of the sky", "a clear blue sky", "an overcast or cloudy sky"],
-    "clouds":       ["a photo of clouds in the sky", "a photo of storm clouds", "a photo of white fluffy clouds"],
+    "fog":          ["a photo of fog", "a photo of a foggy landscape", "a photo of mist or haze", "a photo of a misty morning"],
+    "haze":         ["a photo of haze", "a photo of a hazy sky", "a photo of atmospheric haze or smog"],
+    "sunset":       ["a photo of a sunset", "a photo of a sunrise", "a photo of golden hour sky",
+                     "a photo of colorful sky at dusk", "a photo of twilight or dawn sky"],
+    "aurora":       ["a photo of an aurora", "a photo of the northern lights", "a photo of aurora borealis or australis"],
+    "rainbow":      ["a photo of a rainbow", "a photo of a double rainbow", "a photo of a rainbow in the sky"],
+    "moon":         ["a photo of the moon", "a photo of a full moon in the sky", "a photo of a crescent moon"],
+    "stars":        ["a photo of stars in the sky", "a photo of a starry night sky", "a photo of the milky way"],
     "water":        ["a photo of water", "a photo of a body of water", "a calm water surface"],
     "river":        ["a photo of a river", "a photo of a flowing river or stream", "a photo of a riverbank"],
     "ocean":        ["a photo of the ocean", "a photo of the sea", "ocean waves on a shore"],
