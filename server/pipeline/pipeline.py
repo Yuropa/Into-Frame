@@ -434,6 +434,7 @@ class Pipeline:
                     ran = True
                 else:
                     self.log_info(f"Skipping cached stage {stage.name}")
+                    progress.advance(task, 1)
                     ran = False
 
                 context.pop_stage()
