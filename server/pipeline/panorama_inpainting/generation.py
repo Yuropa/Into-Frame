@@ -141,7 +141,7 @@ class PanoramaInpaintingStage(PipelineStage):
             self._classifier = ImageClipClassifier(self.preferred_device)
 
         # Dilate the mask so LaMa/Flux have enough boundary material to blend into.
-        lama_dilation = 50
+        lama_dilation = 25
 
         object_masks = []  # foreground-object masks for the visual panorama composite
         all_masks = []     # every detected mask, for the extraction overlay
@@ -383,8 +383,8 @@ class PanoramaInpaintingStage(PipelineStage):
             flux_mask_s,
             temp_path=self.temp,
             prompt=caption,
-            num_inference_steps=28,
-            guidance_scale=7.0,
+            num_inference_steps=36,
+            guidance_scale=10.0,
         )
         flux_inpainter.close()
 
@@ -448,7 +448,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 self.advance_progress(inpaint_task)
                 continue
 
-            pad     = max(64, int(max(bw, bh) * 0.5))
+            pad     = max(64, int(max(bw, bh) * 1.0))
             crop_y0 = max(0, top    - pad)
             crop_y1 = min(h, bottom + pad)
             crop_x0 = max(0, left   - pad)
@@ -459,20 +459,24 @@ class PanoramaInpaintingStage(PipelineStage):
                 iterations=lama_dilation,
             ).astype(np.float32)
 
-            lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
-            mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
+            skip_lama = min(bw, bh) < 80
+            if skip_lama:
+                self.log_info(f"  LaMa: crop_{lama_idx} skipped ({int(bw)}×{int(bh)}px, too small → Flux only)")
+            else:
+                lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
+                mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
-            self.log_info(f"  LaMa: crop_{lama_idx} ({crop_x1 - crop_x0}×{crop_y1 - crop_y0}px)")
-            lama_pil = lama_inpainter.inpaint(lama_crop, mask_crop, temp_path=self.temp)
-            lama_arr = np.array(lama_pil)
+                self.log_info(f"  LaMa: crop_{lama_idx} ({crop_x1 - crop_x0}×{crop_y1 - crop_y0}px)")
+                lama_pil = lama_inpainter.inpaint(lama_crop, mask_crop, temp_path=self.temp)
+                lama_arr = np.array(lama_pil)
 
-            composited = current_arr[crop_y0:crop_y1, crop_x0:crop_x1].copy()
-            composited[dilated_crop > 0.5] = lama_arr[dilated_crop > 0.5]
-            current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
+                composited = current_arr[crop_y0:crop_y1, crop_x0:crop_x1].copy()
+                composited[dilated_crop > 0.5] = lama_arr[dilated_crop > 0.5]
+                current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
 
-            if self.temp is not None:
-                lama_pil.save(self.temp / f"inpaint_{lama_idx}_lama_crop.png")
-                PILImage.fromarray(current_arr).save(self.temp / f"inpaint_{lama_idx}_lama_panorama.png")
+                if self.temp is not None:
+                    lama_pil.save(self.temp / f"inpaint_{lama_idx}_lama_crop.png")
+                    PILImage.fromarray(current_arr).save(self.temp / f"inpaint_{lama_idx}_lama_panorama.png")
 
             lama_states.append((mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1))
             self.advance_progress(inpaint_task)
@@ -520,8 +524,8 @@ class PanoramaInpaintingStage(PipelineStage):
                     mask_crop,
                     temp_path=self.temp,
                     prompt=caption,
-                    num_inference_steps=28,
-                    guidance_scale=7.0,
+                    num_inference_steps=36,
+                    guidance_scale=10.0,
                 )
 
                 if self.temp is not None:

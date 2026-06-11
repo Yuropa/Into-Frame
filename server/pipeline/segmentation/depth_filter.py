@@ -29,8 +29,8 @@ class DepthObjectFilter:
         self,
         result: SegmentationResult,
         depth: Depth,
-        threshold: float = -0.05,
-        edge_threshold: float = 0.02,
+        threshold: float = 0.0,
+        edge_threshold: float = 0.01,
     ) -> SegmentationResult:
         if result.is_empty():
             return result

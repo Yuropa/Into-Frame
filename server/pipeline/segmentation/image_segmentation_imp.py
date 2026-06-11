@@ -24,7 +24,7 @@ class ImageSegServer(RemoteServer):
             points_per_side=64,
             pred_iou_thresh=0.7,
             stability_score_thresh=0.80,
-            min_mask_region_area=100,
+            min_mask_region_area=50,
             box_nms_thresh=0.7,
         )
 
