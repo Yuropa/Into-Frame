@@ -12,8 +12,9 @@ _ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 class ImageClipClassifier:
     MODEL_NAME = "openai/clip-vit-base-patch32"
 
-    def __init__(self, device: torch.device):
+    def __init__(self, device: torch.device, confidence_threshold: float = 0.75):
         self.device = device
+        self._confidence_threshold = confidence_threshold
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_NAME)
         self.model = CLIPModel.from_pretrained(self.MODEL_NAME).to(device)
         self.model.eval()
@@ -58,18 +59,37 @@ class ImageClipClassifier:
 
     def classify(self, image: Image) -> tuple[str, str]:
         """Returns (type, class) where type is the winning category label and
-        class is 'object' or 'environment' depending on which dict it came from."""
+        class is 'object', 'environment', or 'indeterminate'.
+
+        'indeterminate' is returned when neither side clears confidence_threshold,
+        computed as max(obj_score, env_score) / (obj_score + env_score) — the same
+        formula used by the caption-based classifier."""
         inputs = self.processor(images=self._to_rgb(image), return_tensors="pt").to(self.device)
         with torch.no_grad():
             vision_out = self.model.vision_model(**inputs)
             image_features = self.model.visual_projection(vision_out.pooler_output)
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
-        # Per-category score = max cosine similarity across that category's prompts
         sims = (image_features @ self._text_features.T).squeeze(0)
-        best_label = max(
-            self._category_slices,
-            key=lambda t: sims[t[1]:t[2]].max().item()
-        )[0]
-        cls = "object" if best_label in _OBJECT_LABELS else "environment"
-        return best_label, cls
+
+        best_obj_label, best_obj_score = None, -float("inf")
+        best_env_label, best_env_score = None, -float("inf")
+        for label, start, end in self._category_slices:
+            score = sims[start:end].max().item()
+            if label in _OBJECT_LABELS:
+                if score > best_obj_score:
+                    best_obj_score, best_obj_label = score, label
+            else:
+                if score > best_env_score:
+                    best_env_score, best_env_label = score, label
+
+        obj_s = max(0.0, best_obj_score)
+        env_s = max(0.0, best_env_score)
+        total = obj_s + env_s
+        confidence = max(obj_s, env_s) / total if total > 0 else 0.0
+
+        if confidence < self._confidence_threshold:
+            return "indeterminate", "indeterminate"
+        if best_obj_score >= best_env_score:
+            return best_obj_label, "object"
+        return best_env_label, "environment"
