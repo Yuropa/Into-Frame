@@ -18,7 +18,7 @@ class ForegroundInpaint:
         self.torch_dtype = torch_dtype
         self.seed = seed
 
-    def inpaint(self, input: Image, temp_path: Path) -> Image:
+    def inpaint(self, input: Image, temp_path: Path, on_iteration=None) -> Image:
         result = input
         for idx in range(20):
             result = result.copy()
@@ -35,7 +35,7 @@ class ForegroundInpaint:
                 mask = mask[..., 0]
 
             fill_pct = mask.mean()
-            _log.info(f"  mask_{idx}: fill={fill_pct * 100:.1f}% ({int(mask.sum())}/{mask.size} px)")
+            _log.info(f"  iter {idx + 1}: fill={fill_pct * 100:.1f}% ({int(mask.sum())}/{mask.size} px)")
             self._save_mask(mask, temp_path / f"mask_{idx}.png")
 
             dilation_factor = 50
@@ -47,6 +47,9 @@ class ForegroundInpaint:
             # Save the masked input image
             masked_save_path = temp_path / f"masked_input_{idx}.png"
             masked_input.save(masked_save_path)
+
+            if on_iteration is not None:
+                on_iteration(idx, fill_pct)
 
             if fill_pct < 0.01:
                 break

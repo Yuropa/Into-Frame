@@ -1,6 +1,9 @@
 from pipeline.context_value import ContextValue, ValueKeys
 from pathlib import Path
 from typing import Literal, TypeAlias, Optional, Any
+import logging
+
+_log = logging.getLogger("pipeline")
 from scene.mesh import Mesh
 from util.depth_utils import Depth
 from util.image_utils import Image
@@ -281,27 +284,25 @@ class PipelineContext():
                 value.read(path)
                 target[name] = value
             except Exception as e:
-                print(f"Skipping '{name}' in {path}: {e}")
+                _log.warning(f"Skipping '{name}' in {path}: {e}")
 
     def log_state(self):
-        def _print_values(values: dict, indent: str):
+        def _emit_values(values: dict, indent: str):
             items = sorted(values.items())
             for i, (name, value) in enumerate(items):
                 connector = "└──" if i == len(items) - 1 else "├──"
-                print(f"{indent}{connector} {name}: {value.describe()}")
+                _log.info(f"{indent}{connector} {name}: {value.describe()}")
 
-        print("\n PipelineContext")
+        _log.info("PipelineContext:")
         if self._state:
             has_stages = bool(self._stage_state)
             connector = "├──" if has_stages else "└──"
-            print(f" {connector} [global]")
-            _print_values(self._state, " │   " if has_stages else "     ")
+            _log.info(f" {connector} [global]")
+            _emit_values(self._state, " │   " if has_stages else "     ")
 
         stages = list(self._stage_state.items())
         for i, (stage_name, values) in enumerate(stages):
             connector = "└──" if i == len(stages) - 1 else "├──"
-            print(f" {connector} [{stage_name}]")
-            _print_values(values, "     " if i == len(stages) - 1 else " │   ")
-
-        print()
+            _log.info(f" {connector} [{stage_name}]")
+            _emit_values(values, "     " if i == len(stages) - 1 else " │   ")
         
