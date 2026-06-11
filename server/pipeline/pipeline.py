@@ -414,7 +414,7 @@ class Pipeline:
         if progress_queue is not None:
             progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
 
-    def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task) -> bool:
+    def _run_stage(self, stage: PipelineStage, context: PipelineContext, progress_queue: Optional[queue.SimpleQueue], monitor, progress, task, force: bool = False) -> bool:
         output_root = self._create_output_directories()
         stage.set_output(output_root)
 
@@ -427,7 +427,7 @@ class Pipeline:
                 self._post_progress(progress_queue)
 
                 context.push_stage(stage.name)
-                if not stage.has_expected_output(context):
+                if force or not stage.has_expected_output(context):
                     context = stage.run(context)
                     stage.log_memory_usage()
                     stage.clean_up()
@@ -534,15 +534,18 @@ class Pipeline:
             try:
                 with live_ctx:
                     task = progress.add_task("Processing...", total=len(self.stages))
+                    dirty = False
                     for stage in self.stages:
-                        self._run_stage(
+                        ran = self._run_stage(
                             stage=stage,
                             context=context,
                             progress_queue=progress_queue,
                             monitor=monitor,
                             progress=progress,
                             task=task,
+                            force=dirty,
                         )
+                        dirty = dirty or ran
             except BaseException as _exc:
                 _pipeline_exc = _exc
                 raise
