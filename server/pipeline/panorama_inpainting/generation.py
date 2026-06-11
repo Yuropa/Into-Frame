@@ -15,16 +15,24 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         Objects whose mask covers more than this fraction of the total panorama
         pixels are skipped for inpainting — they are too large to fill plausibly.
         Still classified and logged; just not removed.
+
+    supersample_inpaint (bool, default True):
+        When True, runs Swin2SR on the Flux output before LANCZOS upscaling it
+        back to the panorama resolution. Reduces the LANCZOS stretch ratio from
+        4x to 2x, producing sharper fills. Only applies when Flux ran at a
+        downscaled resolution (i.e. the panorama is larger than flux_max).
     """
-    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, **kwargs):
+    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, **kwargs):
         super().__init__(*args, **kwargs)
         self.full_panorama = full_panorama
         self.max_object_area_fraction = max_object_area_fraction
+        self.supersample_inpaint = supersample_inpaint
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
 from pipeline.captioning.image_captioning import ImageCaptioning
+from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -102,6 +110,7 @@ class PanoramaInpaintingStage(PipelineStage):
         self._seg = None
         self._classifier = None
         self._captioner = None
+        self._samp = None
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     @classmethod
@@ -268,13 +277,30 @@ class PanoramaInpaintingStage(PipelineStage):
             for m in object_masks:
                 obj_union = np.maximum(obj_union, m)
             obj_mask_pil = PILImage.fromarray((obj_union * 255).astype(np.uint8), mode="L")
-            obj_feathered = np.array(obj_mask_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
+            visual_feather_radius = max(8, min(w, h) // 100)
+            obj_feathered = np.array(obj_mask_pil.filter(ImageFilter.GaussianBlur(radius=visual_feather_radius))).astype(np.float32)[..., np.newaxis] / 255.0
             visual_composited = (original_array * (1.0 - obj_feathered) + np.array(terrain_pil) * obj_feathered).astype(np.uint8)
             context.add_panorama(output_key, Panorama(PILImage.fromarray(visual_composited)))
 
         return context
 
     # ── Inpainting helpers ────────────────────────────────────────────────────
+
+    def _supersample_flux(self, pil: PILImage.Image, target_w: int, target_h: int) -> PILImage.Image:
+        """Swin2SR 2x the Flux output before LANCZOS upscaling.
+
+        Halves the LANCZOS stretch ratio (e.g. 4x → 2x) for a sharper result.
+        Only runs when the image actually needs upscaling and supersample_inpaint
+        is enabled in config. Returns the input unchanged if already at target size."""
+        if pil.width == target_w and pil.height == target_h:
+            return pil
+        if self.config.supersample_inpaint:
+            if self._samp is None:
+                self._samp = ImageSupersampling(self.preferred_device)
+            pil = self._samp.supersample(Image(pil), self.temp).image
+        if pil.width != target_w or pil.height != target_h:
+            pil = pil.resize((target_w, target_h), PILImage.LANCZOS)
+        return pil
 
     def _caption_from_lama(self, lama_arr: np.ndarray) -> str:
         if self._captioner is None:
@@ -359,15 +385,17 @@ class PanoramaInpaintingStage(PipelineStage):
         )
         flux_inpainter.close()
 
-        if flux_pil.size != (w, h):
-            flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
-
+        flux_pil = self._supersample_flux(flux_pil, w, h)
         flux_arr = np.array(flux_pil)
 
-        # Feathered composite over original using the tight (non-dilated) union mask
+        # Feathered composite — blend against current_arr (LaMa-filled, object already
+        # removed) rather than original_pil (still has the object). The transition zone
+        # then blends two "no-object" images instead of showing a ghost of the removed
+        # content at the seam. Radius scales with the shorter panorama dimension.
+        feather_radius = max(8, min(w, h) // 100)
         feather_pil = PILImage.fromarray((union_mask * 255).astype(np.uint8), mode="L")
-        feathered = np.array(feather_pil.filter(ImageFilter.GaussianBlur(radius=4))).astype(np.float32)[..., np.newaxis] / 255.0
-        next_terrain_arr = (np.array(original_pil) * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
+        feathered = np.array(feather_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))).astype(np.float32)[..., np.newaxis] / 255.0
+        next_terrain_arr = (current_arr * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
 
         if self.temp is not None:
             flux_pil.save(self.temp / "inpaint_pass_2_flux.png")
@@ -487,15 +515,14 @@ class PanoramaInpaintingStage(PipelineStage):
                     guidance_scale=7.0,
                 )
 
-                if flux_pil.size != (crop_w, crop_h):
-                    flux_pil = flux_pil.resize((crop_w, crop_h), PILImage.LANCZOS)
-
+                flux_pil = self._supersample_flux(flux_pil, crop_w, crop_h)
                 flux_crop_arr = np.array(flux_pil)
 
+                feather_radius = max(4, min(right - left, bottom - top) // 50)
                 region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
-                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=2))).astype(np.float32)[..., np.newaxis] / 255.0
+                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))).astype(np.float32)[..., np.newaxis] / 255.0
 
-                orig_region = next_terrain_arr[top:bottom, left:right]
+                orig_region = current_arr[top:bottom, left:right]
                 flux_region = flux_crop_arr[top - crop_y0 : bottom - crop_y0,
                                             left - crop_x0 : right  - crop_x0]
                 next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
@@ -530,12 +557,15 @@ class PanoramaInpaintingStage(PipelineStage):
         return all_classified and terrain_ready
 
     def model_names(self) -> list[str]:
-        return (
+        names = (
             ImageSeg.model_names()
             + InPainting.model_names(type=InPaintingType.LAMA)
             + InPainting.model_names(type=InPaintingType.FLUX)
             + ImageClipClassifier.model_names()
         )
+        if self.config.supersample_inpaint:
+            names = names + ImageSupersampling.model_names()
+        return names
 
     def clean_up(self):
         if self._seg is not None:
@@ -545,4 +575,7 @@ class PanoramaInpaintingStage(PipelineStage):
         if self._captioner is not None:
             del self._captioner
             self._captioner = None
+        if self._samp is not None:
+            self._samp.close()
+            self._samp = None
         super().clean_up()  # calls torch.cuda.empty_cache() after refs are dropped
