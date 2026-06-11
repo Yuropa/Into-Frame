@@ -51,7 +51,8 @@ class DepthStage(PipelineStage):
                     depth = Depth(result.depth)
 
                     resulting_faces[face] = depth
-                    depth.save_debug_image(self.temp / (face.value + ".png"))
+                    if self.temp is not None:
+                        depth.save_debug_image(self.temp / (face.value + ".png"))
                 pass
                 
             context.add_cubemap(output_key, resulting_faces)
@@ -73,7 +74,8 @@ class DepthStage(PipelineStage):
                     result.extrinsics
                 )
 
-                depth.save_debug_image(self.temp / "depth.png")
+                if self.temp is not None:
+                    depth.save_debug_image(self.temp / "depth.png")
 
                 self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
