@@ -375,6 +375,9 @@ class Pipeline:
     def log_info(self, msg):
         self.config.log.info(msg)
 
+    def log_error(self, msg):
+        self.config.log.error(msg)
+
     def run(self, input: PipelineInputItem, progress_queue: Optional[queue.SimpleQueue] = None) -> PipelineContext:
         self.input = input
         self.download_models()

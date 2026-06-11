@@ -189,7 +189,8 @@ class PipelineStage:
             return
         sub_total = t.total if t.total is not None else 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
-        remaining = (sub_total - t.completed) / (sub_total * total_tasks)
+        denominator = sub_total * total_tasks
+        remaining = (sub_total - t.completed) / denominator if denominator > 0 else 0
         if remaining > 0:
             self.progress.advance(self.main_task, remaining)
         self.progress.remove_task(task)
