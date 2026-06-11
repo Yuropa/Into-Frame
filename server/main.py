@@ -14,6 +14,13 @@ if _env != "frame":
 # Setting in case we run on macOS
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+import warnings
+# Suppress known noisy library warnings before any imports that trigger them.
+# pynvml FutureWarning fires at torch.cuda import time; max_length UserWarning
+# fires at model inference time — both are non-actionable for our users.
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*model-agnostic default.*max_length.*")
+
 import asyncio
 import argparse
 import logging

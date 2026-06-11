@@ -223,6 +223,19 @@ class PipelineConfiguration:
                 disable_progress_bars()
             except Exception:
                 pass
+            # Disable tqdm bars globally — checked at bar-creation time, so this
+            # covers bars from safetensors, transformers, diffusers, etc.
+            os.environ["TQDM_DISABLE"] = "1"
+            try:
+                import transformers as _transformers
+                _transformers.logging.set_verbosity_error()
+            except Exception:
+                pass
+            try:
+                import diffusers as _diffusers
+                _diffusers.logging.set_verbosity_error()
+            except Exception:
+                pass
 
         return logging.getLogger("pipeline")
 
@@ -480,8 +493,9 @@ class Pipeline:
                 )
                 tail = _TailLogPanel(maxlines=10)
                 logging.getLogger().addHandler(tail)
+                _hint = Text("  Ctrl+C to exit early", style="dim")
                 live_ctx = Live(
-                    RenderGroup(tail, progress),
+                    RenderGroup(tail, progress, _hint),
                     refresh_per_second=4,
                     console=_console,
                 )
