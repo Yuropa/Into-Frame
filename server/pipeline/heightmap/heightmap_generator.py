@@ -1,7 +1,6 @@
 import numpy as np
 from collections import deque
-from scipy.interpolate import griddata
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -314,36 +313,71 @@ class HeightMapGenerator:
                 levels[hi, rows, cols] * frac).astype(np.float32)
 
     @staticmethod
-    def _interpolate(height_map: np.ndarray) -> np.ndarray:
-        valid = ~np.isnan(height_map)
-        if not np.any(valid):
-            return np.zeros_like(height_map)
-        if np.all(valid):
+    def _interpolate(height_map: np.ndarray, n_octaves: int = 4, noise_seed: int = 0) -> np.ndarray:
+        """
+        Multi-scale noise inpainting for unknown (NaN) cells, after Algorithm 3
+        in Jain et al. 2026.
+
+        Works coarse-to-fine: at the coarsest octave, unknown cells are seeded
+        with noise around the mean height.  At each finer octave the previous
+        result is upsampled, smaller-amplitude noise is injected into still-
+        unknown cells, and Laplacian diffusion (iterative Gaussian relaxation)
+        propagates boundary values inward.  Known cells act as fixed Dirichlet
+        boundary conditions throughout, so the final output matches the input
+        exactly at every measured point.
+        """
+        known_mask = ~np.isnan(height_map)
+        if np.all(known_mask):
             return height_map
+        if not np.any(known_mask):
+            return np.zeros_like(height_map)
 
+        rng = np.random.default_rng(noise_seed)
         h, w = height_map.shape
-        src_ys, src_xs = np.where(valid)
-        values = height_map[valid]
+        max_factor = 2 ** (n_octaves - 1)
 
-        all_ys, all_xs = np.mgrid[0:h, 0:w]
-        query = np.column_stack([all_ys.ravel(), all_xs.ravel()])
+        # Noise amplitude calibrated to ~25% of the terrain's height variation.
+        noise_scale = float(np.std(height_map[known_mask])) * 0.25
 
-        result = griddata(
-            points=np.column_stack([src_ys, src_xs]),
-            values=values,
-            xi=query,
-            method="linear",
-        ).reshape(h, w).astype(np.float32)
+        def nan_downsample(factor: int) -> np.ndarray:
+            sh, sw = max(1, h // factor), max(1, w // factor)
+            crop = height_map[: sh * factor, : sw * factor]
+            with np.errstate(all="ignore"):
+                return np.nanmean(
+                    crop.reshape(sh, factor, sw, factor), axis=(1, 3)
+                ).astype(np.float32)
 
-        # Nearest-neighbour fallback for cells outside the convex hull of known points
-        still_nan = np.isnan(result)
-        if np.any(still_nan):
-            nearest = griddata(
-                points=np.column_stack([src_ys, src_xs]),
-                values=values,
-                xi=query,
-                method="nearest",
-            ).reshape(h, w).astype(np.float32)
-            result = np.where(still_nan, nearest, result)
+        def diffuse(Z: np.ndarray, mask: np.ndarray, sigma: float, n_iters: int) -> np.ndarray:
+            for _ in range(n_iters):
+                Z = np.where(mask, Z, gaussian_filter(Z, sigma=sigma))
+            return Z
 
-        return result
+        ZI: Optional[np.ndarray] = None
+
+        for octave in range(n_octaves - 1, -1, -1):
+            factor = 2 ** octave
+            ds = nan_downsample(factor) if factor > 1 else height_map.copy()
+            ds_mask = ~np.isnan(ds)
+            sh, sw = ds.shape
+            ds_vals = np.where(ds_mask, ds, 0.0)
+
+            if ZI is None:
+                # Coarsest level: seed unknown cells with mean + full-amplitude noise.
+                mean_h = float(np.nanmean(ds))
+                noise = rng.standard_normal((sh, sw)).astype(np.float32) * noise_scale
+                ZI = np.where(ds_mask, ds_vals, mean_h + noise)
+            else:
+                # Upsample and inject scale-dependent noise into still-unknown cells.
+                ZI_up = zoom(ZI, (sh / ZI.shape[0], sw / ZI.shape[1]), order=1)
+                amplitude = noise_scale * factor / max_factor
+                noise = rng.standard_normal((sh, sw)).astype(np.float32) * amplitude
+                ZI = np.where(ds_mask, ds_vals, ZI_up + noise)
+
+            # Laplacian diffusion: larger sigma at coarser levels for long-range fill;
+            # fewer iterations at fine levels where the coarse pass already set structure.
+            sigma = max(1.0, sh / 32.0)
+            n_iters = max(5, 40 * factor // max_factor)
+            ZI = diffuse(ZI, ds_mask, sigma, n_iters)
+
+        # Restore original known values exactly — no drift from the diffusion passes.
+        return np.where(known_mask, height_map, ZI).astype(np.float32)
