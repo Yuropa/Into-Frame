@@ -442,7 +442,8 @@ class Pipeline:
                 self.current_step_index += 1
                 self._post_progress(progress_queue)
                 return ran
-            except RuntimeError as e:
+            except Exception as e:
+                self.log_error(f"Stage '{stage.name}' failed: {type(e).__name__}: {e}")
                 self._print_total_allocations()
                 raise
 
@@ -528,6 +529,7 @@ class Pipeline:
                 sys.stderr = _LogStream(self.config.log, logging.WARNING)
                 _redirected = True
 
+            _pipeline_exc: Optional[BaseException] = None
             try:
                 with live_ctx:
                     task = progress.add_task("Processing...", total=len(self.stages))
@@ -540,11 +542,26 @@ class Pipeline:
                             progress=progress,
                             task=task,
                         )
+            except BaseException as _exc:
+                _pipeline_exc = _exc
+                raise
             finally:
                 if _redirected:
                     sys.stdout = _orig_stdout
                     sys.stderr = _orig_stderr
                     logging.getLogger().removeHandler(tail)
+                    # In panel mode stderr was redirected into the logger, so the
+                    # exception would only appear as a silent panel log before the
+                    # display collapsed. Now that the real stderr is restored, write
+                    # a clear banner so the error is always visible on the terminal.
+                    if _pipeline_exc is not None and not isinstance(_pipeline_exc, KeyboardInterrupt):
+                        _orig_stderr.write(
+                            f"\n\033[1;31m{'─' * 60}\n"
+                            f"Pipeline error in '{self.current_step}':\n"
+                            f"  {type(_pipeline_exc).__name__}: {_pipeline_exc}\n"
+                            f"{'─' * 60}\033[0m\n"
+                        )
+                        _orig_stderr.flush()
 
         self._save_context(context)
         monitor.print_summary()

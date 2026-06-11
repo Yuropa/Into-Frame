@@ -323,14 +323,22 @@ def main():
         print(f"{e}")
         return
 
-    if args.command == "server":
-        handle_server(args)
-    elif args.command == "run":
-        handle_run(args)
-    elif args.command == "local":
-        handle_local(args)
-    elif args.command == "download":
-        handle_download(args)
+    try:
+        if args.command == "server":
+            handle_server(args)
+        elif args.command == "run":
+            handle_run(args)
+        elif args.command == "local":
+            handle_local(args)
+        elif args.command == "download":
+            handle_download(args)
+    except KeyboardInterrupt:
+        print("\nStopped.", file=sys.stderr)
+        sys.exit(130)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
