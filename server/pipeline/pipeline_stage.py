@@ -83,17 +83,14 @@ class PipelineStage:
     def keys_dict(self, **defaults: ContextKeyName) -> dict[SemanticKey, ContextKeyName]:
         return {s: self._resolve_key(s, defaults.get(s)) for s in SemanticKey}
 
-    def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
+    def set_output(self, output_root: Optional[Path]):
         if output_root is not None:
             self.output = output_root / self.name
             self.output.mkdir(parents=True, exist_ok=True)
+            self.temp = self.output / "build"
+            self.temp.mkdir(parents=True, exist_ok=True)
         else:
             self.output = None
-
-        if temp is not None:
-            self.temp = temp / self.name
-            self.temp.mkdir(parents=True, exist_ok=True)    
-        else:
             self.temp = None
 
     def model_names(self) -> list[str]:
