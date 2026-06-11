@@ -34,7 +34,8 @@ class ContextKey:
     TERRAIN_MESH = "terrain_mesh"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags"]
+    OBJECT_CORRELATION = "object_correlation"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

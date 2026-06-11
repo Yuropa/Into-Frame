@@ -36,6 +36,7 @@ from pipeline.object_typing.object_typing import ObjectTypingStage
 from pipeline.panorama_asset_generation.generation import PanoramaAssetGenerationStage, PanoramaAssetGenerationConfiguration
 from pipeline.lighting.lighting import PanoramaLightingStage
 from pipeline.recognize.recognize import RecognizeAnythingStage
+from pipeline.object_correlation.object_correlation import ObjectCorrelationStage
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
@@ -304,6 +305,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectTypingStage": ObjectTypingStage,
     "PanoramaAssetGenerationStage": PanoramaAssetGenerationStage,
     "RecognizeAnythingStage": RecognizeAnythingStage,
+    "ObjectCorrelationStage": ObjectCorrelationStage,
 }
 
 

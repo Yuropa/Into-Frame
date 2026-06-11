@@ -85,6 +85,10 @@ stages:
     stage: SegmentationStage
     enabled: false
 
+  - name: Object Correlation
+    stage: ObjectCorrelationStage
+    enabled: false
+
   - name: Mesh Generation
     stage: ModelGenerationStage
     enabled: false
