@@ -324,8 +324,8 @@ class PanoramaInpaintingStage(PipelineStage):
         current_arr[dilated_union > 0.5] = lama_arr[dilated_union > 0.5]
 
         if self.temp is not None:
-            lama_pil.save(self.temp / "debug_lama_full.png")
-            PILImage.fromarray(current_arr).save(self.temp / "debug_lama_panorama_full.png")
+            lama_pil.save(self.temp / "inpaint_pass_0_lama.png")
+            PILImage.fromarray(current_arr).save(self.temp / "inpaint_pass_1_lama_composite.png")
 
         # Advance LaMa half of the progress bar
         for _ in pass_objects:
@@ -370,14 +370,14 @@ class PanoramaInpaintingStage(PipelineStage):
         next_terrain_arr = (np.array(original_pil) * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
 
         if self.temp is not None:
-            flux_pil.save(self.temp / "debug_flux_full.png")
+            flux_pil.save(self.temp / "inpaint_pass_2_flux.png")
 
         for _ in pass_objects:
             self.advance_progress(inpaint_task)
 
         terrain_pil = PILImage.fromarray(next_terrain_arr)
         if self.temp is not None:
-            terrain_pil.save(self.temp / "panorama_inpainted.png")
+            terrain_pil.save(self.temp / "inpaint_pass_3_final.png")
         self.finish_progress(inpaint_task)
         return terrain_pil
 
@@ -436,8 +436,8 @@ class PanoramaInpaintingStage(PipelineStage):
             current_arr[crop_y0:crop_y1, crop_x0:crop_x1] = composited
 
             if self.temp is not None:
-                lama_pil.save(self.temp / f"debug_lama_crop_{lama_idx}.png")
-                PILImage.fromarray(current_arr).save(self.temp / f"debug_lama_panorama_{lama_idx}.png")
+                lama_pil.save(self.temp / f"inpaint_lama_{lama_idx}_crop.png")
+                PILImage.fromarray(current_arr).save(self.temp / f"inpaint_lama_{lama_idx}_panorama.png")
 
             lama_states.append((mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1))
             self.advance_progress(inpaint_task)
@@ -501,8 +501,8 @@ class PanoramaInpaintingStage(PipelineStage):
                 next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
 
                 if self.temp is not None:
-                    flux_pil.save(self.temp / f"debug_flux_crop_{flux_idx}.png")
-                    PILImage.fromarray(next_terrain_arr).save(self.temp / f"debug_flux_panorama_{flux_idx}.png")
+                    flux_pil.save(self.temp / f"inpaint_flux_{flux_idx}_crop.png")
+                    PILImage.fromarray(next_terrain_arr).save(self.temp / f"inpaint_flux_{flux_idx}_panorama.png")
 
                 self.advance_progress(inpaint_task)
 
@@ -514,7 +514,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
         terrain_pil = PILImage.fromarray(next_terrain_arr)
         if self.temp is not None:
-            terrain_pil.save(self.temp / "panorama_inpainted.png")
+            terrain_pil.save(self.temp / "inpaint_final.png")
         self.finish_progress(inpaint_task)
         return terrain_pil
 
