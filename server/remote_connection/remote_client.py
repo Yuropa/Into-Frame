@@ -36,7 +36,7 @@ class RemoteClient():
                     lines.append(decoded)
                 stripped = decoded.rstrip()
                 if stripped:
-                    _log.info("[%s] %s", prefix, stripped)
+                    _log.debug("[%s] %s", prefix, stripped)
             stream.close()
         return threading.Thread(target=_capture, args=(stream,), daemon=True)
 

@@ -64,6 +64,7 @@ class ModelGenerationStage(PipelineStage):
 
             super().clean_up()
             input_image = context.input_image(image_name)
+            self.log_info(f"  {image_name}: generating mesh...")
             mesh = gen.meshify(input_image, self.temp / image_name, seed=self.seed)
             mesh = mesh.repair()
 

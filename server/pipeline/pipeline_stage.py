@@ -98,19 +98,11 @@ class PipelineStage:
 
     def _log_memory_usage(self, value):
         mb = value / 1024 / 1024
-
-        if mb < 2048:  # less than 2GB
+        if mb < 2048:
             formatted = f"{mb:.0f} MB"
         else:
-            gb = mb / 1024.0
-            formatted = f"{gb:.1f} GB"
-
-
-        BOLD = "\033[1m"
-        BLUE = "\033[94m"
-        RESET = "\033[0m"
-        
-        print(f"{BLUE}Peak Memory({self.name}): {BOLD}{formatted}{RESET}")
+            formatted = f"{mb / 1024.0:.1f} GB"
+        self.log_info(f"Peak memory: {formatted}")
 
     def log_memory_usage(self):
         if self.device.type == "cuda":

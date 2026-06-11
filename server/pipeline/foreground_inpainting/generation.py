@@ -33,14 +33,19 @@ class ForegroundInpainting(PipelineStage):
 
         input_image = context.input_image(input_key).copy()
 
-        inpainting_task = self.create_progress(2, "Inpainting...")
+        max_iter = 20
+        inpainting_task = self.create_progress(max_iter + 1, "Inpainting...")
+
         if self._inpaint is None:
+            self.log_info("Loading inpainting models...")
             self._inpaint = ForegroundInpaint(self.preferred_device, self.preferred_format, seed=self.seed)
         self.advance_progress(inpainting_task)
 
-        result = self._inpaint.inpaint(input_image, self.temp)
+        def on_iteration(idx: int, fill_pct: float):
+            self.advance_progress(inpainting_task)
 
-        self.advance_progress(inpainting_task)
+        result = self._inpaint.inpaint(input_image, self.temp, on_iteration=on_iteration)
+
         self.finish_progress(inpainting_task)
 
         context.add_image(output_key, result)

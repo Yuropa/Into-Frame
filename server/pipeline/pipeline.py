@@ -1,4 +1,5 @@
 from pathlib import Path
+import io
 import os
 import random
 import sys
@@ -9,6 +10,7 @@ import logging
 import shutil
 import queue
 from collections import deque
+from rich.console import Console as RichConsole
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
 from rich.logging import RichHandler
 from rich.live import Live
@@ -44,9 +46,41 @@ from util.image_utils import Image
 from util.json_utils import write_json
 
 class _PipelineFilter(logging.Filter):
-    """Only passes log records emitted by our own pipeline logger."""
+    """Passes log records from the pipeline logger and its children."""
     def filter(self, record: logging.LogRecord) -> bool:
-        return record.name == "pipeline"
+        return record.name == "pipeline" or record.name.startswith("pipeline.")
+
+
+class _LogStream:
+    """Redirects stray print() calls into the pipeline logger during Live display."""
+
+    def __init__(self, log: logging.Logger, level: int = logging.INFO):
+        self._log = log
+        self._level = level
+        self._buf = ""
+        self.encoding = "utf-8"
+        self.errors = "replace"
+
+    def write(self, data: str) -> int:
+        if not isinstance(data, str):
+            data = data.decode("utf-8", errors="replace")
+        self._buf += data
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._log.log(self._level, line)
+        return len(data)
+
+    def flush(self):
+        if self._buf.strip():
+            self._log.log(self._level, self._buf)
+            self._buf = ""
+
+    def isatty(self):
+        return False
+
+    def fileno(self):
+        raise io.UnsupportedOperation("fileno")
 
 
 class _TailLogPanel(logging.Handler):
@@ -325,13 +359,13 @@ class Pipeline:
 
     def _print_total_allocations(self):
         if torch.backends.mps.is_available():
-            print("MPS Allocated:", torch.mps.current_allocated_memory() / 1e9, "GB")
-            print("MPS Driver:", torch.mps.driver_allocated_memory() / 1e9, "GB")
-            print("MPS Cap:", torch.mps.recommended_max_memory() / 1e9, "GB")
+            self.log_info(f"MPS Allocated: {torch.mps.current_allocated_memory() / 1e9:.2f} GB")
+            self.log_info(f"MPS Driver: {torch.mps.driver_allocated_memory() / 1e9:.2f} GB")
+            self.log_info(f"MPS Cap: {torch.mps.recommended_max_memory() / 1e9:.2f} GB")
         elif torch.cuda.is_available():
-            print("CUDA Allocated:", torch.cuda.memory_allocated() / 1e9, "GB")
-            print("CUDA Reserved:", torch.cuda.memory_reserved() / 1e9, "GB")
-            print("CUDA Max Allocated:", torch.cuda.max_memory_allocated() / 1e9, "GB")
+            self.log_info(f"CUDA Allocated: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+            self.log_info(f"CUDA Reserved: {torch.cuda.memory_reserved() / 1e9:.2f} GB")
+            self.log_info(f"CUDA Max Allocated: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
 
     def _save_context(self, context: PipelineContext):
         if self.config.save_files:
@@ -415,6 +449,9 @@ class Pipeline:
         self.current_step_index = 0
 
         monitor = PipelineMonitor(interval=0.25)
+        _orig_stdout = sys.stdout
+        _orig_stderr = sys.stderr
+        _redirected = False
 
         with monitor.stage("Full Pipeline"):
             if self.config.verbose:
@@ -427,6 +464,10 @@ class Pipeline:
                 )
                 live_ctx = progress
             else:
+                # Pin Rich to the real stdout before we redirect sys.stdout below,
+                # so that any stray print() calls route to the logger instead of
+                # corrupting the Live display.
+                _console = RichConsole(file=_orig_stdout, stderr=False)
                 progress = Progress(
                     SpinnerColumn(),
                     "[progress.description]{task.description}",
@@ -434,10 +475,18 @@ class Pipeline:
                     "[progress.percentage]{task.percentage:>3.0f}%",
                     TimeElapsedColumn(),
                     auto_refresh=False,
+                    console=_console,
                 )
-                tail = _TailLogPanel(maxlines=6)
+                tail = _TailLogPanel(maxlines=10)
                 logging.getLogger().addHandler(tail)
-                live_ctx = Live(RenderGroup(tail, progress), refresh_per_second=4)
+                live_ctx = Live(
+                    RenderGroup(tail, progress),
+                    refresh_per_second=4,
+                    console=_console,
+                )
+                sys.stdout = _LogStream(self.config.log, logging.INFO)
+                sys.stderr = _LogStream(self.config.log, logging.WARNING)
+                _redirected = True
 
             try:
                 with live_ctx:
@@ -452,7 +501,9 @@ class Pipeline:
                             task=task,
                         )
             finally:
-                if not self.config.verbose:
+                if _redirected:
+                    sys.stdout = _orig_stdout
+                    sys.stderr = _orig_stderr
                     logging.getLogger().removeHandler(tail)
 
         self._save_context(context)
