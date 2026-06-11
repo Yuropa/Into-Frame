@@ -7,13 +7,27 @@ _ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys())
 _OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
-def _classify_caption(caption: str) -> str:
-    """Classify a free-form caption as 'object' or 'environment' via keyword scoring."""
+def _classify_caption(caption: str, confidence_threshold: float = 0.75) -> str:
+    """Classify a free-form caption as 'object', 'environment', or 'indeterminate'.
+
+    Confidence = max(obj_score, env_score) / total_keywords. Returns 'indeterminate'
+    when no keywords match or the winning side doesn't clear the threshold."""
     words = set(caption.lower().replace(",", " ").replace(".", " ").replace("'", " ").split())
     obj_score = sum(1 for kw in _OBJECT_KEYWORDS if kw in words)
     env_score = sum(1 for kw in _ENVIRONMENT_KEYWORDS if kw in words)
-    # Require a positive object signal to remove something; unknown/ambiguous → keep
+    total = obj_score + env_score
+    if total == 0:
+        return "indeterminate"
+    confidence = max(obj_score, env_score) / total
+    if confidence < confidence_threshold:
+        return "indeterminate"
     return "object" if obj_score > env_score else "environment"
+
+
+class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
+    def __init__(self, confidence_threshold: float = 0.75, **kwargs):
+        super().__init__(**kwargs)
+        self.confidence_threshold = confidence_threshold
 
 
 class PanoramaObjectClassificationStage(PipelineStage):
@@ -29,9 +43,14 @@ class PanoramaObjectClassificationStage(PipelineStage):
     Writes: metadata_{i} (updated with 'class' and 'caption')
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls):
+        return PanoramaObjectClassificationConfig
+
+    def __init__(self, config: PanoramaObjectClassificationConfig) -> None:
         super().__init__(config)
         self._captioner = None
+        self._confidence_threshold = config.confidence_threshold
 
     def run(self, context: PipelineContext) -> PipelineContext:
         object_count = context.input_object(ContextKey.OBJECT_COUNT)
@@ -44,7 +63,7 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)
 
-        env_count = 0
+        counts = {"object": 0, "environment": 0, "indeterminate": 0}
         for idx in range(object_count):
             crop = context.input_image(f"crop_{idx}")
             metadata = context.input_object(f"metadata_{idx}") or {}
@@ -54,9 +73,8 @@ class PanoramaObjectClassificationStage(PipelineStage):
                 continue
 
             caption = self._captioner.caption(crop)
-            cls = _classify_caption(caption)
-            if cls == "environment":
-                env_count += 1
+            cls = _classify_caption(caption, self._confidence_threshold)
+            counts[cls] = counts.get(cls, 0) + 1
 
             context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
             self.log_info(f"  crop_{idx}: '{caption}' → {cls}")
@@ -64,7 +82,8 @@ class PanoramaObjectClassificationStage(PipelineStage):
 
         self.finish_progress(classify_task)
         self.log_info(
-            f"Classification complete: {object_count - env_count} objects, {env_count} environment"
+            f"Classification complete: {counts['object']} objects, "
+            f"{counts['environment']} environment, {counts['indeterminate']} indeterminate"
         )
         return context
 

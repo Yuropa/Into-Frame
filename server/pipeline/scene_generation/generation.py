@@ -85,8 +85,9 @@ class SceneGenerationStage(PipelineStage):
 
                 metadata = context.input_object(f"metadata_{idx}")
 
-                if (metadata or {}).get("class") == "environment":
-                    self.log_info(f"Skipping environment object {idx}")
+                cls = (metadata or {}).get("class")
+                if cls in ("environment", "indeterminate"):
+                    self.log_info(f"Skipping {cls} object {idx}")
                     self.advance_progress(generation_task)
                     continue
 
