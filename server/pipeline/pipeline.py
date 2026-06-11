@@ -171,8 +171,17 @@ class PipelineConfiguration:
         output: Optional[str],
         seeds: Optional[SeedConfiguration] = None,
         config_path: Optional[Path] = None,
-        verbose: bool = False,
+        log_mode: str = "panel",
     ):
+        """
+        log_mode controls logging output:
+          "panel"   — Rich panel UI during pipeline runs, all library noise suppressed.
+                      Default for the 'run' command.
+          "plain"   — Plain StreamHandler to stderr, noise still suppressed.
+                      Default for the 'server' command.
+          "verbose" — RichHandler with full output, minimal suppression.
+                      For developer debugging (--verbose flag).
+        """
         if output is not None:
             self.output = Path(output)
             self.temp = Path(output + "/build")
@@ -186,12 +195,34 @@ class PipelineConfiguration:
             self.temp = None
 
         self.seeds = seeds if seeds is not None else SeedConfiguration()
-        self.verbose = verbose
+        self.log_mode = log_mode
         self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
-        self.log = self._configure_logging(verbose)
+        self.log = self._configure_logging(log_mode)
         self.stages_yaml = self._load_stages_yaml(config_path)
 
-    def _configure_logging(self, verbose: bool) -> logging.Logger:
+    def _suppress_library_noise(self):
+        """Silence tqdm bars and chatty third-party loggers."""
+        for noisy in ("httpx", "urllib3", "huggingface_hub", "transformers",
+                      "filelock", "diffusers", "accelerate"):
+            logging.getLogger(noisy).setLevel(logging.WARNING)
+        try:
+            from huggingface_hub.utils import disable_progress_bars
+            disable_progress_bars()
+        except Exception:
+            pass
+        os.environ["TQDM_DISABLE"] = "1"
+        try:
+            import transformers as _transformers
+            _transformers.logging.set_verbosity_error()
+        except Exception:
+            pass
+        try:
+            import diffusers as _diffusers
+            _diffusers.logging.set_verbosity_error()
+        except Exception:
+            pass
+
+    def _configure_logging(self, log_mode: str) -> logging.Logger:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         filename = f"pipeline-{timestamp}.log"
@@ -207,35 +238,25 @@ class PipelineConfiguration:
         ))
         root.addHandler(file_handler)
 
-        if verbose:
+        if log_mode == "verbose":
+            # Developer debugging: Rich console output, no noise suppression.
             console_handler = RichHandler(rich_tracebacks=True)
             console_handler.setFormatter(logging.Formatter("%(message)s"))
             console_handler.addFilter(_PipelineFilter())
             root.addHandler(console_handler)
+        elif log_mode == "plain":
+            # Server mode: plain timestamped lines to stderr, noise suppressed.
+            console_handler = logging.StreamHandler()
+            console_handler.setFormatter(logging.Formatter(
+                "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"
+            ))
+            console_handler.addFilter(_PipelineFilter())
+            root.addHandler(console_handler)
+            self._suppress_library_noise()
         else:
-            # Suppress noisy third-party progress bars and HTTP chatter so
-            # they don't appear in the tail panel or bleed onto the terminal.
-            for noisy in ("httpx", "urllib3", "huggingface_hub", "transformers",
-                          "filelock", "diffusers", "accelerate"):
-                logging.getLogger(noisy).setLevel(logging.WARNING)
-            try:
-                from huggingface_hub.utils import disable_progress_bars
-                disable_progress_bars()
-            except Exception:
-                pass
-            # Disable tqdm bars globally — checked at bar-creation time, so this
-            # covers bars from safetensors, transformers, diffusers, etc.
-            os.environ["TQDM_DISABLE"] = "1"
-            try:
-                import transformers as _transformers
-                _transformers.logging.set_verbosity_error()
-            except Exception:
-                pass
-            try:
-                import diffusers as _diffusers
-                _diffusers.logging.set_verbosity_error()
-            except Exception:
-                pass
+            # Panel mode (default): no console handler — the panel is added
+            # temporarily by _run_pipeline for the duration of each run.
+            self._suppress_library_noise()
 
         return logging.getLogger("pipeline")
 
@@ -467,8 +488,12 @@ class Pipeline:
         _orig_stderr = sys.stderr
         _redirected = False
 
+        log_mode = self.config.log_mode
+
         with monitor.stage("Full Pipeline"):
-            if self.config.verbose:
+            if log_mode in ("verbose", "plain"):
+                # Verbose / plain: plain Rich progress bar, logs already go to
+                # terminal via the handler set up in _configure_logging.
                 progress = Progress(
                     SpinnerColumn(),
                     "[progress.description]{task.description}",
@@ -478,9 +503,9 @@ class Pipeline:
                 )
                 live_ctx = progress
             else:
-                # Pin Rich to the real stdout before we redirect sys.stdout below,
-                # so that any stray print() calls route to the logger instead of
-                # corrupting the Live display.
+                # Panel mode: pin Rich to the real stdout before redirecting
+                # sys.stdout, so stray print() calls route to the logger instead
+                # of corrupting the Live display.
                 _console = RichConsole(file=_orig_stdout, stderr=False)
                 progress = Progress(
                     SpinnerColumn(),

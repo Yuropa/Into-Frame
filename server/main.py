@@ -48,12 +48,29 @@ def create_parser():
             "A global seed is always generated and logged even if not supplied."
         ),
     )
-    parser.add_argument(
+    _log_group = parser.add_mutually_exclusive_group()
+    _log_group.add_argument(
         "-v", "--verbose",
-        action="store_true",
-        default=False,
-        help="Print logs to the terminal in addition to the log file (default: file only)",
+        dest="log_mode",
+        action="store_const",
+        const="verbose",
+        help="Print all logs to the terminal with Rich formatting (for debugging)",
     )
+    _log_group.add_argument(
+        "--plain",
+        dest="log_mode",
+        action="store_const",
+        const="plain",
+        help="Print logs as plain timestamped lines (used by server mode)",
+    )
+    _log_group.add_argument(
+        "--log-mode",
+        dest="log_mode",
+        choices=["panel", "plain", "verbose"],
+        metavar="MODE",
+        help="Logging mode: panel (default), plain, or verbose",
+    )
+    parser.set_defaults(log_mode="panel")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -201,7 +218,7 @@ def _create_pipeline_config(args):
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
-        verbose=getattr(args, "verbose", False),
+        log_mode=getattr(args, "log_mode", "panel"),
     )
 
     config.save_files = args.debug
@@ -289,7 +306,7 @@ def handle_download(args):
     config = PipelineConfiguration(
         output=None,
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
-        verbose=getattr(args, "verbose", False),
+        log_mode=getattr(args, "log_mode", "panel"),
     )
 
     pipeline = Pipeline(

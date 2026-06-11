@@ -10,7 +10,7 @@ SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 # --- Global defaults ---
 ENV="frame"
 SEED_ARGS=()
-VERBOSE=""
+LOG_MODE=""
 
 # --- Shared defaults ---
 PORT="${PORT:-8080}"
@@ -51,7 +51,9 @@ Subcommands (default: run):
 Global options:
   --env ENV          Conda environment name  (default: ${ENV})
   --seed VALUE       Random seed (bare integer) or STAGE:VALUE pair; repeatable
-  -v, --verbose      Print logs to the terminal (default: file only)
+  --log-mode MODE    Logging mode: panel (default), plain, verbose
+  -v, --verbose      Shorthand for --log-mode verbose (developer debugging)
+  --plain            Shorthand for --log-mode plain
   -h, --help         Show this help message
 
 run options:
@@ -141,7 +143,7 @@ build_global_args() {
   for s in "${SEED_ARGS[@]+"${SEED_ARGS[@]}"}"; do
     args+=("--seed" "$s")
   done
-  [[ -n "$VERBOSE" ]] && args+=("--verbose")
+  [[ -n "$LOG_MODE" ]] && args+=("--log-mode" "$LOG_MODE")
   echo "${args[@]+"${args[@]}"}"
 }
 
@@ -152,10 +154,12 @@ SUBCOMMAND=""
 
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --env)        ENV="$2";          shift 2 ;;
-    --seed)       SEED_ARGS+=("$2"); shift 2 ;;
-    -v|--verbose) VERBOSE="1";       shift   ;;
-    -h|--help)    usage; exit 0 ;;
+    --env)           ENV="$2";          shift 2 ;;
+    --seed)          SEED_ARGS+=("$2"); shift 2 ;;
+    -v|--verbose)    LOG_MODE="verbose"; shift   ;;
+    --plain)         LOG_MODE="plain";   shift   ;;
+    --log-mode)      LOG_MODE="$2";      shift 2 ;;
+    -h|--help)       usage; exit 0 ;;
     run|server|local|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
     -*) break ;;   # unknown global flag — let subcommand parser handle it
@@ -215,6 +219,10 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
       *) echo "Unknown server option: $1" >&2; exit 1 ;;
     esac
   done
+
+  # Default server to plain logging so pipeline output goes to the terminal
+  # without the panel UI. Users can override with -v/--verbose if needed.
+  [[ -z "$LOG_MODE" ]] && LOG_MODE="plain"
 
   [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
   [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
