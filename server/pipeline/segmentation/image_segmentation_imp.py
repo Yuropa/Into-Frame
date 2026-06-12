@@ -26,6 +26,8 @@ class ImageSegServer(RemoteServer):
             stability_score_thresh=0.80,
             min_mask_region_area=50,
             box_nms_thresh=0.7,
+            crop_n_layers=1,
+            crop_overlap_ratio=0.5,
         )
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:

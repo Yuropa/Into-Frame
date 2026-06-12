@@ -77,16 +77,20 @@ stages:
     stage: RecognizeAnythingStage
     enabled: false
 
+  - name: Object Detection
+    stage: ObjectDetectionStage
+    enabled: false
+
+  - name: Object Correlation
+    stage: ObjectCorrelationStage
+    enabled: false
+
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false
 
   - name: Object Segmentation
     stage: SegmentationStage
-    enabled: false
-
-  - name: Object Correlation
-    stage: ObjectCorrelationStage
     enabled: false
 
   - name: Mesh Generation

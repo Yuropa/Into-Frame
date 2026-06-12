@@ -19,10 +19,13 @@ class ObjectCorrelationResult:
     Aggregated correlation data produced by ObjectCorrelationStage.
 
     groups maps each object type label to an ObjectGroupStats instance holding
-    the indices of all metadata_{i} entries that share that type.
+    the indices of all surviving metadata_{i} entries that share that type.
+    deduplicated_count is the number of Grounding DINO detections dropped because
+    they overlapped an existing SAM2 detection.
     """
 
     groups: dict[str, ObjectGroupStats] = field(default_factory=dict)
+    deduplicated_count: int = 0
 
     def group_for(self, object_type: str) -> ObjectGroupStats | None:
         return self.groups.get(object_type)
