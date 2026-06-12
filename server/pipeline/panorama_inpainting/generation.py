@@ -564,11 +564,11 @@ class PanoramaInpaintingStage(PipelineStage):
         return terrain_pil
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        count = context.input_object(ContextKey.OBJECT_COUNT)
+        count = context.object(ContextKey.OBJECT_COUNT)
         if count is None:
             return False
         all_classified = all(
-            (context.input_object(f"metadata_{i}") or {}).get("class") is not None
+            (context.object(f"metadata_{i}") or {}).get("class") is not None
             for i in range(count)
         )
         terrain_ready = context.panorama(ContextKey.PANORAMA_TERRAIN) is not None
