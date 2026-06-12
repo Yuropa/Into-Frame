@@ -43,9 +43,9 @@ class ObjectTypingStage(PipelineStage):
                 self.advance_progress(typing_task)
                 continue
 
-            obj_type = self._classifier.classify(crop)
-            context.add_object(f"metadata_{idx}", {**metadata, "type": obj_type})
-            self.log_info(f"  crop_{idx}: {metadata.get('caption', '')} → {obj_type}")
+            obj_type, obj_class, confidence = self._classifier.classify(crop)
+            context.add_object(f"metadata_{idx}", {**metadata, "type": obj_type, "class": obj_class})
+            self.log_info(f"  crop_{idx}: {metadata.get('caption', '')} → {obj_type} ({obj_class}, {confidence:.2f})")
             self.advance_progress(typing_task)
 
         self.finish_progress(typing_task)
