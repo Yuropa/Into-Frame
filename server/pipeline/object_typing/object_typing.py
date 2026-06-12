@@ -5,15 +5,16 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class ObjectTypingStage(PipelineStage):
     """
-    Assigns a fine-grained type label to each crop already classified as 'object'
-    using CLIP zero-shot image classification (openai/clip-vit-base-patch32).
+    Assigns a fine-grained type label to every crop using CLIP zero-shot
+    classification (openai/clip-vit-base-patch32). Covers both object and
+    environment categories so all crops get a meaningful type label regardless
+    of what the upstream classification stage decided.
 
-    Skips crops whose metadata 'class' is 'environment'. Text embeddings for all
-    categories are computed once at load time; per-image cost is a single forward
-    pass plus cosine similarity.
+    Text embeddings for all categories are computed once at load time;
+    per-image cost is a single forward pass plus cosine similarity.
 
-    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i} (with 'class' field)
-    Writes: metadata_{i} (adds 'type' field, e.g. "car", "building", "person")
+    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
+    Writes: metadata_{i} (adds/overwrites 'type' and 'class' fields)
     """
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -33,12 +34,8 @@ class ObjectTypingStage(PipelineStage):
 
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
-
-            if metadata.get("class") != "object":
-                self.advance_progress(typing_task)
-                continue
-
             crop = context.input_image(f"crop_{idx}")
+
             if crop is None:
                 self.advance_progress(typing_task)
                 continue
@@ -55,11 +52,10 @@ class ObjectTypingStage(PipelineStage):
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
             return False
-        for i in range(count):
-            meta = context.object(f"metadata_{i}") or {}
-            if meta.get("class") == "object" and meta.get("type") is None:
-                return False
-        return True
+        return all(
+            (context.object(f"metadata_{i}") or {}).get("type") is not None
+            for i in range(count)
+        )
 
     def model_names(self) -> list[str]:
         return ImageClipClassifier.model_names()

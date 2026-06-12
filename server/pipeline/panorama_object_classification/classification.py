@@ -58,6 +58,8 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self.log_info("No objects to classify, skipping")
             return context
 
+        context.add_object(ContextKey.OBJECT_COUNT, object_count)
+
         classify_task = self.create_progress(object_count + 1, "Classifying objects…")
         if self._captioner is None:
             self._captioner = ImageCaptioning(self.device)
@@ -69,9 +71,11 @@ class PanoramaObjectClassificationStage(PipelineStage):
             metadata = context.input_object(f"metadata_{idx}") or {}
 
             if crop is None:
+                context.add_object(f"metadata_{idx}", metadata)
                 self.advance_progress(classify_task)
                 continue
 
+            context.add_image(f"crop_{idx}", crop)
             caption = self._captioner.caption(crop)
             cls = _classify_caption(caption, self._confidence_threshold)
             counts[cls] = counts.get(cls, 0) + 1
