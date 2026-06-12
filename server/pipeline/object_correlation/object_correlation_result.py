@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from typing import Self
 
 
 @dataclass
@@ -11,6 +12,15 @@ class ObjectGroupStats:
     @property
     def count(self) -> int:
         return len(self.indices)
+
+    def encode(self) -> dict:
+        return {"object_type": self.object_type, "indices": self.indices}
+
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        obj = cls(object_type=data["object_type"])
+        obj.indices = data["indices"]
+        return obj
 
 
 @dataclass
@@ -32,3 +42,15 @@ class ObjectCorrelationResult:
 
     def types(self) -> list[str]:
         return list(self.groups.keys())
+
+    def encode(self) -> dict:
+        return {
+            "groups": {k: v.encode() for k, v in self.groups.items()},
+            "deduplicated_count": self.deduplicated_count,
+        }
+
+    @classmethod
+    def decode(cls, data: dict) -> Self:
+        result = cls(deduplicated_count=data.get("deduplicated_count", 0))
+        result.groups = {k: ObjectGroupStats.decode(v) for k, v in data.get("groups", {}).items()}
+        return result

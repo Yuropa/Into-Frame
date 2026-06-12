@@ -98,7 +98,7 @@ class ObjectCorrelationStage(PipelineStage):
         for _ in range(deduplicated):
             self.advance_progress(task)
 
-        context.add_object(ContextKey.OBJECT_CORRELATION, result)
+        context.add_object_correlation(ContextKey.OBJECT_CORRELATION, result)
         self.finish_progress(task)
 
         # Log summary

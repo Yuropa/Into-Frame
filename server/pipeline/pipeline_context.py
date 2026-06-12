@@ -240,6 +240,19 @@ class PipelineContext():
     def input_lighting(self, name: ContextKeyName) -> Optional[SceneLighting]:
         return self._value(name, self._previous_stage).lighting()
 
+    # ObjectCorrelationResult
+    def add_object_correlation(self, name: ContextKeyName, input: "ObjectCorrelationResult"):
+        from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult
+        value = ContextValue(name=name)
+        value.set_object_correlation(input)
+        self._set_value(name, value)
+
+    def object_correlation(self, name: ContextKeyName) -> Optional["ObjectCorrelationResult"]:
+        return self._value(name).object_correlation()
+
+    def input_object_correlation(self, name: ContextKeyName) -> Optional["ObjectCorrelationResult"]:
+        return self._value(name, self._previous_stage).object_correlation()
+
     def has_stage_output(self, name: ContextKeyName) -> bool:
         """True only if the current stage has already written this key (cache hit for this stage)."""
         stage = self._current_stage
