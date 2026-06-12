@@ -1,6 +1,8 @@
 import io
 import json
+import subprocess
 import tarfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -9,6 +11,28 @@ from pipeline.pipeline_context import PipelineContext
 
 EXTENSION = ".frame"
 DEBUG_EXTENSION = ".debug.frame"
+
+
+@contextmanager
+def _xz_tar(archive_path: Path, preset: int):
+    """Open a tar for xz-compressed writing, using parallel xz CLI when available."""
+    try:
+        out = open(archive_path, "wb")
+        proc = subprocess.Popen(
+            ["xz", f"-{preset}", "-T", "0"],
+            stdin=subprocess.PIPE,
+            stdout=out,
+        )
+        try:
+            with tarfile.open(fileobj=proc.stdin, mode="w|") as tar:
+                yield tar
+        finally:
+            proc.stdin.close()
+            proc.wait()
+            out.close()
+    except FileNotFoundError:
+        with tarfile.open(archive_path, "w:xz", preset=preset) as tar:
+            yield tar
 
 
 def _add_dir(tar: tarfile.TarFile, src_dir: Path, arcname: str, filter_fn) -> None:
@@ -57,7 +81,7 @@ def create_frame_archive(
             return None
         return tarinfo
 
-    with tarfile.open(archive_path, "w:xz", preset=9) as tar:
+    with _xz_tar(archive_path, preset=9) as tar:
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))
@@ -84,7 +108,7 @@ def create_debug_frame_archive(
     }
     manifest_bytes = json.dumps(manifest, indent=2).encode()
 
-    with tarfile.open(archive_path, "w:xz", preset=9) as tar:
+    with _xz_tar(archive_path, preset=9) as tar:
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))
