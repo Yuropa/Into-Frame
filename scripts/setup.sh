@@ -679,6 +679,8 @@ setup_recognize_anything() {
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
     run_in_env pip install scipy timm fairscale matplotlib opencv-python-headless
     run_in_env pip install "transformers<4.45"
+    sed -i "s/torch.load(url_or_filename, map_location='cpu')/torch.load(url_or_filename, map_location='cpu', weights_only=False)/" \
+        "$LIB_DIR/recognize-anything/ram/models/utils.py"
     stop_env
 }
 
