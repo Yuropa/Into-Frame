@@ -673,7 +673,7 @@ run_step "Installing Depth Anything" \
 
 setup_recognize_anything() {
     clone_if_needed https://github.com/xinyu1205/recognize-anything.git "$LIB_DIR/recognize-anything"
-    download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/blob/main/ram_plus_swin_large_14m.pth" "recognize_anything"
+    download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/resolve/main/ram_plus_swin_large_14m.pth" "recognize_anything"
 
     create_env "recognize" 3.10
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
