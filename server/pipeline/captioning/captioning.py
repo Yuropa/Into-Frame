@@ -67,9 +67,7 @@ class CaptioningStage(PipelineStage):
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, output_key = self._resolved_keys()
-        return (
-            context.image(output_key) is not None
-        )
+        return context.object(output_key) is not None
 
     def model_names(self) -> list[str]:
         return ImageCaptioning.model_names()
