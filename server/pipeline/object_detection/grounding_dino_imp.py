@@ -12,7 +12,6 @@ from remote_connection.remote_server import RemoteServer
 
 _MODEL_ID = "IDEA-Research/grounding-dino-base"
 _BOX_THRESHOLD = 0.35
-_TEXT_THRESHOLD = 0.25
 
 
 class GroundingDinoServer(RemoteServer):
@@ -43,8 +42,7 @@ class GroundingDinoServer(RemoteServer):
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
-            box_threshold=_BOX_THRESHOLD,
-            text_threshold=_TEXT_THRESHOLD,
+            threshold=_BOX_THRESHOLD,
             target_sizes=[rgb.size[::-1]],  # (height, width)
         )[0]
 
