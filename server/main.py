@@ -270,21 +270,26 @@ def handle_run(args):
         context_dir = pipeline.context_path()
         if context_dir and context_dir.exists():
             from pipeline.archive import create_frame_archive, create_debug_frame_archive
+            from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
             stage_order = [s.name for s in pipeline.stages]
-            archive = create_frame_archive(
-                context_dir=context_dir,
-                input_path=Path(args.input),
-                output_dir=Path(args.output),
-                stage_order=stage_order,
-            )
-            print(f"\nArchive: {archive}")
-            if config.debug_archive:
-                debug_archive = create_debug_frame_archive(
+            with Progress(SpinnerColumn(), "[progress.description]{task.description}", TimeElapsedColumn()) as progress:
+                task = progress.add_task("Writing archive…", total=None)
+                archive = create_frame_archive(
                     context_dir=context_dir,
                     input_path=Path(args.input),
                     output_dir=Path(args.output),
                     stage_order=stage_order,
                 )
+                if config.debug_archive:
+                    progress.update(task, description="Writing debug archive…")
+                    debug_archive = create_debug_frame_archive(
+                        context_dir=context_dir,
+                        input_path=Path(args.input),
+                        output_dir=Path(args.output),
+                        stage_order=stage_order,
+                    )
+            print(f"Archive: {archive}")
+            if config.debug_archive:
                 print(f"Debug archive: {debug_archive}")
 
 
