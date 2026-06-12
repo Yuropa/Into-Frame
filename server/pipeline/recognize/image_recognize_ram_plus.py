@@ -14,7 +14,7 @@ class ImageRecognizeRAMPlus(RemoteClient):
         script_path = Path(__file__).parent / "image_recognize_ram_plus_imp.py"
         super().__init__(
             device=device,
-            conda_env="frame",
+            conda_env="recognize",
             script_path=script_path,
         )
 

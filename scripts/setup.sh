@@ -677,6 +677,7 @@ setup_recognize_anything() {
 
     create_env "recognize" 3.10
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
+    run_in_env pip install "transformers<4.45"
     stop_env
 }
 
