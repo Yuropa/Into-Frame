@@ -12,7 +12,7 @@ _ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 class ImageClipClassifier:
     MODEL_NAME = "openai/clip-vit-base-patch32"
 
-    def __init__(self, device: torch.device, confidence_threshold: float = 0.55):
+    def __init__(self, device: torch.device, confidence_threshold: float = 0.1):
         self.device = device
         self._confidence_threshold = confidence_threshold
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_NAME)
@@ -60,7 +60,7 @@ class ImageClipClassifier:
     def classify(self, image: Image) -> tuple[str, str, float]:
         """Returns (type, class, confidence) where type is the winning category label,
         class is 'object', 'environment', or 'indeterminate', and confidence is
-        max(obj_score, env_score) / (obj_score + env_score)."""
+        rescaled to [0, 1]: 0 = perfectly tied, 1 = completely one-sided."""
         inputs = self.processor(images=self._to_rgb(image), return_tensors="pt").to(self.device)
         with torch.no_grad():
             vision_out = self.model.vision_model(**inputs)
@@ -83,7 +83,8 @@ class ImageClipClassifier:
         obj_s = max(0.0, best_obj_score)
         env_s = max(0.0, best_env_score)
         total = obj_s + env_s
-        confidence = max(obj_s, env_s) / total if total > 0 else 0.0
+        # Raw ratio is in [0.5, 1.0]; rescale to [0, 1] so the threshold is meaningful.
+        confidence = (max(obj_s, env_s) / total - 0.5) * 2.0 if total > 0 else 0.0
 
         if confidence < self._confidence_threshold:
             return "indeterminate", "indeterminate", confidence
