@@ -122,7 +122,7 @@ class RemoteClient():
 
         ready_line = self._readline_json(self.json_pipe)
         if not ready_line:
-            raise RuntimeError("subprocess produced no output")
+            raise RuntimeError(f"Subprocess exited during setup:\n{self._get_stderr()}")
 
         ready_status = Status.decode(ready_line)
         if ready_status.status != "ready":

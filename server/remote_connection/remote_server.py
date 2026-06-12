@@ -103,7 +103,7 @@ class RemoteServer(ABC):
     @classmethod
     def run(cls):
         server = cls()
-        server.connect()
         server.setup()
+        server.connect()
         server.poll()
         server.close()
