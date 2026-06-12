@@ -157,4 +157,4 @@ class ObjectCorrelationStage(PipelineStage):
         composite.save(debug_path)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return context.object(ContextKey.OBJECT_CORRELATION) is not None
+        return context.object_correlation(ContextKey.OBJECT_CORRELATION) is not None
