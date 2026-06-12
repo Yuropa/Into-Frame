@@ -58,7 +58,7 @@ class ObjectCorrelationStage(PipelineStage):
             self.log_info("No objects to correlate, skipping")
             return context
 
-        task = self.create_progress(object_count, "Correlating objects...")
+        task = self.create_progress(object_count, "Correlating objects…")
 
         # Separate SAM2 vs Grounding DINO detections
         sam2_meta = {}

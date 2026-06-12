@@ -91,7 +91,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             return context
 
         # Second pass: generate meshes for near objects
-        asset_task = self.create_progress(len(near_indices), "Generating 3D assets...")
+        asset_task = self.create_progress(len(near_indices), "Generating 3D assets…")
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
 

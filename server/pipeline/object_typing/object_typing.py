@@ -26,7 +26,7 @@ class ObjectTypingStage(PipelineStage):
             self.log_info("No objects to type, skipping")
             return context
 
-        typing_task = self.create_progress(object_count + 1, "Typing objects...")
+        typing_task = self.create_progress(object_count + 1, "Typing objects…")
         if self._classifier is None:
             self._classifier = ImageClipClassifier(self.device)
         self.advance_progress(typing_task)

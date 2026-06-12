@@ -37,7 +37,7 @@ class RAMPlusServer(RemoteServer):
     def recognize(self, input_image: PILImage.Image) -> dict:
         image = self.transform(input_image.convert("RGB")).unsqueeze(0).to(self.device)
 
-        self.report_progress(0.1, "Running RAM++ inference...")
+        self.report_progress(0.1, "Running RAM++ inference…")
         with torch.no_grad():
             res = inference(image, self.model)
 

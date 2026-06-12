@@ -25,7 +25,7 @@ class RecognizeAnythingStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        task = self.create_progress(2, "Recognizing...")
+        task = self.create_progress(2, "Recognizing…")
 
         if self._recognize is None:
             self._recognize = ImageRecognize(self.device)

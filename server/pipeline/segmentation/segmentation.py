@@ -46,7 +46,7 @@ class SegmentationStage(PipelineStage):
             nonlocal total_crops
 
             # Cropping
-            cropping_task = self.create_progress(result.length, "Cropping...")
+            cropping_task = self.create_progress(result.length, "Cropping…")
             for idx, crop in enumerate(result.masked_images(input_image)):
                 i = total_crops + idx
                 context.add_image(f"crop_{i}", crop.image)
@@ -62,7 +62,7 @@ class SegmentationStage(PipelineStage):
             total_crops += result.length
 
         # Foreground Segmentation
-        # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting...")
+        # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting…")
         # self.advance_progress(foreground_segmenting_task)
 
         # infill_count = 0
@@ -97,7 +97,7 @@ class SegmentationStage(PipelineStage):
         # self.finish_progress(foreground_segmenting_task)
 
         #Segmentation
-        segmenting_task = self.create_progress(2, "Segmenting...")
+        segmenting_task = self.create_progress(2, "Segmenting…")
         if self._seg is None:
             self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)

@@ -55,7 +55,7 @@ class PanoramaLightingStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        task = self.create_progress(2, "Panorama Lighting...")
+        task = self.create_progress(2, "Panorama Lighting…")
 
         if self._lux_dit is None:
             self._lux_dit = LuxDiT(self.device)

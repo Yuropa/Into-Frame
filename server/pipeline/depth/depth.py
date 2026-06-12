@@ -36,7 +36,7 @@ class DepthStage(PipelineStage):
         if is_cubemap:
             steps = 7
 
-        depth_task = self.create_progress(steps, "Depth...")
+        depth_task = self.create_progress(steps, "Depth…")
         if self._depth is None:
             self._depth = ImageDepth(self.device)
         self.advance_progress(depth_task)

@@ -51,7 +51,7 @@ class ModelGenerationStage(PipelineStage):
         gen_type = getattr(self.config, "generator_type", ModelGeneratorType.default())
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=gen_type)
-        generation_task = self.create_progress(count, "Meshifying...")
+        generation_task = self.create_progress(count, "Meshifying…")
         for idx in range(count):
             mesh_name = f"mesh_{idx}"   
             image_name = f"crop_{idx}"
@@ -64,7 +64,7 @@ class ModelGenerationStage(PipelineStage):
 
             super().clean_up()
             input_image = context.input_image(image_name)
-            self.log_info(f"  {image_name}: generating mesh...")
+            self.log_info(f"  {image_name}: generating mesh…")
             mesh = gen.meshify(input_image, self.temp / image_name, seed=self.seed)
             mesh = mesh.repair()
 

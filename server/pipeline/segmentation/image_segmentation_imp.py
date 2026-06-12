@@ -37,7 +37,7 @@ class ImageSegServer(RemoteServer):
 
     def _segment(self, image: Image.Image) -> dict:
         image_np = np.array(image.convert("RGB"))
-        self.report_progress(0.1, "Running SAM2 segmentation...")
+        self.report_progress(0.1, "Running SAM2 segmentation…")
         with torch.no_grad():
             results = self.mask_generator.generate(image_np)
         self.report_progress(1.0, "Done")

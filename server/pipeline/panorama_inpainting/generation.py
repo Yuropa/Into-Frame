@@ -149,7 +149,7 @@ class PanoramaInpaintingStage(PipelineStage):
         fraction_advanced = 0.0
         self.set_total_tasks(3)  # seg + classify + inpaint
 
-        seg_task = self.create_progress(2, "Segmenting...")
+        seg_task = self.create_progress(2, "Segmenting…")
         result = self._seg.segment(Image(original_pil), self.temp, on_progress=self.make_progress_callback(seg_task))
         self.advance_progress(seg_task)
         self.finish_progress(seg_task)
@@ -176,7 +176,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
             # Classify and save crops; track (mask, box) pairs for inpainting
             pass_objects = []
-            classify_task = self.create_progress(result.length, "Classifying...")
+            classify_task = self.create_progress(result.length, "Classifying…")
             for i, crop in enumerate(result.masked_images(Image(original_pil))):
                 box = [float(x) for x in crop.box]
 
@@ -228,7 +228,7 @@ class PanoramaInpaintingStage(PipelineStage):
             #   Full-panorama: one LaMa call → one Flux call on the whole image.
             #     Matches the LayerPano3D research baseline. Fewer calls; Flux sees
             #     global context but runs on a downscaled panorama.
-            inpaint_task = self.create_progress(len(pass_objects) * 2, "Inpainting...")
+            inpaint_task = self.create_progress(len(pass_objects) * 2, "Inpainting…")
             scene_caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
             caption = _environment_prompt(scene_caption)
 

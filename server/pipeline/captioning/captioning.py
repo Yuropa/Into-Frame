@@ -47,7 +47,7 @@ class CaptioningStage(PipelineStage):
         return result
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        caption_task = self.create_progress(2, "Captioning...")
+        caption_task = self.create_progress(2, "Captioning…")
         if self._caption is None:
             self._caption = ImageCaptioning(self.device)
         self.advance_progress(caption_task)

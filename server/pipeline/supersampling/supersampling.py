@@ -28,7 +28,7 @@ class SupersamplingStage(PipelineStage):
         return context.has_stage_output(self.output_key())
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        task = self.create_progress(2, "Supersampling...")
+        task = self.create_progress(2, "Supersampling…")
 
         if self._samp is None:
             self._samp = ImageSupersampling(self.preferred_device)

@@ -324,12 +324,12 @@ class PanoGenerator(RemoteServer):
         prompt_embeds, pooled_prompt_embeds = self._encode_prompt(prompt)
 
         # --- Pass 1 — Main Generation ---
-        self.report_progress(0.10, "Building blending canvas...")
+        self.report_progress(0.10, "Building blending canvas…")
         canvas, mask = _make_canvas(input_image, equi_size, hfov_deg=fov_deg)
         canvas.save(str(temp_path / "01_canvas.png"))
         mask.save(str(temp_path / "01_mask.png"))
 
-        self.report_progress(0.20, "Running main 360° outpaint...")
+        self.report_progress(0.20, "Running main 360° outpaint…")
         self.base_pipeline.set_adapters(["pano"], adapter_weights=[1.0])
         self.base_pipeline.set_ip_adapter_scale(ip_adapter_scale)
 
@@ -353,7 +353,7 @@ class PanoGenerator(RemoteServer):
         pass1.save(str(temp_path / "02_pass1_initial.png"))
 
         # --- Pass 2 — Seam Stitch Fix ---
-        self.report_progress(0.60, "Fixing panorama edge seams...")
+        self.report_progress(0.60, "Fixing panorama edge seams…")
         
         shifted_pass1 = _shift_horizon(pass1, pct=0.5)
         seam_mask = _make_seam_mask(equi_size, seam_width=96) # Kept tighter to preserve clarity
@@ -383,7 +383,7 @@ class PanoGenerator(RemoteServer):
         torch.cuda.empty_cache()
 
         # --- Pass 3 — Color & Style Adjustments ---
-        self.report_progress(0.85, "Post-processing color and style...")
+        self.report_progress(0.85, "Post-processing color and style…")
         lab_result = _lab_color_transfer(
             source=input_image,
             target=pass2,
@@ -407,7 +407,7 @@ class PanoGenerator(RemoteServer):
         final.save(str(temp_path / "05_final_panorama.png"))
 
         # Cube-map projection
-        self.report_progress(0.95, "Projecting cubemap...")
+        self.report_progress(0.95, "Projecting cubemap…")
         equirectangular = np.array(final)
         cube_dict = py360convert.e2c(equirectangular, face_w=512, cube_format="dict")
         

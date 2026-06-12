@@ -77,7 +77,7 @@ class PanoramaStage(PipelineStage):
         })
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        pano_task = self.create_progress(2, "Panorama...")
+        pano_task = self.create_progress(2, "Panorama…")
 
         input_key, depth_key, output_key, cubemap_key, caption_key, intrinsics_key = self._resolved_keys()
 

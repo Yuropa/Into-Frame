@@ -30,15 +30,15 @@ class GroundingDinoServer(RemoteServer):
         # Grounding DINO expects ". "-separated labels with a trailing period
         prompt = ". ".join(t.lower().strip() for t in tags if t.strip()) + "."
 
-        self.report_progress(0.1, "Preparing inputs...")
+        self.report_progress(0.1, "Preparing inputs…")
         rgb = image.convert("RGB")
         inputs = self.processor(images=rgb, text=prompt, return_tensors="pt").to(self.device)
 
-        self.report_progress(0.3, "Running Grounding DINO...")
+        self.report_progress(0.3, "Running Grounding DINO…")
         with torch.no_grad():
             outputs = self.model(**inputs)
 
-        self.report_progress(0.8, "Post-processing...")
+        self.report_progress(0.8, "Post-processing…")
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,

@@ -28,7 +28,7 @@ class PanoramaDepthStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        task = self.create_progress(2, "Panorama Depth...")
+        task = self.create_progress(2, "Panorama Depth…")
 
         if self._depth is None:
             self._depth = PanoramaDepth(self.preferred_device)

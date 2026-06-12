@@ -58,7 +58,7 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self.log_info("No objects to classify, skipping")
             return context
 
-        classify_task = self.create_progress(object_count + 1, "Classifying objects...")
+        classify_task = self.create_progress(object_count + 1, "Classifying objects…")
         if self._captioner is None:
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)

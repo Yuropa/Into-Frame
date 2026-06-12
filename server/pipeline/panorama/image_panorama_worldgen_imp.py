@@ -51,7 +51,7 @@ class WorldGenPanoGenerator(RemoteServer):
         }
 
     def _pano(self, input_image: Image.Image, seed: int, temp_path: Path, hfov_deg: float = DEFAULT_HFOV_DEG, caption: str = "") -> dict:
-        self.report_progress(0.05, "Computing depth...")
+        self.report_progress(0.05, "Computing depth…")
         predictions = pred_depth(self.depth_model, input_image)
 
         # pred_depth assigns full-sphere equirectangular rays, which would
@@ -60,12 +60,12 @@ class WorldGenPanoGenerator(RemoteServer):
         h, w = predictions["rgb"].shape[:2]
         predictions["rays"] = perspective_rays(h, w, hfov_deg, device=predictions["rgb"].device)
 
-        self.report_progress(0.2, "Projecting image to panorama space...")
+        self.report_progress(0.2, "Projecting image to panorama space…")
         pano_cond_img, cond_mask = map_image_to_pano(predictions, device=self.device)
 
         pano_w, pano_h = pano_cond_img.size
 
-        self.report_progress(0.35, "Generating panorama fill...")
+        self.report_progress(0.35, "Generating panorama fill…")
         pano_image = gen_pano_fill_image(
             self.pano_model,
             image=pano_cond_img,
@@ -76,7 +76,7 @@ class WorldGenPanoGenerator(RemoteServer):
             width=pano_w,
         )
 
-        self.report_progress(0.8, "Blending...")
+        self.report_progress(0.8, "Blending…")
         pano_image = pano_image.resize((pano_w, pano_h))
         mask_arr = np.array(cond_mask) / 255.0
         blended = (
@@ -85,7 +85,7 @@ class WorldGenPanoGenerator(RemoteServer):
         )
         pano_image = _enforce_wrap_continuity(Image.fromarray(blended.astype(np.uint8)))
 
-        self.report_progress(0.9, "Projecting cubemap...")
+        self.report_progress(0.9, "Projecting cubemap…")
         return {"image": pano_image, "faces": self._to_cubemap(pano_image)}
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:

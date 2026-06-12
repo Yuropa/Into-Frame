@@ -38,7 +38,7 @@ class ObjectDetectionStage(PipelineStage):
         tags = [t.strip() for t in tags_str.split("|") if t.strip()]
         existing_count = context.input_object(ContextKey.OBJECT_COUNT) or 0
 
-        task = self.create_progress(2, "Detecting objects...")
+        task = self.create_progress(2, "Detecting objects…")
         if self._detector is None:
             self._detector = GroundingDino(self.device)
         self.advance_progress(task)

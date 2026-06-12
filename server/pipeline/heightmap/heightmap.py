@@ -80,7 +80,7 @@ class HeightMapStage(PipelineStage):
         depth_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: HeightMapConfiguration = self.config
 
-        task = self.create_progress(3, "Height Map...")
+        task = self.create_progress(3, "Height Map…")
 
         depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)

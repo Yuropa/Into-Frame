@@ -59,7 +59,7 @@ class PanoDepthGenerator(RemoteServer):
             .to(self.device)
         )
 
-        self.report_progress(0.1, "Running panorama depth inference...")
+        self.report_progress(0.1, "Running panorama depth inference…")
         sky_mask = None
         with torch.inference_mode():
             outputs = self.model(tensor)

@@ -541,7 +541,7 @@ class Pipeline:
             _pipeline_exc: Optional[BaseException] = None
             try:
                 with live_ctx:
-                    task = progress.add_task("Processing...", total=len(self.stages))
+                    task = progress.add_task("Processing…", total=len(self.stages))
                     dirty = False
                     for stage in self.stages:
                         ran = self._run_stage(

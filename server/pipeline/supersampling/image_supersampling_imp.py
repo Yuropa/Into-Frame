@@ -22,7 +22,7 @@ class SupersamplingServer(RemoteServer):
         raise ValueError(f"Unknown action: {action}")
 
     def _supersample(self, image: Image.Image) -> Image.Image:
-        self.report_progress(0.1, "Running supersampling...")
+        self.report_progress(0.1, "Running supersampling…")
         inputs = self.processor(image, return_tensors="pt").to(self.device)
         with torch.no_grad():
             output = self.model(**inputs).reconstruction

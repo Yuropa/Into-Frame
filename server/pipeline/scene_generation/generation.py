@@ -78,7 +78,7 @@ class SceneGenerationStage(PipelineStage):
             scene.skybox = panorama_key
 
         if object_count is not None:
-            generation_task = self.create_progress(object_count, "Creating Objects...")
+            generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in range(object_count):
                 texture_name = f"crop_{idx}"
                 mesh_name = f"mesh_{idx}"

@@ -48,7 +48,7 @@ class PanoramaToCubemapStage(PipelineStage):
         return context.has_stage_output(cubemap_key)
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        task = self.create_progress(1, "Rebuilding cubemap...")
+        task = self.create_progress(1, "Rebuilding cubemap…")
 
         panorama_key, cubemap_key = self._resolved_keys()
         panorama = context.input_panorama(panorama_key)

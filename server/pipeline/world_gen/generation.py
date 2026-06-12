@@ -12,7 +12,7 @@ class WorldGenStage(PipelineStage):
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        gen_task = self.create_progress(2, "WorldGen...")
+        gen_task = self.create_progress(2, "WorldGen…")
         if self._gen is None:
             self._gen = WorldGen(self.preferred_device)
         self.advance_progress(gen_task)

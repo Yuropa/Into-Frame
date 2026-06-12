@@ -24,7 +24,7 @@ class DepthGenerator(RemoteServer):
     
     def depth(self, temp_path: Path, input: Image) -> Any:
         image = input.convert("RGB")
-        self.report_progress(0.1, "Running depth inference...")
+        self.report_progress(0.1, "Running depth inference…")
         with torch.no_grad():
             result = self.model.inference([image])
         self.report_progress(1.0, "Done")
