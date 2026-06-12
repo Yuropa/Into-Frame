@@ -12,7 +12,7 @@ _ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 class ImageClipClassifier:
     MODEL_NAME = "openai/clip-vit-base-patch32"
 
-    def __init__(self, device: torch.device, confidence_threshold: float = 0.75):
+    def __init__(self, device: torch.device, confidence_threshold: float = 0.55):
         self.device = device
         self._confidence_threshold = confidence_threshold
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_NAME)
@@ -57,13 +57,10 @@ class ImageClipClassifier:
         composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
         return PILImage.fromarray(composited, mode="RGB")
 
-    def classify(self, image: Image) -> tuple[str, str]:
-        """Returns (type, class) where type is the winning category label and
-        class is 'object', 'environment', or 'indeterminate'.
-
-        'indeterminate' is returned when neither side clears confidence_threshold,
-        computed as max(obj_score, env_score) / (obj_score + env_score) — the same
-        formula used by the caption-based classifier."""
+    def classify(self, image: Image) -> tuple[str, str, float]:
+        """Returns (type, class, confidence) where type is the winning category label,
+        class is 'object', 'environment', or 'indeterminate', and confidence is
+        max(obj_score, env_score) / (obj_score + env_score)."""
         inputs = self.processor(images=self._to_rgb(image), return_tensors="pt").to(self.device)
         with torch.no_grad():
             vision_out = self.model.vision_model(**inputs)
@@ -89,7 +86,7 @@ class ImageClipClassifier:
         confidence = max(obj_s, env_s) / total if total > 0 else 0.0
 
         if confidence < self._confidence_threshold:
-            return "indeterminate", "indeterminate"
+            return "indeterminate", "indeterminate", confidence
         if best_obj_score >= best_env_score:
-            return best_obj_label, "object"
-        return best_env_label, "environment"
+            return best_obj_label, "object", confidence
+        return best_env_label, "environment", confidence

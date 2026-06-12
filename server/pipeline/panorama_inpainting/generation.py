@@ -183,18 +183,19 @@ class PanoramaInpaintingStage(PipelineStage):
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, cls = self._classifier.classify(crop_image)
+                obj_type, cls, clip_confidence = self._classifier.classify(crop_image)
 
                 context.add_image(f"crop_{i}", crop_image)
                 context.add_object(f"metadata_{i}", {
-                    "box":   box,
-                    "score": float(crop.score),
-                    "class": cls,
-                    "type":  obj_type,
+                    "box":        box,
+                    "score":      float(crop.score),
+                    "class":      cls,
+                    "type":       obj_type,
+                    "confidence": round(clip_confidence, 4),
                 })
                 if self.temp is not None:
                     crop_image.image.save(self.temp / f"crop_{i}.png")
-                    crop_caption = f"type: {obj_type}\nclass: {cls}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
+                    crop_caption = f"type: {obj_type}\nclass: {cls}\nconfidence: {clip_confidence:.3f}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
                 if cls == "object":
                     mask_fraction = float(mask_array.sum()) / (h * w)
@@ -212,7 +213,7 @@ class PanoramaInpaintingStage(PipelineStage):
                     "box":   [round(x, 1) for x in box],
                 })
 
-                self.log_info(f"  crop_{i}: {obj_type} → {cls}")
+                self.log_info(f"  crop_{i}: {obj_type} → {cls}  (conf={clip_confidence:.2f})")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks
