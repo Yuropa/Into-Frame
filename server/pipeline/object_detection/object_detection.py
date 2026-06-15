@@ -12,7 +12,7 @@ class ObjectDetectionStage(PipelineStage):
 
     Reads:  ContextKey.RECOGNIZE_TAGS (pipe-separated str), SemanticKey.INPUT image,
             ContextKey.OBJECT_COUNT (existing SAM2 count)
-    Writes: crop_{i}, metadata_{i} (type, score, box, source='grounding_dino')
+    Writes: crop_{i}, metadata_{i} (class, score, box, source='grounding_dino')
             for each new detection; updated ContextKey.OBJECT_COUNT
     Debug:  self.output/detections.json — list of new detections with label, box, score
     """
@@ -69,7 +69,7 @@ class ObjectDetectionStage(PipelineStage):
             metadata = {
                 "box": [float(x), float(y), float(w), float(h)],
                 "score": float(det["score"]),
-                "type": det["label"],
+                "class": det["label"],
                 "source": "grounding_dino",
             }
 

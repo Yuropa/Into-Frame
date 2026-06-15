@@ -88,7 +88,7 @@ class ObjectCorrelationStage(PipelineStage):
 
         for idx in sorted(all_meta):
             metadata = all_meta[idx]
-            obj_type = metadata.get("type") or "unknown"
+            obj_type = metadata.get("class") or "unknown"
             if obj_type not in result.groups:
                 result.groups[obj_type] = ObjectGroupStats(object_type=obj_type)
             result.groups[obj_type].indices.append(idx)
