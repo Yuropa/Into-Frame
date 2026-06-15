@@ -649,7 +649,6 @@ static Eigen::Vector2d polygon_centroid(
   }
 
   Polygon_2 cell_poly;
-  cell_poly.reserve(pts.size());
   for (const auto &pt : pts) {
     cell_poly.push_back(Point_2(pt.x(), pt.y()));
   }
