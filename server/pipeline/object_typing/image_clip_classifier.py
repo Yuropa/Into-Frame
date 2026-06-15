@@ -94,7 +94,33 @@ class ImageClipClassifier:
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         sims = (image_features @ self._text_features.T).squeeze(0)
+        return self._sims_to_result(sims, top_n)
 
+    def classify_from_caption(
+        self,
+        caption: str,
+        top_n: int = 5,
+    ) -> tuple[str, float, list[tuple[str, float]], dict]:
+        """Classify using a text caption instead of an image.
+
+        Encodes the caption with CLIP's text encoder and scores it against the
+        same pre-computed category embeddings used for image classification.
+        Intended as a fallback when image-based classification is indeterminate.
+        """
+        text_inputs = self.processor(text=[caption], return_tensors="pt", padding=True).to(self.device)
+        with torch.no_grad():
+            text_out = self.model.text_model(**text_inputs)
+            caption_features = self.model.text_projection(text_out.pooler_output)
+            caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)
+
+        sims = (caption_features @ self._text_features.T).squeeze(0)
+        return self._sims_to_result(sims, top_n)
+
+    def _sims_to_result(
+        self,
+        sims: "torch.Tensor",
+        top_n: int,
+    ) -> tuple[str, float, list[tuple[str, float]], dict]:
         best_obj_label, best_obj_score = None, -float("inf")
         best_env_label, best_env_score = None, -float("inf")
         per_label: list[tuple[str, float]] = []

@@ -48,14 +48,22 @@ class ObjectTypingStage(PipelineStage):
                 continue
 
             obj_type, confidence, top, criteria = self._classifier.classify_with_details(crop)
+            caption = metadata.get("caption", "")
+            caption_fallback = False
+            if obj_type == "indeterminate" and caption:
+                obj_type, confidence, top, criteria = self._classifier.classify_from_caption(caption)
+                caption_fallback = True
+
             context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type, "confidence": round(confidence, 4)})
-            self.log_info(f"  crop_{idx}: '{metadata.get('caption', '')}' → {obj_type} ({confidence:.2f})")
+            suffix = " [caption fallback]" if caption_fallback else ""
+            self.log_info(f"  crop_{idx}: '{caption}' → {obj_type} ({confidence:.2f}){suffix}")
 
             debug_entries.append({
                 "idx": idx,
-                "caption": metadata.get("caption", ""),
+                "caption": caption,
                 "class": obj_type,
                 "confidence": round(confidence, 4),
+                "caption_fallback": caption_fallback,
                 **criteria,
                 "top_candidates": [[lbl, round(sc, 4)] for lbl, sc in top],
             })
@@ -71,9 +79,10 @@ class ObjectTypingStage(PipelineStage):
             return
         threshold = self._classifier._confidence_threshold if self._classifier else None
         indet = sum(1 for e in entries if e["class"] == "indeterminate")
+        caption_fallbacks = sum(1 for e in entries if e.get("caption_fallback"))
         payload = {
             "confidence_threshold": threshold,
-            "summary": {"total": len(entries), "indeterminate": indet},
+            "summary": {"total": len(entries), "indeterminate": indet, "caption_fallbacks": caption_fallbacks},
             "objects": entries,
         }
         with open(self.output / "typing_debug.json", "w") as f:
