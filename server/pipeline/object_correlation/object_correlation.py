@@ -7,6 +7,9 @@ import PIL.ImageFont
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
+from pipeline.object_typing.categories import UNIQUE_CATEGORIES
+
+_DISTRIBUTION_MIN_COUNT = 2
 
 
 def _iou(a: list[float], b: list[float]) -> float:
@@ -116,11 +119,17 @@ class ObjectCorrelationStage(PipelineStage):
 
         # Stats JSON
         stats_path = self.output / "stats.json"
+        def _distribution_info(obj_type: str, grp: ObjectGroupStats) -> dict:
+            unique = obj_type in UNIQUE_CATEGORIES
+            distribute = not unique and grp.count >= _DISTRIBUTION_MIN_COUNT
+            reason = "unique category" if unique else ("count >= {}".format(_DISTRIBUTION_MIN_COUNT) if distribute else "single instance")
+            return {"distribute": distribute, "reason": reason}
+
         stats = {
             "deduplicated_gdino": result.deduplicated_count,
             "categories": {
-                obj_type: {"count": stats.count, "indices": stats.indices}
-                for obj_type, stats in result.groups.items()
+                obj_type: {"count": grp.count, "indices": grp.indices, **_distribution_info(obj_type, grp)}
+                for obj_type, grp in result.groups.items()
             },
         }
         with open(stats_path, "w") as f:

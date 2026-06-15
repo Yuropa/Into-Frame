@@ -51,6 +51,15 @@ OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "other":        ["a photo of an unidentified object", "a miscellaneous item outdoors"],
 }
 
+# Objects that are intrinsically one-of-a-kind in a scene.  Multiple detections of
+# these types are treated as duplicates of the same object rather than a population
+# to scatter.  Everything outside this set is count-driven: 1 instance → individual
+# placement, ≥2 instances → distribution.
+UNIQUE_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "monument", "statue", "landmark", "lighthouse",
+    "fountain", "gazebo", "waterfall", "bridge", "tower",
+})
+
 ENVIRONMENT_CATEGORIES: Final[dict[str, list[str]]] = {
     "sky":          ["a photo of the sky", "a clear blue sky", "an overcast or cloudy sky"],
     "clouds":       ["a photo of clouds in the sky", "a photo of storm clouds", "a photo of white fluffy clouds",
