@@ -44,15 +44,34 @@ if(APPLE)
 endif()
 find_package(OpenMP)
 
+# PATTERN_SYNTHESIS_SRC_DIR: path to pattern-synthesis/src.
+# Defaults to ../src relative to this CMakeLists.txt.
+# Override with -DPATTERN_SYNTHESIS_SRC_DIR=/absolute/path when the relative
+# path doesn't resolve correctly (e.g. when building via pip from setup.sh).
+if(NOT DEFINED PATTERN_SYNTHESIS_SRC_DIR)
+  get_filename_component(PATTERN_SYNTHESIS_SRC_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../src" REALPATH)
+endif()
+
+if(NOT EXISTS "${PATTERN_SYNTHESIS_SRC_DIR}/sampling.cpp")
+  message(FATAL_ERROR
+    "Cannot find sampling.cpp in PATTERN_SYNTHESIS_SRC_DIR='${PATTERN_SYNTHESIS_SRC_DIR}'.\n"
+    "Pass -DPATTERN_SYNTHESIS_SRC_DIR=/path/to/pattern-synthesis/src to cmake, "
+    "or set it via pip: --config-settings=cmake.define.PATTERN_SYNTHESIS_SRC_DIR=...")
+endif()
+
+message(STATUS "pattern-synthesis src: ${PATTERN_SYNTHESIS_SRC_DIR}")
+
 pybind11_add_module(_pattern_synthesis
   bindings.cpp
   synthesis_core.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../src/sampling.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/../src/lloyd_relaxation.cpp
+  ${PATTERN_SYNTHESIS_SRC_DIR}/sampling.cpp
+  ${PATTERN_SYNTHESIS_SRC_DIR}/lloyd_relaxation.cpp
 )
 
 target_include_directories(_pattern_synthesis PRIVATE
-  ${CMAKE_CURRENT_SOURCE_DIR}/../src
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${PATTERN_SYNTHESIS_SRC_DIR}
 )
 
 target_link_libraries(_pattern_synthesis PRIVATE igl::core CGAL::CGAL)

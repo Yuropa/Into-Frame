@@ -442,9 +442,14 @@ build_pattern_synthesis() {
     conda run --no-capture-output -n frame pip install \
         "scikit-build-core>=0.4.3" "pybind11>=2.11" cmake ninja
 
-    # Build and install the pattern_synthesis Python extension
+    # Build and install the pattern_synthesis Python extension.
+    # Pass the absolute src path so CMake resolves it correctly regardless
+    # of how pip / scikit-build-core resolves CMAKE_CURRENT_SOURCE_DIR.
+    local PS_SRC="$PROJECT_DIR/pattern-synthesis/src"
     conda run --no-capture-output -n frame \
-        pip install --no-build-isolation "$PROJECT_DIR/pattern-synthesis/python_lib"
+        pip install --no-build-isolation \
+        --config-settings="cmake.define.PATTERN_SYNTHESIS_SRC_DIR=$PS_SRC" \
+        "$PROJECT_DIR/pattern-synthesis/python_lib"
 }
 
 run_step "Building Pattern Synthesis Library" \
