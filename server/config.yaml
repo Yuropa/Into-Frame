@@ -47,7 +47,7 @@ stages:
       depth: panorama_depth
       intrinsics: intrinsics
     grid_size_meters: 100.0      # side length of the output grid in metres
-    grid_resolution: 512         # grid cells per side
+    grid_resolution: 1024        # grid cells per side
     ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground candidates
     use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
     smooth_sigma: 8.0            # distance-weighted smoothing: 0 at centre → this value (px) at corners
@@ -59,8 +59,8 @@ stages:
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
-    inner_min_dist: 0.25    # metres between samples in the inner region (~20 m radius)
-    outer_min_dist: 1.5     # metres between samples across the full domain
+    inner_min_dist: 0.15    # metres between samples at the origin (15 cm)
+    outer_min_dist: 6.0     # metres between samples at the domain corners
     n_boundary: 16          # anchor points per edge of the domain rectangle
     z_far: null
     noise_amplitude: 0.05   # metres of peak noise displacement
