@@ -8,20 +8,22 @@ _OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
 def _classify_caption(caption: str, confidence_threshold: float = 0.75) -> str:
-    """Classify a free-form caption as 'object', 'environment', or 'indeterminate'.
+    """Return the best-matching fine-grained category keyword from a free-form caption,
+    or 'indeterminate' when no keywords match or confidence is below threshold.
 
-    Confidence = max(obj_score, env_score) / total_keywords. Returns 'indeterminate'
-    when no keywords match or the winning side doesn't clear the threshold."""
+    Confidence = max(obj_score, env_score) / total_keywords."""
     words = set(caption.lower().replace(",", " ").replace(".", " ").replace("'", " ").split())
-    obj_score = sum(1 for kw in _OBJECT_KEYWORDS if kw in words)
-    env_score = sum(1 for kw in _ENVIRONMENT_KEYWORDS if kw in words)
+    obj_matches = [kw for kw in _OBJECT_KEYWORDS if kw in words]
+    env_matches = [kw for kw in _ENVIRONMENT_KEYWORDS if kw in words]
+    obj_score = len(obj_matches)
+    env_score = len(env_matches)
     total = obj_score + env_score
     if total == 0:
         return "indeterminate"
     confidence = max(obj_score, env_score) / total
     if confidence < confidence_threshold:
         return "indeterminate"
-    return "object" if obj_score > env_score else "environment"
+    return obj_matches[0] if obj_score >= env_score else env_matches[0]
 
 
 class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
@@ -32,12 +34,13 @@ class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
 
 class PanoramaObjectClassificationStage(PipelineStage):
     """
-    Classifies each panorama object crop as 'environment' or 'object' using
-    BLIP captioning + keyword matching. Updates metadata_{i} in-place with
-    'class' ('object'|'environment') and 'caption' (str) fields.
+    Assigns a coarse class to each panorama crop using BLIP captioning + keyword
+    matching against OBJECT_CATEGORIES and ENVIRONMENT_CATEGORIES keys. Writes
+    'class' (a fine-grained keyword like 'tree' or 'sky', or 'indeterminate')
+    and 'caption' (str) to metadata_{i}.
 
-    Environment-classified crops are preserved in the context but skipped
-    by SceneGenerationStage so they don't appear as scene objects.
+    This is a fast first-pass pre-filter. ObjectTypingStage (CLIP) runs after and
+    overwrites 'class' with a more reliable fine-grained result for all crops.
 
     Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
     Writes: metadata_{i} (updated with 'class' and 'caption')
@@ -63,7 +66,7 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)
 
-        counts = {"object": 0, "environment": 0, "indeterminate": 0}
+        obj_count = env_count = indet_count = 0
         for idx in range(object_count):
             crop = context.input_image(f"crop_{idx}")
             metadata = context.input_object(f"metadata_{idx}") or {}
@@ -74,7 +77,12 @@ class PanoramaObjectClassificationStage(PipelineStage):
 
             caption = self._captioner.caption(crop)
             cls = _classify_caption(caption, self._confidence_threshold)
-            counts[cls] = counts.get(cls, 0) + 1
+            if cls == "indeterminate":
+                indet_count += 1
+            elif cls in _OBJECT_KEYWORDS:
+                obj_count += 1
+            else:
+                env_count += 1
 
             context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
             self.log_info(f"  crop_{idx}: '{caption}' → {cls}")
@@ -82,8 +90,8 @@ class PanoramaObjectClassificationStage(PipelineStage):
 
         self.finish_progress(classify_task)
         self.log_info(
-            f"Classification complete: {counts['object']} objects, "
-            f"{counts['environment']} environment, {counts['indeterminate']} indeterminate"
+            f"Classification complete: {obj_count} objects, "
+            f"{env_count} environment, {indet_count} indeterminate"
         )
         return context
 

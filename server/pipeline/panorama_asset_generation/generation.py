@@ -6,6 +6,7 @@ from typing import Any
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
 from util.device_utils import DeviceStrategy, preferred_device
 
 
@@ -72,8 +73,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
             metadata = context.input_object(f"metadata_{idx}")
             if metadata is None:
                 continue
-            if metadata.get("class") == "environment":
-                self.log_info(f"  crop_{idx}: environment, skipping")
+            if metadata.get("class") in _ENV_CATEGORIES or metadata.get("class") == "indeterminate":
+                self.log_info(f"  crop_{idx}: {metadata.get('class')}, skipping")
                 continue
             if context.input_mesh(f"mesh_{idx}") is not None:
                 self.log_info(f"  crop_{idx}: mesh already cached")
@@ -156,7 +157,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         for idx in range(count):
             metadata = context.object(f"metadata_{idx}")
-            if metadata is None or metadata.get("class") == "environment":
+            if metadata is None or metadata.get("class") in _ENV_CATEGORIES or metadata.get("class") == "indeterminate":
                 continue
             depth = self._sample_object_depth(
                 (metadata or {}).get("box"), panorama_depth, pano_w, pano_h

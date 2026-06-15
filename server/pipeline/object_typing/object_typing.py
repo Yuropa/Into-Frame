@@ -5,15 +5,16 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class ObjectTypingStage(PipelineStage):
     """
-    Assigns a fine-grained type label to each crop already classified as 'object'
-    using CLIP zero-shot image classification (openai/clip-vit-base-patch32).
+    Refines the 'class' on every crop using CLIP zero-shot image classification
+    (openai/clip-vit-base-patch32), overwriting the caption-based pre-filter value
+    with a more reliable fine-grained label (e.g. 'car', 'tree', 'sky').
 
-    Skips crops whose metadata 'class' is 'environment'. Text embeddings for all
-    categories are computed once at load time; per-image cost is a single forward
-    pass plus cosine similarity.
+    Skips crops already marked 'indeterminate'. Text embeddings for all categories
+    are computed once at load time; per-image cost is a single forward pass plus
+    cosine similarity.
 
     Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i} (with 'class' field)
-    Writes: metadata_{i} (adds 'type' field, e.g. "car", "building", "person")
+    Writes: metadata_{i} (updates 'class' with fine-grained CLIP result)
     """
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -34,7 +35,7 @@ class ObjectTypingStage(PipelineStage):
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
 
-            if metadata.get("class") != "object":
+            if metadata.get("class") == "indeterminate":
                 self.advance_progress(typing_task)
                 continue
 
@@ -44,7 +45,7 @@ class ObjectTypingStage(PipelineStage):
                 continue
 
             obj_type = self._classifier.classify(crop)
-            context.add_object(f"metadata_{idx}", {**metadata, "type": obj_type})
+            context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type})
             self.log_info(f"  crop_{idx}: {metadata.get('caption', '')} → {obj_type}")
             self.advance_progress(typing_task)
 
@@ -56,8 +57,10 @@ class ObjectTypingStage(PipelineStage):
         if count is None:
             return False
         for i in range(count):
-            meta = context.object(f"metadata_{i}") or {}
-            if meta.get("class") == "object" and meta.get("type") is None:
+            prior_meta = context.input_object(f"metadata_{i}") or {}
+            if prior_meta.get("class") == "indeterminate":
+                continue
+            if not context.has_stage_output(f"metadata_{i}"):
                 return False
         return True
 

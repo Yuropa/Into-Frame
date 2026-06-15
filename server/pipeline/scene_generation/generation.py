@@ -1,5 +1,6 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
@@ -86,7 +87,7 @@ class SceneGenerationStage(PipelineStage):
                 metadata = context.input_object(f"metadata_{idx}")
 
                 cls = (metadata or {}).get("class")
-                if cls in ("environment", "indeterminate"):
+                if cls in _ENV_CATEGORIES or cls == "indeterminate":
                     self.log_info(f"Skipping {cls} object {idx}")
                     self.advance_progress(generation_task)
                     continue
