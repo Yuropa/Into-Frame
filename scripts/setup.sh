@@ -99,6 +99,11 @@ fi
 # Keep sudo alive
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
+# Prevent system sleep during installation (macOS only; no-op elsewhere)
+if command -v caffeinate &>/dev/null; then
+    caffeinate -s -w $$ &
+fi
+
 # Setup logs
 if [ "$SAVE_LOGS" = true ]; then
     # Saving prior execution logs
