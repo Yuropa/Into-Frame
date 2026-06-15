@@ -424,6 +424,32 @@ create_main_environment() {
 run_step "Creating Conda Environment '$CONDA_NAME'" \
     create_main_environment
 
+## ========================
+##    Pattern Synthesis Lib
+## ========================
+
+build_pattern_synthesis() {
+    # Install CGAL (required for Delaunay/Voronoi in lloyd_relaxation)
+    if command -v apt &>/dev/null; then
+        sudo apt install -y libcgal-dev cmake ninja-build
+    elif command -v brew &>/dev/null; then
+        brew install cgal cmake ninja libomp
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y CGAL-devel cmake ninja-build
+    fi
+
+    # Install Python build tools into the frame environment
+    conda run --no-capture-output -n frame pip install \
+        "scikit-build-core>=0.4.3" "pybind11>=2.11" cmake ninja
+
+    # Build and install the pattern_synthesis Python extension
+    conda run --no-capture-output -n frame \
+        pip install --no-build-isolation "$PROJECT_DIR/pattern-synthesis/python_lib"
+}
+
+run_step "Building Pattern Synthesis Library" \
+    build_pattern_synthesis
+
 ## =============
 ##    SAM 2
 ## =============
