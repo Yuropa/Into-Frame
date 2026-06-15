@@ -1,4 +1,4 @@
-from util.image_utils import Image
+from util.image_utils import Image, make_context_composite
 from transformers import BlipProcessor, BlipForConditionalGeneration
 from PIL import Image as PILImage
 import numpy as np
@@ -33,8 +33,25 @@ class ImageCaptioning:
         composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
         return PILImage.fromarray(composited, mode="RGB")
 
-    def caption(self, input: Image, prompt: str = ""):
-        inputs = self.processor(self._to_rgb(input), prompt, return_tensors="pt").to(self.device)
+    def caption(
+        self,
+        input: Image,
+        scene_image: Image | None = None,
+        box: list[float] | None = None,
+        prompt: str = "",
+    ) -> str:
+        """Generate a caption for input.
+
+        When scene_image is provided, BLIP receives a composite (scene thumbnail
+        with object highlighted on top, crop below) instead of the bare crop,
+        giving it spatial context to produce more accurate captions.
+        """
+        if scene_image is not None:
+            pil_input = make_context_composite(self._to_rgb(input), scene_image.rgb(), box)
+        else:
+            pil_input = self._to_rgb(input)
+
+        inputs = self.processor(pil_input, prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             out = self.model.generate(**inputs)

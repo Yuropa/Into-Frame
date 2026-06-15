@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import torch
 from logging import Logger
@@ -69,12 +70,21 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         # First pass: decide which objects need 3D generation
         near_indices = []
+        skipped_debug = []
+        billboard_debug = []
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}")
             if metadata is None:
                 continue
             if metadata.get("class") in _ENV_CATEGORIES or metadata.get("class") == "indeterminate":
-                self.log_info(f"  crop_{idx}: {metadata.get('class')}, skipping")
+                self.log_info(f"  crop_{idx}: {metadata.get('class')} — skipped")
+                skipped_debug.append({
+                    "idx": idx,
+                    "class": metadata.get("class"),
+                    "caption": metadata.get("caption", ""),
+                    "confidence": metadata.get("confidence"),
+                    "reason": "environment" if metadata.get("class") in _ENV_CATEGORIES else "indeterminate",
+                })
                 continue
             if context.input_mesh(f"mesh_{idx}") is not None:
                 self.log_info(f"  crop_{idx}: mesh already cached")
@@ -86,6 +96,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
             else:
                 label = f"{depth:.1f} m" if depth is not None else "unknown depth"
                 self.log_info(f"  crop_{idx}: {label} → billboard")
+                billboard_debug.append({
+                    "idx": idx,
+                    "class": metadata.get("class"),
+                    "depth_m": round(depth, 2) if depth is not None else None,
+                    "threshold_m": threshold,
+                })
+
+        self._write_debug(skipped_debug, billboard_debug, near_indices)
 
         if not near_indices:
             self.log_info("No objects within 3D generation distance")
@@ -119,6 +137,23 @@ class PanoramaAssetGenerationStage(PipelineStage):
         gen.close()
         self.finish_progress(asset_task)
         return context
+
+    def _write_debug(self, skipped: list, billboards: list, near: list):
+        if self.output is None:
+            return
+        payload = {
+            "billboard_distance_m": self.config.billboard_distance_m,
+            "summary": {
+                "skipped_env_or_indeterminate": len(skipped),
+                "billboard": len(billboards),
+                "mesh_3d": len(near),
+            },
+            "skipped": skipped,
+            "billboard": billboards,
+            "mesh_3d": [{"idx": idx, "depth_m": round(depth, 2)} for idx, depth in near],
+        }
+        with open(self.output / "asset_debug.json", "w") as f:
+            json.dump(payload, f, indent=2)
 
     def _sample_object_depth(self, box, panorama_depth, pano_w, pano_h) -> float | None:
         """Sample median depth in a patch around the bbox centre in the panorama depth map."""

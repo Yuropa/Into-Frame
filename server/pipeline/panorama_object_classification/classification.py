@@ -1,3 +1,4 @@
+import json
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -7,23 +8,26 @@ _ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys())
 _OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
-def _classify_caption(caption: str, confidence_threshold: float = 0.75) -> str:
-    """Return the best-matching fine-grained category keyword from a free-form caption,
-    or 'indeterminate' when no keywords match or confidence is below threshold.
+def _classify_caption(
+    caption: str, confidence_threshold: float = 0.75
+) -> tuple[str, dict]:
+    """Return (label, debug) where label is the best keyword or 'indeterminate'.
 
-    Confidence = max(obj_score, env_score) / total_keywords."""
+    debug contains obj_matches, env_matches, and confidence for JSON output."""
     words = set(caption.lower().replace(",", " ").replace(".", " ").replace("'", " ").split())
     obj_matches = [kw for kw in _OBJECT_KEYWORDS if kw in words]
     env_matches = [kw for kw in _ENVIRONMENT_KEYWORDS if kw in words]
     obj_score = len(obj_matches)
     env_score = len(env_matches)
     total = obj_score + env_score
+    debug = {"obj_matches": obj_matches, "env_matches": env_matches, "confidence": 0.0}
     if total == 0:
-        return "indeterminate"
+        return "indeterminate", debug
     confidence = max(obj_score, env_score) / total
+    debug["confidence"] = confidence
     if confidence < confidence_threshold:
-        return "indeterminate"
-    return obj_matches[0] if obj_score >= env_score else env_matches[0]
+        return "indeterminate", debug
+    return (obj_matches[0] if obj_score >= env_score else env_matches[0]), debug
 
 
 class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
@@ -39,11 +43,15 @@ class PanoramaObjectClassificationStage(PipelineStage):
     'class' (a fine-grained keyword like 'tree' or 'sky', or 'indeterminate')
     and 'caption' (str) to metadata_{i}.
 
+    BLIP receives a context composite (scene thumbnail with the object highlighted
+    on top, crop below) rather than the bare crop, giving it spatial context.
+
     This is a fast first-pass pre-filter. ObjectTypingStage (CLIP) runs after and
     overwrites 'class' with a more reliable fine-grained result for all crops.
 
-    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
+    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}, ContextKey.INPUT (scene context)
     Writes: metadata_{i} (updated with 'class' and 'caption')
+    Debug:  classification_debug.json
     """
 
     @classmethod
@@ -68,7 +76,10 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)
 
+        scene_image = context.input_image(ContextKey.INPUT)
+
         obj_count = env_count = indet_count = 0
+        debug_entries = []
         for idx in range(object_count):
             crop = context.input_image(f"crop_{idx}")
             metadata = context.input_object(f"metadata_{idx}") or {}
@@ -79,8 +90,10 @@ class PanoramaObjectClassificationStage(PipelineStage):
                 continue
 
             context.add_image(f"crop_{idx}", crop)
-            caption = self._captioner.caption(crop)
-            cls = _classify_caption(caption, self._confidence_threshold)
+            box = metadata.get("box")
+            caption = self._captioner.caption(crop, scene_image=scene_image, box=box)
+            cls, debug = _classify_caption(caption, self._confidence_threshold)
+
             if cls == "indeterminate":
                 indet_count += 1
             elif cls in _OBJECT_KEYWORDS:
@@ -88,8 +101,18 @@ class PanoramaObjectClassificationStage(PipelineStage):
             else:
                 env_count += 1
 
-            context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
             self.log_info(f"  crop_{idx}: '{caption}' → {cls}")
+            context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
+
+            debug_entries.append({
+                "idx": idx,
+                "caption": caption,
+                "class": cls,
+                "caption_confidence": round(debug["confidence"], 4),
+                "obj_matches": debug["obj_matches"],
+                "env_matches": debug["env_matches"],
+            })
+
             self.advance_progress(classify_task)
 
         self.finish_progress(classify_task)
@@ -97,7 +120,19 @@ class PanoramaObjectClassificationStage(PipelineStage):
             f"Classification complete: {obj_count} objects, "
             f"{env_count} environment, {indet_count} indeterminate"
         )
+        self._write_debug(debug_entries, obj_count, env_count, indet_count)
         return context
+
+    def _write_debug(self, entries: list, obj_count: int, env_count: int, indet_count: int):
+        if self.output is None:
+            return
+        payload = {
+            "confidence_threshold": self._confidence_threshold,
+            "summary": {"objects": obj_count, "environment": env_count, "indeterminate": indet_count},
+            "objects": entries,
+        }
+        with open(self.output / "classification_debug.json", "w") as f:
+            json.dump(payload, f, indent=2)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)
