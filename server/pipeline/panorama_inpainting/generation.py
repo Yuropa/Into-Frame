@@ -31,6 +31,7 @@ from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
+from pipeline.object_typing.categories import OBJECT_CATEGORIES as _OBJECT_CATEGORIES
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -100,7 +101,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
     Dynamic context keys per detected crop (index i):
       crop_{i}     → Image
-      metadata_{i} → {"box": [...], "score": float, "class": str, "type": str}
+      metadata_{i} → {"box": [...], "score": float, "class": str}
 
     Also writes ContextKey.OBJECT_COUNT (total crops found).
     """
@@ -183,21 +184,20 @@ class PanoramaInpaintingStage(PipelineStage):
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, cls, clip_confidence = self._classifier.classify(crop_image)
+                obj_type, clip_confidence = self._classifier.classify(crop_image)
 
                 context.add_image(f"crop_{i}", crop_image)
                 context.add_object(f"metadata_{i}", {
                     "box":        box,
                     "score":      float(crop.score),
-                    "class":      cls,
-                    "type":       obj_type,
+                    "class":      obj_type,
                     "confidence": round(clip_confidence, 4),
                 })
                 if self.temp is not None:
                     crop_image.image.save(self.temp / f"crop_{i}.png")
-                    crop_caption = f"type: {obj_type}\nclass: {cls}\nconfidence: {clip_confidence:.3f}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
+                    crop_caption = f"class: {obj_type}\nconfidence: {clip_confidence:.3f}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
-                if cls == "object":
+                if obj_type in _OBJECT_CATEGORIES:
                     mask_fraction = float(mask_array.sum()) / (h * w)
                     if mask_fraction > self.config.max_object_area_fraction:
                         self.log_info(f"  crop_{i}: skipping inpaint, mask too large ({mask_fraction:.1%} of panorama)")
@@ -207,13 +207,12 @@ class PanoramaInpaintingStage(PipelineStage):
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
-                    "type":  obj_type,
-                    "class": cls,
+                    "class": obj_type,
                     "score": round(float(crop.score), 3),
                     "box":   [round(x, 1) for x in box],
                 })
 
-                self.log_info(f"  crop_{i}: {obj_type} → {cls}  (conf={clip_confidence:.2f})")
+                self.log_info(f"  crop_{i}: {obj_type}  (conf={clip_confidence:.2f})")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks

@@ -57,10 +57,10 @@ class ImageClipClassifier:
         composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
         return PILImage.fromarray(composited, mode="RGB")
 
-    def classify(self, image: Image) -> tuple[str, str, float]:
-        """Returns (type, class, confidence) where type is the winning category label,
-        class is 'object', 'environment', or 'indeterminate', and confidence is
-        rescaled to [0, 1]: 0 = perfectly tied, 1 = completely one-sided."""
+    def classify(self, image: Image) -> tuple[str, float]:
+        """Returns (label, confidence) where label is the winning fine-grained category
+        (e.g. 'tree', 'sky') or 'indeterminate', and confidence is rescaled to [0, 1]:
+        0 = perfectly tied, 1 = completely one-sided."""
         inputs = self.processor(images=self._to_rgb(image), return_tensors="pt").to(self.device)
         with torch.no_grad():
             vision_out = self.model.vision_model(**inputs)
@@ -87,7 +87,7 @@ class ImageClipClassifier:
         confidence = (max(obj_s, env_s) / total - 0.5) * 2.0 if total > 0 else 0.0
 
         if confidence < self._confidence_threshold:
-            return "indeterminate", "indeterminate", confidence
+            return "indeterminate", confidence
         if best_obj_score >= best_env_score:
-            return best_obj_label, "object", confidence
-        return best_env_label, "environment", confidence
+            return best_obj_label, confidence
+        return best_env_label, confidence

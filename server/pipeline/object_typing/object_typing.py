@@ -5,16 +5,17 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 
 class ObjectTypingStage(PipelineStage):
     """
-    Assigns a fine-grained type label to every crop using CLIP zero-shot
-    classification (openai/clip-vit-base-patch32). Covers both object and
-    environment categories so all crops get a meaningful type label regardless
-    of what the upstream classification stage decided.
+    Assigns a fine-grained 'class' to every crop using CLIP zero-shot classification
+    (openai/clip-vit-base-patch32), overwriting the caption-based pre-filter value
+    with a more reliable label (e.g. 'car', 'tree', 'sky'). Covers both object and
+    environment categories so all crops get a meaningful class regardless of what the
+    upstream classification stage decided.
 
     Text embeddings for all categories are computed once at load time;
     per-image cost is a single forward pass plus cosine similarity.
 
     Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
-    Writes: metadata_{i} (adds/overwrites 'type' and 'class' fields)
+    Writes: metadata_{i} (updates 'class' and 'confidence' fields)
     """
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
@@ -34,15 +35,15 @@ class ObjectTypingStage(PipelineStage):
 
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
-            crop = context.input_image(f"crop_{idx}")
 
+            crop = context.input_image(f"crop_{idx}")
             if crop is None:
                 self.advance_progress(typing_task)
                 continue
 
-            obj_type, obj_class, confidence = self._classifier.classify(crop)
-            context.add_object(f"metadata_{idx}", {**metadata, "type": obj_type, "class": obj_class})
-            self.log_info(f"  crop_{idx}: {metadata.get('caption', '')} → {obj_type} ({obj_class}, {confidence:.2f})")
+            obj_type, confidence = self._classifier.classify(crop)
+            context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type, "confidence": round(confidence, 4)})
+            self.log_info(f"  crop_{idx}: {metadata.get('caption', '')} → {obj_type} ({confidence:.2f})")
             self.advance_progress(typing_task)
 
         self.finish_progress(typing_task)
@@ -52,10 +53,7 @@ class ObjectTypingStage(PipelineStage):
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
             return False
-        return all(
-            (context.object(f"metadata_{i}") or {}).get("type") is not None
-            for i in range(count)
-        )
+        return all(context.has_stage_output(f"metadata_{i}") for i in range(count))
 
     def model_names(self) -> list[str]:
         return ImageClipClassifier.model_names()
