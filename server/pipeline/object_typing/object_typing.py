@@ -38,8 +38,6 @@ class ObjectTypingStage(PipelineStage):
             self._classifier = ImageClipClassifier(self.device)
         self.advance_progress(typing_task)
 
-        scene_image = context.input_image(ContextKey.INPUT)
-
         debug_entries = []
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
@@ -49,10 +47,7 @@ class ObjectTypingStage(PipelineStage):
                 self.advance_progress(typing_task)
                 continue
 
-            box = metadata.get("box")
-            obj_type, confidence, top, criteria = self._classifier.classify_with_details(
-                crop, scene_image=scene_image, box=box
-            )
+            obj_type, confidence, top, criteria = self._classifier.classify_with_details(crop)
             context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type, "confidence": round(confidence, 4)})
             self.log_info(f"  crop_{idx}: '{metadata.get('caption', '')}' → {obj_type} ({confidence:.2f})")
 

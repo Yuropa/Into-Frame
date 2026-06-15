@@ -8,9 +8,7 @@ _ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys())
 _OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
-def _classify_caption(
-    caption: str, confidence_threshold: float = 0.75
-) -> tuple[str, dict]:
+def _classify_caption(caption: str) -> tuple[str, dict]:
     """Return (label, debug) where label is the best keyword or 'indeterminate'.
 
     debug contains obj_matches, env_matches, and confidence for JSON output."""
@@ -25,15 +23,11 @@ def _classify_caption(
         return "indeterminate", debug
     confidence = max(obj_score, env_score) / total
     debug["confidence"] = confidence
-    if confidence < confidence_threshold:
-        return "indeterminate", debug
     return (obj_matches[0] if obj_score >= env_score else env_matches[0]), debug
 
 
 class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
-    def __init__(self, confidence_threshold: float = 0.75, **kwargs):
-        super().__init__(**kwargs)
-        self.confidence_threshold = confidence_threshold
+    pass
 
 
 class PanoramaObjectClassificationStage(PipelineStage):
@@ -61,7 +55,6 @@ class PanoramaObjectClassificationStage(PipelineStage):
     def __init__(self, config: PanoramaObjectClassificationConfig) -> None:
         super().__init__(config)
         self._captioner = None
-        self._confidence_threshold = config.confidence_threshold
 
     def run(self, context: PipelineContext) -> PipelineContext:
         object_count = context.input_object(ContextKey.OBJECT_COUNT)
@@ -76,8 +69,6 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)
 
-        scene_image = context.input_image(ContextKey.INPUT)
-
         obj_count = env_count = indet_count = 0
         debug_entries = []
         for idx in range(object_count):
@@ -90,9 +81,8 @@ class PanoramaObjectClassificationStage(PipelineStage):
                 continue
 
             context.add_image(f"crop_{idx}", crop)
-            box = metadata.get("box")
-            caption = self._captioner.caption(crop, scene_image=scene_image, box=box)
-            cls, debug = _classify_caption(caption, self._confidence_threshold)
+            caption = self._captioner.caption(crop)
+            cls, debug = _classify_caption(caption)
 
             if cls == "indeterminate":
                 indet_count += 1
@@ -127,7 +117,6 @@ class PanoramaObjectClassificationStage(PipelineStage):
         if self.output is None:
             return
         payload = {
-            "confidence_threshold": self._confidence_threshold,
             "summary": {"objects": obj_count, "environment": env_count, "indeterminate": indet_count},
             "objects": entries,
         }
