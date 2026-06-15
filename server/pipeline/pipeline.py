@@ -45,7 +45,7 @@ from pipeline.pipeline_monitor import PipelineMonitor
 from pipeline.pipeline_input import PipelineInputItem
 from util.device_utils import preferred_device, device_name, DeviceStrategy
 from util.image_utils import Image
-from util.json_utils import write_json
+from util.json_utils import write_json, parse_json
 
 class _PipelineFilter(logging.Filter):
     """Passes log records from the pipeline logger and its children."""
@@ -461,6 +461,18 @@ class Pipeline:
         self.log_info(f"Running with input: {self.input}")
 
         output = self._create_output_directories()
+
+        # Read cached seeds before overwriting so we can detect per-stage changes.
+        cached_global_seed: Optional[int] = None
+        cached_stage_seeds: dict[str, int] = {}
+        if output is not None:
+            seed_file = output / "seed.json"
+            if seed_file.exists():
+                with open(seed_file) as f:
+                    old_seed_data = parse_json(f.read())
+                cached_global_seed = old_seed_data.get("global_seed")
+                cached_stage_seeds = old_seed_data.get("stage_seeds", {})
+
         if output is not None:
             seed_data = {
                 "global_seed": self.config.seeds.global_seed,
@@ -484,6 +496,9 @@ class Pipeline:
                 _clear_directory(output)
                 context = PipelineContext()
                 context.add_image(ContextKey.INPUT, input_image)
+                # Cache was purged — seed comparison no longer meaningful.
+                cached_global_seed = None
+                cached_stage_seeds = {}
             else:
                 self.log_info("Found cached content")
                 context.log_state()
@@ -544,6 +559,11 @@ class Pipeline:
                     task = progress.add_task("Processing…", total=len(self.stages))
                     dirty = False
                     for stage in self.stages:
+                        cached_seed = cached_stage_seeds.get(stage.name, cached_global_seed)
+                        current_seed = self.config.seeds.seed_for(stage.name)
+                        seed_changed = cached_global_seed is not None and cached_seed != current_seed
+                        if seed_changed and not dirty:
+                            self.log_info(f"Seed changed for '{stage.name}' ({cached_seed} → {current_seed}), forcing rerun")
                         ran = self._run_stage(
                             stage=stage,
                             context=context,
@@ -551,7 +571,7 @@ class Pipeline:
                             monitor=monitor,
                             progress=progress,
                             task=task,
-                            force=dirty,
+                            force=dirty or seed_changed,
                         )
                         dirty = dirty or ran
             except BaseException as _exc:
