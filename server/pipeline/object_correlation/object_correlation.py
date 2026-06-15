@@ -136,11 +136,14 @@ class ObjectCorrelationStage(PipelineStage):
         draw = PIL.ImageDraw.Draw(overlay)
         font = PIL.ImageFont.load_default()
 
-        colors = _category_colors(result.types())
+        visible_types = [t for t in result.types() if t != "indeterminate"]
+        colors = _category_colors(visible_types)
 
         for obj_type, stats in result.groups.items():
+            if obj_type == "indeterminate":
+                continue
+
             r, g, b = colors[obj_type]
-            fill = (r, g, b, 50)
             outline = (r, g, b, 220)
 
             for idx in stats.indices:
@@ -149,7 +152,20 @@ class ObjectCorrelationStage(PipelineStage):
                 if not box:
                     continue
                 x, y, w, h = box
-                draw.rectangle([x, y, x + w, y + h], fill=fill, outline=outline, width=2)
+
+                # Draw mask from SAM2 crop alpha channel if available
+                drawn_mask = False
+                crop = context.input_image(f"crop_{idx}")
+                if crop is not None and crop.image.mode == "RGBA":
+                    alpha = crop.image.getchannel("A")
+                    colored = PIL.Image.new("RGBA", crop.image.size, (r, g, b, 80))
+                    overlay.paste(colored, (int(x), int(y)), mask=alpha)
+                    draw.rectangle([x, y, x + w, y + h], outline=outline, width=2)
+                    drawn_mask = True
+
+                if not drawn_mask:
+                    draw.rectangle([x, y, x + w, y + h], fill=(r, g, b, 50), outline=outline, width=2)
+
                 draw.text((x + 4, y + 4), obj_type, fill=(r, g, b, 255), font=font)
 
         composite = PIL.Image.alpha_composite(base, overlay).convert("RGB")

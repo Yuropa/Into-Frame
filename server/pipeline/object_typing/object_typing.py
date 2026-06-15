@@ -54,6 +54,13 @@ class ObjectTypingStage(PipelineStage):
                 obj_type, confidence, top, criteria = self._classifier.classify_from_caption(caption)
                 caption_fallback = True
 
+            # Don't clobber a valid prior classification with indeterminate — keep
+            # the existing class as a fallback so correlation has something to work with.
+            prior_class = metadata.get("class", "indeterminate")
+            if obj_type == "indeterminate" and prior_class != "indeterminate":
+                obj_type = prior_class
+                caption_fallback = False
+
             context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type, "confidence": round(confidence, 4)})
             suffix = " [caption fallback]" if caption_fallback else ""
             self.log_info(f"  crop_{idx}: '{caption}' → {obj_type} ({confidence:.2f}){suffix}")
