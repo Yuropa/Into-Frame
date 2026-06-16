@@ -130,7 +130,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "treed")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -918,6 +918,32 @@ setup_worldgen() {
 
 run_step "Installing WorldGen" \
     setup_worldgen
+
+## ============
+##    TreeD
+## ============
+
+TREED_DIR="$LIB_DIR/TreeDFusion"
+
+setup_treed() {
+    clone_if_needed https://github.com/JaeLee18/TreeDFusion_ECCV24.git "$TREED_DIR"
+
+    local ckpt_dir="$CHECKPOINT_DIR/treed"
+    if [ ! -d "$ckpt_dir" ]; then
+        mkdir -p "$ckpt_dir"
+        conda run --no-capture-output -n "$CONDA_NAME" pip install -q gdown
+        conda run --no-capture-output -n "$CONDA_NAME" gdown "1tHWbX-TdkS4JCg6MrUu-BAUDjPDTaMyQ" -O "$ckpt_dir/"
+    fi
+
+    create_env "treed" 3.10
+    run_in_env pip install -r "$TREED_DIR/Magic123/requirements.txt"
+    run_in_env pip install -r "$TREED_DIR/zero123/requirements.txt"
+
+    stop_env
+}
+
+run_step "Installing TreeD (Tree-D Fusion)" \
+    setup_treed
 
 ## ============
 ##    End

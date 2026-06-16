@@ -1,5 +1,9 @@
 from typing import Final
 
+VEGETATION_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "tree", "forest", "bush", "flower", "plant"
+})
+
 # Each category maps to CLIP text prompts; best per-category similarity is used.
 OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "person":       ["a photo of a person", "a photo of a man or woman walking", "a photo of people"],
@@ -59,6 +63,53 @@ UNIQUE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "monument", "statue", "landmark", "lighthouse",
     "fountain", "gazebo", "waterfall", "bridge", "tower",
 })
+
+_ALL_KNOWN: Final[frozenset[str]] = frozenset(OBJECT_CATEGORIES) | frozenset({
+    "sky", "clouds", "fog", "haze", "sunset", "aurora", "rainbow", "moon", "stars",
+    "water", "river", "ocean", "lake", "beach", "ground", "dirt", "grass", "field",
+    "sand", "snow", "ice", "mountain", "cliff", "trail", "road", "wall", "mud",
+    "other_environment",
+})
+
+
+def validate_categories(names: list[str]) -> None:
+    """Raise ValueError if any name is not a recognized object or environment category."""
+    unknown = [n for n in names if n not in _ALL_KNOWN]
+    if unknown:
+        raise ValueError(
+            f"Unrecognized category type(s): {unknown!r}. "
+            f"Valid types: {sorted(_ALL_KNOWN)}"
+        )
+
+
+class CategoryFilter:
+    """Include/exclude filter on object category labels.
+
+    Exactly one of include or exclude may be specified. If neither is given,
+    all categories are allowed.
+    """
+
+    def __init__(
+        self,
+        include: list[str] | None = None,
+        exclude: list[str] | None = None,
+    ) -> None:
+        if include is not None and exclude is not None:
+            raise ValueError("Specify at most one of include_categories or exclude_categories")
+        if include is not None:
+            validate_categories(include)
+        if exclude is not None:
+            validate_categories(exclude)
+        self._include = frozenset(include) if include is not None else None
+        self._exclude = frozenset(exclude) if exclude is not None else None
+
+    def allows(self, category: str) -> bool:
+        if self._include is not None:
+            return category in self._include
+        if self._exclude is not None:
+            return category not in self._exclude
+        return True
+
 
 ENVIRONMENT_CATEGORIES: Final[dict[str, list[str]]] = {
     "sky":          ["a photo of the sky", "a clear blue sky", "an overcast or cloudy sky"],

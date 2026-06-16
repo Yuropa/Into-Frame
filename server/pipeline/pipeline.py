@@ -42,6 +42,7 @@ from pipeline.object_distribution.object_distribution import ObjectDistributionS
 from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
 from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguration
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
+from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -314,6 +315,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectDistributionStage": ObjectDistributionStage,
     "PanoramaRegionStage": PanoramaRegionStage,
     "RegionMapStage": RegionMapStage,
+    "TreeMeshGenerationStage": TreeMeshGenerationStage,
 }
 
 

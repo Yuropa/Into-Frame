@@ -7,7 +7,7 @@ from typing import Any
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
+from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter
 from util.device_utils import DeviceStrategy, preferred_device
 
 
@@ -23,11 +23,14 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         billboard_distance_m: float = 10.0,
         generator_type: str = "TRELLIS",
         lod_max_error_fraction: float = 0.03,
+        include_categories: list[str] | None = None,
+        exclude_categories: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.billboard_distance_m = float(billboard_distance_m)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         self.lod_max_error_fraction = float(lod_max_error_fraction)
+        self.category_filter = CategoryFilter(include_categories, exclude_categories)
 
 
 class PanoramaAssetGenerationStage(PipelineStage):
@@ -76,14 +79,25 @@ class PanoramaAssetGenerationStage(PipelineStage):
             metadata = context.input_object(f"metadata_{idx}")
             if metadata is None:
                 continue
-            if metadata.get("class") in _ENV_CATEGORIES or metadata.get("class") == "indeterminate":
-                self.log_info(f"  crop_{idx}: {metadata.get('class')} — skipped")
+            obj_class = metadata.get("class")
+            if obj_class in _ENV_CATEGORIES or obj_class == "indeterminate":
+                self.log_info(f"  crop_{idx}: {obj_class} — skipped")
                 skipped_debug.append({
                     "idx": idx,
-                    "class": metadata.get("class"),
+                    "class": obj_class,
                     "caption": metadata.get("caption", ""),
                     "confidence": metadata.get("confidence"),
-                    "reason": "environment" if metadata.get("class") in _ENV_CATEGORIES else "indeterminate",
+                    "reason": "environment" if obj_class in _ENV_CATEGORIES else "indeterminate",
+                })
+                continue
+            if not self.config.category_filter.allows(obj_class or ""):
+                self.log_info(f"  crop_{idx}: '{obj_class}' — excluded by category filter")
+                skipped_debug.append({
+                    "idx": idx,
+                    "class": obj_class,
+                    "caption": metadata.get("caption", ""),
+                    "confidence": metadata.get("confidence"),
+                    "reason": "category_filter",
                 })
                 continue
             if context.input_mesh(f"mesh_{idx}") is not None:
@@ -192,10 +206,15 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         for idx in range(count):
             metadata = context.object(f"metadata_{idx}")
-            if metadata is None or metadata.get("class") in _ENV_CATEGORIES or metadata.get("class") == "indeterminate":
+            if metadata is None:
+                continue
+            obj_class = metadata.get("class")
+            if obj_class in _ENV_CATEGORIES or obj_class == "indeterminate":
+                continue
+            if not self.config.category_filter.allows(obj_class or ""):
                 continue
             depth = self._sample_object_depth(
-                (metadata or {}).get("box"), panorama_depth, pano_w, pano_h
+                metadata.get("box"), panorama_depth, pano_w, pano_h
             )
             if depth is not None and depth < threshold:
                 if context.mesh(f"mesh_{idx}") is None:
