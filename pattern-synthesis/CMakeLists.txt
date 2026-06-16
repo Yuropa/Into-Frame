@@ -31,13 +31,19 @@ set(POLYSCOPE_BACKEND_OPENGL3_EGL OFF)
 set(POLYSCOPE_BACKEND_OPENGL3_WGL OFF)
 FetchContent_MakeAvailable(polyscope)
 
-add_executable(pattern_synthesis 
-  src/main.cpp 
-  src/sampling.cpp 
+add_executable(pattern_synthesis
+  src/main.cpp
+  src/sampling.cpp
   src/parameterization.cpp
   src/lloyd_relaxation.cpp
   src/interaction.cpp
   src/voronoi-pcf.cpp
+)
+
+add_executable(pcf_cli
+  src/pcf_cli.cpp
+  src/lloyd_relaxation.cpp
+  src/sampling.cpp
 )
 
 find_package(CGAL REQUIRED)
@@ -69,3 +75,8 @@ find_package(OpenMP REQUIRED)
 target_link_libraries(pattern_synthesis PRIVATE igl::core polyscope CGAL::CGAL)
 target_link_libraries(pattern_synthesis PRIVATE OpenMP::OpenMP_CXX)
 message(STATUS "OpenMP enabled")
+
+target_link_libraries(pcf_cli PRIVATE igl::core CGAL::CGAL)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(pcf_cli PRIVATE OpenMP::OpenMP_CXX)
+endif()

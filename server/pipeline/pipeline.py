@@ -38,6 +38,8 @@ from pipeline.lighting.lighting import PanoramaLightingStage
 from pipeline.recognize.recognize import RecognizeAnythingStage
 from pipeline.object_correlation.object_correlation import ObjectCorrelationStage
 from pipeline.object_detection.object_detection import ObjectDetectionStage
+from pipeline.object_distribution.object_distribution import ObjectDistributionStage
+from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
@@ -308,6 +310,8 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "RecognizeAnythingStage": RecognizeAnythingStage,
     "ObjectCorrelationStage": ObjectCorrelationStage,
     "ObjectDetectionStage": ObjectDetectionStage,
+    "ObjectDistributionStage": ObjectDistributionStage,
+    "PanoramaRegionStage": PanoramaRegionStage,
 }
 
 

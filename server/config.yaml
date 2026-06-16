@@ -32,6 +32,9 @@ stages:
     stage: PanoramaInpaintingStage
     full_panorama: true
 
+  - name: Panorama Regions
+    stage: PanoramaRegionStage
+
   - name: Panorama Lighting
     stage: PanoramaLightingStage
 
@@ -85,6 +88,11 @@ stages:
 
   - name: Object Correlation
     stage: ObjectCorrelationStage
+
+  - name: Object Distribution
+    stage: ObjectDistributionStage
+    bin_count: 48
+    # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
