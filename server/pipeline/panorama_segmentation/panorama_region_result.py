@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Self
 
+import numpy as np
+
 
 REGION_TYPE_SKY = "sky"
 REGION_TYPE_WATER = "water"
@@ -40,6 +42,36 @@ def coarse_type_for_label(label_name: str) -> str:
         if any(kw in name for kw in keywords):
             return region_type
     return REGION_TYPE_OTHER
+
+
+REGION_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
+    REGION_TYPE_SKY:        (135, 206, 235),
+    REGION_TYPE_WATER:      (30,  144, 255),
+    REGION_TYPE_TERRAIN:    (139, 90,  43),
+    REGION_TYPE_GROUND:     (160, 120, 60),
+    REGION_TYPE_VEGETATION: (34,  139, 34),
+    REGION_TYPE_BUILT:      (169, 169, 169),
+    REGION_TYPE_OTHER:      (200, 200, 200),
+}
+
+
+def build_type_idx_map(label_map: np.ndarray, id2label: dict[int, str]) -> np.ndarray:
+    """Map ADE20K per-pixel class IDs to a per-pixel coarse region type index array."""
+    other_idx = ALL_REGION_TYPES.index(REGION_TYPE_OTHER)
+    type_idx_map = np.full(label_map.shape, other_idx, dtype=np.uint8)
+    for class_id, label_name in id2label.items():
+        region_type = coarse_type_for_label(label_name)
+        type_idx = ALL_REGION_TYPES.index(region_type)
+        type_idx_map[label_map == class_id] = type_idx
+    return type_idx_map
+
+
+def colorize_region_type_map(type_idx_map: np.ndarray) -> np.ndarray:
+    """Convert a per-pixel region type index array (H, W) to an RGB image array (H, W, 3)."""
+    rgb = np.zeros((*type_idx_map.shape, 3), dtype=np.uint8)
+    for i, region_type in enumerate(ALL_REGION_TYPES):
+        rgb[type_idx_map == i] = REGION_TYPE_COLORS.get(region_type, (200, 200, 200))
+    return rgb
 
 
 @dataclass

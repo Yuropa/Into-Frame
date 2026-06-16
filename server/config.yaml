@@ -60,6 +60,13 @@ stages:
     flood_fill: true             # BFS from grid centre outward; stops at height jumps and sky gaps
     flood_fill_max_step: 1.5    # max Y change (metres) between adjacent cells in the flood-fill
 
+  - name: Region Map
+    stage: RegionMapStage
+    grid_size_meters: 100.0     # must match Height Map grid extent
+    grid_resolution: 1024       # must match Height Map resolution
+    ground_y_max: -0.5
+    camera_height_meters: 1.0
+
   - name: Terrain Mesh
     stage: TerrainMeshStage
     inner_min_dist: 0.15    # metres between samples at the origin (15 cm)

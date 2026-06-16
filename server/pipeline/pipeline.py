@@ -40,6 +40,7 @@ from pipeline.object_correlation.object_correlation import ObjectCorrelationStag
 from pipeline.object_detection.object_detection import ObjectDetectionStage
 from pipeline.object_distribution.object_distribution import ObjectDistributionStage
 from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
+from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguration
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
@@ -312,6 +313,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectDetectionStage": ObjectDetectionStage,
     "ObjectDistributionStage": ObjectDistributionStage,
     "PanoramaRegionStage": PanoramaRegionStage,
+    "RegionMapStage": RegionMapStage,
 }
 
 

@@ -12,6 +12,8 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     PanoramaRegion,
     ALL_REGION_TYPES,
     coarse_type_for_label,
+    build_type_idx_map,
+    colorize_region_type_map,
 )
 from util.image_utils import Image
 
@@ -42,11 +44,13 @@ def _connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
     return labels, n
 
 
-def _build_result(raw: dict) -> PanoramaRegionResult:
+def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
     label_map = np.array(raw["label_map"], dtype=np.int16)
     id2label: dict[int, str] = {int(k): v for k, v in raw["id2label"].items()}
     h, w = label_map.shape
     total_pixels = h * w
+
+    type_idx_map = build_type_idx_map(label_map, id2label)
 
     result = PanoramaRegionResult()
     type_pixel_counts: dict[str, int] = {t: 0 for t in ALL_REGION_TYPES}
@@ -110,7 +114,7 @@ def _build_result(raw: dict) -> PanoramaRegionResult:
     result.present_types = [
         t for t in ALL_REGION_TYPES if type_pixel_counts.get(t, 0) > 0
     ]
-    return result
+    return result, type_idx_map
 
 
 def _dominant_label_name(
@@ -165,8 +169,9 @@ class PanoramaRegionStage(PipelineStage):
         raw = self._client.segment(panorama.rgb())
         self.advance_progress(task)
 
-        result = _build_result(raw)
+        result, type_idx_map = _build_result(raw)
         context.add_panorama_regions(ContextKey.PANORAMA_REGIONS, result)
+        context.add_depth(ContextKey.PANORAMA_REGION_TYPE_MAP, type_idx_map.astype(np.float32))
 
         for region_type in result.present_types:
             frac = result.type_fractions.get(region_type, 0.0)
@@ -174,44 +179,19 @@ class PanoramaRegionStage(PipelineStage):
 
         self.advance_progress(task)
         self.finish_progress(task)
-        self._write_debug(result, raw)
+        self._write_debug(result, type_idx_map)
         return context
 
-    def _write_debug(self, result: PanoramaRegionResult, raw: dict):
+    def _write_debug(self, result: PanoramaRegionResult, type_idx_map: np.ndarray):
         if self.output is None:
             return
 
         with open(self.output / "regions.json", "w") as f:
             json.dump(result.encode(), f, indent=2)
 
-        self._write_label_overlay(raw)
-
-    def _write_label_overlay(self, raw: dict):
-        label_map = np.array(raw["label_map"], dtype=np.int16)
-        h, w = label_map.shape
-
-        _TYPE_COLORS = {
-            "sky":         (135, 206, 235),
-            "water":       (30,  144, 255),
-            "terrain":     (139, 90,  43),
-            "ground":      (160, 120, 60),
-            "vegetation":  (34,  139, 34),
-            "built":       (169, 169, 169),
-            "other":       (200, 200, 200),
-        }
-
-        id2label = {int(k): v for k, v in raw["id2label"].items()}
-        id_to_color = {}
-        for class_id, label_name in id2label.items():
-            region_type = coarse_type_for_label(label_name)
-            id_to_color[class_id] = _TYPE_COLORS.get(region_type, (200, 200, 200))
-
-        overlay = np.zeros((h, w, 3), dtype=np.uint8)
-        for class_id, color in id_to_color.items():
-            mask = label_map == class_id
-            overlay[mask] = color
-
-        PILImage.fromarray(overlay).save(self.output / "label_overlay.png")
+        PILImage.fromarray(colorize_region_type_map(type_idx_map)).save(
+            self.output / "label_overlay.png"
+        )
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.panorama_regions(ContextKey.PANORAMA_REGIONS) is not None
