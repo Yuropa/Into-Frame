@@ -105,6 +105,15 @@ stages:
     stage: PanoramaAssetGenerationStage
     billboard_distance_m: 30.0
     generator_type: SAM3D
+    exclude_categories:
+      - tree
+      - forest
+      - bush
+      - flower
+      - plant
+
+  - name: Tree Mesh Generation
+    stage: TreeMeshGenerationStage
 
   - name: Scene Generation
     stage: SceneGenerationStage
@@ -116,6 +125,12 @@ stages:
   - name: Mesh Generation
     stage: ModelGenerationStage
     enabled: false
+    exclude_categories:
+      - tree
+      - forest
+      - bush
+      - flower
+      - plant
 
   - name: Panorama Cubemap
     stage: PanoramaToCubemapStage
