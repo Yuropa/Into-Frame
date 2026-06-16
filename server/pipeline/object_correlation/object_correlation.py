@@ -1,5 +1,6 @@
 import colorsys
 import json
+import math
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
@@ -40,6 +41,37 @@ def _category_colors(categories: list[str]) -> dict[str, tuple[int, int, int]]:
     return colors
 
 
+def _project_box_to_pano(box, intrinsics, pano_w: int, pano_h: int) -> list[tuple[float, float]]:
+    """Project a perspective bounding box onto equirectangular panorama pixel coordinates.
+
+    Assumes the input camera faces lon=0, lat=0 (the panorama's forward direction).
+    Returns four (u, v) corner points in panorama pixel space.
+    """
+    x, y, w, h = box
+    corners_img = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
+
+    scale_x = intrinsics.color_width / intrinsics.width if intrinsics.width else 1.0
+    scale_y = intrinsics.color_height / intrinsics.height if intrinsics.height else 1.0
+    fx = intrinsics.fx * scale_x
+    fy = intrinsics.fy * scale_y
+    cx = intrinsics.px * scale_x
+    cy = intrinsics.py * scale_y
+
+    result = []
+    for px, py in corners_img:
+        x_cam = (px - cx) / fx
+        y_cam = -((py - cy) / fy)  # image +y is down; world +Y is up
+        z_cam = 1.0
+        n = math.sqrt(x_cam ** 2 + y_cam ** 2 + z_cam ** 2)
+        x_cam /= n; y_cam /= n; z_cam /= n
+        lon = math.atan2(x_cam, z_cam)
+        lat = math.atan2(y_cam, math.sqrt(x_cam ** 2 + z_cam ** 2))
+        u = (lon / (2.0 * math.pi) + 0.5) * pano_w
+        v = (0.5 - lat / math.pi) * pano_h
+        result.append((u, v))
+    return result
+
+
 class ObjectCorrelationStage(PipelineStage):
     """
     Groups all detected objects (SAM2 + Grounding DINO) by type label.
@@ -49,8 +81,9 @@ class ObjectCorrelationStage(PipelineStage):
 
     Reads:  ContextKey.OBJECT_COUNT, metadata_{i}, ContextKey.INPUT (for debug image)
     Writes: ContextKey.OBJECT_CORRELATION (ObjectCorrelationResult)
-    Debug:  self.output/stats.json        — per-category counts and indices
-            self.output/debug.png         — input image with per-category colored boxes
+    Debug:  self.output/stats.json            — per-category counts and indices
+            self.output/debug.png             — input image with per-category colored boxes
+            self.output/debug_panorama.png    — panorama with boxes projected from perspective space
     """
 
     _IOU_DEDUP_THRESHOLD = 0.5
@@ -135,51 +168,87 @@ class ObjectCorrelationStage(PipelineStage):
         with open(stats_path, "w") as f:
             json.dump(stats, f, indent=2)
 
-        # Debug overlay image
+        visible_types = [t for t in result.types() if t != "indeterminate"]
+        colors = _category_colors(visible_types)
+
+        # Debug overlay on input image
         input_image = context.input_image(ContextKey.INPUT)
-        if input_image is None:
+        if input_image is not None:
+            base = input_image.rgb().convert("RGBA")
+            overlay = PIL.Image.new("RGBA", base.size, (0, 0, 0, 0))
+            draw = PIL.ImageDraw.Draw(overlay)
+            font = PIL.ImageFont.load_default()
+
+            for obj_type, grp in result.groups.items():
+                if obj_type == "indeterminate":
+                    continue
+
+                r, g, b = colors[obj_type]
+                outline = (r, g, b, 220)
+
+                for idx in grp.indices:
+                    metadata = context.input_object(f"metadata_{idx}") or {}
+                    box = metadata.get("box")
+                    if not box:
+                        continue
+                    x, y, w, h = box
+
+                    drawn_mask = False
+                    crop = context.input_image(f"crop_{idx}")
+                    if crop is not None and crop.image.mode == "RGBA":
+                        alpha = crop.image.getchannel("A")
+                        colored = PIL.Image.new("RGBA", crop.image.size, (r, g, b, 80))
+                        overlay.paste(colored, (int(x), int(y)), mask=alpha)
+                        draw.rectangle([x, y, x + w, y + h], outline=outline, width=2)
+                        drawn_mask = True
+
+                    if not drawn_mask:
+                        draw.rectangle([x, y, x + w, y + h], fill=(r, g, b, 50), outline=outline, width=2)
+
+                    draw.text((x + 4, y + 4), obj_type, fill=(r, g, b, 255), font=font)
+
+            composite = PIL.Image.alpha_composite(base, overlay).convert("RGB")
+            composite.save(self.output / "debug.png")
+
+        self._write_debug_panorama(context, result, colors)
+
+    def _write_debug_panorama(self, context: PipelineContext, result: ObjectCorrelationResult, colors: dict):
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        if panorama is None:
             return
 
-        base = input_image.rgb().convert("RGBA")
+        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        if intrinsics is None:
+            return
+
+        pano_w, pano_h = panorama.size
+        base = panorama.rgb().convert("RGBA")
         overlay = PIL.Image.new("RGBA", base.size, (0, 0, 0, 0))
         draw = PIL.ImageDraw.Draw(overlay)
         font = PIL.ImageFont.load_default()
 
-        visible_types = [t for t in result.types() if t != "indeterminate"]
-        colors = _category_colors(visible_types)
-
-        for obj_type, stats in result.groups.items():
+        for obj_type, grp in result.groups.items():
             if obj_type == "indeterminate":
                 continue
 
-            r, g, b = colors[obj_type]
+            r, g, b = colors.get(obj_type, (128, 128, 128))
             outline = (r, g, b, 220)
 
-            for idx in stats.indices:
+            for idx in grp.indices:
                 metadata = context.input_object(f"metadata_{idx}") or {}
                 box = metadata.get("box")
                 if not box:
                     continue
-                x, y, w, h = box
 
-                # Draw mask from SAM2 crop alpha channel if available
-                drawn_mask = False
-                crop = context.input_image(f"crop_{idx}")
-                if crop is not None and crop.image.mode == "RGBA":
-                    alpha = crop.image.getchannel("A")
-                    colored = PIL.Image.new("RGBA", crop.image.size, (r, g, b, 80))
-                    overlay.paste(colored, (int(x), int(y)), mask=alpha)
-                    draw.rectangle([x, y, x + w, y + h], outline=outline, width=2)
-                    drawn_mask = True
+                corners = _project_box_to_pano(box, intrinsics, pano_w, pano_h)
+                draw.polygon(corners, fill=(r, g, b, 50), outline=outline, width=2)
 
-                if not drawn_mask:
-                    draw.rectangle([x, y, x + w, y + h], fill=(r, g, b, 50), outline=outline, width=2)
-
-                draw.text((x + 4, y + 4), obj_type, fill=(r, g, b, 255), font=font)
+                cx = sum(c[0] for c in corners) / 4
+                cy = sum(c[1] for c in corners) / 4
+                draw.text((cx + 4, cy + 4), obj_type, fill=(r, g, b, 255), font=font)
 
         composite = PIL.Image.alpha_composite(base, overlay).convert("RGB")
-        debug_path = self.output / "debug.png"
-        composite.save(debug_path)
+        composite.save(self.output / "debug_panorama.png")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object_correlation(ContextKey.OBJECT_CORRELATION) is not None
