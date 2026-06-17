@@ -76,7 +76,10 @@ class TreeDGenerator(RemoteServer):
             "--zero123_config", "zero123/zero123/configs/sd-objaverse-finetune-c_concat-256.yaml",
             "--zero123_ckpt", str(ckpt_path),
         ]
-        subprocess.run(cmd, cwd=str(treed_dir), check=True)
+        result = subprocess.run(cmd, cwd=str(treed_dir), capture_output=True, text=True)
+        if result.returncode != 0:
+            output = (result.stdout + result.stderr).strip()
+            raise RuntimeError(f"Magic123 failed (exit {result.returncode}):\n{output}")
 
         obj_path = workspace / "mesh" / "mesh.obj"
         if not obj_path.exists():
