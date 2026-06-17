@@ -130,7 +130,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "treed")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -918,80 +918,6 @@ setup_worldgen() {
 
 run_step "Installing WorldGen" \
     setup_worldgen
-
-## ============
-##    TreeD
-## ============
-
-TREED_DIR="$LIB_DIR/TreeDFusion"
-
-setup_treed() {
-    clone_if_needed https://github.com/JaeLee18/TreeDFusion_ECCV24.git "$TREED_DIR"
-
-    # CUDA 13 + modern PyTorch require C++17; Magic123 hardcodes c++14 in its extension backends.
-    sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/gridencoder/backend.py"
-    sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/raymarching/backend.py"
-
-    # PyTorch 2.6 changed torch.load to default weights_only=True, breaking the zero123 checkpoint
-    sed -i "s/torch.load(ckpt, map_location='cpu')/torch.load(ckpt, map_location='cpu', weights_only=False)/" "$TREED_DIR/Magic123/guidance/zero123_utils.py"
-
-    # Magic123 runs with cwd=TreeDFusion/ but load_attn_procs("tree_lora") is relative to that.
-    ln -sfn Magic123/guidance/tree_lora "$TREED_DIR/tree_lora"
-
-    local ckpt_dir="$CHECKPOINT_DIR/treed"
-    if [ ! -d "$ckpt_dir" ]; then
-        mkdir -p "$ckpt_dir"
-        conda run --no-capture-output -n "$CONDA_NAME" pip install -q gdown
-        conda run --no-capture-output -n "$CONDA_NAME" gdown "1tHWbX-TdkS4JCg6MrUu-BAUDjPDTaMyQ" -O "$ckpt_dir/"
-    fi
-
-    create_env "treed" 3.10
-
-    # Install core scientific packages first so they're present even if
-    # later requirements fail (cubvh, dearpygui, carvekit-colab can abort pip).
-    # Pin transformers<4.45: newer versions import torchaudio via loss_rnnt.py
-    # which breaks due to ABI mismatch with the cu130 torchaudio.
-    run_in_env pip install \
-        numpy scipy scikit-learn matplotlib pandas \
-        opencv-python imageio imageio-ffmpeg \
-        tqdm rich einops tensorboard tensorboardX \
-        huggingface_hub "diffusers<0.31" accelerate "transformers<4.45" peft \
-        torch-ema xatlas PyMCubes trimesh pymeshlab \
-        omegaconf pytorch-lightning kornia \
-        timm==0.6.7 easydict termcolor psutil lpips \
-        sentencepiece wandb rembg \
-        Pillow
-
-    # Force torch/torchaudio back to cu130-matched versions — pip may have upgraded them.
-    run_in_env pip install torch torchvision torchaudio --extra-index-url "$TORCH_URL"
-
-    # git-based deps (build failures are tolerated individually)
-    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
-        "git+https://github.com/openai/CLIP.git" || warn "CLIP install failed, skipping"
-    conda run --no-capture-output -n "$CURRENT_ENV" pip install --no-build-isolation \
-        "git+https://github.com/NVlabs/nvdiffrast/" || warn "nvdiffrast install failed, skipping"
-    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
-        "git+https://github.com/ashawkey/cubvh" || warn "cubvh install failed, skipping"
-
-    # taming-transformers and carvekit tolerated (optional / conflict-prone)
-    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
-        taming-transformers-rom1504 || warn "taming-transformers install failed, skipping"
-    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
-        carvekit-colab || warn "carvekit-colab install failed, skipping"
-
-    # Pre-download SD 1.5 so the HF cache is complete before Magic123 runs.
-    info "Pre-downloading stable-diffusion-v1-5 (~5 GB, may take a while)..."
-    run_in_env python - <<'EOF'
-from diffusers import StableDiffusionPipeline
-import torch
-StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
-EOF
-
-    stop_env
-}
-
-run_step "Installing TreeD (Tree-D Fusion)" \
-    setup_treed
 
 ## ============
 ##    End
