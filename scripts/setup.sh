@@ -949,7 +949,7 @@ setup_treed() {
         numpy scipy scikit-learn matplotlib pandas \
         opencv-python imageio imageio-ffmpeg \
         tqdm rich einops tensorboard tensorboardX \
-        huggingface_hub diffusers accelerate "transformers<4.45" \
+        huggingface_hub "diffusers<0.30" accelerate "transformers<4.45" \
         torch-ema xatlas PyMCubes trimesh pymeshlab \
         omegaconf pytorch-lightning kornia \
         timm==0.6.7 easydict termcolor psutil lpips \
