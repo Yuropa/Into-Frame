@@ -938,6 +938,9 @@ setup_treed() {
     create_env "treed" 3.10
     run_in_env pip install -r "$TREED_DIR/Magic123/requirements.txt"
     run_in_env pip install -r "$TREED_DIR/zero123/requirements.txt"
+    # Explicit deps needed by the remote_server bootstrap chain
+    # (remote_types → image_utils) before Magic123 itself runs.
+    run_in_env pip install trimesh numpy Pillow matplotlib opencv-python-headless
 
     stop_env
 }
