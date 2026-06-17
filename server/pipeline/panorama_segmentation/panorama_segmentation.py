@@ -33,8 +33,8 @@ class PanoramaSegmentationClient(RemoteClient):
     def model_names(cls) -> list[str]:
         return [_MODEL_ID]
 
-    def segment(self, panorama: PILImage.Image) -> dict:
-        return self.send(action="segment", input=panorama)
+    def segment(self, panorama: PILImage.Image, temp_path: Path) -> dict:
+        return self.send(action="segment", input=panorama, temp_path=temp_path)
 
 
 def _connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
@@ -166,7 +166,7 @@ class PanoramaRegionStage(PipelineStage):
             self._client = PanoramaSegmentationClient(self.device)
         self.advance_progress(task)
 
-        raw = self._client.segment(panorama.rgb())
+        raw = self._client.segment(panorama.rgb(), self.temp)
         self.advance_progress(task)
 
         result, type_idx_map = _build_result(raw)
