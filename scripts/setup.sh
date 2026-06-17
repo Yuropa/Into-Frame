@@ -936,11 +936,38 @@ setup_treed() {
     fi
 
     create_env "treed" 3.10
-    run_in_env pip install -r "$TREED_DIR/Magic123/requirements.txt"
-    run_in_env pip install -r "$TREED_DIR/zero123/requirements.txt"
-    # Explicit deps needed by the remote_server bootstrap chain
-    # (remote_types → image_utils) before Magic123 itself runs.
-    run_in_env pip install trimesh numpy Pillow matplotlib opencv-python-headless
+
+    # Install core scientific packages first so they're present even if
+    # later requirements fail (cubvh, dearpygui, carvekit-colab can abort pip).
+    # Pin transformers<4.45: newer versions import torchaudio via loss_rnnt.py
+    # which breaks due to ABI mismatch with the cu130 torchaudio.
+    run_in_env pip install \
+        numpy scipy scikit-learn matplotlib pandas \
+        opencv-python imageio imageio-ffmpeg \
+        tqdm rich einops tensorboard tensorboardX \
+        huggingface_hub diffusers accelerate "transformers<4.45" \
+        torch-ema xatlas PyMCubes trimesh pymeshlab \
+        omegaconf pytorch-lightning kornia \
+        timm==0.6.7 easydict termcolor psutil lpips \
+        sentencepiece wandb rembg \
+        Pillow
+
+    # Force torch/torchaudio back to cu130-matched versions — pip may have upgraded them.
+    run_in_env pip install torch torchvision torchaudio --extra-index-url "$TORCH_URL"
+
+    # git-based deps (build failures are tolerated individually)
+    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
+        "git+https://github.com/openai/CLIP.git" || warn "CLIP install failed, skipping"
+    conda run --no-capture-output -n "$CURRENT_ENV" pip install --no-build-isolation \
+        "git+https://github.com/NVlabs/nvdiffrast/" || warn "nvdiffrast install failed, skipping"
+    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
+        "git+https://github.com/ashawkey/cubvh" || warn "cubvh install failed, skipping"
+
+    # taming-transformers and carvekit tolerated (optional / conflict-prone)
+    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
+        taming-transformers-rom1504 || warn "taming-transformers install failed, skipping"
+    conda run --no-capture-output -n "$CURRENT_ENV" pip install \
+        carvekit-colab || warn "carvekit-colab install failed, skipping"
 
     stop_env
 }
