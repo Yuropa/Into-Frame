@@ -12,7 +12,7 @@ from transformers import SegformerImageProcessor, SegformerForSemanticSegmentati
 from remote_connection.remote_server import RemoteServer
 
 
-_MODEL_ID = "nvidia/segformer-b5-finetuned-ade-512-512"
+_MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
 # Maximum resolution to process in a single pass.  The panorama is resized to
 # fit within this width while preserving aspect ratio before inference.
 _MAX_WIDTH = 2048
