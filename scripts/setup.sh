@@ -928,6 +928,10 @@ TREED_DIR="$LIB_DIR/TreeDFusion"
 setup_treed() {
     clone_if_needed https://github.com/JaeLee18/TreeDFusion_ECCV24.git "$TREED_DIR"
 
+    # CUDA 13 + modern PyTorch require C++17; Magic123 hardcodes c++14 in its extension backends.
+    sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/gridencoder/backend.py"
+    sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/raymarching/backend.py"
+
     local ckpt_dir="$CHECKPOINT_DIR/treed"
     if [ ! -d "$ckpt_dir" ]; then
         mkdir -p "$ckpt_dir"
