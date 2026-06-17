@@ -79,6 +79,8 @@ class TreeMeshGenerationStage(PipelineStage):
             crop = context.input_image(f"crop_{idx}")
             temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
             self.log_info(f"  crop_{idx}: '{obj_class}' → Tree-D Fusion")
+            if temp_path is not None:
+                self.log_info(f"  crop_{idx}: Magic123 log → {temp_path / 'magic123.log'}")
             super().clean_up()
             mesh = gen.meshify(crop, temp_path, seed=self.seed, species=obj_class)
             mesh = mesh.repair()

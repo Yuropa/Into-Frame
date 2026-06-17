@@ -932,6 +932,12 @@ setup_treed() {
     sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/gridencoder/backend.py"
     sed -i 's/std=c++14/std=c++17/g' "$TREED_DIR/Magic123/raymarching/backend.py"
 
+    # PyTorch 2.6 changed torch.load to default weights_only=True, breaking the zero123 checkpoint
+    sed -i "s/torch.load(ckpt, map_location='cpu')/torch.load(ckpt, map_location='cpu', weights_only=False)/" "$TREED_DIR/Magic123/guidance/zero123_utils.py"
+
+    # Magic123 runs with cwd=TreeDFusion/ but load_attn_procs("tree_lora") is relative to that.
+    ln -sfn Magic123/guidance/tree_lora "$TREED_DIR/tree_lora"
+
     local ckpt_dir="$CHECKPOINT_DIR/treed"
     if [ ! -d "$ckpt_dir" ]; then
         mkdir -p "$ckpt_dir"
@@ -949,7 +955,7 @@ setup_treed() {
         numpy scipy scikit-learn matplotlib pandas \
         opencv-python imageio imageio-ffmpeg \
         tqdm rich einops tensorboard tensorboardX \
-        huggingface_hub "diffusers<0.30" accelerate "transformers<4.45" \
+        huggingface_hub "diffusers<0.31" accelerate "transformers<4.45" peft \
         torch-ema xatlas PyMCubes trimesh pymeshlab \
         omegaconf pytorch-lightning kornia \
         timm==0.6.7 easydict termcolor psutil lpips \
@@ -972,6 +978,14 @@ setup_treed() {
         taming-transformers-rom1504 || warn "taming-transformers install failed, skipping"
     conda run --no-capture-output -n "$CURRENT_ENV" pip install \
         carvekit-colab || warn "carvekit-colab install failed, skipping"
+
+    # Pre-download SD 1.5 so the HF cache is complete before Magic123 runs.
+    info "Pre-downloading stable-diffusion-v1-5 (~5 GB, may take a while)..."
+    run_in_env python - <<'EOF'
+from diffusers import StableDiffusionPipeline
+import torch
+StableDiffusionPipeline.from_pretrained("runwayml/stable-diffusion-v1-5", torch_dtype=torch.float16)
+EOF
 
     stop_env
 }
