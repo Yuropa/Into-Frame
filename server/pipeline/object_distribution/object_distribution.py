@@ -3,6 +3,10 @@ import math
 import os
 import subprocess
 from pathlib import Path
+from typing import Any
+from logging import Logger
+
+import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -128,6 +132,23 @@ def _region_type_for_point(
     return best.region_type if best is not None else _GLOBAL_REGION
 
 
+class ObjectDistributionStageConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        bin_count: int = _DEFAULT_BIN_COUNT,
+        pcf_cli_path: str | None = None,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.bin_count = bin_count
+        self.pcf_cli_path = pcf_cli_path
+
+
 class ObjectDistributionStage(PipelineStage):
     """
     Computes per-region Voronoi PCF histograms for each distributable object type.
@@ -148,10 +169,14 @@ class ObjectDistributionStage(PipelineStage):
     Debug:  self.output/distributions.json
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls) -> type[ObjectDistributionStageConfiguration]:
+        return ObjectDistributionStageConfiguration
+
+    def __init__(self, config: ObjectDistributionStageConfiguration) -> None:
         super().__init__(config)
-        self._pcf_cli_path: str | None = getattr(config, "pcf_cli_path", None)
-        self._bin_count: int = getattr(config, "bin_count", _DEFAULT_BIN_COUNT)
+        self._pcf_cli_path: str | None = config.pcf_cli_path
+        self._bin_count: int = config.bin_count
 
     def run(self, context: PipelineContext) -> PipelineContext:
         correlation = context.input_object_correlation(ContextKey.OBJECT_CORRELATION)
