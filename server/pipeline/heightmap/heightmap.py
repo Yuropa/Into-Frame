@@ -104,7 +104,7 @@ class HeightMapStage(PipelineStage):
         if panorama_depth is not None:
             self.log_info("Panorama depth available — will fill unseen terrain regions")
 
-        height_array = HeightMapGenerator.generate(
+        height_array, certainty_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -122,6 +122,7 @@ class HeightMapStage(PipelineStage):
 
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)
+        context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters": cfg.grid_size_meters,
@@ -131,10 +132,12 @@ class HeightMapStage(PipelineStage):
 
         if self.temp is not None:
             height_map.save_debug_image(self.temp / "heightmap.png")
+            Depth(certainty_array).save_debug_image(self.temp / "heightmap_certainty.png")
 
         self.log_info(
             f"Height map {height_array.shape}, "
-            f"Y range {height_array.min():.2f} → {height_array.max():.2f} m"
+            f"Y range {height_array.min():.2f} → {height_array.max():.2f} m, "
+            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"
         )
 
         self.finish_progress(task)

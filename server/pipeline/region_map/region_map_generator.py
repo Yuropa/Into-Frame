@@ -4,6 +4,7 @@ from typing import Optional
 
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
+from util.projection_utils import ground_projection_certainty
 from pipeline.panorama_segmentation.panorama_region_result import (
     ALL_REGION_TYPES,
     REGION_TYPE_SKY,
@@ -21,7 +22,7 @@ class RegionMapGenerator:
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         sky_mask: Optional[np.ndarray] = None,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project per-pixel region type labels from an equirectangular panorama onto a
         top-down grid, using the same XZ binning as the height map.
@@ -30,15 +31,18 @@ class RegionMapGenerator:
         pixels that project into it.  Empty cells are filled by nearest-neighbour
         propagation from the closest labelled cell.
 
-        Returns a (grid_resolution, grid_resolution) uint8 array of ALL_REGION_TYPES
-        indices.  Grid layout matches the height map: rows = Z near→far, cols = X
-        left→right.
+        Returns (region_map, certainty_map):
+          region_map   — (grid_resolution, grid_resolution) uint8 of ALL_REGION_TYPES indices.
+          certainty_map — (grid_resolution, grid_resolution) float32 in [0, 1]: projection
+                         certainty (sin²(depression angle)) for cells with direct observations,
+                         0 for cells filled by nearest-neighbour propagation.
+
+        Grid layout matches the height map: rows = Z near→far, cols = X left→right.
         """
         sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
         other_idx = ALL_REGION_TYPES.index(REGION_TYPE_OTHER)
 
         d = panorama_depth.depth.astype(np.float32)
-
         if sky_mask is not None and sky_mask.shape == d.shape:
             d = d.copy()
             d[sky_mask] = np.nan
@@ -58,7 +62,8 @@ class RegionMapGenerator:
         )
 
         if not np.any(ground_mask):
-            return np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8)
+            zero_certainty = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+            return np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8), zero_certainty
 
         Xg = X[ground_mask]
         Zg = Z[ground_mask]
@@ -84,7 +89,14 @@ class RegionMapGenerator:
         region_map = np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8)
         region_map[has_data] = vote_counts[has_data].argmax(axis=1).astype(np.uint8)
 
-        return RegionMapGenerator._fill_nearest(region_map, has_data)
+        # Certainty: projection-distortion geometry for observed cells, 0 for NN-filled.
+        x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
+        z_centers = (z_edges[:-1] + z_edges[1:]) / 2.0
+        X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
+        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height_meters)
+        certainty = np.where(has_data, certainty_field, 0.0).astype(np.float32)
+
+        return RegionMapGenerator._fill_nearest(region_map, has_data), certainty
 
     @staticmethod
     def _fill_nearest(region_map: np.ndarray, has_data: np.ndarray) -> np.ndarray:

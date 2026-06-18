@@ -90,7 +90,7 @@ class RegionMapStage(PipelineStage):
 
         type_idx_map = type_idx_depth.depth.astype(np.uint8)
 
-        region_map = RegionMapGenerator.generate(
+        region_map, certainty_array = RegionMapGenerator.generate(
             panorama_depth=panorama_depth,
             type_idx_map=type_idx_map,
             grid_size_meters=cfg.grid_size_meters,
@@ -102,18 +102,23 @@ class RegionMapStage(PipelineStage):
         self.advance_progress(task)
 
         context.add_depth(output_key, region_map.astype(np.float32))
+        context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 
         unique_types = [
             ALL_REGION_TYPES[i]
             for i in np.unique(region_map)
             if i < len(ALL_REGION_TYPES)
         ]
-        self.log_info(f"Region map {region_map.shape}, types present: {unique_types}")
+        self.log_info(
+            f"Region map {region_map.shape}, types present: {unique_types}, "
+            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"
+        )
 
         if self.temp is not None:
             PILImage.fromarray(colorize_region_type_map(region_map)).save(
                 self.temp / "region_map.png"
             )
+            Depth(certainty_array).save_debug_image(self.temp / "region_map_certainty.png")
 
         self.finish_progress(task)
         return context
