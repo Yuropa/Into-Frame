@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
 import os
+import sys
+
+_env = os.environ.get("CONDA_DEFAULT_ENV")
+if _env != "frame":
+    print(
+        f"Error: wrong conda environment '{_env}'. "
+        f"Activate 'frame' first:\n  conda activate frame",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
 # Setting in case we run on macOS
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
+import warnings
+# Suppress known noisy library warnings before any imports that trigger them.
+# pynvml FutureWarning fires at torch.cuda import time; max_length UserWarning
+# fires at model inference time — both are non-actionable for our users.
+warnings.filterwarnings("ignore", category=FutureWarning, message=".*pynvml.*")
+warnings.filterwarnings("ignore", category=UserWarning, message=".*model-agnostic default.*max_length.*")
+
 import asyncio
 import argparse
+import logging
 from pathlib import Path
-from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration, check_conda_env
+from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration
 from pipeline.pipeline_input import PipelineInput
 from pipeline.pipeline_runner import PipelineRunner
 from server.server import SimulationServerConfiguration, SimulationServer
@@ -19,12 +38,6 @@ def create_parser():
     )
 
     parser.add_argument(
-        "--env",
-        type=str,
-        default="frame",
-        help="Expected conda environment name (default: frame)"
-    )
-    parser.add_argument(
         "--seed",
         type=str,
         action="append",
@@ -35,6 +48,29 @@ def create_parser():
             "A global seed is always generated and logged even if not supplied."
         ),
     )
+    _log_group = parser.add_mutually_exclusive_group()
+    _log_group.add_argument(
+        "-v", "--verbose",
+        dest="log_mode",
+        action="store_const",
+        const="verbose",
+        help="Print all logs to the terminal with Rich formatting (for debugging)",
+    )
+    _log_group.add_argument(
+        "--plain",
+        dest="log_mode",
+        action="store_const",
+        const="plain",
+        help="Print logs as plain timestamped lines (used by server mode)",
+    )
+    _log_group.add_argument(
+        "--log-mode",
+        dest="log_mode",
+        choices=["panel", "plain", "verbose"],
+        metavar="MODE",
+        help="Logging mode: panel (default), plain, or verbose",
+    )
+    parser.set_defaults(log_mode="panel")
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -65,8 +101,14 @@ def create_parser():
         '-d',
         '--debug',
         help="Saves intermediate files for debugg",
-        default=False,
+        default=True,
         type=bool
+    )
+    server_parser.add_argument(
+        '--debug-archive',
+        help="Also write a .debug.frame archive containing intermediate build files",
+        default=False,
+        action=argparse.BooleanOptionalAction,
     )
     server_parser.add_argument(
         "-o", "--output",
@@ -106,10 +148,45 @@ def create_parser():
         type=bool
     )
     run_parser.add_argument(
+        '--debug-archive',
+        help="Also write a .debug.frame archive containing intermediate build files",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+    )
+    run_parser.add_argument(
         "--config",
         type=Path,
         default=DEFAULT_CONFIG_PATH,
         help="Path to pipeline configuration YAML (default: config.yaml)"
+    )
+
+    # local
+    local_parser = subparsers.add_parser(
+        "local",
+        help="Serve a .frame archive as a local scene server (no pipeline required)"
+    )
+    local_parser.add_argument(
+        "archive",
+        type=str,
+        help="Path to the .frame archive produced by 'run'"
+    )
+    local_parser.add_argument(
+        "--host",
+        type=str,
+        default="localhost",
+        help="Host to bind the server"
+    )
+    local_parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="Port to run the WebSocket server on"
+    )
+    local_parser.add_argument(
+        "--asset-port",
+        type=int,
+        default=3000,
+        help="Port to run the asset server on"
     )
 
     # download
@@ -153,9 +230,11 @@ def _create_pipeline_config(args):
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
+        log_mode=getattr(args, "log_mode", "panel"),
     )
 
     config.save_files = args.debug
+    config.debug_archive = getattr(args, "debug_archive", False)
 
     return config
 
@@ -180,18 +259,81 @@ def handle_server(args):
 
 
 def handle_run(args):
-    pipeline = Pipeline(
-        config=_create_pipeline_config(args=args)
-    )
+    config = _create_pipeline_config(args=args)
+    pipeline = Pipeline(config=config)
 
     input = PipelineInput(args.input)
     runner = PipelineRunner(pipeline)
     runner.run(input)
 
+    if config.save_files:
+        context_dir = pipeline.context_path()
+        if context_dir and context_dir.exists():
+            from pipeline.archive import create_frame_archive, create_debug_frame_archive
+            from rich.progress import Progress, SpinnerColumn, TimeElapsedColumn
+            stage_order = [s.name for s in pipeline.stages]
+            with Progress(SpinnerColumn(), "[progress.description]{task.description}", TimeElapsedColumn()) as progress:
+                task = progress.add_task("Writing archive…", total=None)
+                archive = create_frame_archive(
+                    context_dir=context_dir,
+                    input_path=Path(args.input),
+                    output_dir=Path(args.output),
+                    stage_order=stage_order,
+                )
+                if config.debug_archive:
+                    progress.update(task, description="Writing debug archive…")
+                    debug_archive = create_debug_frame_archive(
+                        context_dir=context_dir,
+                        input_path=Path(args.input),
+                        output_dir=Path(args.output),
+                        stage_order=stage_order,
+                    )
+            print(f"Archive: {archive}")
+            if config.debug_archive:
+                print(f"Debug archive: {debug_archive}")
+
+
+def handle_local(args):
+    import logging
+    import tempfile
+    from pipeline.archive import load_frame_archive
+
+    archive_path = Path(args.archive)
+    if not archive_path.exists():
+        print(f"Error: archive not found: {archive_path}")
+        return
+
+    log = logging.getLogger("pipeline")
+    if not log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%H:%M:%S"
+        ))
+        log.addHandler(handler)
+    log.setLevel(logging.INFO)
+
+    log.info(f"Loading archive: {archive_path.name}")
+
+    with tempfile.TemporaryDirectory(prefix="frame-local-") as tmpdir:
+        context, _ = load_frame_archive(archive_path, Path(tmpdir))
+
+        asset_dir = Path(tmpdir) / "assets"
+        asset_dir.mkdir(exist_ok=True)
+
+        sim_config = SimulationServerConfiguration()
+        sim_config.log = log
+        sim_config.address = args.host
+        sim_config.port = args.port
+        sim_config.asset_port = args.asset_port
+
+        server = SimulationServer(sim_config, pipeline=None, context=context, asset_dir=asset_dir)
+        asyncio.run(server.run())
+
 def handle_download(args):
     config = PipelineConfiguration(
         output=None,
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
+        log_mode=getattr(args, "log_mode", "panel"),
     )
 
     pipeline = Pipeline(
@@ -208,14 +350,22 @@ def main():
         print(f"{e}")
         return
 
-    check_conda_env(args.env)
-
-    if args.command == "server":
-        handle_server(args)
-    elif args.command == "run":
-        handle_run(args)
-    elif args.command == "download":
-        handle_download(args)
+    try:
+        if args.command == "server":
+            handle_server(args)
+        elif args.command == "run":
+            handle_run(args)
+        elif args.command == "local":
+            handle_local(args)
+        elif args.command == "download":
+            handle_download(args)
+    except KeyboardInterrupt:
+        print("\nStopped.", file=sys.stderr)
+        sys.exit(130)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":

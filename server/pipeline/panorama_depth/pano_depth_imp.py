@@ -59,14 +59,20 @@ class PanoDepthGenerator(RemoteServer):
             .to(self.device)
         )
 
-        self.report_progress(0.1, "Running panorama depth inference...")
+        self.report_progress(0.1, "Running panorama depth inference…")
+        sky_mask = None
         with torch.inference_mode():
             outputs = self.model(tensor)
 
             if isinstance(outputs, dict) and "pred_depth" in outputs:
                 if "pred_mask" in outputs:
-                    mask = (1.0 - outputs["pred_mask"]) > 0.5
+                    mask = (1.0 - outputs["pred_mask"]) > 0.5  # True = not-sky
                     outputs["pred_depth"][~mask] = 1.0
+                    raw_sky = (~mask).detach().cpu().numpy()
+                    # Squeeze to (H, W) — strip any batch/channel leading dims of size 1
+                    while raw_sky.ndim > 2 and raw_sky.shape[0] == 1:
+                        raw_sky = raw_sky[0]
+                    sky_mask = raw_sky.astype(bool)
                 pred = outputs["pred_depth"][0].detach().cpu().squeeze().numpy()
             else:
                 pred = outputs[0].detach().cpu().squeeze().numpy()
@@ -74,7 +80,7 @@ class PanoDepthGenerator(RemoteServer):
         # DAP output is 0–1 where 1.0 = 100 m; convert to metric metres
         depth_metres = pred.astype(np.float32) * 100.0
         self.report_progress(1.0, "Done")
-        return {"depth": depth_metres}
+        return {"depth": depth_metres, "sky_mask": sky_mask}
 
 
 if __name__ == "__main__":

@@ -1,11 +1,54 @@
 from __future__ import annotations
 import PIL
+import PIL.ImageDraw
 import matplotlib.pyplot as plt
 from matplotlib import colormaps
 from pathlib import Path
 import numpy as np
 import cv2
 import torchvision.transforms.functional as F
+
+
+def make_context_composite(
+    crop_pil: PIL.Image.Image,
+    scene_pil: PIL.Image.Image,
+    box: list[float] | None = None,
+    size: int = 448,
+) -> PIL.Image.Image:
+    """Build a square context image for classification models.
+
+    Top half: scene thumbnail with a red rectangle marking the object.
+    Bottom half: crop centred on a dark panel.
+
+    At 448×448 the CLIPProcessor (shortest_edge=224, center_crop=224×224)
+    scales uniformly to 224×224 with no cropping, giving each half 112 px."""
+    half = size // 2
+
+    # Top panel: scene thumbnail + optional highlight
+    scene_rgb = scene_pil.convert("RGB")
+    s_w, s_h = scene_rgb.size
+    scene_panel = scene_rgb.resize((size, half), PIL.Image.LANCZOS)
+    if box is not None:
+        draw = PIL.ImageDraw.Draw(scene_panel)
+        bx, by, bw, bh = box
+        sx, sy = size / s_w, half / s_h
+        tx, ty = int(bx * sx), int(by * sy)
+        tw, th = max(2, int(bw * sx)), max(2, int(bh * sy))
+        draw.rectangle([tx, ty, tx + tw, ty + th], outline=(255, 60, 60), width=2)
+
+    # Bottom panel: crop centred on a dark background
+    crop_rgb = crop_pil.convert("RGB")
+    c_w, c_h = crop_rgb.size
+    scale = min(size / c_w, half / c_h)
+    new_w, new_h = max(1, int(c_w * scale)), max(1, int(c_h * scale))
+    crop_thumb = crop_rgb.resize((new_w, new_h), PIL.Image.LANCZOS)
+    crop_panel = PIL.Image.new("RGB", (size, half), (32, 32, 32))
+    crop_panel.paste(crop_thumb, ((size - new_w) // 2, (half - new_h) // 2))
+
+    composite = PIL.Image.new("RGB", (size, size), (0, 0, 0))
+    composite.paste(scene_panel, (0, 0))
+    composite.paste(crop_panel, (0, half))
+    return composite
 
 class Image:
     image: PIL.Image.Image

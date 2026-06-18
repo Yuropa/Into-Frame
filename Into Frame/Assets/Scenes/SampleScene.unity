@@ -558,6 +558,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::PanoramaSkybox
   imageName: 
   exposure: 1
+  rotation: 0
   server: {fileID: 2130367361}
 --- !u!4 &341509120
 Transform:
@@ -3078,8 +3079,8 @@ ReflectionProbe:
   m_Enabled: 1
   serializedVersion: 2
   m_Type: 0
-  m_Mode: 0
-  m_RefreshMode: 0
+  m_Mode: 1
+  m_RefreshMode: 2
   m_TimeSlicingMode: 0
   m_Resolution: 128
   m_UpdateFrequency: 0
@@ -3380,6 +3381,7 @@ GameObject:
   - component: {fileID: 1862969861}
   - component: {fileID: 1862969860}
   - component: {fileID: 1862969859}
+  - component: {fileID: 1862969864}
   m_Layer: 0
   m_Name: SceneManager
   m_TagString: Untagged
@@ -3414,6 +3416,7 @@ MonoBehaviour:
   directionalLight: {fileID: 1815318736}
   camera: {fileID: 877652245}
   skybox: {fileID: 341509118}
+  environmentLighting: {fileID: 1862969864}
 --- !u!114 &1862969861
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3463,6 +3466,19 @@ Transform:
   m_Children: []
   m_Father: {fileID: 0}
   m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1862969864
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1862969858}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 3715ee84949374588ba462670f0f090f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::EnvironmentLighting
+  reflectionProbe: {fileID: 1598269140}
 --- !u!1 &2046629158
 GameObject:
   m_ObjectHideFlags: 0

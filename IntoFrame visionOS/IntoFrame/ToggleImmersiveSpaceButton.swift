@@ -49,8 +49,11 @@ struct ToggleImmersiveSpaceButton: View {
                 }
             }
         } label: {
-            Text(appModel.immersiveSpaceState == .open ? "Hide Immersive Space" : "Show Immersive Space")
+            Label(appModel.immersiveSpaceState == .open ? "Disconnect VP" : "Vision Pro",
+                  systemImage: appModel.immersiveSpaceState == .open ? "xmark.circle" : "visionpro")
+                .frame(maxWidth: .infinity)
         }
+        .buttonStyle(.borderedProminent)
         .disabled(appModel.immersiveSpaceState == .inTransition)
         .animation(.none, value: 0)
         .fontWeight(.semibold)

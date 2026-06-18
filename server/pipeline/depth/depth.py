@@ -36,7 +36,7 @@ class DepthStage(PipelineStage):
         if is_cubemap:
             steps = 7
 
-        depth_task = self.create_progress(steps, "Depth...")
+        depth_task = self.create_progress(steps, "Depth…")
         if self._depth is None:
             self._depth = ImageDepth(self.device)
         self.advance_progress(depth_task)
@@ -51,7 +51,8 @@ class DepthStage(PipelineStage):
                     depth = Depth(result.depth)
 
                     resulting_faces[face] = depth
-                    depth.save_debug_image(self.temp / (face.value + ".png"))
+                    if self.temp is not None:
+                        depth.save_debug_image(self.temp / (face.value + ".png"))
                 pass
                 
             context.add_cubemap(output_key, resulting_faces)
@@ -73,7 +74,8 @@ class DepthStage(PipelineStage):
                     result.extrinsics
                 )
 
-                depth.save_debug_image(self.temp / "depth.png")
+                if self.temp is not None:
+                    depth.save_debug_image(self.temp / "depth.png")
 
                 self.log_info(f"Scene depth {depth.min()} to {depth.max()}")
 
@@ -99,5 +101,7 @@ class DepthStage(PipelineStage):
         return ImageDepth.model_names()
 
     def clean_up(self):
+        if self._depth is not None:
+            self._depth.close()
+            self._depth = None
         super().clean_up()
-        self._depth = None

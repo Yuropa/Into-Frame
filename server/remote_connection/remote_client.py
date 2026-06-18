@@ -7,6 +7,8 @@ import tempfile
 import shutil
 import base64
 import os
+import time
+import logging
 from io import BytesIO
 
 from typing import Any, Callable, Optional
@@ -14,6 +16,8 @@ from util.image_utils import Image
 from util.device_utils import device_id
 from util.json_utils import parse_json
 from remote_connection.remote_types import RemoteInput, RemoteOutput, Status, RemoteObject
+
+_log = logging.getLogger("pipeline.remote")
 
 class RemoteClient():
     def _readline_json(self, pipe):
@@ -30,7 +34,9 @@ class RemoteClient():
                 decoded = line.decode('utf-8', errors='replace')
                 with lock:
                     lines.append(decoded)
-                print(f"[{prefix}] {decoded}", end="", flush=True)
+                stripped = decoded.rstrip()
+                if stripped:
+                    _log.debug("[%s] %s", prefix, stripped)
             stream.close()
         return threading.Thread(target=_capture, args=(stream,), daemon=True)
 
@@ -45,7 +51,21 @@ class RemoteClient():
 
         return env
 
+    @staticmethod
+    def _verify_conda_env(conda_env: str) -> None:
+        result = subprocess.run(
+            ["conda", "env", "list", "--json"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"Failed to query conda environments: {result.stderr}")
+        envs = parse_json(result.stdout).get("envs", [])
+        env_names = [Path(e).name for e in envs]
+        if conda_env not in env_names:
+            raise RuntimeError(f"Conda environment '{conda_env}' not found. Available: {env_names}")
+
     def __init__(self, device: torch.device, conda_env: str, script_path: Path, env_options: Optional[dict] = None) -> None:
+        self._verify_conda_env(conda_env)
         self.process = None
         self.device = device
         self.script_path = script_path
@@ -82,26 +102,33 @@ class RemoteClient():
         self._make_capture_thread(self.process.stdout, self._stdout_lines, self._stdout_lock, "out").start()
         self._make_capture_thread(self.process.stderr, self._stderr_lines, self._stderr_lock, "err").start()
 
-        self.server_sock.settimeout(60)
-        try:
-            self.conn, _ = self.server_sock.accept()
-        except socket.timeout:
-            if self.process.poll() is not None:
-                raise RuntimeError(f"Subprocess died while waiting:\n{self._get_stderr()}")
-            raise RuntimeError("Timed out waiting for subprocess to connect")
+        self.server_sock.settimeout(1)
+        deadline = time.time() + 60
+        while True:
+            try:
+                self.conn, _ = self.server_sock.accept()
+                break
+            except socket.timeout:
+                if self.process.poll() is not None:
+                    raise RuntimeError(
+                        f"Subprocess exited (code {self.process.returncode}) before connecting "
+                        f"(conda env '{conda_env}' may not exist):\n{self._get_stderr()}"
+                    )
+                if time.time() > deadline:
+                    raise RuntimeError("Timed out waiting for subprocess to connect")
 
         self.json_pipe = self.conn.makefile('r')
         self.json_out = self.conn.makefile('w')
 
         ready_line = self._readline_json(self.json_pipe)
         if not ready_line:
-            raise RuntimeError("subprocess produced no output")
+            raise RuntimeError(f"Subprocess exited during setup:\n{self._get_stderr()}")
 
         ready_status = Status.decode(ready_line)
         if ready_status.status != "ready":
             raise RuntimeError(f"Unexpected startup message: {ready_line}")
 
-        print(f"Finished loading script {script_path}")
+        _log.info("Loaded %s", script_path.name)
 
     def __del__(self):
         if self.process is not None:
@@ -117,14 +144,12 @@ class RemoteClient():
 
     def dump_logs(self):
         tag = f"[{self.conda_env}]"
-
-        stdout = self._get_stdout()
-        stderr = self._get_stderr()
-
-        if stdout:
-            print(f"{tag}[stdout] {stdout}")
-        if stderr:
-            print(f"{tag}[stderr] {stderr}")
+        for line in self._get_stdout().splitlines():
+            if line.strip():
+                _log.debug("%s[stdout] %s", tag, line)
+        for line in self._get_stderr().splitlines():
+            if line.strip():
+                _log.debug("%s[stderr] %s", tag, line)
 
     def _check_for_errors(self):
         if self.process.poll() is not None:
@@ -168,8 +193,7 @@ class RemoteClient():
             error = getattr(response, "error", None)
             if error:
                 stack = getattr(response, "stack", None)
-                print(f"Encountered error {error}")
-                print(f"{stack}")
+                _log.error("Remote error: %s\n%s", error, stack or "")
                 raise RuntimeError(f"Remote error: {error}")
 
             self.dump_logs()

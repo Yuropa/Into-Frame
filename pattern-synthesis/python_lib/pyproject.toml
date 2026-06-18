@@ -1,0 +1,13 @@
+[build-system]
+requires = ["scikit-build-core>=0.4.3", "pybind11>=2.11"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pattern_synthesis"
+version = "0.1.0"
+requires-python = ">=3.9"
+description = "Distribute point patterns over 3D surface meshes"
+
+[tool.scikit-build]
+# Include the pattern_synthesis/ Python package alongside the C extension.
+wheel.packages = ["pattern_synthesis"]

@@ -2,6 +2,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_depth.pano_depth import PanoramaDepth
 from util.depth_utils import Depth
+from util.device_utils import DeviceStrategy, preferred_device
 
 
 class PanoramaDepthStage(PipelineStage):
@@ -16,6 +17,7 @@ class PanoramaDepthStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self._depth = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
         return self.keys({
@@ -26,10 +28,10 @@ class PanoramaDepthStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        task = self.create_progress(2, "Panorama Depth...")
+        task = self.create_progress(2, "Panorama Depth…")
 
         if self._depth is None:
-            self._depth = PanoramaDepth(self.device)
+            self._depth = PanoramaDepth(self.preferred_device)
         self.advance_progress(task)
 
         input_panorama = context.input_panorama(input_key)
@@ -45,6 +47,10 @@ class PanoramaDepthStage(PipelineStage):
                 f"({depth.width}×{depth.height})"
             )
             context.add_depth(output_key, depth)
+            if result.sky_mask is not None:
+                context.add_object(ContextKey.PANORAMA_SKY_MASK, result.sky_mask)
+                sky_pct = result.sky_mask.mean() * 100
+                self.log_info(f"Sky mask: {sky_pct:.1f}% sky pixels")
         else:
             self.log_warning("No panorama found — skipping panorama depth")
 
@@ -59,5 +65,7 @@ class PanoramaDepthStage(PipelineStage):
         return PanoramaDepth.model_names()
 
     def clean_up(self):
+        if self._depth is not None:
+            self._depth.close()
+            self._depth = None
         super().clean_up()
-        self._depth = None

@@ -129,7 +129,7 @@ class LuxDiTServer(RemoteServer):
 
         _, cond_images = self.pipeline.example2input(vid_example, target_labels, cond_labels)
 
-        self.report_progress(0.1, "Running LuxDiT inference...")
+        self.report_progress(0.1, "Running LuxDiT inference…")
 
         height, width = resolution
         with torch.no_grad():

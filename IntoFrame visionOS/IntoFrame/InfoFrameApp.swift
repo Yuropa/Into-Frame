@@ -1,4 +1,5 @@
 import ARKit
+import AppKit
 import CompositorServices
 import SwiftUI
 
@@ -39,10 +40,43 @@ struct InfoFrameApp: App {
             ContentView()
                 .environment(appModel)
         }
+        .windowResizability(.contentSize)
+        .commands {
+            AppCommands()
+        }
+
+        Settings {
+            SettingsView()
+                .environment(appModel)
+        }
+
+        Window("About Into Frame", id: "about") {
+            AboutView()
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
+
+        WindowGroup("Preview", id: "mac-preview") {
+            MacDebugView()
+                .environment(appModel)
+        }
+        .defaultSize(width: 960, height: 640)
 
         RemoteImmersiveSpace(id: appModel.immersiveSpaceID) {
             ImmersiveSpaceContent(appModel: appModel)
         }
         .immersionStyle(selection: .constant(.full), in: .full)
+    }
+}
+
+struct AppCommands: Commands {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some Commands {
+        CommandGroup(replacing: .appInfo) {
+            Button("About Into Frame") {
+                openWindow(id: "about")
+            }
+        }
     }
 }

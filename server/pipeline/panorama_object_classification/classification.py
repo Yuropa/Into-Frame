@@ -1,59 +1,58 @@
+import json
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 
-_ENVIRONMENT_KEYWORDS = frozenset({
-    "sky", "cloud", "clouds", "ceiling", "roof", "rooftop",
-    "wall", "walls", "floor", "ground", "terrain", "earth",
-    "road", "pavement", "sidewalk", "path", "asphalt", "cobblestone", "street",
-    "grass", "lawn", "field", "meadow",
-    "foliage", "tree", "trees", "bush", "shrub", "leaves", "branch", "branches",
-    "vegetation", "plant", "plants", "hedge", "forest", "jungle",
-    "water", "ocean", "sea", "lake", "river", "pond", "stream", "puddle",
-    "mountain", "hill", "cliff", "rock", "rocks", "boulder",
-    "stone", "dirt", "sand", "snow", "ice", "mud",
-    "building", "buildings", "architecture", "house", "facade", "exterior", "structure",
-    "concrete", "landscape", "scenery", "horizon", "background",
-    "shadow", "reflection", "surface", "texture", "pattern",
-})
-
-_OBJECT_KEYWORDS = frozenset({
-    "person", "people", "man", "woman", "child", "boy", "girl", "human", "crowd", "figure",
-    "car", "vehicle", "truck", "bus", "bicycle", "motorcycle", "bike", "scooter", "van",
-    "boat", "ship", "airplane", "train", "tram",
-    "animal", "dog", "cat", "bird", "horse", "sheep", "cow", "elephant", "bear", "deer",
-    "chair", "table", "bench", "couch", "sofa", "desk", "furniture", "stool",
-    "sign", "signpost", "pole", "lamp", "lamppost", "streetlight", "fire", "hydrant",
-    "trash", "bin", "can", "barrel", "box", "container", "dumpster",
-    "umbrella", "backpack", "bag", "suitcase", "luggage",
-    "statue", "sculpture", "monument",
-    "ball", "toy", "cart", "trolley",
-})
+_ENVIRONMENT_KEYWORDS = frozenset(ENVIRONMENT_CATEGORIES.keys())
+_OBJECT_KEYWORDS = frozenset(OBJECT_CATEGORIES.keys())
 
 
-def _classify_caption(caption: str) -> str:
-    """Classify a free-form caption as 'object' or 'environment' via keyword scoring."""
+def _classify_caption(caption: str) -> tuple[str, dict]:
+    """Return (label, debug) where label is the best keyword or 'indeterminate'.
+
+    debug contains obj_matches, env_matches, and confidence for JSON output."""
     words = set(caption.lower().replace(",", " ").replace(".", " ").replace("'", " ").split())
-    obj_score = sum(1 for kw in _OBJECT_KEYWORDS if kw in words)
-    env_score = sum(1 for kw in _ENVIRONMENT_KEYWORDS if kw in words)
-    # Prefer 'object' on ties or no match — it's safer to include than to discard
-    return "object" if obj_score >= env_score else "environment"
+    obj_matches = [kw for kw in _OBJECT_KEYWORDS if kw in words]
+    env_matches = [kw for kw in _ENVIRONMENT_KEYWORDS if kw in words]
+    obj_score = len(obj_matches)
+    env_score = len(env_matches)
+    total = obj_score + env_score
+    debug = {"obj_matches": obj_matches, "env_matches": env_matches, "confidence": 0.0}
+    if total == 0:
+        return "indeterminate", debug
+    confidence = max(obj_score, env_score) / total
+    debug["confidence"] = confidence
+    return (obj_matches[0] if obj_score >= env_score else env_matches[0]), debug
+
+
+class PanoramaObjectClassificationConfig(PipelineStageConfiguration):
+    pass
 
 
 class PanoramaObjectClassificationStage(PipelineStage):
     """
-    Classifies each panorama object crop as 'environment' or 'object' using
-    BLIP captioning + keyword matching. Updates metadata_{i} in-place with
-    'class' ('object'|'environment') and 'caption' (str) fields.
+    Assigns a coarse class to each panorama crop using BLIP captioning + keyword
+    matching against OBJECT_CATEGORIES and ENVIRONMENT_CATEGORIES keys. Writes
+    'class' (a fine-grained keyword like 'tree' or 'sky', or 'indeterminate')
+    and 'caption' (str) to metadata_{i}.
 
-    Environment-classified crops are preserved in the context but skipped
-    by SceneGenerationStage so they don't appear as scene objects.
+    BLIP receives a context composite (scene thumbnail with the object highlighted
+    on top, crop below) rather than the bare crop, giving it spatial context.
 
-    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
+    This is a fast first-pass pre-filter. ObjectTypingStage (CLIP) runs after and
+    overwrites 'class' with a more reliable fine-grained result for all crops.
+
+    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}, ContextKey.INPUT (scene context)
     Writes: metadata_{i} (updated with 'class' and 'caption')
+    Debug:  classification_debug.json
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls):
+        return PanoramaObjectClassificationConfig
+
+    def __init__(self, config: PanoramaObjectClassificationConfig) -> None:
         super().__init__(config)
         self._captioner = None
 
@@ -63,34 +62,66 @@ class PanoramaObjectClassificationStage(PipelineStage):
             self.log_info("No objects to classify, skipping")
             return context
 
-        classify_task = self.create_progress(object_count + 1, "Classifying objects...")
+        context.add_object(ContextKey.OBJECT_COUNT, object_count)
+
+        classify_task = self.create_progress(object_count + 1, "Classifying objects…")
         if self._captioner is None:
             self._captioner = ImageCaptioning(self.device)
         self.advance_progress(classify_task)
 
-        env_count = 0
+        obj_count = env_count = indet_count = 0
+        debug_entries = []
         for idx in range(object_count):
             crop = context.input_image(f"crop_{idx}")
             metadata = context.input_object(f"metadata_{idx}") or {}
 
             if crop is None:
+                context.add_object(f"metadata_{idx}", metadata)
                 self.advance_progress(classify_task)
                 continue
 
+            context.add_image(f"crop_{idx}", crop)
             caption = self._captioner.caption(crop)
-            cls = _classify_caption(caption)
-            if cls == "environment":
+            cls, debug = _classify_caption(caption)
+
+            if cls == "indeterminate":
+                indet_count += 1
+            elif cls in _OBJECT_KEYWORDS:
+                obj_count += 1
+            else:
                 env_count += 1
 
-            context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
             self.log_info(f"  crop_{idx}: '{caption}' → {cls}")
+            context.add_object(f"metadata_{idx}", {**metadata, "class": cls, "caption": caption})
+
+            debug_entries.append({
+                "idx": idx,
+                "caption": caption,
+                "class": cls,
+                "caption_confidence": round(debug["confidence"], 4),
+                "obj_matches": debug["obj_matches"],
+                "env_matches": debug["env_matches"],
+            })
+
             self.advance_progress(classify_task)
 
         self.finish_progress(classify_task)
         self.log_info(
-            f"Classification complete: {object_count - env_count} objects, {env_count} environment"
+            f"Classification complete: {obj_count} objects, "
+            f"{env_count} environment, {indet_count} indeterminate"
         )
+        self._write_debug(debug_entries, obj_count, env_count, indet_count)
         return context
+
+    def _write_debug(self, entries: list, obj_count: int, env_count: int, indet_count: int):
+        if self.output is None:
+            return
+        payload = {
+            "summary": {"objects": obj_count, "environment": env_count, "indeterminate": indet_count},
+            "objects": entries,
+        }
+        with open(self.output / "classification_debug.json", "w") as f:
+            json.dump(payload, f, indent=2)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)

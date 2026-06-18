@@ -1,5 +1,7 @@
-from util.image_utils import Image
+from util.image_utils import Image, make_context_composite
 from transformers import BlipProcessor, BlipForConditionalGeneration
+from PIL import Image as PILImage
+import numpy as np
 import torch
 
 class ImageCaptioning:
@@ -13,8 +15,43 @@ class ImageCaptioning:
     def model_names(cls) -> list[str]:
         return ["Salesforce/blip-image-captioning-large"]
 
-    def caption(self, input: Image, prompt: str = ""):
-        inputs = self.processor(input.rgb(), prompt, return_tensors="pt").to(self.device)
+    def _to_rgb(self, image: Image) -> PILImage.Image:
+        """Convert to RGB, filling transparent pixels with the mean opaque color.
+
+        PIL's default RGBA→RGB fills alpha=0 areas with black, creating a dark
+        silhouette of masked-out content (e.g. a tower hole in a sky crop) that
+        causes BLIP to caption the hole instead of the actual content."""
+        pil = image.image
+        if pil.mode != "RGBA":
+            return image.rgb()
+        arr = np.array(pil).astype(np.float32)
+        alpha = arr[..., 3:4] / 255.0
+        rgb = arr[..., :3]
+        opaque = arr[..., 3] > 128
+        mean_color = rgb[opaque].mean(axis=0) if opaque.any() else np.array([128.0, 128.0, 128.0])
+        background = np.ones_like(rgb) * mean_color
+        composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
+        return PILImage.fromarray(composited, mode="RGB")
+
+    def caption(
+        self,
+        input: Image,
+        scene_image: Image | None = None,
+        box: list[float] | None = None,
+        prompt: str = "",
+    ) -> str:
+        """Generate a caption for input.
+
+        When scene_image is provided, BLIP receives a composite (scene thumbnail
+        with object highlighted on top, crop below) instead of the bare crop,
+        giving it spatial context to produce more accurate captions.
+        """
+        if scene_image is not None:
+            pil_input = make_context_composite(self._to_rgb(input), scene_image.rgb(), box)
+        else:
+            pil_input = self._to_rgb(input)
+
+        inputs = self.processor(pil_input, prompt, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             out = self.model.generate(**inputs)

@@ -12,6 +12,9 @@ from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 from scene.lighting import SceneLighting
+from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult
+from pipeline.object_distribution.object_distribution_result import ObjectDistributionResult
+from pipeline.panorama_segmentation.panorama_region_result import PanoramaRegionResult
 
 class ValueKeys(StrEnum):
     NONE = "none"
@@ -26,6 +29,9 @@ class ValueKeys(StrEnum):
     CUBEMAP = "cubemap"
     PANORAMA = "panorama"
     LIGHTING = "lighting"
+    OBJECT_CORRELATION = "object_correlation"
+    OBJECT_DISTRIBUTION = "object_distribution"
+    PANORAMA_REGIONS = "panorama_regions"
 
     def preferred_extension(self) -> "str":
         match self:
@@ -51,6 +57,12 @@ class ValueKeys(StrEnum):
                 return "png"
             case ValueKeys.LIGHTING:
                 return "lighting"
+            case ValueKeys.OBJECT_CORRELATION:
+                return "json"
+            case ValueKeys.OBJECT_DISTRIBUTION:
+                return "json"
+            case ValueKeys.PANORAMA_REGIONS:
+                return "json"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -116,6 +128,18 @@ class ContextValue():
 
     def set_lighting(self, obj: SceneLighting):
         self.type = ValueKeys.LIGHTING
+        self.value = obj
+
+    def set_object_correlation(self, obj: ObjectCorrelationResult):
+        self.type = ValueKeys.OBJECT_CORRELATION
+        self.value = obj
+
+    def set_object_distribution(self, obj: ObjectDistributionResult):
+        self.type = ValueKeys.OBJECT_DISTRIBUTION
+        self.value = obj
+
+    def set_panorama_regions(self, obj: PanoramaRegionResult):
+        self.type = ValueKeys.PANORAMA_REGIONS
         self.value = obj
 
     def image(self) -> Optional[Image]:
@@ -184,6 +208,24 @@ class ContextValue():
         else:
             return None
 
+    def object_correlation(self) -> Optional[ObjectCorrelationResult]:
+        if self.type == ValueKeys.OBJECT_CORRELATION:
+            return self.value
+        else:
+            return None
+
+    def object_distribution(self) -> Optional[ObjectDistributionResult]:
+        if self.type == ValueKeys.OBJECT_DISTRIBUTION:
+            return self.value
+        else:
+            return None
+
+    def panorama_regions(self) -> Optional[PanoramaRegionResult]:
+        if self.type == ValueKeys.PANORAMA_REGIONS:
+            return self.value
+        else:
+            return None
+
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
@@ -222,6 +264,15 @@ class ContextValue():
             self.set_panorama(Panorama.load(resolved_path))
         elif value_type == ValueKeys.LIGHTING:
             self.set_lighting(SceneLighting.load(resolved_path))
+        elif value_type == ValueKeys.OBJECT_CORRELATION:
+            with open(resolved_path) as f:
+                self.set_object_correlation(ObjectCorrelationResult.decode(json.load(f)))
+        elif value_type == ValueKeys.OBJECT_DISTRIBUTION:
+            with open(resolved_path) as f:
+                self.set_object_distribution(ObjectDistributionResult.decode(json.load(f)))
+        elif value_type == ValueKeys.PANORAMA_REGIONS:
+            with open(resolved_path) as f:
+                self.set_panorama_regions(PanoramaRegionResult.decode(json.load(f)))
 
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
@@ -257,6 +308,15 @@ class ContextValue():
             self.panorama().save(path=save_path)
         elif self.type == ValueKeys.LIGHTING:
             self.lighting().save(save_path)
+        elif self.type == ValueKeys.OBJECT_CORRELATION:
+            with open(save_path, "w") as f:
+                json.dump(self.object_correlation().encode(), f, indent=4)
+        elif self.type == ValueKeys.OBJECT_DISTRIBUTION:
+            with open(save_path, "w") as f:
+                json.dump(self.object_distribution().encode(), f, indent=4)
+        elif self.type == ValueKeys.PANORAMA_REGIONS:
+            with open(save_path, "w") as f:
+                json.dump(self.panorama_regions().encode(), f, indent=4)
 
         return save_path
     

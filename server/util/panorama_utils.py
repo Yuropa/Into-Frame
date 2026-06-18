@@ -189,6 +189,108 @@ class Panorama:
 
         return colors
 
+    def perspective_crop(
+        self,
+        box: list[float],
+        mask: "np.ndarray | None" = None,
+        fov_scale: float = 1.0,
+    ) -> PIL.Image.Image:
+        """
+        Re-project the region around `box` from equirectangular onto a
+        perspective (rectilinear) view, removing panoramic distortion.
+
+        The output has the same pixel dimensions as the bounding box and covers
+        exactly its angular extent (modulated by fov_scale).  Objects near the
+        poles lose the horizontal stretching that equirectangular imposes; objects
+        near the equator are unchanged.
+
+        box:       [bx, by, bw, bh] in panorama pixel coordinates.
+        mask:      optional (H, W) float32 array [0, 1]; when provided the
+                   returned image is RGBA with the reprojected mask as alpha.
+        fov_scale: multiplier on the computed FoV; >1 widens the view margin.
+        Returns:   PIL Image (RGB or RGBA).
+        """
+        W, H = self.width, self.height
+        pano = np.array(self.image.convert("RGB"), dtype=np.float32)
+
+        bx, by, bw, bh = box
+        out_w = max(2, int(round(bw)))
+        out_h = max(2, int(round(bh)))
+
+        # Centre of the box in the panorama's spherical coordinate convention:
+        #   lon=0  → +Z (forward), lat=0 → horizon
+        lon0 = ((bx + bw * 0.5) / W - 0.5) * 2.0 * np.pi
+        lat0 = (0.5 - (by + bh * 0.5) / H) * np.pi
+
+        # Half-FoV angles matching the box's angular extent, clamped so
+        # tan() stays well-behaved (89° is safe).
+        half_fov_h = min((bw / W) * np.pi * fov_scale, np.radians(89.0))
+        half_fov_v = min((bh / (2.0 * H)) * np.pi * fov_scale, np.radians(89.0))
+
+        # Output pixel grid → normalised [-1, 1] → camera-space tangent offsets.
+        # Camera convention: +X right, +Y up, +Z forward (into scene).
+        uu, vv = np.meshgrid(
+            np.linspace(-1.0, 1.0, out_w, dtype=np.float64),
+            np.linspace(-1.0, 1.0, out_h, dtype=np.float64),
+        )
+        x_cam =  uu * np.tan(half_fov_h)
+        y_cam = -vv * np.tan(half_fov_v)   # image +v is down; camera +Y is up
+        z_cam =  np.ones_like(x_cam)
+
+        norm = np.sqrt(x_cam ** 2 + y_cam ** 2 + z_cam ** 2)
+        x_cam /= norm;  y_cam /= norm;  z_cam /= norm
+
+        # Rotation matrix: camera space → world space.
+        # Camera axes in world coords (verified: R_x × R_y = R_z):
+        #   +X (right)   = ( cos_lon,             0,      -sin_lon           )
+        #   +Y (up)      = (-sin_lat * sin_lon,  cos_lat, -sin_lat * cos_lon )
+        #   +Z (forward) = ( cos_lat * sin_lon,  sin_lat,  cos_lat * cos_lon )
+        cl, sl = np.cos(lat0), np.sin(lat0)
+        cn, sn = np.cos(lon0), np.sin(lon0)
+        R = np.array([
+            [ cn, -sl * sn,  cl * sn],
+            [0.0,  cl,       sl     ],
+            [-sn, -sl * cn,  cl * cn],
+        ])
+
+        dirs  = np.stack([x_cam.ravel(), y_cam.ravel(), z_cam.ravel()])  # (3, N)
+        world = R @ dirs                                                   # (3, N)
+        X, Y, Z = world[0], world[1], world[2]
+
+        # World direction → equirectangular pixel coordinates (same convention
+        # as equirectangular_unproject).
+        lon  = np.arctan2(X, Z)
+        lat  = np.arctan2(Y, np.sqrt(X ** 2 + Z ** 2))
+        src_u = ((lon  / (2.0 * np.pi)) + 0.5) * (W - 1)
+        src_v = (0.5 - lat / np.pi) * (H - 1)
+
+        src_u = (src_u % W).reshape(out_h, out_w)
+        src_v = np.clip(src_v, 0, H - 1).reshape(out_h, out_w)
+
+        # Bilinear sampling with horizontal wrap.
+        u0 = np.floor(src_u).astype(np.int32);  u1 = (u0 + 1) % W
+        v0 = np.floor(src_v).astype(np.int32);  v1 = np.clip(v0 + 1, 0, H - 1)
+        fu = (src_u - np.floor(src_u))[..., np.newaxis]
+        fv = (src_v - np.floor(src_v))[..., np.newaxis]
+
+        color = (pano[v0, u0] * (1 - fu) * (1 - fv)
+               + pano[v0, u1] *      fu  * (1 - fv)
+               + pano[v1, u0] * (1 - fu) *      fv
+               + pano[v1, u1] *      fu  *      fv)
+        color = np.clip(color, 0, 255).astype(np.uint8)
+
+        if mask is None:
+            return PIL.Image.fromarray(color, "RGB")
+
+        # Project mask with the same sample coordinates.
+        fu2, fv2 = fu[..., 0], fv[..., 0]
+        mask_s = (mask[v0, u0] * (1 - fu2) * (1 - fv2)
+                + mask[v0, u1] *      fu2  * (1 - fv2)
+                + mask[v1, u0] * (1 - fu2) *      fv2
+                + mask[v1, u1] *      fu2  *      fv2)
+        alpha = np.clip(mask_s * 255, 0, 255).astype(np.uint8)
+        return PIL.Image.fromarray(np.dstack([color, alpha]), "RGBA")
+
     def to_cubemap(self, face_w: int = 512) -> "CubeMap":
         """Convert to a CubeMap via equirectangular → cubemap projection."""
         import py360convert

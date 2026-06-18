@@ -4,7 +4,7 @@ import os
 @MainActor
 @Observable
 class SceneManager {
-    let assetServer = AssetServer()
+    var assetServer = AssetServer()
     let client = SceneClient()
 
     var sceneObjects: [String: SceneObject] = [:]
@@ -13,6 +13,7 @@ class SceneManager {
     var totalAssets = 0
     var completedAssets = 0
     var isLoading = false
+    private var pendingDownloads = 0
 
     var onSceneReady: (([SceneObject], [String: Data], SceneParams?) -> Void)?
 
@@ -37,6 +38,22 @@ class SceneManager {
         client.connect()
     }
 
+    func reconnect(websocketURL: String, assetBaseURL: String) {
+        if let url = URL(string: assetBaseURL) {
+            assetServer = AssetServer(baseURL: url)
+        }
+        sceneObjects.removeAll()
+        downloadedAssets.removeAll()
+        sceneParams = nil
+        isLoading = false
+        totalAssets = 0
+        completedAssets = 0
+        pendingDownloads = 0
+        if let url = URL(string: websocketURL) {
+            client.reconnect(to: url)
+        }
+    }
+
     // MARK: - Scene Init
 
     private func handleSceneInit(_ payload: SceneInitPayload) {
@@ -51,8 +68,8 @@ class SceneManager {
 
         var assetNames: Set<String> = []
         for obj in objects {
-            if let mesh = obj.mesh { assetNames.insert(mesh) }
-            if let texture = obj.texture { assetNames.insert(texture) }
+            if let mesh = obj.mesh, !mesh.isEmpty { assetNames.insert(mesh) }
+            if let texture = obj.texture, !texture.isEmpty { assetNames.insert(texture) }
         }
         if let skybox = payload.scene.skybox {
             assetNames.insert(skybox)
@@ -60,6 +77,7 @@ class SceneManager {
 
         totalAssets = assetNames.count
         completedAssets = 0
+        pendingDownloads = 0
         isLoading = assetNames.count > 0
 
         for obj in objects {
@@ -114,17 +132,33 @@ class SceneManager {
 
         sceneObjects[obj.id] = obj
 
+        let needsMesh = obj.mesh.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let needsTexture = obj.texture.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let count = (needsMesh ? 1 : 0) + (needsTexture ? 1 : 0)
+
+        if count > 0 {
+            totalAssets += count
+            pendingDownloads += count
+            isLoading = true
+        }
+
         Task {
             let server = assetServer
-            if let mesh = obj.mesh, downloadedAssets[mesh] == nil {
+            if needsMesh, let mesh = obj.mesh {
                 if let data = try? await server.fetchResource(mesh) {
                     downloadedAssets[mesh] = data
                 }
+                completedAssets += 1
+                pendingDownloads -= 1
+                if pendingDownloads == 0 { isLoading = false }
             }
-            if let texture = obj.texture, downloadedAssets[texture] == nil {
+            if needsTexture, let texture = obj.texture {
                 if let data = try? await server.fetchResource(texture) {
                     downloadedAssets[texture] = data
                 }
+                completedAssets += 1
+                pendingDownloads -= 1
+                if pendingDownloads == 0 { isLoading = false }
             }
             onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
         }
@@ -140,7 +174,29 @@ class SceneManager {
         if let mesh = changes.mesh { existing.mesh = mesh }
 
         sceneObjects[update.id] = existing
-        onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+
+        let needsMesh = changes.mesh.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+        let needsTexture = changes.texture.map { !$0.isEmpty && downloadedAssets[$0] == nil } ?? false
+
+        guard needsMesh || needsTexture else {
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+            return
+        }
+
+        Task {
+            let server = assetServer
+            if needsMesh, let mesh = changes.mesh {
+                if let data = try? await server.fetchResource(mesh) {
+                    downloadedAssets[mesh] = data
+                }
+            }
+            if needsTexture, let texture = changes.texture {
+                if let data = try? await server.fetchResource(texture) {
+                    downloadedAssets[texture] = data
+                }
+            }
+            onSceneReady?(Array(sceneObjects.values), downloadedAssets, sceneParams)
+        }
     }
 
     private func handleDestroy(_ id: String) {

@@ -5,6 +5,7 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
+from pipeline.object_typing.categories import CategoryFilter
 from pipeline.pipeline_context import PipelineContext
 from util.device_utils import DeviceStrategy, preferred_device
 
@@ -18,10 +19,13 @@ class ModelGenerationConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        generator_type: str = "TRELLIS",
+        generator_type: str = "SAM3D",
+        include_categories: list[str] | None = None,
+        exclude_categories: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
+        self.category_filter = CategoryFilter(include_categories, exclude_categories)
 
 
 class ModelGenerationStage(PipelineStage):
@@ -51,27 +55,34 @@ class ModelGenerationStage(PipelineStage):
         gen_type = getattr(self.config, "generator_type", ModelGeneratorType.default())
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=gen_type)
-        generation_task = self.create_progress(count, "Meshifying...")
+        generation_task = self.create_progress(count, "Meshifying…")
         for idx in range(count):
-            mesh_name = f"mesh_{idx}"   
+            mesh_name = f"mesh_{idx}"
             image_name = f"crop_{idx}"
+
+            metadata = context.input_object(f"metadata_{idx}") or {}
+            obj_class = metadata.get("class", "")
+            if not self.config.category_filter.allows(obj_class):
+                self.log_info(f"  {image_name}: '{obj_class}' — excluded by category filter")
+                self.advance_progress(generation_task)
+                continue
 
             cached_mesh = context.mesh(mesh_name)
             if cached_mesh is not None:
-                # Already cached
-                print(f"Using cached mesh for {image_name} vertices={cached_mesh.vertex_count} faces={cached_mesh.face_count}")
+                self.log_info(f"  {image_name}: cached ({cached_mesh.vertex_count}v {cached_mesh.face_count}f)")
                 self.advance_progress(generation_task)
                 continue
 
             super().clean_up()
             input_image = context.input_image(image_name)
+            self.log_info(f"  {image_name}: generating mesh…")
             mesh = gen.meshify(input_image, self.temp / image_name, seed=self.seed)
+            mesh = mesh.repair()
 
             self.advance_progress(generation_task)
             context.add_mesh(mesh_name, mesh)
+            self.log_info(f"  {image_name}: {mesh.vertex_count}v {mesh.face_count}f")
 
-            print(f"Generated mesh for {image_name} vertices={mesh.vertex_count} faces={mesh.face_count}")
-        
         gen.close()
         self.finish_progress(generation_task)
 
@@ -81,7 +92,14 @@ class ModelGenerationStage(PipelineStage):
         count = context.input_object("count")
         if count is None:
             return False
-        return all(context.mesh(f"mesh_{idx}") is not None for idx in range(count))
+        for idx in range(count):
+            metadata = context.object(f"metadata_{idx}")
+            obj_class = (metadata or {}).get("class", "")
+            if not self.config.category_filter.allows(obj_class):
+                continue
+            if context.mesh(f"mesh_{idx}") is None:
+                return False
+        return True
 
     def model_names(self) -> list[str]:
         return ModelGenerator.model_names()

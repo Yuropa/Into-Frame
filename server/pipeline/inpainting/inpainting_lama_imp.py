@@ -89,11 +89,11 @@ class InPaintingLama(RemoteServer):
             result = batch['inpainted'][0].permute(1, 2, 0).detach().cpu().numpy()
 
         result = np.clip(result * 255, 0, 255).astype(np.uint8)
-        return PILImage.fromarray(result, mode="RGB")
+        # Crop back to original dimensions in case padding was applied
+        return PILImage.fromarray(result[:orig_h, :orig_w], mode="RGB")
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "inpaint":
-            print(f"Got input: {input}")
             image = input["image"]
             mask = input["mask"]
             prompt = input.get("prompt", "")

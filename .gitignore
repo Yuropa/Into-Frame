@@ -15,7 +15,7 @@ build/
 output/
 checkpoints/
 mnt/
-src/
+/src/
 ckpt/checkpoint_000500_Video2RMS.pt
 ckpt/ControlNetstep300000.pth
 data/

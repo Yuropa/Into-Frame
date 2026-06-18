@@ -12,17 +12,19 @@
 stages:
   - name: Depth Generation
     stage: DepthStage
-    enabled: true
 
   - name: Panorama
     stage: PanoramaStage
-    enabled: true
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
-    enabled: true
+
+  - name: Inpainting Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
 
   - name: Mesh Generation
     stage: ModelGenerationStage
-    enabled: true
     generator_type: SAM3D

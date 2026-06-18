@@ -79,6 +79,8 @@ actor Renderer {
     let depthState: MTLDepthStencilState
     let skyboxDepthState: MTLDepthStencilState
     let colorMap: MTLTexture
+    var environmentTexture: MTLTexture
+    var sceneAmbientColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 0)
 
     let endFrameEvent: MTLSharedEvent
     var committedFrameIndex: UInt64 = 0
@@ -90,10 +92,6 @@ actor Renderer {
     var uniforms: UnsafeMutablePointer<Uniforms>
 
     var perDrawableTarget = [LayerRenderer.Drawable.Target: DrawableTarget]()
-
-    var rotation: Float = 0
-
-    var mesh: MTKMesh
 
     var sceneRenderables: [SceneRenderable] = []
     var skyboxRenderable: SceneRenderable?
@@ -115,10 +113,10 @@ actor Renderer {
         self.commandAllocators = (0...maxBuffersInFlight).map { _ in device.makeCommandAllocator()! }
 
         let argTableDesc = MTL4ArgumentTableDescriptor()
-        argTableDesc.maxBufferBindCount = 4
+        argTableDesc.maxBufferBindCount = 5
         self.vertexArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
         argTableDesc.maxBufferBindCount = 0
-        argTableDesc.maxTextureBindCount = 1
+        argTableDesc.maxTextureBindCount = 2
         self.fragmentArgumentTable = try! device.makeArgumentTable(descriptor: argTableDesc)
 
         #if !targetEnvironment(simulator)
@@ -158,23 +156,17 @@ actor Renderer {
         self.skyboxDepthState = device.makeDepthStencilState(descriptor: skyboxDepthDesc)!
 
         do {
-            mesh = try Self.buildMesh(device: device, mtlVertexDescriptor: mtlVertexDescriptor)
-        } catch {
-            fatalError("Unable to build MetalKit Mesh. Error info: \(error)")
-        }
-
-        do {
             colorMap = try Self.loadTexture(device: device, textureName: "ColorMap")
         } catch {
             fatalError("Unable to load texture. Error info: \(error)")
         }
 
+        environmentTexture = Self.makeDefaultEnvironmentTexture(device: device)
+
         #if !targetEnvironment(simulator)
-        residencySetDesc.initialCapacity = mesh.vertexBuffers.count + mesh.submeshes.count + 2
+        residencySetDesc.initialCapacity = 3
         let residencySet = try! self.device.makeResidencySet(descriptor: residencySetDesc)
-        residencySet.addAllocations(mesh.vertexBuffers.map { $0.buffer })
-        residencySet.addAllocations(mesh.submeshes.map { $0.indexBuffer.buffer })
-        residencySet.addAllocations([colorMap, dynamicUniformBuffer])
+        residencySet.addAllocations([colorMap, dynamicUniformBuffer, environmentTexture])
         residencySet.commit()
         commandQueueResidencySet = residencySet
         commandQueue.addResidencySet(residencySet)
@@ -212,6 +204,10 @@ actor Renderer {
         mtlVertexDescriptor.attributes[VertexAttribute.texcoord.rawValue].offset = 0
         mtlVertexDescriptor.attributes[VertexAttribute.texcoord.rawValue].bufferIndex = BufferIndex.meshGenerics.rawValue
 
+        mtlVertexDescriptor.attributes[VertexAttribute.normal.rawValue].format = MTLVertexFormat.float3
+        mtlVertexDescriptor.attributes[VertexAttribute.normal.rawValue].offset = 0
+        mtlVertexDescriptor.attributes[VertexAttribute.normal.rawValue].bufferIndex = BufferIndex.meshNormals.rawValue
+
         mtlVertexDescriptor.layouts[BufferIndex.meshPositions.rawValue].stride = 12
         mtlVertexDescriptor.layouts[BufferIndex.meshPositions.rawValue].stepRate = 1
         mtlVertexDescriptor.layouts[BufferIndex.meshPositions.rawValue].stepFunction = MTLVertexStepFunction.perVertex
@@ -219,6 +215,10 @@ actor Renderer {
         mtlVertexDescriptor.layouts[BufferIndex.meshGenerics.rawValue].stride = 8
         mtlVertexDescriptor.layouts[BufferIndex.meshGenerics.rawValue].stepRate = 1
         mtlVertexDescriptor.layouts[BufferIndex.meshGenerics.rawValue].stepFunction = MTLVertexStepFunction.perVertex
+
+        mtlVertexDescriptor.layouts[BufferIndex.meshNormals.rawValue].stride = 12
+        mtlVertexDescriptor.layouts[BufferIndex.meshNormals.rawValue].stepRate = 1
+        mtlVertexDescriptor.layouts[BufferIndex.meshNormals.rawValue].stepFunction = MTLVertexStepFunction.perVertex
 
         return mtlVertexDescriptor
     }
@@ -253,29 +253,6 @@ actor Renderer {
         return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
     }
 
-    static func buildMesh(device: MTLDevice,
-                          mtlVertexDescriptor: MTLVertexDescriptor) throws -> MTKMesh {
-        let metalAllocator = MTKMeshBufferAllocator(device: device)
-
-        let mdlMesh = MDLMesh.newBox(withDimensions: SIMD3<Float>(4, 4, 4),
-                                     segments: SIMD3<UInt32>(2, 2, 2),
-                                     geometryType: MDLGeometryType.triangles,
-                                     inwardNormals: false,
-                                     allocator: metalAllocator)
-
-        let mdlVertexDescriptor = MTKModelIOVertexDescriptorFromMetal(mtlVertexDescriptor)
-
-        guard let attributes = mdlVertexDescriptor.attributes as? [MDLVertexAttribute] else {
-            throw RendererError.badVertexDescriptor
-        }
-        attributes[VertexAttribute.position.rawValue].name = MDLVertexAttributePosition
-        attributes[VertexAttribute.texcoord.rawValue].name = MDLVertexAttributeTextureCoordinate
-
-        mdlMesh.vertexDescriptor = mdlVertexDescriptor
-
-        return try MTKMesh(mesh: mdlMesh, device: device)
-    }
-
     static func loadTexture(device: MTLDevice,
                             textureName: String) throws -> MTLTexture {
         let textureLoader = MTKTextureLoader(device: device)
@@ -307,19 +284,6 @@ actor Renderer {
         perDrawableTarget = perDrawableTarget.filter { $0.value.lastUsedFrameIndex + 90 > frameIndex }
     }
 
-    private func updateGameState() {
-        guard sceneRenderables.isEmpty && skyboxRenderable == nil else { return }
-
-        let rotationAxis = SIMD3<Float>(1, 1, 0)
-        let modelRotationMatrix = matrix4x4_rotation(radians: rotation, axis: rotationAxis)
-        let modelTranslationMatrix = matrix4x4_translation(0.0, 0.0, -8.0)
-        let modelMatrix = modelTranslationMatrix * modelRotationMatrix
-
-        self.uniforms[0].modelMatrix = modelMatrix
-
-        rotation += 0.01
-    }
-
     func renderFrame() {
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
@@ -336,8 +300,6 @@ actor Renderer {
         frame.startUpdate()
 
         self.updateDynamicBufferState(frameIndex: frame.frameIndex)
-
-        self.updateGameState()
 
         frame.endUpdate()
 
@@ -411,7 +373,8 @@ actor Renderer {
         residencySet.addAllocations([
             drawable.colorTextures[0],
             drawable.depthTextures[0],
-            drawableTarget.viewProjectionBuffer
+            drawableTarget.viewProjectionBuffer,
+            environmentTexture
         ])
 
         for renderable in sceneRenderables {
@@ -458,6 +421,7 @@ actor Renderer {
         renderEncoder.setArgumentTable(self.fragmentArgumentTable, stages: .fragment)
 
         self.vertexArgumentTable.setAddress(drawableTarget.viewProjectionBuffer.gpuAddress + UInt64(drawableTarget.viewProjectionBufferOffset), index: BufferIndex.viewProjection.rawValue)
+        self.fragmentArgumentTable.setTexture(environmentTexture.gpuResourceID, index: TextureIndex.environment.rawValue)
 
         let hasScene = !sceneRenderables.isEmpty || skyboxRenderable != nil
 
@@ -470,6 +434,7 @@ actor Renderer {
                 let ptr = UnsafeMutableRawPointer(dynamicUniformBuffer.contents() + uniformBufferOffset)
                     .bindMemory(to: Uniforms.self, capacity: 1)
                 ptr.pointee.modelMatrix = skybox.modelMatrix
+                ptr.pointee.ambientColor = SIMD4<Float>(1, 1, 1, 0)
 
                 self.vertexArgumentTable.setAddress(
                     dynamicUniformBuffer.gpuAddress + UInt64(uniformBufferOffset),
@@ -501,6 +466,7 @@ actor Renderer {
                 let ptr = UnsafeMutableRawPointer(dynamicUniformBuffer.contents() + objOffset)
                     .bindMemory(to: Uniforms.self, capacity: 1)
                 ptr.pointee.modelMatrix = renderable.modelMatrix
+                ptr.pointee.ambientColor = sceneAmbientColor
 
                 self.vertexArgumentTable.setAddress(
                     dynamicUniformBuffer.gpuAddress + UInt64(objOffset),
@@ -521,37 +487,6 @@ actor Renderer {
                                                         indexBufferLength: submesh.indexBuffer.buffer.length)
                 }
             }
-        } else {
-            renderEncoder.pushDebugGroup("Draw Box")
-
-            renderEncoder.setCullMode(.back)
-
-            renderEncoder.setDepthStencilState(depthState)
-
-            self.vertexArgumentTable.setAddress(dynamicUniformBuffer.gpuAddress + UInt64(uniformBufferOffset), index: BufferIndex.uniforms.rawValue)
-
-            for (index, element) in mesh.vertexDescriptor.layouts.enumerated() {
-                guard let layout = element as? MDLVertexBufferLayout else {
-                    fatalError("unsupported layout")
-                }
-
-                if layout.stride != 0 {
-                    let buffer = mesh.vertexBuffers[index]
-                    self.vertexArgumentTable.setAddress(buffer.buffer.gpuAddress + UInt64(buffer.offset), index: index)
-                }
-            }
-
-            self.fragmentArgumentTable.setTexture(colorMap.gpuResourceID, index: TextureIndex.color.rawValue)
-
-            for submesh in mesh.submeshes {
-                renderEncoder.drawIndexedPrimitives(primitiveType: submesh.primitiveType,
-                                                    indexCount: submesh.indexCount,
-                                                    indexType: submesh.indexType,
-                                                    indexBuffer: submesh.indexBuffer.buffer.gpuAddress + UInt64(submesh.indexBuffer.offset),
-                                                    indexBufferLength: submesh.indexBuffer.buffer.length)
-            }
-
-            renderEncoder.popDebugGroup()
         }
 
         renderEncoder.endEncoding()
@@ -602,6 +537,7 @@ actor Renderer {
         guard let attributes = mdlVertexDescriptor.attributes as? [MDLVertexAttribute] else { return }
         attributes[VertexAttribute.position.rawValue].name = MDLVertexAttributePosition
         attributes[VertexAttribute.texcoord.rawValue].name = MDLVertexAttributeTextureCoordinate
+        attributes[VertexAttribute.normal.rawValue].name = MDLVertexAttributeNormal
 
         let textureLoader = MTKTextureLoader(device: device)
         let textureOptions: [MTKTextureLoader.Option: Any] = [
@@ -613,18 +549,23 @@ actor Renderer {
 
         for obj in data.objects {
             let objMesh: MTKMesh
+            var meshTexture: MTLTexture? = nil
+
             if obj.type == "billboard" {
                 guard let m = createBillboardMesh(vertexDescriptor: mdlVertexDescriptor) else { continue }
                 objMesh = m
-            } else if let meshName = obj.mesh, let meshData = data.assets[meshName] {
-                guard let m = loadMeshFromData(meshData, name: meshName, vertexDescriptor: mdlVertexDescriptor) else { continue }
-                objMesh = m
+            } else if let meshName = obj.mesh, !meshName.isEmpty, let meshData = data.assets[meshName] {
+                guard let result = loadMeshFromData(meshData, name: meshName, vertexDescriptor: mdlVertexDescriptor) else { continue }
+                objMesh = result.mesh
+                meshTexture = result.texture
             } else {
                 continue
             }
 
             let objTexture: MTLTexture
-            if let texName = obj.texture, let texData = data.assets[texName] {
+            if let tex = meshTexture {
+                objTexture = tex
+            } else if let texName = obj.texture, !texName.isEmpty, let texData = data.assets[texName] {
                 objTexture = (try? textureLoader.newTexture(data: texData, options: textureOptions)) ?? colorMap
             } else {
                 objTexture = colorMap
@@ -641,8 +582,30 @@ actor Renderer {
         if let skyboxName = data.params?.skybox, let skyboxData = data.assets[skyboxName] {
             if let skyboxTexture = try? textureLoader.newTexture(data: skyboxData, options: textureOptions),
                let skyboxMesh = createSkyboxMesh(vertexDescriptor: mdlVertexDescriptor) {
-                newSkybox = SceneRenderable(mesh: skyboxMesh, texture: skyboxTexture, modelMatrix: matrix_identity_float4x4)
+                let rotDeg = data.params?.skyboxRotation ?? 0
+                let skyboxMatrix = matrix4x4_rotation(radians: rotDeg * .pi / 180,
+                                                       axis: SIMD3<Float>(0, 1, 0))
+                newSkybox = SceneRenderable(mesh: skyboxMesh, texture: skyboxTexture, modelMatrix: skyboxMatrix)
             }
+        }
+
+        // Parse ambient color from params (default: white)
+        var newAmbient = SIMD3<Float>(1, 1, 1)
+        if let hexStr = data.params?.ambientColor,
+           let parsed = Self.parseHexColor(hexStr) {
+            newAmbient = parsed
+        }
+
+        // Decode environment lighting map if present
+        var newEnvTexture: MTLTexture? = nil
+        if let ldrBase64 = data.params?.lighting?.ldr,
+           let imgData = Data(base64Encoded: ldrBase64) {
+            let envOptions: [MTKTextureLoader.Option: Any] = [
+                .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+                .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue),
+                .SRGB: NSNumber(value: false)
+            ]
+            newEnvTexture = try? textureLoader.newTexture(data: imgData, options: envOptions)
         }
 
         if !sceneRenderables.isEmpty || skyboxRenderable != nil {
@@ -651,10 +614,40 @@ actor Renderer {
 
         sceneRenderables = newRenderables
         skyboxRenderable = newSkybox
+
+        // Update ambient color: enable env map IBL (a=1) only if we loaded one
+        let envStrength: Float = newEnvTexture != nil ? 1.0 : 0.0
+        sceneAmbientColor = SIMD4<Float>(newAmbient.x, newAmbient.y, newAmbient.z, envStrength)
+        if let tex = newEnvTexture {
+            environmentTexture = tex
+        }
     }
 
-    private func loadMeshFromData(_ data: Data, name: String, vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {
-        let ext = (name as NSString).pathExtension.isEmpty ? "usdz" : (name as NSString).pathExtension
+    static func parseHexColor(_ hex: String) -> SIMD3<Float>? {
+        let h = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard h.count == 6, let value = UInt32(h, radix: 16) else { return nil }
+        return SIMD3<Float>(
+            Float((value >> 16) & 0xFF) / 255.0,
+            Float((value >> 8)  & 0xFF) / 255.0,
+            Float( value        & 0xFF) / 255.0
+        )
+    }
+
+    static func makeDefaultEnvironmentTexture(device: MTLDevice) -> MTLTexture {
+        let desc = MTLTextureDescriptor.texture2DDescriptor(
+            pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
+        desc.usage = .shaderRead
+        desc.storageMode = .shared
+        let tex = device.makeTexture(descriptor: desc)!
+        var pixel: [UInt8] = [255, 255, 255, 255]
+        tex.replace(region: MTLRegionMake2D(0, 0, 1, 1),
+                    mipmapLevel: 0, withBytes: &pixel, bytesPerRow: 4)
+        return tex
+    }
+
+    private func loadMeshFromData(_ data: Data, name: String, vertexDescriptor: MDLVertexDescriptor) -> (mesh: MTKMesh, texture: MTLTexture?)? {
+        let nameExt = (name as NSString).pathExtension
+        let ext = nameExt.isEmpty ? Self.detectMeshExtension(from: data) : nameExt
         let tempURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "." + ext)
         do {
             try data.write(to: tempURL)
@@ -662,12 +655,45 @@ actor Renderer {
 
             let allocator = MTKMeshBufferAllocator(device: device)
             let asset = MDLAsset(url: tempURL, vertexDescriptor: vertexDescriptor, bufferAllocator: allocator)
+            asset.loadTextures()
             guard let mdlMesh = asset.childObjects(of: MDLMesh.self).first as? MDLMesh else { return nil }
             mdlMesh.vertexDescriptor = vertexDescriptor
-            return try MTKMesh(mesh: mdlMesh, device: device)
+            let mtkMesh = try MTKMesh(mesh: mdlMesh, device: device)
+            let texture = Self.extractTexture(from: mdlMesh, device: device)
+            return (mesh: mtkMesh, texture: texture)
         } catch {
             return nil
         }
+    }
+
+    static func detectMeshExtension(from data: Data) -> String {
+        // GLB binary magic: "glTF" = 0x67 0x6C 0x54 0x46
+        if data.count >= 4 && data[0] == 0x67 && data[1] == 0x6C && data[2] == 0x54 && data[3] == 0x46 {
+            return "glb"
+        }
+        return "usdz"
+    }
+
+    static func extractTexture(from mdlMesh: MDLMesh, device: MTLDevice) -> MTLTexture? {
+        let loader = MTKTextureLoader(device: device)
+        let options: [MTKTextureLoader.Option: Any] = [
+            .textureUsage: NSNumber(value: MTLTextureUsage.shaderRead.rawValue),
+            .textureStorageMode: NSNumber(value: MTLStorageMode.shared.rawValue),
+            .SRGB: NSNumber(value: true)
+        ]
+        guard let submeshes = mdlMesh.submeshes else { return nil }
+        for case let sub as MDLSubmesh in submeshes {
+            guard let mat = sub.material else { continue }
+            for semantic in [MDLMaterialSemantic.baseColor, .emission, .ambientOcclusion] {
+                guard let prop = mat.property(with: semantic),
+                      prop.type == MDLMaterialPropertyType.texture,
+                      let sampler = prop.textureSamplerValue,
+                      let mdlTex = sampler.texture,
+                      let tex = try? loader.newTexture(texture: mdlTex, options: options) else { continue }
+                return tex
+            }
+        }
+        return nil
     }
 
     private func createBillboardMesh(vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {
@@ -682,7 +708,7 @@ actor Renderer {
 
     private func createSkyboxMesh(vertexDescriptor: MDLVertexDescriptor) -> MTKMesh? {
         let allocator = MTKMeshBufferAllocator(device: device)
-        let mdlMesh = MDLMesh(sphereWithExtent: SIMD3<Float>(100, 100, 100),
+        let mdlMesh = MDLMesh(sphereWithExtent: SIMD3<Float>(500, 500, 500),
                               segments: SIMD2<UInt32>(64, 32),
                               inwardNormals: true,
                               geometryType: .triangles,
@@ -692,10 +718,7 @@ actor Renderer {
     }
 
     private func computeModelMatrix(_ obj: SceneObject) -> float4x4 {
-        let t = obj.position?.simd ?? SIMD3<Float>(0, 0, 0)
-        let r = obj.rotation?.quaternion ?? simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
-        let s = obj.scale?.simd ?? SIMD3<Float>(1, 1, 1)
-        return matrix4x4_translation(t.x, t.y, t.z) * float4x4(r) * float4x4(diagonal: SIMD4<Float>(s.x, s.y, s.z, 1))
+        sceneObjectModelMatrix(obj)
     }
 }
 
@@ -772,6 +795,13 @@ extension Renderer.DrawableTarget {
             viewProjectionArray[0].viewProjectionMatrix.1 = viewProjection(forViewIndex: 1)
         }
     }
+}
+
+nonisolated func sceneObjectModelMatrix(_ obj: SceneObject) -> float4x4 {
+    let t = obj.position?.simd ?? SIMD3<Float>(0, 0, 0)
+    let r = obj.rotation?.quaternion ?? simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    let s = obj.scale?.simd ?? SIMD3<Float>(1, 1, 1)
+    return matrix4x4_translation(t.x, t.y, t.z) * float4x4(r) * float4x4(diagonal: SIMD4<Float>(s.x, s.y, s.z, 1))
 }
 
 nonisolated func matrix4x4_rotation(radians: Float, axis: SIMD3<Float>) -> matrix_float4x4 {

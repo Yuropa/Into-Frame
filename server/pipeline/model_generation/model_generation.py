@@ -16,7 +16,7 @@ class ModelGeneratorType(Enum):
 
     @classmethod
     def default(cls):
-        return cls.TRELLIS
+        return cls.SAM3D
 
 class ModelGenerator():
     generator: ModelGeneratorBase

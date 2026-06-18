@@ -74,7 +74,7 @@ class TerrainMeshStage(PipelineStage):
         input_key, panorama_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: TerrainMeshConfiguration = self.config
 
-        task = self.create_progress(3, "Terrain Mesh...")
+        task = self.create_progress(3, "Terrain Mesh…")
 
         height_map = context.input_depth(input_key)
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)

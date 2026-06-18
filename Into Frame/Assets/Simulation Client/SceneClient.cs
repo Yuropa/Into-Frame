@@ -213,6 +213,7 @@ public class SceneObject
     public string type;
     public string texture;
     public string mesh;
+    public string name;
     public Vec3   position;
     public Vec3   rotation;
     public Vec3   scale;
@@ -233,6 +234,15 @@ public class ExtrinsicsParams
 }
 
 [Serializable]
+public class SceneLightingData
+{
+    public string ldr;    // base64 PNG — LDR equirectangular environment map
+    public string log;    // base64 PNG — log-domain environment map
+    public int    width;
+    public int    height;
+}
+
+[Serializable]
 public class SceneParams
 {
     public string ambientColor;
@@ -243,8 +253,9 @@ public class SceneParams
     public string skybox;
     public float  skyboxRotation;
 
-    public SceneObject[] objects;
+    public SceneObject[]    objects;
     public ExtrinsicsParams extrinsics;
+    public SceneLightingData lighting;
 }
 
 [Serializable]

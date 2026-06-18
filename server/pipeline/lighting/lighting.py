@@ -1,7 +1,25 @@
+from logging import Logger
+from typing import Any
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.lighting.lux_dit import LuxDiT
 from scene.lighting import SceneLighting
+
+
+class PanoramaLightingConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        crop_fov_deg: float = 90.0,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.crop_fov_deg = float(crop_fov_deg)
 
 
 class PanoramaLightingStage(PipelineStage):
@@ -14,11 +32,19 @@ class PanoramaLightingStage(PipelineStage):
 
     Input key  (SemanticKey.INPUT)  → ContextKey.PANORAMA  (Panorama)
     Output key (SemanticKey.OUTPUT) → ContextKey.LIGHTING   (SceneLighting)
+
+    Config:
+      crop_fov_deg — horizontal FOV of the centre crop fed to LuxDiT (degrees).
+                     Set to 0 to use the full panorama. Default: 90.
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    def __init__(self, config: PanoramaLightingConfiguration) -> None:
         super().__init__(config)
         self._lux_dit = None
+
+    @classmethod
+    def config_class(cls) -> type[PanoramaLightingConfiguration]:
+        return PanoramaLightingConfiguration
 
     def _resolved_keys(self):
         return self.keys({
@@ -29,7 +55,7 @@ class PanoramaLightingStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        task = self.create_progress(2, "Panorama Lighting...")
+        task = self.create_progress(2, "Panorama Lighting…")
 
         if self._lux_dit is None:
             self._lux_dit = LuxDiT(self.device)
@@ -41,8 +67,19 @@ class PanoramaLightingStage(PipelineStage):
             self.finish_progress(task)
             return context
 
+        crop_fov = self.config.crop_fov_deg
+        if crop_fov > 0:
+            img  = panorama.rgb()
+            w, h = img.size
+            crop_w = max(1, int(w * crop_fov / 360.0))
+            x0     = (w - crop_w) // 2
+            input_image = img.crop((x0, 0, x0 + crop_w, h))
+            self.log_info(f"Lighting: using {crop_fov}° centre crop ({crop_w}×{h}px)")
+        else:
+            input_image = panorama.rgb()
+
         result = self._lux_dit.estimate(
-            panorama.rgb(),
+            input_image,
             self.temp,
             on_progress=self.make_progress_callback(task),
         )
@@ -70,5 +107,7 @@ class PanoramaLightingStage(PipelineStage):
         return LuxDiT.model_names()
 
     def clean_up(self):
+        if self._lux_dit is not None:
+            self._lux_dit.close()
+            self._lux_dit = None
         super().clean_up()
-        self._lux_dit = None

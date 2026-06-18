@@ -19,6 +19,7 @@ class InPaintingFlux:
         )
         
         offload_pipeline(device, self.pipeline)
+        self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod
     def model_names(cls) -> list[str]:
@@ -68,4 +69,17 @@ class InPaintingFlux:
         return output
 
     def close(self):
-        pass
+        import gc
+        if self.pipeline is not None:
+            # enable_model_cpu_offload registers accelerate hooks on each
+            # component, creating reference cycles that prevent GC. Remove them
+            # first so del actually frees the CUDA tensors.
+            try:
+                from accelerate.hooks import remove_hook_from_module
+                remove_hook_from_module(self.pipeline, recurse=True)
+            except Exception:
+                pass
+            del self.pipeline
+            self.pipeline = None
+        gc.collect()
+        torch.cuda.empty_cache()

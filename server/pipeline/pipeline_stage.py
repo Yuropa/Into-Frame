@@ -83,17 +83,14 @@ class PipelineStage:
     def keys_dict(self, **defaults: ContextKeyName) -> dict[SemanticKey, ContextKeyName]:
         return {s: self._resolve_key(s, defaults.get(s)) for s in SemanticKey}
 
-    def set_output(self, output_root: Optional[Path], temp: Optional[Path]):
+    def set_output(self, output_root: Optional[Path]):
         if output_root is not None:
             self.output = output_root / self.name
             self.output.mkdir(parents=True, exist_ok=True)
+            self.temp = self.output / "build"
+            self.temp.mkdir(parents=True, exist_ok=True)
         else:
             self.output = None
-
-        if temp is not None:
-            self.temp = temp / self.name
-            self.temp.mkdir(parents=True, exist_ok=True)    
-        else:
             self.temp = None
 
     def model_names(self) -> list[str]:
@@ -101,19 +98,11 @@ class PipelineStage:
 
     def _log_memory_usage(self, value):
         mb = value / 1024 / 1024
-
-        if mb < 2048:  # less than 2GB
+        if mb < 2048:
             formatted = f"{mb:.0f} MB"
         else:
-            gb = mb / 1024.0
-            formatted = f"{gb:.1f} GB"
-
-
-        BOLD = "\033[1m"
-        BLUE = "\033[94m"
-        RESET = "\033[0m"
-        
-        print(f"{BLUE}Peak Memory({self.name}): {BOLD}{formatted}{RESET}")
+            formatted = f"{mb / 1024.0:.1f} GB"
+        self.log_info(f"Peak memory: {formatted}")
 
     def log_memory_usage(self):
         if self.device.type == "cuda":
@@ -149,7 +138,9 @@ class PipelineStage:
         return self.progress.add_task("  " + label, total=count)
 
     def advance_progress(self, sub_task):
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
         sub_total = task.total if task.total is not None else task.completed + 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
         # Snap to the next integer step — only advance what remains so progress
@@ -162,7 +153,9 @@ class PipelineStage:
 
     def update_progress(self, sub_task, fraction: float):
         """Set a sub-task to an absolute fraction [0, 1] of completion and advance the main task by the delta."""
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        if task is None:
+            return
         total = task.total if task.total is not None else 1
         new_completed = min(fraction * total, total)
         delta = new_completed - task.completed
@@ -179,9 +172,9 @@ class PipelineStage:
         integer step, so the subsequent advance_progress call can snap the last bit
         without double-counting the main task.
         """
-        task = next(t for t in self.progress.tasks if t.id == sub_task)
-        total = task.total if task.total is not None else 1
-        start_frac = task.completed / total
+        task = next((t for t in self.progress.tasks if t.id == sub_task), None)
+        total = task.total if task is not None else 1
+        start_frac = (task.completed / total) if task is not None else 0.0
         remaining_span = 1.0 - start_frac - 1e-6  # leave a sliver for advance_progress
 
         def callback(fraction: float, label: str = ""):
@@ -191,10 +184,13 @@ class PipelineStage:
 
     def finish_progress(self, task):
         # Snap main task forward by whatever fraction this stage didn't account for
-        t = next(t for t in self.progress.tasks if t.id == task)
+        t = next((t for t in self.progress.tasks if t.id == task), None)
+        if t is None:
+            return
         sub_total = t.total if t.total is not None else 1
         total_tasks = self.total_tasks if self.total_tasks is not None else 1
-        remaining = (sub_total - t.completed) / (sub_total * total_tasks)
+        denominator = sub_total * total_tasks
+        remaining = (sub_total - t.completed) / denominator if denominator > 0 else 0
         if remaining > 0:
             self.progress.advance(self.main_task, remaining)
         self.progress.remove_task(task)

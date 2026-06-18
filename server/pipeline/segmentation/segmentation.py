@@ -4,6 +4,7 @@ from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.mask_inpainting import MaskInPainting
+from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 import numpy as np
 from PIL import Image as PILImage
@@ -27,6 +28,7 @@ class SegmentationStage(PipelineStage):
         self._seg = None
         self._foreground_seg = None
         self._mask_inpainting = None
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
         return self.keys({
@@ -44,12 +46,12 @@ class SegmentationStage(PipelineStage):
             nonlocal total_crops
 
             # Cropping
-            cropping_task = self.create_progress(result.length, "Cropping...")
+            cropping_task = self.create_progress(result.length, "Cropping…")
             for idx, crop in enumerate(result.masked_images(input_image)):
                 i = total_crops + idx
                 context.add_image(f"crop_{i}", crop.image)
+                self.log_info(f"  crop_{i}: box={[round(x, 1) for x in crop.box]} score={crop.score:.3f}")
 
-                print(f"Crop {crop.box}")
                 metadata = {
                     "box": [float(x) for x in crop.box],
                     "score": float(crop.score)
@@ -60,7 +62,7 @@ class SegmentationStage(PipelineStage):
             total_crops += result.length
 
         # Foreground Segmentation
-        # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting...")
+        # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting…")
         # self.advance_progress(foreground_segmenting_task)
 
         # infill_count = 0
@@ -95,12 +97,12 @@ class SegmentationStage(PipelineStage):
         # self.finish_progress(foreground_segmenting_task)
 
         #Segmentation
-        segmenting_task = self.create_progress(2, "Segmenting...")
+        segmenting_task = self.create_progress(2, "Segmenting…")
         if self._seg is None:
-            self._seg = ImageSeg(self.device)
+            self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)
 
-        result = self._seg.segment(input_image)
+        result = self._seg.segment(input_image, self.temp)
         store_segmentation_result(result)
 
         self.advance_progress(segmenting_task)
@@ -116,10 +118,7 @@ class SegmentationStage(PipelineStage):
     def _prepare_mask_and_image(self, original_image: Image, small_mask: np.ndarray, box, radius: float = 5):
         x, y, w, h = box
 
-        print(f"Shape mask {small_mask.shape}")
-        print(f"Box {box}")
-        
-        full_mask = PILImage.new("L", original_image.size, 0)    
+        full_mask = PILImage.new("L", original_image.size, 0)
         small_mask_pil = Image(small_mask).L(copy=True).resize((w, h))
         full_mask.paste(small_mask, (x, y))    
         full_mask = full_mask.filter(ImageFilter.GaussianBlur(radius=radius))
@@ -130,7 +129,9 @@ class SegmentationStage(PipelineStage):
         return ImageSeg.model_names() + ForegroundSeg.model_names() + MaskInPainting.model_names()
 
     def clean_up(self):
-        self._seg = None
+        if self._seg is not None:
+            self._seg.close()
+            self._seg = None
         self._foreground_seg = None
         self._mask_inpainting = None
         super().clean_up()

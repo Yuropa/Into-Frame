@@ -1,5 +1,6 @@
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
@@ -78,15 +79,16 @@ class SceneGenerationStage(PipelineStage):
             scene.skybox = panorama_key
 
         if object_count is not None:
-            generation_task = self.create_progress(object_count, "Creating Objects...")
+            generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in range(object_count):
                 texture_name = f"crop_{idx}"
                 mesh_name = f"mesh_{idx}"
 
                 metadata = context.input_object(f"metadata_{idx}")
 
-                if (metadata or {}).get("class") == "environment":
-                    self.log_info(f"Skipping environment object {idx}")
+                cls = (metadata or {}).get("class")
+                if cls in _ENV_CATEGORIES or cls == "indeterminate":
+                    self.log_info(f"Skipping {cls} object {idx}")
                     self.advance_progress(generation_task)
                     continue
 
@@ -119,6 +121,7 @@ class SceneGenerationStage(PipelineStage):
                         y=position[1],
                         z=position[2],
                     )
+                    mesh_obj.name = mesh_name
                     scene.add_object(mesh_obj)
                 else:
                     self.log_info(f"Creating billboard for {idx}")
@@ -130,6 +133,7 @@ class SceneGenerationStage(PipelineStage):
                         y=position[1],
                         z=position[2],
                     )
+                    billboard.name = mesh_name
                     scene.add_object(billboard)
                 self.advance_progress(generation_task)
 
@@ -138,7 +142,9 @@ class SceneGenerationStage(PipelineStage):
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
         if terrain_mesh is not None:
             self.log_info("Adding terrain mesh to scene")
-            scene.add_object(Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0))
+            terrian = Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0)
+            terrian.name = "terrian"
+            scene.add_object(terrian)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:

@@ -99,6 +99,11 @@ fi
 # Keep sudo alive
 while true; do sudo -n true; sleep 60; kill -0 "$$" || exit; done 2>/dev/null &
 
+# Prevent system sleep during installation (macOS only; no-op elsewhere)
+if command -v caffeinate &>/dev/null; then
+    caffeinate -i -w $$ &
+fi
+
 # Setup logs
 if [ "$SAVE_LOGS" = true ]; then
     # Saving prior execution logs
@@ -125,15 +130,19 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
 CHECKPOINT_DIR="$PROJECT_DIR/checkpoints"
 PACKAGES_DIR="$LIB_DIR/packages"
+REQUIREMENTS_DIR="$PROJECT_DIR/requirements"
 CURRENT_ENV=""
 
 FLASH_WHEEL_DIR="$HOME/.cache/wheels/flash-attn"
+FLASH_VERSION_SAM3D="2.8.3"
+P3D_WHEEL_DIR="$HOME/.cache/wheels/pytorch3d"
+P3D_COMMIT="75ebeeaea0908c5527e7b1e305fbc7681382db47"
 
 load_conda() {
     eval "$(conda shell.bash hook)" 2>/dev/null || true
@@ -407,7 +416,7 @@ create_main_environment() {
     conda activate "$CONDA_NAME"
 
     # Install standard pip packages
-    conda run --no-capture-output -n frame pip install -r "$PROJECT_DIR/requirements.txt" \
+    conda run --no-capture-output -n frame pip install -r "$REQUIREMENTS_DIR/requirements.txt" \
         || { error "pip install failed in 'frame'"; exit 1; }
     conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git \
         || { error "AlphaCLIP install failed in 'frame'"; exit 1; }
@@ -419,6 +428,37 @@ create_main_environment() {
 
 run_step "Creating Conda Environment '$CONDA_NAME'" \
     create_main_environment
+
+## ========================
+##    Pattern Synthesis Lib
+## ========================
+
+build_pattern_synthesis() {
+    # Install CGAL (required for Delaunay/Voronoi in lloyd_relaxation)
+    if command -v apt &>/dev/null; then
+        sudo apt install -y libcgal-dev cmake ninja-build
+    elif command -v brew &>/dev/null; then
+        brew install cgal cmake ninja libomp
+    elif command -v dnf &>/dev/null; then
+        sudo dnf install -y CGAL-devel cmake ninja-build
+    fi
+
+    # Install Python build tools into the frame environment
+    conda run --no-capture-output -n frame pip install \
+        "scikit-build-core>=0.4.3" "pybind11>=2.11" cmake ninja
+
+    # Build and install the pattern_synthesis Python extension.
+    # Pass the absolute src path so CMake resolves it correctly regardless
+    # of how pip / scikit-build-core resolves CMAKE_CURRENT_SOURCE_DIR.
+    local PS_SRC="$PROJECT_DIR/pattern-synthesis/src"
+    conda run --no-capture-output -n frame \
+        pip install --no-build-isolation \
+        --config-settings="cmake.define.PATTERN_SYNTHESIS_SRC_DIR=$PS_SRC" \
+        "$PROJECT_DIR/pattern-synthesis/python_lib"
+}
+
+run_step "Building Pattern Synthesis Library" \
+    build_pattern_synthesis
 
 ## =============
 ##    SAM 2
@@ -503,12 +543,141 @@ download_sam3d() {
 run_step "Downloading SAM 3D" \
     download_sam3d
 
+install_pytorch3d() {
+    mkdir -p "$P3D_WHEEL_DIR"
+
+    local matched_wheels=("$P3D_WHEEL_DIR"/pytorch3d-*.whl)
+
+    if [ -f "${matched_wheels[0]}" ]; then
+        info "Found pre-compiled pytorch3d wheel. Installing..."
+        run_in_env pip install "${matched_wheels[0]}"
+    else
+        warn "Building pytorch3d from source. This will take a while..."
+
+        # Clone at pinned commit and build as a pure-Python wheel by making
+        # setup.py believe CUDA is unavailable. sam3d_objects only uses pytorch3d's
+        # pure-Python APIs (look_at_view_transform, Transform3d, quaternion_*)
+        # so the _C CUDA extension is not needed.
+        local build_dir
+        build_dir="$(mktemp -d)"
+        git clone https://github.com/facebookresearch/pytorch3d.git "$build_dir"
+        git -C "$build_dir" checkout "$P3D_COMMIT"
+        python3 -c "
+import pathlib
+p = pathlib.Path('$build_dir/setup.py')
+# Prepend a patch so torch.cuda.is_available() returns False, causing setup.py
+# to skip the _C CUDA extension entirely. sam3d_objects only uses pytorch3d's
+# pure-Python APIs (look_at_view_transform, Transform3d, quaternion_*) which
+# don't need _C. This avoids the Pulsar linker failure on CUDA 13 / sm_89+.
+p.write_text(
+    'import torch as _t; _t.cuda.is_available = lambda: False\n' + p.read_text()
+)
+"
+        run_in_env pip wheel --no-build-isolation "$build_dir" -w "$P3D_WHEEL_DIR"
+        rm -rf "$build_dir"
+
+        matched_wheels=("$P3D_WHEEL_DIR"/pytorch3d-*.whl)
+        run_in_env pip install "${matched_wheels[0]}"
+    fi
+}
+
 setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
 
     create_env "sam3d"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-sam3d.txt"
-    run_in_env pip install opencv-python
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-sam3d.txt"
+
+    local sam3d_flash_wheels=("$FLASH_WHEEL_DIR"/flash_attn-"$FLASH_VERSION_SAM3D"*.whl)
+    if [ ! -f "${sam3d_flash_wheels[0]}" ]; then
+        warn "Building flash-attn $FLASH_VERSION_SAM3D for sam3d. This will take a while..."
+        MAX_JOBS=4 run_in_env pip wheel flash-attn=="$FLASH_VERSION_SAM3D" \
+            -w "$FLASH_WHEEL_DIR" --no-build-isolation
+    fi
+
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-p3d.txt" \
+        --find-links "$FLASH_WHEEL_DIR" --no-build-isolation
+    install_pytorch3d
+    # Install SAM3D's own deps one by one, skipping known-broken or incompatible packages.
+    # NOTE: use conda run directly (not run_in_env) so failures are tolerated — run_in_env
+    # calls exit 1 on failure, which would terminate the whole script.
+    while IFS= read -r pkg; do
+        [[ -z "$pkg" || "$pkg" == \#* ]] && continue
+        # bpy: not on PyPI
+        # *+cu121*: version pinned to CUDA 12.1 (we have cu13 variants, e.g. torchaudio)
+        # cuda-python==12.1.0: never published on PyPI
+        # nvidia-pyindex: broken setup.py; just adds NVIDIA package index, not a runtime dep
+        # Note: spconv-cu121 is intentionally NOT skipped — no cu130 build exists, and
+        #       cu121 wheels run fine on CUDA 13 via forward compatibility.
+        [[ "$pkg" == bpy* || "$pkg" == *+cu121* || \
+           "$pkg" == "cuda-python==12.1.0" || "$pkg" == nvidia-pyindex* ]] && {
+            warn "Skipping incompatible dep: $pkg"
+            continue
+        }
+        conda run --no-capture-output -n "$CURRENT_ENV" pip install "$pkg" --quiet \
+            || warn "Skipped dep (incompatible): $pkg"
+    done < "$LIB_DIR/SAM3D/requirements.txt"
+    # Install inference-only deps (gsplat, nvdiffrast, seaborn).
+    # Skip kaolin — handled by stub below. Skip gradio — UI dep, not needed for inference.
+    # gsplat and nvdiffrast both import torch at build time, so --no-build-isolation is required.
+    run_in_env pip install --no-build-isolation \
+        "gsplat @ git+https://github.com/nerfstudio-project/gsplat.git@2323de5905d5e90e035f792fe65bad0fedd413e7" \
+        "git+https://github.com/NVlabs/nvdiffrast.git" \
+        seaborn==0.13.2
+    # SAM3D's gaussian_render.py uses kernel_size + subpixel_offset, which are Mip-Splatting
+    # extensions not in the upstream graphdeco-inria fork. Clone mip-splatting shallowly and
+    # install from its diff-gaussian-rasterization submodule.
+    # Also patch rasterizer_impl.h: CUDA 13 + C++20 no longer implicitly includes <cstdint>.
+    local dgr_build_dir
+    dgr_build_dir="$(mktemp -d)"
+    git clone --depth 1 --recursive https://github.com/autonomousvision/mip-splatting.git "$dgr_build_dir"
+    sed -i '1s/^/#include <cstdint>\n/' "$dgr_build_dir/submodules/diff-gaussian-rasterization/cuda_rasterizer/rasterizer_impl.h"
+    run_in_env pip install --no-build-isolation "$dgr_build_dir/submodules/diff-gaussian-rasterization"
+    rm -rf "$dgr_build_dir"
+    run_in_env pip install -e "$LIB_DIR/SAM3D" --no-deps
+    # SAM3D's requirements include nvidia-nccl-cu12 which overwrites the cu13 NCCL that
+    # PyTorch was compiled against. ncclCommResume was added after 2.21.5 (cu12), so we
+    # must force cu13 back after all deps are installed.
+    run_in_env pip install --upgrade nvidia-nccl-cu13
+    # SAM3D pins opencv-python==4.9.0.80 which is a NumPy 1.x build; upgrade to get a
+    # NumPy 2-compatible wheel.
+    run_in_env pip install --upgrade "opencv-python>=4.9.0.80"
+    # SAM3D pins xformers==0.0.28.post3 (built for torch 2.5.1+cu121). The triton JIT API
+    # changed in torch 2.12, breaking xformers' vararg kernel unrolling. Upgrade to 0.0.35
+    # which supports torch>=2.10 and ships a py-none (pure-Python) wheel.
+    run_in_env pip install xformers==0.0.35
+    # kaolin has no wheels for torch 2.x / CUDA 13. The only usage in sam3d_objects is
+    # kaolin.utils.testing.check_tensor (a pure-Python shape validator in flexicubes.py).
+    # Install a minimal stub instead of the full library.
+    local py_ver
+    py_ver=$(conda run -n "$CURRENT_ENV" python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+    local kaolin_dir="$HOME/miniconda3/envs/$CURRENT_ENV/lib/python${py_ver}/site-packages/kaolin"
+    mkdir -p "$kaolin_dir/utils"
+    printf '# Minimal kaolin stub — only kaolin.utils.testing.check_tensor is used.\n' > "$kaolin_dir/__init__.py"
+    printf '' > "$kaolin_dir/utils/__init__.py"
+    cat > "$kaolin_dir/utils/testing.py" << 'PYEOF'
+import torch
+
+def check_tensor(obj, shape=None, dtype=None, throw=True):
+    if not isinstance(obj, torch.Tensor):
+        if throw:
+            raise TypeError(f"Expected torch.Tensor, got {type(obj)}")
+        return False
+    if shape is not None:
+        if len(obj.shape) != len(shape):
+            if throw:
+                raise ValueError(f"Shape rank mismatch: expected {len(shape)}, got {len(obj.shape)}")
+            return False
+        for i, (actual, expected) in enumerate(zip(obj.shape, shape)):
+            if expected is not None and actual != expected:
+                if throw:
+                    raise ValueError(f"Dim {i}: expected {expected}, got {actual}")
+                return False
+    if dtype is not None and obj.dtype != dtype:
+        if throw:
+            raise TypeError(f"dtype mismatch: expected {dtype}, got {obj.dtype}")
+        return False
+    return True
+PYEOF
     stop_env
 }
 
@@ -540,10 +709,14 @@ run_step "Installing Depth Anything" \
 
 setup_recognize_anything() {
     clone_if_needed https://github.com/xinyu1205/recognize-anything.git "$LIB_DIR/recognize-anything"
-    download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/blob/main/ram_plus_swin_large_14m.pth" "recognize_anything"
+    download_checkpoint "https://huggingface.co/xinyu1205/recognize-anything-plus-model/resolve/main/ram_plus_swin_large_14m.pth" "recognize_anything"
 
     create_env "recognize" 3.10
     run_in_env pip install -e "$LIB_DIR/recognize-anything"
+    run_in_env pip install scipy timm fairscale matplotlib opencv-python-headless
+    run_in_env pip install "transformers<4.45"
+    sed -i "s/torch.load(url_or_filename, map_location='cpu')/torch.load(url_or_filename, map_location='cpu', weights_only=False)/" \
+        "$LIB_DIR/recognize-anything/ram/models/utils.py"
     stop_env
 }
 
@@ -606,7 +779,7 @@ setup_stable_point() {
     run_in_env pip install transformers==4.42.3
     clone_if_needed https://github.com/Stability-AI/stable-point-aware-3d "$LIB_DIR/StablePoint"
 
-    run_in_env pip install -r "$PROJECT_DIR/requirements-stable3d.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-stable3d.txt"
     run_in_env pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/texture_baker"
     run_in_env pip install --no-build-isolation -e "$LIB_DIR/StablePoint/uv_unwrapper"
@@ -626,7 +799,7 @@ run_step "Installing Stable Point 3D" \
 setup_cubediff() {
     create_env "cubediff"
     clone_if_needed https://github.com:Juan5713/OpenCubeDiff.git "$LIB_DIR/CubeDiff"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-cubediff.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-cubediff.txt"
     ln -sf  "$LIB_DIR/CubeDiff/cubediff" "$PACKAGES_DIR/cubediff"
 
     stop_env
@@ -643,9 +816,9 @@ setup_dreamcube() {
     create_env "dreamcube"
 
     clone_if_needed https://github.com/Yukun-Huang/DreamCube.git "$LIB_DIR/DreamCube"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-dreamcube.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-dreamcube.txt"
     run_in_env pip install ninja wheel setuptools
-    run_in_env pip install --no-build-isolation "git+https://github.com/facebookresearch/pytorch3d.git"
+    install_pytorch3d
     run_in_env pip install peft
     ln -sf  "$LIB_DIR/DreamCube" "$PACKAGES_DIR/dreamcube"
 
@@ -662,7 +835,7 @@ run_step "Installing DreamCube" \
 setup_lama() {
     create_env "lama" 3.10
     clone_if_needed https://github.com/advimman/lama.git "$LIB_DIR/LaMa"
-    run_in_env pip install -r "$PROJECT_DIR/requirements-lama.txt"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-lama.txt"
     ln -sf  "$LIB_DIR/LaMa" "$PACKAGES_DIR/lama"
 
     LAMA_CHECKPOINT="$CHECKPOINT_DIR/lama"
@@ -705,6 +878,9 @@ setup_depth_pano() {
     create_env "depthpano"
     clone_if_needed https://github.com/Insta360-Research-Team/DAP "$LIB_DIR/DAP"
     run_in_env pip install -r "$LIB_DIR/DAP/requirements.txt"
+    # DAP's requirements.txt pins torch==2.7.1 without a CUDA suffix, which resolves
+    # to the cu126 wheel and overwrites the cu130 base. Force upgrade with the correct index.
+    run_in_env pip install --upgrade torch torchvision torchaudio --index-url "$TORCH_URL"
 
     download_checkpoint "https://huggingface.co/Insta360-Research/DAP-weights/resolve/main/model.pth" "depth_pano"
 
@@ -713,6 +889,35 @@ setup_depth_pano() {
 
 run_step "Install Depth Any Panoramas" \
     setup_depth_pano
+
+## ============
+##    WorldGen
+## ============
+
+setup_worldgen() {
+    clone_if_needed https://github.com/ZiYang-xie/WorldGen.git "$LIB_DIR/WorldGen"
+
+    create_env "worldgen" 3.12
+    run_in_env pip install torch==2.10.0 torchvision==0.25.0 --extra-index-url "$TORCH_URL"
+    run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-worldgen.txt"
+    run_in_env pip install git+https://github.com/mit-han-lab/nunchaku.git
+    run_in_env pip install --no-build-isolation git+https://github.com/facebookresearch/pytorch3d.git
+
+    run_in_env pip uninstall -y xformers
+    run_in_env pip install ninja cmake setuptools wheel
+    export TORCH_CUDA_ARCH_LIST="12.0"
+    run_in_env pip install --no-build-isolation git+https://github.com/facebookresearch/xformers.git
+    unset TORCH_CUDA_ARCH_LIST
+
+    run_in_env pip install --no-deps git+https://github.com/EnVision-Research/DA-2.git#subdirectory=src
+
+    ln -sf "$LIB_DIR/WorldGen/src/worldgen" "$PACKAGES_DIR/worldgen"
+
+    stop_env
+}
+
+run_step "Installing WorldGen" \
+    setup_worldgen
 
 ## ============
 ##    End

@@ -47,7 +47,7 @@ class CaptioningStage(PipelineStage):
         return result
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        caption_task = self.create_progress(2, "Captioning...")
+        caption_task = self.create_progress(2, "Captioning…")
         if self._caption is None:
             self._caption = ImageCaptioning(self.device)
         self.advance_progress(caption_task)
@@ -67,9 +67,7 @@ class CaptioningStage(PipelineStage):
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, output_key = self._resolved_keys()
-        return (
-            context.image(output_key) is not None
-        )
+        return context.object(output_key) is not None
 
     def model_names(self) -> list[str]:
         return ImageCaptioning.model_names()

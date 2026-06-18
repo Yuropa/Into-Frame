@@ -21,6 +21,9 @@ public class SceneParamManager : MonoBehaviour
     [Header("Skybox")]
     public GameObject skybox;
 
+    [Header("Lighting")]
+    public EnvironmentLighting environmentLighting;
+
     public void ApplyParams(SceneParams p)
     {
         if (p == null) return;
@@ -62,6 +65,9 @@ public class SceneParamManager : MonoBehaviour
         {
             skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox, p.skyboxRotation);
         }
+
+        if (environmentLighting != null)
+            environmentLighting.Apply(p.lighting);
     }
 
     private void Update()

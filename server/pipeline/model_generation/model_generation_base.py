@@ -17,9 +17,14 @@ class ModelGeneratorBase(RemoteClient):
         try:
             mesh = trimesh.load(str(glb_path))
 
-            # trimesh.load returns a Scene for GLB — extract the geometry
             if isinstance(mesh, trimesh.Scene):
-                mesh = trimesh.util.concatenate(list(mesh.geometry.values()))
+                geoms = list(mesh.geometry.values())
+                # For a single geometry keep it as-is so TextureVisuals are preserved.
+                # concatenate() rebuilds a bare Trimesh and drops material/UV data.
+                if len(geoms) == 1:
+                    mesh = geoms[0]
+                else:
+                    mesh = trimesh.util.concatenate(geoms)
 
             return Mesh(mesh)
         finally:

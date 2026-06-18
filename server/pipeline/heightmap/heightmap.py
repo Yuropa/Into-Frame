@@ -23,6 +23,9 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
         smooth_sigma: float = 0.0,
+        camera_height_meters: float = 1.0,
+        flood_fill: bool = True,
+        flood_fill_max_step: float = 1.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -34,6 +37,15 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # Max Gaussian sigma (in grid pixels) for distance-weighted smoothing.
         # 0 disables smoothing; sigma is 0 at the centre, smooth_sigma at the corners.
         self.smooth_sigma = smooth_sigma
+        # Assumed camera height above the ground plane (metres). Used to derive the Y
+        # floor filter that rejects sky-pixel artefacts and as the flood-fill seed height.
+        self.camera_height_meters = camera_height_meters
+        # Flood-fill from the grid centre outward; stops at height discontinuities and
+        # empty cells (sky gaps), yielding a connected ground region rather than a noisy
+        # global threshold selection.
+        self.flood_fill = flood_fill
+        # Maximum Y change (metres) between adjacent grid cells during flood-fill.
+        self.flood_fill_max_step = flood_fill_max_step
 
 
 class HeightMapStage(PipelineStage):
@@ -68,10 +80,12 @@ class HeightMapStage(PipelineStage):
         depth_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: HeightMapConfiguration = self.config
 
-        task = self.create_progress(3, "Height Map...")
+        task = self.create_progress(3, "Height Map…")
 
         depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         self.advance_progress(task)
 
         if depth is None:
@@ -84,6 +98,12 @@ class HeightMapStage(PipelineStage):
             self.finish_progress(task)
             return context
 
+        if sky_mask is not None:
+            self.log_info("Using sky mask to exclude horizon artefacts")
+
+        if panorama_depth is not None:
+            self.log_info("Panorama depth available — will fill unseen terrain regions")
+
         height_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
@@ -92,6 +112,11 @@ class HeightMapStage(PipelineStage):
             ground_y_max=cfg.ground_y_max,
             use_equirectangular=cfg.use_equirectangular,
             smooth_sigma=cfg.smooth_sigma,
+            camera_height_meters=cfg.camera_height_meters,
+            sky_mask=sky_mask,
+            flood_fill=cfg.flood_fill,
+            flood_fill_max_step=cfg.flood_fill_max_step,
+            panorama_depth=panorama_depth,
         )
         self.advance_progress(task)
 

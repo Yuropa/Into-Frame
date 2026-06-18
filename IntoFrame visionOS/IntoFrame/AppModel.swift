@@ -13,13 +13,15 @@ class AppModel {
 
     let sceneManager = SceneManager()
     var renderer: Renderer?
+    var macRenderer: MacRenderer?
 
     init() {
         sceneManager.onSceneReady = { [weak self] objects, assets, params in
-            guard let renderer = self?.renderer else { return }
-            Task {
-                await renderer.loadScene(objects: objects, assets: assets, params: params)
+            guard let self else { return }
+            if let renderer = self.renderer {
+                Task { await renderer.loadScene(objects: objects, assets: assets, params: params) }
             }
+            self.macRenderer?.loadScene(objects: objects, assets: assets, params: params)
         }
     }
 }

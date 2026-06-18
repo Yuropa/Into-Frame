@@ -1,6 +1,9 @@
 from pipeline.context_value import ContextValue, ValueKeys
 from pathlib import Path
 from typing import Literal, TypeAlias, Optional, Any
+import logging
+
+_log = logging.getLogger("pipeline")
 from scene.mesh import Mesh
 from util.depth_utils import Depth
 from util.image_utils import Image
@@ -24,14 +27,20 @@ class ContextKey:
     OBJECT_COUNT = "count"
     FOREGROUND_MASKED_IMAGE = "foreground_masked_image"
     PANORAMA_DEPTH = "panorama_depth"
+    PANORAMA_TERRAIN = "panorama_terrain"
+    PANORAMA_SKY_MASK = "panorama_sky_mask"
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
+    OBJECT_CORRELATION = "object_correlation"
     OBJECT_DISTRIBUTION = "object_distribution"
     LINEAR_GRAPH = "linear_graph"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_distribution", "linear_graph"]
+    PANORAMA_REGIONS = "panorama_regions"
+    PANORAMA_REGION_TYPE_MAP = "panorama_region_type_map"
+    REGION_MAP = "region_map"
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
@@ -236,6 +245,50 @@ class PipelineContext():
     def input_lighting(self, name: ContextKeyName) -> Optional[SceneLighting]:
         return self._value(name, self._previous_stage).lighting()
 
+    # ObjectCorrelationResult
+    def add_object_correlation(self, name: ContextKeyName, input: "ObjectCorrelationResult"):
+        from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult
+        value = ContextValue(name=name)
+        value.set_object_correlation(input)
+        self._set_value(name, value)
+
+    def object_correlation(self, name: ContextKeyName) -> Optional["ObjectCorrelationResult"]:
+        return self._value(name).object_correlation()
+
+    def input_object_correlation(self, name: ContextKeyName) -> Optional["ObjectCorrelationResult"]:
+        return self._value(name, self._previous_stage).object_correlation()
+
+    # ObjectDistributionResult
+    def add_object_distribution(self, name: ContextKeyName, input: "ObjectDistributionResult"):
+        from pipeline.object_distribution.object_distribution_result import ObjectDistributionResult
+        value = ContextValue(name=name)
+        value.set_object_distribution(input)
+        self._set_value(name, value)
+
+    def object_distribution(self, name: ContextKeyName) -> Optional["ObjectDistributionResult"]:
+        return self._value(name).object_distribution()
+
+    def input_object_distribution(self, name: ContextKeyName) -> Optional["ObjectDistributionResult"]:
+        return self._value(name, self._previous_stage).object_distribution()
+
+    # PanoramaRegionResult
+    def add_panorama_regions(self, name: ContextKeyName, input: "PanoramaRegionResult"):
+        from pipeline.panorama_segmentation.panorama_region_result import PanoramaRegionResult
+        value = ContextValue(name=name)
+        value.set_panorama_regions(input)
+        self._set_value(name, value)
+
+    def panorama_regions(self, name: ContextKeyName) -> Optional["PanoramaRegionResult"]:
+        return self._value(name).panorama_regions()
+
+    def input_panorama_regions(self, name: ContextKeyName) -> Optional["PanoramaRegionResult"]:
+        return self._value(name, self._previous_stage).panorama_regions()
+
+    def has_stage_output(self, name: ContextKeyName) -> bool:
+        """True only if the current stage has already written this key (cache hit for this stage)."""
+        stage = self._current_stage
+        return stage in self._stage_state and name in self._stage_state[stage]
+
     # Persistence
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -276,27 +329,25 @@ class PipelineContext():
                 value.read(path)
                 target[name] = value
             except Exception as e:
-                print(f"Skipping '{name}' in {path}: {e}")
+                _log.warning(f"Skipping '{name}' in {path}: {e}")
 
     def log_state(self):
-        def _print_values(values: dict, indent: str):
+        def _emit_values(values: dict, indent: str):
             items = sorted(values.items())
             for i, (name, value) in enumerate(items):
                 connector = "└──" if i == len(items) - 1 else "├──"
-                print(f"{indent}{connector} {name}: {value.describe()}")
+                _log.info(f"{indent}{connector} {name}: {value.describe()}")
 
-        print("\n PipelineContext")
+        _log.info("PipelineContext:")
         if self._state:
             has_stages = bool(self._stage_state)
             connector = "├──" if has_stages else "└──"
-            print(f" {connector} [global]")
-            _print_values(self._state, " │   " if has_stages else "     ")
+            _log.info(f" {connector} [global]")
+            _emit_values(self._state, " │   " if has_stages else "     ")
 
         stages = list(self._stage_state.items())
         for i, (stage_name, values) in enumerate(stages):
             connector = "└──" if i == len(stages) - 1 else "├──"
-            print(f" {connector} [{stage_name}]")
-            _print_values(values, "     " if i == len(stages) - 1 else " │   ")
-
-        print()
+            _log.info(f" {connector} [{stage_name}]")
+            _emit_values(values, "     " if i == len(stages) - 1 else " │   ")
         
