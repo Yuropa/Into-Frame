@@ -67,16 +67,14 @@ stages:
     ground_y_max: -0.5
     camera_height_meters: 1.0
 
-<<<<<<< Updated upstream
   - name: Linear Structures
     stage: LinearStructureStage
     enabled: true
     modify_rivers: true   # carve valley into height map along detected rivers
     modify_roads: true    # gently flatten height map along detected roads
-=======
+
   - name: Ground Map
     stage: GroundMapStage
->>>>>>> Stashed changes
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
