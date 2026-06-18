@@ -5,11 +5,7 @@ from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
 from util.projection_utils import ground_projection_certainty
-from pipeline.panorama_segmentation.panorama_region_result import (
-    ALL_REGION_TYPES,
-    REGION_TYPE_SKY,
-    REGION_TYPE_OTHER,
-)
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
 class RegionMapGenerator:
@@ -32,15 +28,15 @@ class RegionMapGenerator:
         propagation from the closest labelled cell.
 
         Returns (region_map, certainty_map):
-          region_map   — (grid_resolution, grid_resolution) uint8 of ALL_REGION_TYPES indices.
+          region_map   — (grid_resolution, grid_resolution) uint8 of RegionType indices.
           certainty_map — (grid_resolution, grid_resolution) float32 in [0, 1]: projection
                          certainty (sin²(depression angle)) for cells with direct observations,
                          0 for cells filled by nearest-neighbour propagation.
 
         Grid layout matches the height map: rows = Z near→far, cols = X left→right.
         """
-        sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
-        other_idx = ALL_REGION_TYPES.index(REGION_TYPE_OTHER)
+        sky_idx = RegionType.SKY
+        other_idx = RegionType.OTHER
 
         d = panorama_depth.depth.astype(np.float32)
         if sky_mask is not None and sky_mask.shape == d.shape:
@@ -81,7 +77,7 @@ class RegionMapGenerator:
         )
         xi, zi, Tg = xi[in_bounds], zi[in_bounds], Tg[in_bounds]
 
-        n_types = len(ALL_REGION_TYPES)
+        n_types = len(RegionType)
         vote_counts = np.zeros((grid_resolution, grid_resolution, n_types), dtype=np.int32)
         np.add.at(vote_counts, (zi, xi, Tg.astype(np.intp)), 1)
 

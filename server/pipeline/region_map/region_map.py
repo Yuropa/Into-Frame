@@ -9,7 +9,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.region_map.region_map_generator import RegionMapGenerator
 from pipeline.panorama_segmentation.panorama_region_result import (
-    ALL_REGION_TYPES,
+    RegionType,
     colorize_region_type_map,
 )
 from util.depth_utils import Depth
@@ -104,11 +104,7 @@ class RegionMapStage(PipelineStage):
         context.add_depth(output_key, region_map.astype(np.float32))
         context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 
-        unique_types = [
-            ALL_REGION_TYPES[i]
-            for i in np.unique(region_map)
-            if i < len(ALL_REGION_TYPES)
-        ]
+        unique_types = [RegionType(i).label for i in np.unique(region_map) if i < len(RegionType)]
         self.log_info(
             f"Region map {region_map.shape}, types present: {unique_types}, "
             f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"

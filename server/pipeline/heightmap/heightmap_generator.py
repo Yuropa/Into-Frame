@@ -6,6 +6,12 @@ from util.depth_utils import Depth
 from util.panorama_utils import Panorama
 from util.projection_utils import ground_projection_certainty, project_panorama_to_ground_grid
 from scene.camera import CameraIntrinsics
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
+
+# Integer indices of region types that produce reliable ground-plane depth.
+_VALID_REGION_INDICES = np.array(
+    [rt for rt in RegionType if rt.ground_valid], dtype=np.int32
+)
 
 
 class HeightMapGenerator:
@@ -23,6 +29,7 @@ class HeightMapGenerator:
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
         panorama_depth: Optional[Depth] = None,
+        region_type_mask: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -84,6 +91,15 @@ class HeightMapGenerator:
             & np.isfinite(d)
         )
 
+        # Restrict to reliable region types. Vegetation and built structures
+        # occlude the ground plane, so their depth cannot be trusted for terrain.
+        if region_type_mask is not None:
+            rm = np.round(region_type_mask).astype(np.int32)
+            if rm.shape != d.shape:
+                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+            valid_region = np.isin(rm, _VALID_REGION_INDICES)
+            ground_mask &= valid_region
+
         Xg = X[ground_mask]
         Yg = Y[ground_mask]
         Zg = Z[ground_mask]
@@ -134,6 +150,7 @@ class HeightMapGenerator:
                 grid_resolution=grid_resolution,
                 ground_y_max=ground_y_max,
                 ground_y_min=ground_y_min,
+                region_type_mask=region_type_mask,
             )
 
         # Certainty: projection-distortion based, zero for unobserved (interpolated) cells.
@@ -226,6 +243,7 @@ class HeightMapGenerator:
         grid_resolution: int,
         ground_y_max: float,
         ground_y_min: float,
+        region_type_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Project a 360° equirectangular depth map into empty (NaN) cells of height_map.
@@ -236,13 +254,26 @@ class HeightMapGenerator:
         if not np.any(missing):
             return height_map
 
+        # Build a combined exclusion mask: sky pixels plus any unreliable region types.
+        excl_mask = sky_mask
+        if region_type_mask is not None:
+            pd = panorama_depth.depth
+            rm = np.round(region_type_mask).astype(np.int32)
+            if rm.shape != pd.shape:
+                rm = zoom(rm, (pd.shape[0] / rm.shape[0], pd.shape[1] / rm.shape[1]), order=0)
+            valid_region = np.zeros(pd.shape, dtype=bool)
+            for idx in _VALID_REGION_INDICES:
+                valid_region |= (rm == idx)
+            invalid_region = ~valid_region
+            excl_mask = invalid_region if sky_mask is None else (sky_mask | invalid_region)
+
         xi, zi, _, Yg, _ = project_panorama_to_ground_grid(
             panorama_depth=panorama_depth,
             grid_size_meters=grid_size_meters,
             grid_resolution=grid_resolution,
             ground_y_max=ground_y_max,
             ground_y_min=ground_y_min,
-            sky_mask=sky_mask,
+            sky_mask=excl_mask,
         )
 
         if len(xi) == 0:

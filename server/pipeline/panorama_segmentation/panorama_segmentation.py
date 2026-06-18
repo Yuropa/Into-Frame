@@ -10,7 +10,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_segmentation.panorama_region_result import (
     PanoramaRegionResult,
     PanoramaRegion,
-    ALL_REGION_TYPES,
+    RegionType,
     coarse_type_for_label,
     build_type_idx_map,
     colorize_region_type_map,
@@ -53,10 +53,10 @@ def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
     type_idx_map = build_type_idx_map(label_map, id2label)
 
     result = PanoramaRegionResult()
-    type_pixel_counts: dict[str, int] = {t: 0 for t in ALL_REGION_TYPES}
+    type_pixel_counts: dict[RegionType, int] = {rt: 0 for rt in RegionType}
 
     # Group ADE20K class IDs by coarse region type.
-    ids_for_type: dict[str, list[int]] = {t: [] for t in ALL_REGION_TYPES}
+    ids_for_type: dict[RegionType, list[int]] = {rt: [] for rt in RegionType}
     for class_id, label_name in id2label.items():
         region_type = coarse_type_for_label(label_name)
         ids_for_type[region_type].append(class_id)
@@ -96,7 +96,7 @@ def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
 
             result.regions.append(
                 PanoramaRegion(
-                    region_type=region_type,
+                    region_type=region_type.label,
                     label_name=dominant_label_name,
                     area_fraction=round(area_fraction, 4),
                     bbox=(x0, y0, x1 - x0 + 1, y1 - y0 + 1),
@@ -107,12 +107,12 @@ def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
     result.regions.sort(key=lambda r: r.area_fraction, reverse=True)
 
     result.type_fractions = {
-        t: round(count / total_pixels, 4)
-        for t, count in type_pixel_counts.items()
+        rt.label: round(count / total_pixels, 4)
+        for rt, count in type_pixel_counts.items()
         if count > 0
     }
     result.present_types = [
-        t for t in ALL_REGION_TYPES if type_pixel_counts.get(t, 0) > 0
+        rt.label for rt in RegionType if type_pixel_counts.get(rt, 0) > 0
     ]
     return result, type_idx_map
 
