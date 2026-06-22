@@ -127,6 +127,10 @@ class RegionMapStage(PipelineStage):
         # just below it, and project to actual XZ positions on the top-down grid.
         sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
         terrain_idx = ALL_REGION_TYPES.index(REGION_TYPE_TERRAIN)
+        sky_px = int((type_idx_map == sky_idx).sum())
+        terrain_px = int((type_idx_map == terrain_idx).sum())
+        unique_types_pano = [ALL_REGION_TYPES[i] for i in np.unique(type_idx_map) if i < len(ALL_REGION_TYPES)]
+        self.log_info(f"Ridgeline inputs: {sky_px} sky px, {terrain_px} terrain px — types in panorama: {unique_types_pano}")
         silhouette_grid = RegionMapGenerator.extract_mountain_ridgeline(
             type_idx_map=type_idx_map,
             panorama_depth=panorama_depth,
