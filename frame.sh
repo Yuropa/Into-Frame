@@ -184,10 +184,15 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
 
   while [[ $# -gt 0 ]]; do
     case $1 in
-      -o|--output) OUTPUT="$2"; shift 2 ;;
-      -d|--debug)  DEBUG="$2";  shift 2 ;;
-      --config)    CONFIG="$2"; shift 2 ;;
-      -h|--help)   usage; exit 0 ;;
+      --env)        ENV="$2";          shift 2 ;;
+      --seed)       SEED_ARGS+=("$2"); shift 2 ;;
+      -v|--verbose) LOG_MODE="verbose"; shift   ;;
+      --plain)      LOG_MODE="plain";   shift   ;;
+      --log-mode)   LOG_MODE="$2";      shift 2 ;;
+      -o|--output)  OUTPUT="$2"; shift 2 ;;
+      -d|--debug)   DEBUG="$2";  shift 2 ;;
+      --config)     CONFIG="$2"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
       *) echo "Unknown run option: $1" >&2; exit 1 ;;
     esac
   done
@@ -212,6 +217,11 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
 elif [[ "$SUBCOMMAND" == "server" ]]; then
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --env)        ENV="$2";          shift 2 ;;
+      --seed)       SEED_ARGS+=("$2"); shift 2 ;;
+      -v|--verbose) LOG_MODE="verbose"; shift   ;;
+      --plain)      LOG_MODE="plain";   shift   ;;
+      --log-mode)   LOG_MODE="$2";      shift 2 ;;
       --host)       HOST="$2";       shift 2 ;;
       --port)       PORT="$2";       shift 2 ;;
       --asset-port) ASSET_PORT="$2"; shift 2 ;;
@@ -251,6 +261,11 @@ elif [[ "$SUBCOMMAND" == "local" ]]; then
 
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --env)        ENV="$2";          shift 2 ;;
+      --seed)       SEED_ARGS+=("$2"); shift 2 ;;
+      -v|--verbose) LOG_MODE="verbose"; shift   ;;
+      --plain)      LOG_MODE="plain";   shift   ;;
+      --log-mode)   LOG_MODE="$2";      shift 2 ;;
       --host)       HOST="$2";       shift 2 ;;
       --port)       PORT="$2";       shift 2 ;;
       --asset-port) ASSET_PORT="$2"; shift 2 ;;
@@ -279,8 +294,13 @@ elif [[ "$SUBCOMMAND" == "local" ]]; then
 elif [[ "$SUBCOMMAND" == "download" ]]; then
   while [[ $# -gt 0 ]]; do
     case $1 in
-      --config)  CONFIG="$2"; shift 2 ;;
-      -h|--help) usage; exit 0 ;;
+      --env)        ENV="$2";          shift 2 ;;
+      --seed)       SEED_ARGS+=("$2"); shift 2 ;;
+      -v|--verbose) LOG_MODE="verbose"; shift   ;;
+      --plain)      LOG_MODE="plain";   shift   ;;
+      --log-mode)   LOG_MODE="$2";      shift 2 ;;
+      --config)     CONFIG="$2"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
       *) echo "Unknown download option: $1" >&2; exit 1 ;;
     esac
   done
@@ -311,8 +331,12 @@ elif [[ "$SUBCOMMAND" == "setup" ]]; then
 elif [[ "$SUBCOMMAND" == "clear" ]]; then
   while [[ $# -gt 0 ]]; do
     case $1 in
-      -o|--output) OUTPUT="$2"; shift 2 ;;
-      -h|--help)   usage; exit 0 ;;
+      --env)        ENV="$2";          shift 2 ;;
+      -v|--verbose) LOG_MODE="verbose"; shift   ;;
+      --plain)      LOG_MODE="plain";   shift   ;;
+      --log-mode)   LOG_MODE="$2";      shift 2 ;;
+      -o|--output)  OUTPUT="$2"; shift 2 ;;
+      -h|--help)    usage; exit 0 ;;
       *) echo "Unknown clear option: $1" >&2; exit 1 ;;
     esac
   done
