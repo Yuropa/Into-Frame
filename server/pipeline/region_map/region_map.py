@@ -31,7 +31,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         grid_resolution: int = 1024,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
-        water_skeleton_smooth_radius: int = 12,
+        water_skeleton_smooth_radius: int = 40,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
