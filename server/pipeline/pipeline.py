@@ -580,7 +580,7 @@ class Pipeline:
                             monitor=monitor,
                             progress=progress,
                             task=task,
-                            force=seed_changed,
+                            force=dirty or seed_changed,
                         )
                         dirty = dirty or ran
             except BaseException as _exc:
