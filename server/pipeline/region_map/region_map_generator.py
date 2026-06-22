@@ -95,3 +95,40 @@ class RegionMapGenerator:
         result = region_map.copy()
         result[empty] = region_map[indices[0][empty], indices[1][empty]]
         return result
+
+    @staticmethod
+    def extract_mountain_silhouette(
+        type_idx_map: np.ndarray,
+        sky_idx: int,
+        terrain_idx: int,
+    ) -> np.ndarray:
+        """
+        Extract the mountain silhouette from an equirectangular region type map.
+
+        Returns a float32 (H, W) binary mask where 1.0 marks terrain pixels that
+        sit directly below a sky pixel — the ridgeline at the sky-terrain horizon.
+        """
+        h, w = type_idx_map.shape
+        sky_mask = type_idx_map == sky_idx
+        terrain_mask = type_idx_map == terrain_idx
+
+        above_is_sky = np.zeros((h, w), dtype=bool)
+        above_is_sky[1:, :] = sky_mask[:-1, :]
+
+        silhouette = terrain_mask & above_is_sky
+        return silhouette.astype(np.float32)
+
+    @staticmethod
+    def extract_water_skeleton(region_map: np.ndarray, water_idx: int) -> np.ndarray:
+        """
+        Skeletonize the water region of the top-down region map.
+
+        Returns a float32 (H, W) binary mask of the medial axis of all water cells,
+        reducing water bodies to 1-pixel-wide centerlines.
+        """
+        from skimage.morphology import skeletonize as sk_skeletonize
+        water_mask = region_map == water_idx
+        if not np.any(water_mask):
+            return np.zeros(region_map.shape, dtype=np.float32)
+        skeleton = sk_skeletonize(water_mask)
+        return skeleton.astype(np.float32)

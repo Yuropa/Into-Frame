@@ -10,6 +10,9 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.region_map.region_map_generator import RegionMapGenerator
 from pipeline.panorama_segmentation.panorama_region_result import (
     ALL_REGION_TYPES,
+    REGION_TYPE_SKY,
+    REGION_TYPE_TERRAIN,
+    REGION_TYPE_WATER,
     colorize_region_type_map,
 )
 from util.depth_utils import Depth
@@ -71,7 +74,7 @@ class RegionMapStage(PipelineStage):
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
 
-        task = self.create_progress(3, "Region Map…")
+        task = self.create_progress(5, "Region Map…")
 
         panorama_depth = context.input_depth(depth_key)
         type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
@@ -114,6 +117,38 @@ class RegionMapStage(PipelineStage):
             PILImage.fromarray(colorize_region_type_map(region_map)).save(
                 self.temp / "region_map.png"
             )
+        self.advance_progress(task)
+
+        # Mountain silhouette — terrain pixels at the sky-terrain horizon in the panorama.
+        sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
+        terrain_idx = ALL_REGION_TYPES.index(REGION_TYPE_TERRAIN)
+        silhouette = RegionMapGenerator.extract_mountain_silhouette(
+            type_idx_map=type_idx_map,
+            sky_idx=sky_idx,
+            terrain_idx=terrain_idx,
+        )
+        context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette)
+        silhouette_px = int(silhouette.sum())
+        self.log_info(f"Mountain silhouette: {silhouette_px} edge pixels")
+        if self.temp is not None and silhouette_px > 0:
+            rgb = np.zeros((*silhouette.shape, 3), dtype=np.uint8)
+            rgb[silhouette > 0] = (255, 255, 255)
+            PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
+        self.advance_progress(task)
+
+        # Water skeleton — medial axis of water cells in the top-down region map.
+        water_idx = ALL_REGION_TYPES.index(REGION_TYPE_WATER)
+        water_skeleton = RegionMapGenerator.extract_water_skeleton(
+            region_map=region_map,
+            water_idx=water_idx,
+        )
+        context.add_depth(ContextKey.WATER_SKELETON, water_skeleton)
+        skeleton_px = int(water_skeleton.sum())
+        self.log_info(f"Water skeleton: {skeleton_px} skeleton pixels")
+        if self.temp is not None and skeleton_px > 0:
+            rgb = np.zeros((*water_skeleton.shape, 3), dtype=np.uint8)
+            rgb[water_skeleton > 0] = (30, 144, 255)
+            PILImage.fromarray(rgb).save(self.temp / "water_skeleton.png")
 
         self.finish_progress(task)
         return context
