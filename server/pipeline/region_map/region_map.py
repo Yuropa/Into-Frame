@@ -123,17 +123,15 @@ class RegionMapStage(PipelineStage):
             )
         self.advance_progress(task)
 
-        # Mountain silhouette — detect ridgeline in panorama, then project to top-down grid.
+        # Mountain ridgeline — detect sky-terrain boundary per column, sample depth
+        # just below it, and project to actual XZ positions on the top-down grid.
         sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
         terrain_idx = ALL_REGION_TYPES.index(REGION_TYPE_TERRAIN)
-        pano_silhouette = RegionMapGenerator.extract_mountain_silhouette(
+        silhouette_grid = RegionMapGenerator.extract_mountain_ridgeline(
             type_idx_map=type_idx_map,
+            panorama_depth=panorama_depth,
             sky_idx=sky_idx,
             terrain_idx=terrain_idx,
-        )
-        silhouette_grid = RegionMapGenerator.project_silhouette_to_grid(
-            panorama_depth=panorama_depth,
-            silhouette_mask=pano_silhouette,
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
         )

@@ -97,16 +97,26 @@ class RegionMapGenerator:
         return result
 
     @staticmethod
-    def extract_mountain_silhouette(
+    def extract_mountain_ridgeline(
         type_idx_map: np.ndarray,
+        panorama_depth: Depth,
         sky_idx: int,
         terrain_idx: int,
+        grid_size_meters: float = 100.0,
+        grid_resolution: int = 512,
+        depth_offset_rows: int = 3,
     ) -> np.ndarray:
         """
-        Extract the mountain silhouette from an equirectangular region type map.
+        Extract the sky-terrain horizon per column, sample depth just below it,
+        and project to a top-down grid using actual XZ positions.
 
-        Returns a float32 (H, W) binary mask where 1.0 marks terrain pixels that
-        sit directly below a sky pixel — the ridgeline at the sky-terrain horizon.
+        For each panorama column, finds the first terrain row below sky, then
+        samples depth depth_offset_rows below that boundary (where depth estimators
+        are more reliable than at the exact edge). NaN depth values are interpolated
+        from neighboring columns. Each valid column is unprojected to XZ and placed
+        in the grid — close mountains land near the centre, distant ones near the edge.
+
+        Returns float32 (grid_resolution, grid_resolution) binary mask.
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
@@ -114,52 +124,46 @@ class RegionMapGenerator:
 
         above_is_sky = np.zeros((h, w), dtype=bool)
         above_is_sky[1:, :] = sky_mask[:-1, :]
+        silhouette = terrain_mask & above_is_sky  # terrain pixel directly below sky
 
-        silhouette = terrain_mask & above_is_sky
-        return silhouette.astype(np.float32)
+        has_silhouette = silhouette.any(axis=0)                      # (W,) bool
+        boundary_row = silhouette.argmax(axis=0)                     # (W,) int
+        sample_rows = np.clip(boundary_row + depth_offset_rows, 0, h - 1)
 
-    @staticmethod
-    def project_silhouette_to_grid(
-        panorama_depth: Depth,
-        silhouette_mask: np.ndarray,
-        grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
-    ) -> np.ndarray:
-        """
-        Project panorama-space silhouette pixels onto a top-down grid.
-
-        Mountain ridgelines are at the horizon — their literal XZ distances are
-        typically far beyond the grid boundary. Instead, each silhouette pixel is
-        projected to the edge of the grid in its azimuth direction, marking which
-        directions have a visible ridgeline.
-
-        Returns a float32 (grid_resolution, grid_resolution) binary mask where 1.0
-        marks grid-edge cells in directions that contain a silhouette pixel.
-        """
         d = panorama_depth.depth.astype(np.float32)
-        X, _, Z = Panorama.equirectangular_unproject(Depth(d))
+        cols = np.arange(w)
+        depths = np.where(has_silhouette, d[sample_rows, cols], np.nan)
 
-        valid = (silhouette_mask > 0) & np.isfinite(d)
-        if not np.any(valid):
-            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        # Interpolate NaN depths horizontally so depth gaps don't leave holes.
+        nan_mask = ~np.isfinite(depths) | (depths <= 0)
+        valid_for_interp = has_silhouette & ~nan_mask
+        if valid_for_interp.any() and nan_mask.any():
+            valid_cols = cols[valid_for_interp].astype(np.float64)
+            valid_depths = depths[valid_for_interp]
+            depths = np.where(
+                has_silhouette,
+                np.interp(cols.astype(np.float64), valid_cols, valid_depths),
+                np.nan,
+            )
 
-        Xs = X[valid]
-        Zs = Z[valid]
-
-        # Normalize to unit direction in XZ, then scale to grid edge.
-        r = np.sqrt(Xs ** 2 + Zs ** 2)
-        nonzero = r > 0
-        Xs, Zs, r = Xs[nonzero], Zs[nonzero], r[nonzero]
+        theta = (cols / w - 0.5) * 2.0 * np.pi  # longitude: 0 = +Z (forward)
+        Xs = depths * np.sin(theta)
+        Zs = depths * np.cos(theta)
 
         half = grid_size_meters / 2.0
-        # Scale each direction so the longer axis hits the grid boundary.
-        scale = half / np.maximum(np.abs(Xs), np.abs(Zs))
-        Xs = Xs * scale
-        Zs = Zs * scale
+        in_bounds = (
+            has_silhouette
+            & np.isfinite(depths)
+            & (np.abs(Xs) <= half)
+            & (np.abs(Zs) <= half)
+        )
+        Xs, Zs = Xs[in_bounds], Zs[in_bounds]
+
+        if len(Xs) == 0:
+            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
-
         xi = np.clip(np.digitize(Xs, x_edges) - 1, 0, grid_resolution - 1)
         zi = np.clip(np.digitize(Zs, z_edges) - 1, 0, grid_resolution - 1)
 
