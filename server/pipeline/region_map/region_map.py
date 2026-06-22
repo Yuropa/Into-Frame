@@ -31,12 +31,14 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         grid_resolution: int = 1024,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
+        water_skeleton_smooth_radius: int = 12,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
         self.grid_resolution = grid_resolution
         self.ground_y_max = ground_y_max
         self.camera_height_meters = camera_height_meters
+        self.water_skeleton_smooth_radius = water_skeleton_smooth_radius
 
 
 class RegionMapStage(PipelineStage):
@@ -143,6 +145,7 @@ class RegionMapStage(PipelineStage):
         water_skeleton = RegionMapGenerator.extract_water_skeleton(
             region_map=region_map,
             water_idx=water_idx,
+            smooth_radius=cfg.water_skeleton_smooth_radius,
         )
         context.add_depth(ContextKey.WATER_SKELETON, water_skeleton)
         skeleton_px = int(water_skeleton.sum())

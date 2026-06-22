@@ -119,16 +119,25 @@ class RegionMapGenerator:
         return silhouette.astype(np.float32)
 
     @staticmethod
-    def extract_water_skeleton(region_map: np.ndarray, water_idx: int) -> np.ndarray:
+    def extract_water_skeleton(
+        region_map: np.ndarray,
+        water_idx: int,
+        smooth_radius: int = 12,
+    ) -> np.ndarray:
         """
         Skeletonize the water region of the top-down region map.
 
         Returns a float32 (H, W) binary mask of the medial axis of all water cells,
         reducing water bodies to 1-pixel-wide centerlines.
+
+        smooth_radius: morphological closing radius applied before skeletonizing to
+        fill small inlets and smooth jagged boundaries, reducing skeleton branch count.
         """
-        from skimage.morphology import skeletonize as sk_skeletonize
+        from skimage.morphology import skeletonize as sk_skeletonize, disk, binary_closing
         water_mask = region_map == water_idx
         if not np.any(water_mask):
             return np.zeros(region_map.shape, dtype=np.float32)
+        if smooth_radius > 0:
+            water_mask = binary_closing(water_mask, disk(smooth_radius))
         skeleton = sk_skeletonize(water_mask)
         return skeleton.astype(np.float32)
