@@ -1,6 +1,7 @@
 from typing import Any
 from logging import Logger
 
+import numpy as np
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -85,6 +86,8 @@ class HeightMapStage(PipelineStage):
         depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         self.advance_progress(task)
 

@@ -465,8 +465,9 @@ class Pipeline:
                 raise
 
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
-        self.log_info(f"Seed: {self.config.seeds.describe()}")
-        self.log_info(f"Running with input: {self.input}")
+        print(f"Seed: {self.config.seeds.describe()}")
+        print(f"Input: {self.input}")
+        print(f"Input hash: {self.input.uuid_string()}")
 
         output = self._create_output_directories()
 
@@ -579,7 +580,7 @@ class Pipeline:
                             monitor=monitor,
                             progress=progress,
                             task=task,
-                            force=dirty or seed_changed,
+                            force=seed_changed,
                         )
                         dirty = dirty or ran
             except BaseException as _exc:
