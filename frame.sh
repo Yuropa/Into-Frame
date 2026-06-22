@@ -21,6 +21,7 @@ CONFIG=""
 
 # --- run defaults ---
 INPUT="$SCRIPT_DIR/samples/Paris.jpg"
+RERUN_ARGS=()
 
 # --- server defaults ---
 HOST="localhost"
@@ -63,6 +64,7 @@ run options:
   --debug-archive        Also write a .debug.frame archive with build/ files (default: on)
   --no-debug-archive     Disable .debug.frame generation
   --config PATH          Pipeline config YAML      (default: server/config.yaml)
+  --rerun STAGE[,...]    Purge cached output for stage(s) so they re-run; repeatable
 
 server options:
   --host HOST            Bind host                 (default: ${HOST})
@@ -109,6 +111,8 @@ Environment variables:
 Examples:
   $(basename "$0") run samples/Iceland.jpg
   $(basename "$0") run samples/Paris.jpg --output ./out --debug true
+  $(basename "$0") run samples/Paris.jpg --rerun "Region Map"
+  $(basename "$0") run samples/Paris.jpg --rerun "Region Map,Terrain"
   $(basename "$0") local ./output/Paris.frame
   $(basename "$0") local ./output/Paris.frame --port 9090
   $(basename "$0") server --port 9090
@@ -192,6 +196,7 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
       -o|--output)  OUTPUT="$2"; shift 2 ;;
       -d|--debug)   DEBUG="$2";  shift 2 ;;
       --config)     CONFIG="$2"; shift 2 ;;
+      --rerun)      RERUN_ARGS+=("$2"); shift 2 ;;
       -h|--help)    usage; exit 0 ;;
       *) echo "Unknown run option: $1" >&2; exit 1 ;;
     esac
@@ -208,6 +213,7 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
   ARGS=($(build_global_args) run "$INPUT" --output "$OUTPUT")
   [[ -n "$DEBUG"  ]] && ARGS+=(--debug "$DEBUG")
   [[ -n "$CONFIG" ]] && ARGS+=(--config "$CONFIG")
+  for r in "${RERUN_ARGS[@]+"${RERUN_ARGS[@]}"}"; do ARGS+=(--rerun "$r"); done
 
   exec python3 main.py "${ARGS[@]}"
 
