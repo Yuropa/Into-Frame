@@ -79,6 +79,8 @@ class RegionMapStage(PipelineStage):
         panorama_depth = context.input_depth(depth_key)
         type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
         self.advance_progress(task)
 
         if panorama_depth is None:
@@ -155,7 +157,11 @@ class RegionMapStage(PipelineStage):
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, output_key = self._resolved_keys()
-        return context.depth(output_key) is not None
+        return (
+            context.depth(output_key) is not None
+            and context.depth(ContextKey.MOUNTAIN_SILHOUETTE) is not None
+            and context.depth(ContextKey.WATER_SKELETON) is not None
+        )
 
     def model_names(self) -> list[str]:
         return []
