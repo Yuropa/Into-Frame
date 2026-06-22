@@ -123,20 +123,26 @@ class RegionMapStage(PipelineStage):
             )
         self.advance_progress(task)
 
-        # Mountain silhouette — terrain pixels at the sky-terrain horizon in the panorama.
+        # Mountain silhouette — detect ridgeline in panorama, then project to top-down grid.
         sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
         terrain_idx = ALL_REGION_TYPES.index(REGION_TYPE_TERRAIN)
-        silhouette = RegionMapGenerator.extract_mountain_silhouette(
+        pano_silhouette = RegionMapGenerator.extract_mountain_silhouette(
             type_idx_map=type_idx_map,
             sky_idx=sky_idx,
             terrain_idx=terrain_idx,
         )
-        context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette)
-        silhouette_px = int(silhouette.sum())
-        self.log_info(f"Mountain silhouette: {silhouette_px} edge pixels")
+        silhouette_grid = RegionMapGenerator.project_silhouette_to_grid(
+            panorama_depth=panorama_depth,
+            silhouette_mask=pano_silhouette,
+            grid_size_meters=cfg.grid_size_meters,
+            grid_resolution=cfg.grid_resolution,
+        )
+        context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
+        silhouette_px = int(silhouette_grid.sum())
+        self.log_info(f"Mountain silhouette: {silhouette_px} grid cells")
         if self.temp is not None and silhouette_px > 0:
-            rgb = np.zeros((*silhouette.shape, 3), dtype=np.uint8)
-            rgb[silhouette > 0] = (255, 255, 255)
+            rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
+            rgb[silhouette_grid > 0] = (255, 255, 255)
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
         self.advance_progress(task)
 

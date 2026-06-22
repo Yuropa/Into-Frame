@@ -119,6 +119,50 @@ class RegionMapGenerator:
         return silhouette.astype(np.float32)
 
     @staticmethod
+    def project_silhouette_to_grid(
+        panorama_depth: Depth,
+        silhouette_mask: np.ndarray,
+        grid_size_meters: float = 100.0,
+        grid_resolution: int = 512,
+    ) -> np.ndarray:
+        """
+        Project panorama-space silhouette pixels onto a top-down grid.
+
+        Unprojects each silhouette pixel to 3D via the panorama depth map, then
+        bins the XZ coordinates into the same grid layout used by the region map.
+        No Y filtering — silhouette pixels can be at any height.
+
+        Returns a float32 (grid_resolution, grid_resolution) binary mask where 1.0
+        marks grid cells hit by at least one silhouette pixel.
+        """
+        d = panorama_depth.depth.astype(np.float32)
+        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+
+        half = grid_size_meters / 2.0
+        valid = (
+            (silhouette_mask > 0)
+            & np.isfinite(d)
+            & (np.abs(X) <= half)
+            & (np.abs(Z) <= half)
+        )
+
+        if not np.any(valid):
+            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        Xs = X[valid]
+        Zs = Z[valid]
+
+        x_edges = np.linspace(-half, half, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
+
+        xi = np.clip(np.digitize(Xs, x_edges) - 1, 0, grid_resolution - 1)
+        zi = np.clip(np.digitize(Zs, z_edges) - 1, 0, grid_resolution - 1)
+
+        grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        grid[zi, xi] = 1.0
+        return grid
+
+    @staticmethod
     def extract_water_skeleton(
         region_map: np.ndarray,
         water_idx: int,
