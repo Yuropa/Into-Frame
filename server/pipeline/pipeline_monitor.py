@@ -278,13 +278,13 @@ def _print_summary(roots: list, gpu_indices: list[int]):
     n_gpus    = len(gpu_indices)
 
     # Column widths
-    STAGE_W  = 32
-    CPU_W    = 28   # "  avg:XX.X% / peak:XX.X%"
-    RAM_W    = 26
+    STAGE_W  = 28
+    CPU_W    = 20
+    RAM_W    = 22
     # Per-GPU columns (repeated n_gpus times)
-    GPU_W    = 28 if has_gpu else 0
-    VRAM_W   = 26 if has_gpu else 0
-    TIME_W   = 12
+    GPU_W    = 20 if has_gpu else 0
+    VRAM_W   = 22 if has_gpu else 0
+    TIME_W   = 10
 
     gpu_block_w = (GPU_W + VRAM_W) * n_gpus
     INNER = STAGE_W + CPU_W + RAM_W + gpu_block_w + TIME_W
