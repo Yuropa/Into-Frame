@@ -428,28 +428,9 @@ class Pipeline:
                 context.save(path=output)
 
 
-    def _invalidate_stages(self, specs: set[str], output_root: Path):
-        """Clear cached output for the named stages so they are treated as dirty.
-
-        Each entry in *specs* may be a bare stage name ("Region Map") or a path
-        whose final component is the stage name ("./output/abc/Region Map").
-        Warns if an entry does not match any configured stage name.
-        """
-        known = {s.name for s in self.stages}
-        for spec in specs:
-            stage_name = Path(spec).name if ("/" in spec or "\\" in spec) else spec
-            if stage_name not in known:
-                self.log_warning(
-                    f"--rerun: '{stage_name}' does not match any configured stage "
-                    f"(known: {sorted(known)})"
-                )
-                continue
-            stage_dir = output_root / stage_name
-            if stage_dir.exists():
-                self.log_info(f"Invalidating cached stage: {stage_name}")
-                _clear_directory(stage_dir)
-            else:
-                self.log_info(f"No cached output for stage '{stage_name}', will run fresh")
+    def _resolve_stage_name(self, spec: str) -> str:
+        """Return the stage name from a spec that may be a bare name or a path."""
+        return Path(spec).name if ("/" in spec or "\\" in spec) else spec
 
     def _post_progress(self, progress_queue: Optional[queue.SimpleQueue]):
         if progress_queue is not None:
@@ -539,9 +520,6 @@ class Pipeline:
         else:
             context.add_image(ContextKey.INPUT, input_image)
 
-        if self.config.force_stages and output is not None:
-            self._invalidate_stages(self.config.force_stages, output)
-
         self.current_step = ""
         self.current_step_index = 0
 
@@ -599,8 +577,11 @@ class Pipeline:
                         cached_seed = cached_stage_seeds.get(stage.name, cached_global_seed)
                         current_seed = self.config.seeds.seed_for(stage.name)
                         seed_changed = cached_global_seed is not None and cached_seed != current_seed
+                        stage_forced = self._resolve_stage_name(stage.name) in self.config.force_stages
                         if seed_changed and not dirty:
                             self.log_info(f"Seed changed for '{stage.name}' ({cached_seed} → {current_seed}), forcing rerun")
+                        if stage_forced and not dirty:
+                            self.log_info(f"Stage '{stage.name}' marked for rerun via --rerun")
                         ran = self._run_stage(
                             stage=stage,
                             context=context,
@@ -608,7 +589,7 @@ class Pipeline:
                             monitor=monitor,
                             progress=progress,
                             task=task,
-                            force=dirty or seed_changed,
+                            force=dirty or seed_changed or stage_forced,
                         )
                         dirty = dirty or ran
             except BaseException as _exc:
