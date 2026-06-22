@@ -140,7 +140,7 @@ class RegionMapStage(PipelineStage):
         context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
         silhouette_px = int(silhouette_grid.sum())
         self.log_info(f"Mountain silhouette: {silhouette_px} grid cells")
-        if self.temp is not None and silhouette_px > 0:
+        if self.temp is not None:
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
@@ -156,7 +156,7 @@ class RegionMapStage(PipelineStage):
         context.add_depth(ContextKey.WATER_SKELETON, water_skeleton)
         skeleton_px = int(water_skeleton.sum())
         self.log_info(f"Water skeleton: {skeleton_px} skeleton pixels")
-        if self.temp is not None and skeleton_px > 0:
+        if self.temp is not None:
             rgb = np.zeros((*water_skeleton.shape, 3), dtype=np.uint8)
             rgb[water_skeleton > 0] = (30, 144, 255)
             PILImage.fromarray(rgb).save(self.temp / "water_skeleton.png")

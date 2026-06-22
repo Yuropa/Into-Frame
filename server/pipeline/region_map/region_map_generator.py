@@ -128,29 +128,34 @@ class RegionMapGenerator:
         """
         Project panorama-space silhouette pixels onto a top-down grid.
 
-        Unprojects each silhouette pixel to 3D via the panorama depth map, then
-        bins the XZ coordinates into the same grid layout used by the region map.
-        No Y filtering — silhouette pixels can be at any height.
+        Mountain ridgelines are at the horizon — their literal XZ distances are
+        typically far beyond the grid boundary. Instead, each silhouette pixel is
+        projected to the edge of the grid in its azimuth direction, marking which
+        directions have a visible ridgeline.
 
         Returns a float32 (grid_resolution, grid_resolution) binary mask where 1.0
-        marks grid cells hit by at least one silhouette pixel.
+        marks grid-edge cells in directions that contain a silhouette pixel.
         """
         d = panorama_depth.depth.astype(np.float32)
-        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+        X, _, Z = Panorama.equirectangular_unproject(Depth(d))
 
-        half = grid_size_meters / 2.0
-        valid = (
-            (silhouette_mask > 0)
-            & np.isfinite(d)
-            & (np.abs(X) <= half)
-            & (np.abs(Z) <= half)
-        )
-
+        valid = (silhouette_mask > 0) & np.isfinite(d)
         if not np.any(valid):
             return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
         Xs = X[valid]
         Zs = Z[valid]
+
+        # Normalize to unit direction in XZ, then scale to grid edge.
+        r = np.sqrt(Xs ** 2 + Zs ** 2)
+        nonzero = r > 0
+        Xs, Zs, r = Xs[nonzero], Zs[nonzero], r[nonzero]
+
+        half = grid_size_meters / 2.0
+        # Scale each direction so the longer axis hits the grid boundary.
+        scale = half / np.maximum(np.abs(Xs), np.abs(Zs))
+        Xs = Xs * scale
+        Zs = Zs * scale
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
