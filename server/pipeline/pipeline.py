@@ -179,6 +179,7 @@ class PipelineConfiguration:
         seeds: Optional[SeedConfiguration] = None,
         config_path: Optional[Path] = None,
         log_mode: str = "panel",
+        force_stages: Optional[set[str]] = None,
     ):
         """
         log_mode controls logging output:
@@ -203,6 +204,7 @@ class PipelineConfiguration:
 
         self.seeds = seeds if seeds is not None else SeedConfiguration()
         self.log_mode = log_mode
+        self.force_stages: set[str] = force_stages or set()
         self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
         self.log = self._configure_logging(log_mode)
         self.stages_yaml = self._load_stages_yaml(config_path)
@@ -426,6 +428,29 @@ class Pipeline:
                 context.save(path=output)
 
 
+    def _invalidate_stages(self, specs: set[str], output_root: Path):
+        """Clear cached output for the named stages so they are treated as dirty.
+
+        Each entry in *specs* may be a bare stage name ("Region Map") or a path
+        whose final component is the stage name ("./output/abc/Region Map").
+        Warns if an entry does not match any configured stage name.
+        """
+        known = {s.name for s in self.stages}
+        for spec in specs:
+            stage_name = Path(spec).name if ("/" in spec or "\\" in spec) else spec
+            if stage_name not in known:
+                self.log_warning(
+                    f"--rerun: '{stage_name}' does not match any configured stage "
+                    f"(known: {sorted(known)})"
+                )
+                continue
+            stage_dir = output_root / stage_name
+            if stage_dir.exists():
+                self.log_info(f"Invalidating cached stage: {stage_name}")
+                _clear_directory(stage_dir)
+            else:
+                self.log_info(f"No cached output for stage '{stage_name}', will run fresh")
+
     def _post_progress(self, progress_queue: Optional[queue.SimpleQueue]):
         if progress_queue is not None:
             progress_queue.put({"step": self.current_step, "percent": self.current_step_index / float(len(self.stages))})
@@ -513,6 +538,9 @@ class Pipeline:
                 context.log_state()
         else:
             context.add_image(ContextKey.INPUT, input_image)
+
+        if self.config.force_stages and output is not None:
+            self._invalidate_stages(self.config.force_stages, output)
 
         self.current_step = ""
         self.current_step_index = 0

@@ -159,6 +159,17 @@ def create_parser():
         default=DEFAULT_CONFIG_PATH,
         help="Path to pipeline configuration YAML (default: config.yaml)"
     )
+    run_parser.add_argument(
+        "--rerun",
+        type=str,
+        action="append",
+        metavar="STAGE[,STAGE...]",
+        help=(
+            "Purge cached output for the given stage(s) so they are treated as dirty "
+            "and re-run (along with all downstream stages). Accepts a comma-separated "
+            "list of stage names or output paths. May be repeated."
+        ),
+    )
 
     # local
     local_parser = subparsers.add_parser(
@@ -225,12 +236,25 @@ def _parse_seeds(seed_args: list[str] | None) -> SeedConfiguration:
     return SeedConfiguration(global_seed=global_seed, stage_seeds=stage_seeds)
 
 
+def _parse_rerun(rerun_args: list[str] | None) -> set[str]:
+    if not rerun_args:
+        return set()
+    result = set()
+    for arg in rerun_args:
+        for part in arg.split(","):
+            name = part.strip()
+            if name:
+                result.add(name)
+    return result
+
+
 def _create_pipeline_config(args):
     config = PipelineConfiguration(
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
         log_mode=getattr(args, "log_mode", "panel"),
+        force_stages=_parse_rerun(getattr(args, "rerun", None)),
     )
 
     config.save_files = args.debug
