@@ -77,7 +77,7 @@ class RegionMapStage(PipelineStage):
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
 
-        task = self.create_progress(5, "Region Map…")
+        task = self.create_progress(6, "Region Map…")
 
         panorama_depth = context.input_depth(depth_key)
         type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
@@ -150,6 +150,25 @@ class RegionMapStage(PipelineStage):
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
         self.advance_progress(task)
 
+        # Interior peaks — depth jumps + Canny/corners on RGB to find elevated
+        # terrain features that appear against background terrain, not against sky.
+        panorama_img = context.input_image(ContextKey.PANORAMA)
+        panorama_rgb = np.array(panorama_img.rgb()) if panorama_img is not None else None
+        interior_peaks = RegionMapGenerator.extract_interior_peaks(
+            type_idx_map=type_idx_map,
+            panorama_depth=panorama_depth,
+            sky_idx=sky_idx,
+            panorama_rgb=panorama_rgb,
+            grid_size_meters=cfg.grid_size_meters,
+            grid_resolution=cfg.grid_resolution,
+        )
+        context.add_depth(ContextKey.INTERIOR_PEAKS, interior_peaks)
+        peak_cells = int((interior_peaks > 0).sum())
+        self.log_info(f"Interior peaks: {peak_cells} grid cells")
+        if self.temp is not None:
+            peak_img = (interior_peaks * 255).clip(0, 255).astype(np.uint8)
+            PILImage.fromarray(peak_img).save(self.temp / "interior_peaks.png")
+
         for type_idx, ctx_key, smooth_radius, color, filename in [
             (RegionType.WATER, ContextKey.WATER_SKELETON,  cfg.water_skeleton_smooth_radius, (30, 144, 255),  "water_skeleton.png"),
             (RegionType.ROAD,  ContextKey.ROAD_SKELETON,   cfg.road_skeleton_smooth_radius,  (80, 80, 80),    "road_skeleton.png"),
@@ -175,6 +194,7 @@ class RegionMapStage(PipelineStage):
         return (
             context.depth(output_key) is not None
             and context.depth(ContextKey.MOUNTAIN_SILHOUETTE) is not None
+            and context.depth(ContextKey.INTERIOR_PEAKS) is not None
             and context.depth(ContextKey.WATER_SKELETON) is not None
             and context.depth(ContextKey.ROAD_SKELETON) is not None
             and context.depth(ContextKey.TRAIL_SKELETON) is not None

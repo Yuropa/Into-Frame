@@ -15,6 +15,7 @@ from scene.lighting import SceneLighting
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult
 from pipeline.object_distribution.object_distribution_result import ObjectDistributionResult
 from pipeline.panorama_segmentation.panorama_region_result import PanoramaRegionResult
+from pipeline.linear_structures.graph import LinearGraph, LinearStructure
 
 class ValueKeys(StrEnum):
     NONE = "none"
@@ -74,6 +75,10 @@ class JSONEncoder(json.JSONEncoder):
             return int(obj)
         if isinstance(obj, np.floating):
             return float(obj)
+        if isinstance(obj, LinearStructure):
+            return {"type": obj.type, "path": obj.path.tolist(), "width": obj.width}
+        if isinstance(obj, LinearGraph):
+            return {"structures": [self.default(s) for s in obj.structures]}
         return super().default(obj)
 
 class ContextValue():

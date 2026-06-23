@@ -29,6 +29,7 @@ class ContextKey:
     PANORAMA_DEPTH = "panorama_depth"
     PANORAMA_TERRAIN = "panorama_terrain"
     PANORAMA_SKY_MASK = "panorama_sky_mask"
+    PANORAMA_SKY = "panorama_sky"
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
@@ -41,6 +42,7 @@ class ContextKey:
     PANORAMA_REGION_TYPE_MAP = "panorama_region_type_map"
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
+    INTERIOR_PEAKS = "interior_peaks"
     WATER_SKELETON = "water_skeleton"
     ROAD_SKELETON = "road_skeleton"
     TRAIL_SKELETON = "trail_skeleton"
@@ -48,7 +50,7 @@ class ContextKey:
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "water_skeleton", "road_skeleton", "trail_skeleton", "height_map_certainty", "region_map_certainty", "terrain_texture", "terrain_texture_certainty"]
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "panorama_sky", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "interior_peaks", "water_skeleton", "road_skeleton", "trail_skeleton", "height_map_certainty", "region_map_certainty", "terrain_texture", "terrain_texture_certainty"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 
