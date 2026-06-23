@@ -112,7 +112,7 @@ class PanoramaInpaintingStage(PipelineStage):
         self._classifier = None
         self._captioner = None
         self._samp = None
-        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
+        self.preferred_device, self.preferred_dtype = preferred_device(DeviceStrategy.MEMORY)
 
     @classmethod
     def config_class(cls) -> type[PipelineStageConfiguration]:
@@ -344,7 +344,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
         # Phase 1: LaMa — full panorama
         self.log_info(f"  LaMa: full panorama ({w}×{h}px)")
-        lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
+        lama_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.LAMA)
         lama_pil = lama_inpainter.inpaint(original_pil, union_mask_pil, temp_path=self.temp)
         lama_inpainter.close()
 
@@ -377,7 +377,7 @@ class PanoramaInpaintingStage(PipelineStage):
             flux_w, flux_h = w, h
 
         self.log_info(f"  Flux: full panorama ({flux_w}×{flux_h}px)")
-        flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
+        flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
         flux_pil = flux_inpainter.inpaint(
             flux_input_s,
             flux_mask_s,
@@ -434,7 +434,7 @@ class PanoramaInpaintingStage(PipelineStage):
         lama_states = []
         current_arr = np.array(original_pil)
 
-        lama_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
+        lama_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.LAMA)
         for lama_idx, (mask_array, box) in enumerate(pass_objects):
             bx, by, bw, bh = box
             left   = max(0, int(bx))
@@ -489,7 +489,7 @@ class PanoramaInpaintingStage(PipelineStage):
         valid_states = [s for s in lama_states if s[2] is not None]
 
         if valid_states:
-            flux_inpainter = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
+            flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
             lama_count = len(pass_objects)
 
             for flux_idx, (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1) in enumerate(valid_states):
