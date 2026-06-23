@@ -85,12 +85,54 @@ class RegionMapGenerator:
         region_map = np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8)
         region_map[has_data] = vote_counts[has_data].argmax(axis=1).astype(np.uint8)
 
-        # Certainty: projection-distortion geometry for observed cells, 0 for NN-filled.
+        # Certainty: normalised geometric distortion × observation-density ratio.
+        #
+        # Geometric component — sin²(φ) = h²/(r²+h²) measures how much
+        # equirectangular projection distorts each cell.  With camera_height ≈ 1 m
+        # and a 100 m grid the raw values span four orders of magnitude (≈0.0001 at
+        # 50 m vs 1.0 directly below the camera), making the map unreadable.  We
+        # normalise to the *range of distortions actually present* in this scene so
+        # the least-distorted observed cell gets 1.0 and the most-distorted gets 0.0.
+        # This makes certainty relative to the scene rather than absolute.
+        #
+        # Observation-density component — compares the actual per-cell pixel count
+        # against the expected count if every ground point had an unobstructed view
+        # (expected ∝ geometric certainty).  Cells that received fewer observations
+        # than predicted are (partially) occluded → their certainty is scaled down.
+        # This is the "clear line of sight" factor.  NN-filled cells stay at 0.
         x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
         z_centers = (z_edges[:-1] + z_edges[1:]) / 2.0
         X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
         certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height_meters)
-        certainty = np.where(has_data, certainty_field, 0.0).astype(np.float32)
+
+        obs_count = vote_counts.sum(axis=2).astype(np.float32)
+        if has_data.any():
+            # Log-normalise the geometric field within the observed region.
+            # sin²(φ) spans ~4 orders of magnitude across a 100 m grid, so a
+            # linear rescale still clusters everything near zero.  Taking -log
+            # converts the multiplicative range to an additive one and then we
+            # rescale so the least-distorted observed cell → 1.0 and the most
+            # distorted → 0.0.  This gives a perceptually even spread.
+            log_field = -np.log(np.maximum(certainty_field, 1e-9))
+            log_obs = log_field[has_data]
+            log_min, log_max = float(log_obs.min()), float(log_obs.max())
+            geom_normalised = 1.0 - (log_field - log_min) / max(log_max - log_min, 1e-9)
+            geom_normalised = np.clip(geom_normalised, 0.0, 1.0)
+
+            # Observation-density: actual pixel count vs. geometric expectation.
+            geom_sum = float(certainty_field[has_data].sum())
+            obs_sum = float(obs_count[has_data].sum())
+            scale = obs_sum / geom_sum if geom_sum > 0 else 1.0
+            expected = certainty_field * scale
+            obs_density = np.where(
+                has_data,
+                np.minimum(obs_count / np.maximum(expected, 1e-6), 1.0),
+                0.0,
+            )
+        else:
+            geom_normalised = certainty_field
+            obs_density = np.zeros_like(certainty_field)
+        certainty = np.where(has_data, geom_normalised * obs_density, 0.0).astype(np.float32)
 
         return RegionMapGenerator._fill_nearest(region_map, has_data), certainty
 
@@ -109,16 +151,21 @@ class RegionMapGenerator:
         type_idx_map: np.ndarray,
         panorama_depth: Depth,
         sky_idx: int,
-        terrain_idx: int,
+        terrain_idx: int = -1,
         grid_size_meters: float = 100.0,
         grid_resolution: int = 512,
         depth_offset_rows: int = 3,
     ) -> np.ndarray:
         """
-        Extract the sky-terrain horizon per column, sample depth just below it,
+        Extract the sky-foreground horizon per column, sample depth just below it,
         and project to a top-down grid using actual XZ positions.
 
-        For each panorama column, finds the first terrain row below sky, then
+        Any non-sky pixel that sits directly below a sky pixel is treated as part
+        of the ridgeline — this covers bare TERRAIN, forest-covered mountains
+        (VEGETATION), and built structures on hilltops (BUILT), which would all be
+        missed if only the TERRAIN type were accepted.
+
+        For each panorama column, finds the first non-sky row below sky, then
         samples depth depth_offset_rows below that boundary (where depth estimators
         are more reliable than at the exact edge). NaN depth values are interpolated
         from neighboring columns. Each valid column is unprojected to XZ and placed
@@ -128,11 +175,11 @@ class RegionMapGenerator:
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
-        terrain_mask = type_idx_map == terrain_idx
 
         above_is_sky = np.zeros((h, w), dtype=bool)
         above_is_sky[1:, :] = sky_mask[:-1, :]
-        silhouette = terrain_mask & above_is_sky  # terrain pixel directly below sky
+        # Any non-sky pixel directly below sky is a ridgeline candidate.
+        silhouette = (~sky_mask) & above_is_sky
 
         has_silhouette = silhouette.any(axis=0)                      # (W,) bool
         boundary_row = silhouette.argmax(axis=0)                     # (W,) int
