@@ -35,6 +35,9 @@ stages:
   - name: Panorama Regions
     stage: PanoramaRegionStage
 
+  - name: Skybox Inpainting
+    stage: SkyboxInpaintingStage
+
   - name: Panorama Lighting
     stage: PanoramaLightingStage
 

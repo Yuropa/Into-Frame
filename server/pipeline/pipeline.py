@@ -44,6 +44,7 @@ from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguratio
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.linear_structures.linear_structures import LinearStructureStage, LinearStructureConfiguration
 from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
+from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -320,6 +321,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "PanoramaRegionStage": PanoramaRegionStage,
     "RegionMapStage": RegionMapStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
+    "SkyboxInpaintingStage": SkyboxInpaintingStage,
 }
 
 
