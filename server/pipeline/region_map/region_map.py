@@ -29,6 +29,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         water_skeleton_smooth_radius: int = 40,
+        road_skeleton_smooth_radius: int = 8,
+        trail_skeleton_smooth_radius: int = 4,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -36,6 +38,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.ground_y_max = ground_y_max
         self.camera_height_meters = camera_height_meters
         self.water_skeleton_smooth_radius = water_skeleton_smooth_radius
+        self.road_skeleton_smooth_radius = road_skeleton_smooth_radius
+        self.trail_skeleton_smooth_radius = trail_skeleton_smooth_radius
 
 
 class RegionMapStage(PipelineStage):
@@ -146,20 +150,22 @@ class RegionMapStage(PipelineStage):
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
         self.advance_progress(task)
 
-        # Water skeleton — medial axis of water cells in the top-down region map.
-        water_idx = RegionType.WATER
-        water_skeleton = RegionMapGenerator.extract_water_skeleton(
-            region_map=region_map,
-            water_idx=water_idx,
-            smooth_radius=cfg.water_skeleton_smooth_radius,
-        )
-        context.add_depth(ContextKey.WATER_SKELETON, water_skeleton)
-        skeleton_px = int(water_skeleton.sum())
-        self.log_info(f"Water skeleton: {skeleton_px} skeleton pixels")
-        if self.temp is not None:
-            rgb = np.zeros((*water_skeleton.shape, 3), dtype=np.uint8)
-            rgb[water_skeleton > 0] = (30, 144, 255)
-            PILImage.fromarray(rgb).save(self.temp / "water_skeleton.png")
+        for type_idx, ctx_key, smooth_radius, color, filename in [
+            (RegionType.WATER, ContextKey.WATER_SKELETON,  cfg.water_skeleton_smooth_radius, (30, 144, 255),  "water_skeleton.png"),
+            (RegionType.ROAD,  ContextKey.ROAD_SKELETON,   cfg.road_skeleton_smooth_radius,  (80, 80, 80),    "road_skeleton.png"),
+            (RegionType.TRAIL, ContextKey.TRAIL_SKELETON,  cfg.trail_skeleton_smooth_radius, (180, 140, 100), "trail_skeleton.png"),
+        ]:
+            skeleton = RegionMapGenerator.extract_region_skeleton(
+                region_map=region_map,
+                type_idx=int(type_idx),
+                smooth_radius=smooth_radius,
+            )
+            context.add_depth(ctx_key, skeleton)
+            self.log_info(f"{type_idx.label} skeleton: {int(skeleton.sum())} pixels")
+            if self.temp is not None:
+                rgb = np.zeros((*skeleton.shape, 3), dtype=np.uint8)
+                rgb[skeleton > 0] = color
+                PILImage.fromarray(rgb).save(self.temp / filename)
 
         self.finish_progress(task)
         return context
@@ -170,6 +176,8 @@ class RegionMapStage(PipelineStage):
             context.depth(output_key) is not None
             and context.depth(ContextKey.MOUNTAIN_SILHOUETTE) is not None
             and context.depth(ContextKey.WATER_SKELETON) is not None
+            and context.depth(ContextKey.ROAD_SKELETON) is not None
+            and context.depth(ContextKey.TRAIL_SKELETON) is not None
         )
 
     def model_names(self) -> list[str]:

@@ -148,17 +148,17 @@ class LinearStructureDetector:
         params: dict,
         water_skeleton: Optional[np.ndarray] = None,
         water_mask: Optional[np.ndarray] = None,
+        road_skeleton: Optional[np.ndarray] = None,
+        road_mask: Optional[np.ndarray] = None,
+        trail_skeleton: Optional[np.ndarray] = None,
+        trail_mask: Optional[np.ndarray] = None,
     ) -> LinearGraph:
         """
         Build a LinearGraph from pre-computed semantic skeleton masks.
 
-        water_skeleton: binary skeleton of water bodies in height-map grid space
-                        (from RegionMapStage via ContextKey.WATER_SKELETON).
-        water_mask:     full water area mask (same grid) used for width estimation.
-                        Falls back to the skeleton itself if not provided.
-
-        Roads/trails: no reliable semantic source yet — skipped until a road
-        segmentation stage is available.
+        Each *_skeleton is a binary grid in height-map space (from RegionMapStage).
+        Each *_mask is the full area mask for that type, used for width estimation;
+        falls back to the skeleton itself when not provided.
         """
         grid_size = params.get("grid_size_meters", 100.0)
         hm_res    = int(height_map.depth.shape[0])
@@ -167,16 +167,25 @@ class LinearStructureDetector:
 
         graph = LinearGraph()
 
-        if water_skeleton is not None and water_skeleton.any():
-            skel  = water_skeleton > 0
+        sources = [
+            ("river", water_skeleton, water_mask),
+            ("road",  road_skeleton,  road_mask),
+            ("trail", trail_skeleton, trail_mask),
+        ]
+
+        for structure_type, skeleton, area_mask in sources:
+            if skeleton is None or not skeleton.any():
+                continue
+            skel  = skeleton > 0
             paths = _skeleton_to_polylines(skel)
-            if paths:
-                area_mask   = water_mask if water_mask is not None else skel
-                width_m     = _estimate_width(area_mask, paths, cell_size)
-                world_paths = _pixel_paths_to_world(paths, hm_arr, grid_size, hm_res)
-                for wp in world_paths:
-                    if len(wp) >= 2:
-                        graph.add(LinearStructure(type="river", path=wp, width=width_m))
+            if not paths:
+                continue
+            mask_for_width = area_mask if area_mask is not None else skel
+            width_m     = _estimate_width(mask_for_width, paths, cell_size)
+            world_paths = _pixel_paths_to_world(paths, hm_arr, grid_size, hm_res)
+            for wp in world_paths:
+                if len(wp) >= 2:
+                    graph.add(LinearStructure(type=structure_type, path=wp, width=width_m))
 
         return graph
 

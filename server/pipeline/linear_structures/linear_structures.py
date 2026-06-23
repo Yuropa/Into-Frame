@@ -61,21 +61,27 @@ class LinearStructureStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        water_skeleton_depth = context.input_depth(ContextKey.WATER_SKELETON)
-        region_map_depth     = context.input_depth(ContextKey.REGION_MAP)
+        region_map_depth = context.input_depth(ContextKey.REGION_MAP)
+        region_map_arr   = region_map_depth.depth.astype(np.uint8) if region_map_depth is not None else None
 
-        water_skeleton = water_skeleton_depth.depth if water_skeleton_depth is not None else None
-        water_mask = None
-        if region_map_depth is not None:
-            water_mask = region_map_depth.depth.astype(np.uint8) == int(RegionType.WATER)
+        def _skeleton(key):
+            d = context.input_depth(key)
+            return d.depth if d is not None else None
+
+        def _mask(type_idx):
+            return (region_map_arr == int(type_idx)) if region_map_arr is not None else None
 
         self.advance_progress(task)
 
         graph = LinearStructureDetector.detect(
             height_map=height_map,
             params=params or {},
-            water_skeleton=water_skeleton,
-            water_mask=water_mask,
+            water_skeleton=_skeleton(ContextKey.WATER_SKELETON),
+            water_mask=_mask(RegionType.WATER),
+            road_skeleton=_skeleton(ContextKey.ROAD_SKELETON),
+            road_mask=_mask(RegionType.ROAD),
+            trail_skeleton=_skeleton(ContextKey.TRAIL_SKELETON),
+            trail_mask=_mask(RegionType.TRAIL),
         )
         self.advance_progress(task)
 

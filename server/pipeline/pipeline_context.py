@@ -42,9 +42,11 @@ class ContextKey:
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
     WATER_SKELETON = "water_skeleton"
+    ROAD_SKELETON = "road_skeleton"
+    TRAIL_SKELETON = "trail_skeleton"
     HEIGHT_MAP_CERTAINTY = "height_map_certainty"
     REGION_MAP_CERTAINTY = "region_map_certainty"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "water_skeleton", "height_map_certainty", "region_map_certainty"]
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "water_skeleton", "road_skeleton", "trail_skeleton", "height_map_certainty", "region_map_certainty"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

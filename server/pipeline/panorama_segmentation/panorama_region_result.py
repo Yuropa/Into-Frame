@@ -18,6 +18,8 @@ class RegionType(IntEnum):
     VEGETATION = 4
     BUILT      = 5
     OTHER      = 6
+    ROAD       = 7
+    TRAIL      = 8
 
     @property
     def ground_valid(self) -> bool:
@@ -26,7 +28,7 @@ class RegionType(IntEnum):
         Vegetation canopies and built structures occlude the ground, so their
         projected depth cannot be used to build a reliable height or region map.
         """
-        return self in (RegionType.WATER, RegionType.TERRAIN, RegionType.GROUND)
+        return self in (RegionType.WATER, RegionType.TERRAIN, RegionType.GROUND, RegionType.ROAD, RegionType.TRAIL)
 
     @property
     def label(self) -> str:
@@ -47,8 +49,10 @@ _LABEL_RULES: list[tuple[tuple[str, ...], RegionType]] = [
     (("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION),
     (("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
     (("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT),
+    (("road", "pavement", "runway"), RegionType.ROAD),
+    (("sidewalk", "path", "trail"), RegionType.TRAIL),
     (("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
-      "path", "road", "sidewalk", "pavement", "runway", "floor", "snow", "ice"), RegionType.GROUND),
+      "floor", "snow", "ice"), RegionType.GROUND),
 ]
 
 
@@ -68,6 +72,8 @@ REGION_TYPE_COLORS: dict[RegionType, tuple[int, int, int]] = {
     RegionType.VEGETATION: (34,  139, 34),
     RegionType.BUILT:      (169, 169, 169),
     RegionType.OTHER:      (200, 200, 200),
+    RegionType.ROAD:       (80,  80,  80),
+    RegionType.TRAIL:      (180, 140, 100),
 }
 
 
