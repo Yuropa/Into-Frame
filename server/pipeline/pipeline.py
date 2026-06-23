@@ -481,9 +481,14 @@ class Pipeline:
                 raise
 
     def _run_pipeline(self, progress_queue: Optional[queue.SimpleQueue]) -> PipelineContext:
-        print(f"Seed: {self.config.seeds.describe()}")
-        print(f"Input: {self.input}")
-        print(f"Input hash: {self.input.uuid_string()}")
+        info = Text()
+        info.append("Image:  ", style="bold cyan")
+        info.append(str(self.input.source_path), style="white")
+        info.append("\nHash:   ", style="bold cyan")
+        info.append(self.input.uuid_string(), style="white")
+        info.append("\nSeed:   ", style="bold cyan")
+        info.append(self.config.seeds.describe(), style="bright_yellow bold")
+        RichConsole().print(Panel(info, title="[bold green]Pipeline State[/bold green]", border_style="green", expand=True, padding=(1, 2)))
 
         output = self._create_output_directories()
 

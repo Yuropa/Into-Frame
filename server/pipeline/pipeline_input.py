@@ -8,8 +8,10 @@ from util.path_utils import resource_directory
 class PipelineInputItem:
     image: Image
     uuid: uuid
+    source_path: Path
 
     def __init__(self, p: Path):
+        self.source_path = p
         self.image = Image(p)
         self.uuid = self._hash_image(p)
 
