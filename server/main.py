@@ -374,6 +374,14 @@ def main():
         print(f"{e}")
         return
 
+    if args.log_mode != "verbose":
+        import transformers
+        import diffusers
+        transformers.logging.set_verbosity_error()
+        diffusers.logging.set_verbosity_error()
+        from huggingface_hub import utils as hf_utils
+        hf_utils.disable_progress_bars()
+
     try:
         if args.command == "server":
             handle_server(args)
