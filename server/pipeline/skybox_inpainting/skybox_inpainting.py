@@ -6,6 +6,7 @@ from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
 from scipy.ndimage import binary_dilation
@@ -37,6 +38,7 @@ class SkyboxInpaintingStage(PipelineStage):
 
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
+        self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
         self._lama: InPainting | None = None
         self._flux: InPainting | None = None
 
@@ -105,7 +107,7 @@ class SkyboxInpaintingStage(PipelineStage):
 
         # Phase 1: LaMa — structural fill of the full panorama.
         self.log_info(f"LaMa: full panorama ({w}×{h}px)")
-        lama = InPainting(self.device, self.torch_dtype, InPaintingType.LAMA)
+        lama = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.LAMA)
         lama_pil = lama.inpaint(source_pil, fill_mask_pil, temp_path=self.temp)
         lama.close()
         lama_arr = np.array(lama_pil)
@@ -128,7 +130,7 @@ class SkyboxInpaintingStage(PipelineStage):
             fw, fh = w, h
 
         self.log_info(f"Flux: {fw}×{fh}px")
-        flux = InPainting(self.device, self.torch_dtype, InPaintingType.FLUX)
+        flux = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX)
         flux_pil = flux.inpaint(
             flux_input,
             flux_mask,

@@ -210,7 +210,7 @@ class PipelineConfiguration:
         self.seeds = seeds if seeds is not None else SeedConfiguration()
         self.log_mode = log_mode
         self.force_stages: set[str] = force_stages or set()
-        self.device, self.torch_dtype = preferred_device(DeviceStrategy.MEMORY)
+        self.device, self.torch_dtype = preferred_device()
         self.log = self._configure_logging(log_mode)
         self.stages_yaml = self._load_stages_yaml(config_path)
 
