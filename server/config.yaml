@@ -73,9 +73,6 @@ stages:
     modify_rivers: true   # carve valley into height map along detected rivers
     modify_roads: true    # gently flatten height map along detected roads
 
-  - name: Ground Map
-    stage: GroundMapStage
-
   - name: Terrain Mesh
     stage: TerrainMeshStage
     inner_min_dist: 0.15    # metres between samples at the origin (15 cm)
@@ -95,17 +92,6 @@ stages:
 
   - name: Object Typing
     stage: ObjectTypingStage
-
-  - name: Object Distribution
-    stage: ObjectDistributionStage
-    enabled: true
-
-  - name: Scene Population
-    stage: ScenePopulationStage
-    enabled: true
-    fill_factor: 2.5        # place new objects when nearest neighbour > fill_factor * typical_spacing
-    max_per_category: 50    # cap on extra objects added per category
-    scale_jitter: 0.2       # ±20% random scale variation on clones
 
   - name: Object Recognition
     stage: RecognizeAnythingStage

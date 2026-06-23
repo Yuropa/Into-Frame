@@ -1,10 +1,12 @@
 import torch
+import numpy as np
 from typing import Any
 from logging import Logger
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.linear_structures.detector import LinearStructureDetector
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
 class LinearStructureConfiguration(PipelineStageConfiguration):
@@ -22,20 +24,20 @@ class LinearStructureConfiguration(PipelineStageConfiguration):
 
 class LinearStructureStage(PipelineStage):
     """
-    Detects roads, rivers, and trails from the panorama and height map, then:
-      1. Writes a LinearGraph to ContextKey.LINEAR_GRAPH for downstream stages.
-      2. Modifies ContextKey.HEIGHT_MAP in-place (valley carving for rivers,
-         smoothing for roads) so TerrainMeshStage sees an updated terrain.
+    Converts pre-computed semantic skeletons into a LinearGraph of world-space
+    polylines, then applies terrain modifications to the height map.
 
-    Detection sources (tried in combination):
-      • Panorama colour segmentation (equirectangular, ground hemisphere)
-      • Height-map topology (valley detection for rivers)
+    Rivers come from ContextKey.WATER_SKELETON (medial axis of water cells,
+    produced by RegionMapStage from semantic segmentation).
+
+    Roads/trails: no reliable semantic source yet — omitted until a dedicated
+    road segmentation stage is available.
 
     Input:
       ContextKey.HEIGHT_MAP        (Depth)
       ContextKey.HEIGHT_MAP_PARAMS (dict)
-      ContextKey.PANORAMA          (Panorama, optional)
-      ContextKey.PANORAMA_DEPTH    (Depth, optional)
+      ContextKey.WATER_SKELETON    (Depth, binary skeleton grid)
+      ContextKey.REGION_MAP        (Depth, uint8 type-index grid, for width estimation)
 
     Output:
       ContextKey.LINEAR_GRAPH  (LinearGraph)
@@ -59,20 +61,21 @@ class LinearStructureStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        panorama       = context.input_panorama(ContextKey.PANORAMA)
-        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
-        self.advance_progress(task)
+        water_skeleton_depth = context.input_depth(ContextKey.WATER_SKELETON)
+        region_map_depth     = context.input_depth(ContextKey.REGION_MAP)
 
-        if panorama is not None and panorama_depth is not None:
-            self.log_info("Linear structures: using panorama colour + height-map topology")
-        else:
-            self.log_info("Linear structures: using height-map topology only")
+        water_skeleton = water_skeleton_depth.depth if water_skeleton_depth is not None else None
+        water_mask = None
+        if region_map_depth is not None:
+            water_mask = region_map_depth.depth.astype(np.uint8) == int(RegionType.WATER)
+
+        self.advance_progress(task)
 
         graph = LinearStructureDetector.detect(
             height_map=height_map,
             params=params or {},
-            panorama=panorama,
-            panorama_depth=panorama_depth,
+            water_skeleton=water_skeleton,
+            water_mask=water_mask,
         )
         self.advance_progress(task)
 
