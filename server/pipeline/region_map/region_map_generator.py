@@ -1,5 +1,6 @@
+import cv2
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, zoom
 from typing import Optional
 
 from util.depth_utils import Depth
@@ -251,3 +252,159 @@ class RegionMapGenerator:
             mask = binary_closing(mask, d)
             mask = binary_opening(mask, d)
         return sk_skeletonize(mask).astype(np.float32)
+
+    @staticmethod
+    def extract_interior_peaks(
+        type_idx_map: np.ndarray,
+        panorama_depth: Depth,
+        sky_idx: int,
+        panorama_rgb: Optional[np.ndarray] = None,
+        grid_size_meters: float = 100.0,
+        grid_resolution: int = 512,
+        depth_jump_rel: float = 0.20,
+        canny_low: int = 50,
+        canny_high: int = 150,
+        corner_quality: float = 0.08,
+        corner_min_dist: int = 5,
+    ) -> np.ndarray:
+        """
+        Detect elevated terrain features visible against background terrain (rather
+        than against sky) and project them onto a top-down grid.
+
+        The sky-terrain ridgeline captures only the outermost horizon silhouette.
+        This method finds interior peaks — rocky outcrops, ridges, or hilltops that
+        appear in front of more distant terrain — by combining three signals:
+
+          1. Relative depth jumps: |∇d| / d > depth_jump_rel detects boundaries
+             where foreground terrain abruptly occludes more distant ground.
+
+          2. Canny edges on the RGB panorama: visual edge boundaries at
+             colour/luminance discontinuities characteristic of rock faces and
+             hard terrain edges.
+
+          3. Harris corner responses on the RGB panorama: corner features at
+             convergence points of two edges, which correspond to the apices of
+             pointed peaks and the vertices of rocky outcrops.
+
+        Pixels must satisfy both (1) AND at least one of (2)/(3) to be accepted —
+        this filters out pure depth-estimation noise (no visual evidence) and flat
+        colour boundaries (no depth change).  Sky pixels and pixels more than
+        half the grid size away in XZ are excluded.
+
+        The panorama is processed at its native resolution; if depth or type maps
+        are at a different resolution they are rescaled to match.
+
+        Returns float32 (grid_resolution, grid_resolution) with each cell containing
+        the count of peak-candidate pixels that projected into it, normalised to [0,1].
+        """
+        ref_h, ref_w = type_idx_map.shape
+
+        # Align depth to type-map resolution if needed.
+        d_raw = panorama_depth.depth.astype(np.float32)
+        if d_raw.shape != (ref_h, ref_w):
+            d_raw = zoom(d_raw, (ref_h / d_raw.shape[0], ref_w / d_raw.shape[1]), order=1)
+
+        # Work at panorama_rgb resolution when provided (typically lower than depth).
+        if panorama_rgb is not None:
+            work_h, work_w = panorama_rgb.shape[:2]
+            if (work_h, work_w) != (ref_h, ref_w):
+                d_work = zoom(d_raw, (work_h / ref_h, work_w / ref_w), order=1)
+                types_work = zoom(type_idx_map.astype(np.float32), (work_h / ref_h, work_w / ref_w), order=0).astype(np.uint8)
+            else:
+                d_work, types_work = d_raw, type_idx_map
+        else:
+            d_work, types_work = d_raw, type_idx_map
+            work_h, work_w = ref_h, ref_w
+
+        sky_mask = types_work == sky_idx
+        valid = (~sky_mask) & np.isfinite(d_work) & (d_work > 0.5)
+
+        # ── 1. Relative depth gradient ────────────────────────────────────────
+        gy, gx = np.gradient(d_work)
+        grad_mag = np.hypot(gx, gy)
+        rel_grad = np.where(d_work > 0, grad_mag / d_work, 0.0)
+        depth_edge = (rel_grad > depth_jump_rel) & valid
+
+        # Exclude pixels that sit at the sky boundary (those are the ridgeline).
+        above_is_sky = np.zeros((work_h, work_w), dtype=bool)
+        above_is_sky[1:, :] = sky_mask[:-1, :]
+        at_skyline = (~sky_mask) & above_is_sky
+        depth_edge &= ~at_skyline
+
+        if not depth_edge.any():
+            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        # ── 2 & 3. Visual edges and corners from RGB ─────────────────────────
+        visual = np.zeros((work_h, work_w), dtype=bool)
+        if panorama_rgb is not None:
+            gray = cv2.cvtColor(panorama_rgb, cv2.COLOR_RGB2GRAY)
+            canny = cv2.Canny(gray, canny_low, canny_high) > 0
+
+            # Shi-Tomasi corners — peaks of pointed features appear as corners
+            # where two ridgeline segments converge.
+            corners_f32 = cv2.goodFeaturesToTrack(
+                gray, maxCorners=0, qualityLevel=corner_quality,
+                minDistance=corner_min_dist,
+            )
+            corner_map = np.zeros((work_h, work_w), dtype=bool)
+            if corners_f32 is not None:
+                pts = corners_f32[:, 0, :].astype(np.int32)
+                cx = np.clip(pts[:, 0], 0, work_w - 1)
+                cy = np.clip(pts[:, 1], 0, work_h - 1)
+                corner_map[cy, cx] = True
+                # Dilate corners by 3 px so they overlap with the depth-edge mask.
+                kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                corner_map = cv2.dilate(corner_map.astype(np.uint8), kernel).astype(bool)
+
+            visual = canny | corner_map
+
+        # Require depth evidence; additionally gate on visual evidence when available.
+        candidates = depth_edge & (visual if panorama_rgb is not None else np.ones_like(depth_edge))
+
+        if not candidates.any():
+            # Fall back to depth-only if RGB filtering removed everything.
+            candidates = depth_edge
+
+        # ── Project to top-down grid ─────────────────────────────────────────
+        # Use the near-depth side: for each edge pixel, the smaller of its own
+        # depth and its immediate neighbours is the foreground (peak) distance.
+        from scipy.ndimage import minimum_filter
+        min_d = minimum_filter(d_work, size=3)
+        # Accept pixels where the local minimum depth is within 20% of their own
+        # depth — this biases toward the foreground side of each edge.
+        near_side = candidates & (d_work <= min_d * 1.2)
+        if not near_side.any():
+            near_side = candidates
+
+        rows, cols = np.where(near_side)
+        depths = min_d[rows, cols]
+
+        half = grid_size_meters / 2.0
+        theta = (cols / work_w - 0.5) * 2.0 * np.pi
+        phi   = (0.5 - rows / work_h) * np.pi
+        cos_phi = np.cos(phi)
+        Xs = depths * cos_phi * np.sin(theta)
+        Zs = depths * cos_phi * np.cos(theta)
+
+        in_bounds = (
+            np.isfinite(Xs) & np.isfinite(Zs)
+            & (np.abs(Xs) <= half)
+            & (np.abs(Zs) <= half)
+        )
+        Xs, Zs = Xs[in_bounds], Zs[in_bounds]
+
+        if len(Xs) == 0:
+            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        x_edges = np.linspace(-half, half, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
+        xi = np.clip(np.digitize(Xs, x_edges) - 1, 0, grid_resolution - 1)
+        zi = np.clip(np.digitize(Zs, z_edges) - 1, 0, grid_resolution - 1)
+
+        grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        np.add.at(grid, (zi, xi), 1.0)
+
+        peak_max = grid.max()
+        if peak_max > 0:
+            grid /= peak_max
+        return grid
