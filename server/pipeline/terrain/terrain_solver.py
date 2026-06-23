@@ -168,6 +168,105 @@ class TerrainSolver:
         rhs  = w * profile_val
         return local_rows, cols, vals, rhs
 
+    @staticmethod
+    def _perpendicular_profile_constraints(
+        pts: np.ndarray,
+        H: int,
+        W: int,
+        weight: float,
+        amplitude: float,
+        sigma: float,
+        sign: int,
+        n_sigma: float = 2.5,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Like _profile_constraints but uses true perpendicular distance to the
+        continuous polyline rather than Euclidean distance to the nearest
+        rasterized pixel.
+
+        For each candidate pixel q, we find the closest point p* on any segment
+        of *pts*.  Because p* is the orthogonal projection of q onto that segment,
+        dist(q, p*) is by definition perpendicular to the segment tangent.  This
+        gives a cross-sectional profile that is faithful to the curve geometry
+        even at bends and for sparsely sampled polylines.
+
+        Strategy:
+          1. Rasterize pts → binary mask; run EDT as a cheap pre-filter to
+             identify candidate pixels within 1.2 × n_sigma × sigma.
+          2. For each candidate, iterate over segments to find the true
+             minimum perpendicular distance and the nearest point p* on the
+             polyline.
+          3. Apply the Gaussian profile using the true distance.
+        """
+        if len(pts) < 2:
+            return (np.empty(0, np.int64),) * 2 + (np.empty(0, np.float64),) * 2
+
+        # ── Step 1: fast candidate pre-filter ────────────────────────────────
+        mask = np.zeros((H, W), dtype=bool)
+        r_px = np.clip(np.round(pts[:, 0]).astype(int), 0, H - 1)
+        c_px = np.clip(np.round(pts[:, 1]).astype(int), 0, W - 1)
+        mask[r_px, c_px] = True
+
+        edt_dist = distance_transform_edt(~mask)
+        candidate_mask = (edt_dist > 0) & (edt_dist < n_sigma * sigma * 1.2)
+        ya, xa = np.where(candidate_mask)
+        if len(ya) == 0:
+            return (np.empty(0, np.int64),) * 2 + (np.empty(0, np.float64),) * 2
+
+        cand = np.stack([ya, xa], axis=1).astype(np.float64)  # (M, 2)
+
+        # ── Step 2: true perpendicular distance to polyline ───────────────────
+        float_pts  = pts.astype(np.float64)
+        min_dist   = np.full(len(ya), np.inf)
+        nearest_pt = np.zeros((len(ya), 2))
+
+        for i in range(len(float_pts) - 1):
+            p0    = float_pts[i]
+            p1    = float_pts[i + 1]
+            seg   = p1 - p0
+            len_sq = float(np.dot(seg, seg))
+            if len_sq < 1e-10:
+                t = np.zeros(len(ya))
+            else:
+                t = np.clip(((cand - p0) @ seg) / len_sq, 0.0, 1.0)
+            near = p0 + t[:, np.newaxis] * seg          # (M, 2) nearest points
+            dist = np.linalg.norm(cand - near, axis=1)  # (M,)
+            closer = dist < min_dist
+            min_dist[closer]   = dist[closer]
+            nearest_pt[closer] = near[closer]
+
+        # ── Step 3: apply Gaussian profile using true distance ────────────────
+        within = min_dist < n_sigma * sigma
+        if not within.any():
+            return (np.empty(0, np.int64),) * 2 + (np.empty(0, np.float64),) * 2
+
+        ya       = ya[within]
+        xa       = xa[within]
+        d_final  = min_dist[within]
+        near_fin = nearest_pt[within]
+
+        g           = np.exp(-d_final ** 2 / (2.0 * sigma ** 2))
+        w           = weight * g
+        profile_val = amplitude * g
+
+        yr = np.clip(np.round(near_fin[:, 0]).astype(int), 0, H - 1)
+        xr = np.clip(np.round(near_fin[:, 1]).astype(int), 0, W - 1)
+
+        feat_idx  = yr * W + xr
+        pixel_idx = ya * W + xa
+
+        if sign > 0:
+            first_col, second_col = feat_idx, pixel_idx
+        else:
+            first_col, second_col = pixel_idx, feat_idx
+
+        n = len(ya)
+        local_rows = np.repeat(np.arange(n), 2)
+        cols = np.stack([first_col, second_col], axis=1).ravel()
+        vals = np.column_stack([w, -w]).ravel()
+        rhs  = w * profile_val
+        return local_rows, cols, vals, rhs
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def add_ridge_polyline(
@@ -190,14 +289,13 @@ class TerrainSolver:
             crest_height: required elevation above neighbours (same units as heightmap).
             sigma:        Gaussian falloff radius in pixels.
         """
-        if len(points) < 1:
+        if len(points) < 2:
             return
         H, W = self._H, self._W
-        mask = np.zeros((H, W), dtype=bool)
-        rows = np.clip(np.round(points[:, 0]).astype(int), 0, H - 1)
-        cols = np.clip(np.round(points[:, 1]).astype(int), 0, W - 1)
-        mask[rows, cols] = True
-        self.add_ridge_mask(mask, weight=weight, crest_height=crest_height, sigma=sigma)
+        lr, cols, vals, rhs = self._perpendicular_profile_constraints(
+            points, H, W, weight, crest_height, sigma, sign=+1
+        )
+        self._add_block(lr, cols, vals, rhs)
 
     def add_ridge_mask(
         self,
@@ -243,17 +341,18 @@ class TerrainSolver:
             drop_per_segment: required elevation drop per polyline segment.
             sigma:            Gaussian falloff radius in pixels for valley constraints.
         """
-        if len(points) < 1:
+        if len(points) < 2:
             return
         H, W = self._H, self._W
 
         pt_rows = np.clip(np.round(points[:, 0]).astype(int), 0, H - 1)
         pt_cols = np.clip(np.round(points[:, 1]).astype(int), 0, W - 1)
 
-        # Valley cross-section constraints via mask
-        mask = np.zeros((H, W), dtype=bool)
-        mask[pt_rows, pt_cols] = True
-        self.add_river_mask(mask, weight=weight, valley_depth=valley_depth, sigma=sigma)
+        # Valley cross-section: perpendicular profile from continuous polyline
+        lr, cols, vals, rhs = self._perpendicular_profile_constraints(
+            points, H, W, weight, valley_depth, sigma, sign=-1
+        )
+        self._add_block(lr, cols, vals, rhs)
 
         # Flow constraints: h(p_i) - h(p_{i+1}) = drop_per_segment
         changed = (pt_rows[:-1] != pt_rows[1:]) | (pt_cols[:-1] != pt_cols[1:])
