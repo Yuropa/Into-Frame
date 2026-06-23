@@ -26,6 +26,7 @@ class TerrainMeshGenerator:
         panorama: Optional[Panorama] = None,
         texture: Optional[PIL.Image.Image] = None,
         intrinsics: Optional[CameraIntrinsics] = None,
+        precomputed_texture: Optional[PIL.Image.Image] = None,
     ) -> Mesh:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -84,13 +85,17 @@ class TerrainMeshGenerator:
         vertices = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
 
         # ── Colour / texture ──────────────────────────────────────────────
-        if panorama is not None:
-            baked = TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far)
+        baked_tex = (
+            precomputed_texture
+            or (TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far)
+                if panorama is not None else None)
+        )
+        if baked_tex is not None:
             u = ((X_pos + x_half) / (2.0 * x_half)).clip(0.0, 1.0).astype(np.float32)
             v = ((Z_pos + z_far)  / (2.0 * z_far )).clip(0.0, 1.0).astype(np.float32)
             uv = np.stack([u, v], axis=-1)
             material = trimesh.visual.material.PBRMaterial(
-                baseColorTexture=baked,
+                baseColorTexture=baked_tex,
                 baseColorFactor=[1.0, 1.0, 1.0, 1.0],
             )
             visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
@@ -241,6 +246,75 @@ class TerrainMeshGenerator:
         grid_verts = np.stack([X, Y, Z], axis=-1)
         rgba = panorama.sample_3d(grid_verts)
         return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
+
+    @staticmethod
+    def bake_topdown_texture_with_certainty(
+        panorama: Panorama,
+        height_map: np.ndarray,
+        x_half: float,
+        z_far: float,
+        tex_size: int = 1024,
+        height_certainty: Optional[np.ndarray] = None,
+        nadir_cutoff_deg: float = -35.0,
+        nadir_fade_deg: float = 10.0,
+        horizon_fade_deg: float = 5.0,
+    ) -> tuple[PIL.Image.Image, np.ndarray]:
+        """
+        Bake a top-down panorama texture and a per-texel certainty map.
+
+        Certainty encodes how reliable each texel's colour is:
+          - 0 for the nadir dead-zone (no equirectangular coverage, filled by KNN)
+          - 0 for above-horizon / sky samples
+          - Smooth ramp [0→1] over nadir_fade_deg above the cutoff
+          - Smooth ramp [1→0] over horizon_fade_deg below the horizon
+          - Multiplied by a binary observation mask derived from height_certainty
+            (0 for cells that were never directly observed — only interpolated)
+
+        Returns (color_image, certainty) where certainty is (tex_size, tex_size)
+        float32 in [0, 1].
+        """
+        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        ug, vg = np.meshgrid(us, vs)
+
+        X = (ug.ravel() - 0.5) * (2.0 * x_half)
+        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
+
+        h_hm, w_hm = height_map.shape
+        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
+        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
+        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
+        Y = np.nan_to_num(Y, nan=0.0)
+
+        grid_verts = np.stack([X, Y, Z], axis=-1)
+        rgba = panorama.sample_3d(grid_verts)
+        color = PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
+
+        # ── Latitude-based certainty ──────────────────────────────────────────
+        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
+        lat  = np.arctan2(Y.astype(np.float64), r_xz)  # negative = below horizon
+
+        min_lat_rad    = np.radians(nadir_cutoff_deg)
+        nadir_fade_rad = np.radians(nadir_fade_deg)
+        horiz_fade_rad = np.radians(horizon_fade_deg)
+
+        # Ramp up from nadir cutoff; ramp down toward horizon.
+        fade_in  = ((lat - min_lat_rad) / nadir_fade_rad).clip(0.0, 1.0)
+        fade_out = ((-lat) / horiz_fade_rad).clip(0.0, 1.0)
+        valid    = (lat < 0.0) & (lat >= min_lat_rad)
+        certainty = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
+
+        # ── Zero out unobserved (interpolated) heightmap cells ────────────────
+        if height_certainty is not None:
+            obs = map_coordinates(
+                height_certainty.astype(np.float64),
+                [row_coords, col_coords],
+                order=1,
+                mode="nearest",
+            ).astype(np.float32)
+            certainty *= (obs > 0.0).astype(np.float32)
+
+        return color, certainty.reshape(tex_size, tex_size)
 
     @staticmethod
     def _uvs_pinhole(

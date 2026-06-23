@@ -92,22 +92,29 @@ class TerrainMeshStage(PipelineStage):
         )
 
         # ── Resolve texture source ────────────────────────────────────────────
-        panorama_tex = context.input_panorama(panorama_key)
+        # Prefer a pre-baked refined texture (written by TerrainTextureBakeStage
+        # + TerrainTextureRefinementStage) over baking inline from the panorama.
+        precomputed = context.input_image(ContextKey.TERRAIN_TEXTURE)
+        panorama_tex = None
         pinhole_texture = None
         intrinsics = None
 
-        if panorama_tex is not None:
-            self.log_info("Terrain texture: equirectangular panorama")
+        if precomputed is not None:
+            self.log_info("Terrain texture: pre-baked refined texture")
         else:
-            original = context.input_image(ContextKey.INPUT)
-            intrinsics = context.input_intrinsics(intrinsics_key)
-            if original is not None and intrinsics is not None:
-                pinhole_texture = original.rgb()
-                self.log_info("Terrain texture: original image (pinhole projection)")
+            panorama_tex = context.input_panorama(panorama_key)
+            if panorama_tex is not None:
+                self.log_info("Terrain texture: equirectangular panorama (inline bake)")
             else:
-                self.log_warning(
-                    "No texture source found — generating geometry-only terrain mesh"
-                )
+                original = context.input_image(ContextKey.INPUT)
+                intrinsics = context.input_intrinsics(intrinsics_key)
+                if original is not None and intrinsics is not None:
+                    pinhole_texture = original.rgb()
+                    self.log_info("Terrain texture: original image (pinhole projection)")
+                else:
+                    self.log_warning(
+                        "No texture source found — generating geometry-only terrain mesh"
+                    )
 
         # ── Generate mesh ─────────────────────────────────────────────────────
         mesh = TerrainMeshGenerator.generate(
@@ -122,6 +129,7 @@ class TerrainMeshStage(PipelineStage):
             panorama=panorama_tex,
             texture=pinhole_texture,
             intrinsics=intrinsics,
+            precomputed_texture=precomputed.image if precomputed is not None else None,
         )
         self.advance_progress(task)
 
