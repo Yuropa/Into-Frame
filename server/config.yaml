@@ -73,6 +73,18 @@ stages:
     modify_rivers: true   # carve valley into height map along detected rivers
     modify_roads: true    # gently flatten height map along detected roads
 
+  - name: Terrain Reconstruction
+    stage: TerrainReconstructionStage
+    laplacian_weight: 0.1        # smoothness regulariser
+    ridge_weight: 2.0            # strength of ridge-crest constraints
+    ridge_crest_height: 0.5      # metres ridge should exceed neighbours
+    ridge_sigma: 15.0            # Gaussian falloff radius in pixels
+    river_weight: 2.0            # strength of valley constraints
+    river_valley_depth: 0.5      # metres neighbours exceed river channel
+    river_drop_per_segment: 0.05 # metres drop per ordered polyline segment
+    river_sigma: 10.0            # Gaussian falloff radius in pixels
+    solver_iter_lim: 500         # LSQR iteration cap
+
   - name: Terrain Mesh
     stage: TerrainMeshStage
     inner_min_dist: 0.15    # metres between samples at the origin (15 cm)
