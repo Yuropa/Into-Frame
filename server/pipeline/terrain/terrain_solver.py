@@ -107,67 +107,65 @@ class TerrainSolver:
         vals = np.tile(np.array([4 * lw, -lw, -lw, -lw, -lw]), n_int)
         self._add_block(local_rows, cols, vals, np.zeros(n_int))
 
-    # ── Shared helper: neighbour constraints from a binary mask ───────────────
+    # ── Shared helper: Gaussian cross-sectional profile constraints ──────────
 
     @staticmethod
-    def _neighbour_constraints(
+    def _profile_constraints(
         mask: np.ndarray,
         H: int,
         W: int,
-        influence: np.ndarray,
         weight: float,
-        target_diff: float,
+        amplitude: float,
+        sigma: float,
         sign: int,
+        n_sigma: float = 2.5,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
-        For each pixel in *mask* and each of its 4-connected neighbours inside the
-        grid, emit one constraint row:
+        Emit one constraint per pixel within n_sigma*sigma of the mask.
 
-          sign > 0  →  w * h_mask   - w * h_neigh = w * target_diff   (ridge)
-          sign < 0  →  w * h_neigh  - w * h_mask  = w * target_diff   (river)
+        For each such pixel at Euclidean distance d from its nearest mask pixel,
+        with G(d) = exp(-d²/(2σ²)):
 
-        Returns (local_rows, cols, vals, rhs) — all flat arrays ready for _add_block.
+          sign > 0 (ridge):  h_nearest - h_pixel = amplitude * G(d)
+          sign < 0 (valley): h_pixel - h_nearest = amplitude * G(d)
+
+        Both the target difference and the constraint weight scale with G(d),
+        encoding a Gaussian cross-sectional profile: the feature centreline sits
+        amplitude above (ridge) or below (valley) immediately adjacent terrain,
+        with the required difference decaying smoothly with perpendicular distance.
+
+        Returns (local_rows, cols, vals, rhs) ready for _add_block.
         """
-        ry, rx = np.where(mask)
-        if len(ry) == 0:
+        dist, indices = distance_transform_edt(~mask, return_indices=True)
+
+        within = (dist > 0) & (dist < n_sigma * sigma)
+        ya, xa = np.where(within)
+        if len(ya) == 0:
             return (np.empty(0, np.int64),) * 2 + (np.empty(0, np.float64),) * 2
 
-        dy = np.array([-1, 1, 0, 0])
-        dx = np.array([0, 0, -1, 1])
+        d = dist[ya, xa]
+        g = np.exp(-d ** 2 / (2.0 * sigma ** 2))
 
-        mask_idxs, neigh_idxs, ws = [], [], []
-        for d in range(4):
-            ny = ry + dy[d]
-            nx = rx + dx[d]
-            valid = (ny >= 0) & (ny < H) & (nx >= 0) & (nx < W)
-            if not valid.any():
-                continue
-            ny_v, nx_v = ny[valid], nx[valid]
-            ry_v, rx_v = ry[valid], rx[valid]
-            w = weight * influence[ny_v, nx_v]
-            mask_idxs.append(ry_v * W + rx_v)
-            neigh_idxs.append(ny_v * W + nx_v)
-            ws.append(w)
+        # Nearest centreline pixel for each constrained pixel
+        yr = indices[0][ya, xa]
+        xr = indices[1][ya, xa]
 
-        if not mask_idxs:
-            return (np.empty(0, np.int64),) * 2 + (np.empty(0, np.float64),) * 2
+        w           = weight * g
+        profile_val = amplitude * g
 
-        mi = np.concatenate(mask_idxs)
-        ni = np.concatenate(neigh_idxs)
-        w_arr = np.concatenate(ws)
-        n = len(mi)
+        feat_idx  = yr * W + xr
+        pixel_idx = ya * W + xa
 
         if sign > 0:
-            # h_mask - h_neigh = target_diff
-            first_col, second_col = mi, ni
+            first_col, second_col = feat_idx, pixel_idx
         else:
-            # h_neigh - h_mask = target_diff
-            first_col, second_col = ni, mi
+            first_col, second_col = pixel_idx, feat_idx
 
+        n = len(ya)
         local_rows = np.repeat(np.arange(n), 2)
         cols = np.stack([first_col, second_col], axis=1).ravel()
-        vals = np.column_stack([w_arr, -w_arr]).ravel()
-        rhs  = w_arr * target_diff
+        vals = np.column_stack([w, -w]).ravel()
+        rhs  = w * profile_val
         return local_rows, cols, vals, rhs
 
     # ── Public API ────────────────────────────────────────────────────────────
@@ -217,10 +215,8 @@ class TerrainSolver:
         H, W = self._H, self._W
         if mask.shape != (H, W):
             raise ValueError(f"mask shape {mask.shape} != heightmap shape {(H, W)}")
-        ridge_dist = distance_transform_edt(~mask)
-        influence = np.exp(-ridge_dist ** 2 / (2.0 * sigma ** 2))
-        lr, cols, vals, rhs = self._neighbour_constraints(
-            mask, H, W, influence, weight, crest_height, sign=+1
+        lr, cols, vals, rhs = self._profile_constraints(
+            mask, H, W, weight, crest_height, sigma, sign=+1
         )
         self._add_block(lr, cols, vals, rhs)
 
@@ -295,10 +291,8 @@ class TerrainSolver:
         H, W = self._H, self._W
         if mask.shape != (H, W):
             raise ValueError(f"mask shape {mask.shape} != heightmap shape {(H, W)}")
-        river_dist = distance_transform_edt(~mask)
-        influence = np.exp(-river_dist ** 2 / (2.0 * sigma ** 2))
-        lr, cols, vals, rhs = self._neighbour_constraints(
-            mask, H, W, influence, weight, valley_depth, sign=-1
+        lr, cols, vals, rhs = self._profile_constraints(
+            mask, H, W, weight, valley_depth, sigma, sign=-1
         )
         self._add_block(lr, cols, vals, rhs)
 
