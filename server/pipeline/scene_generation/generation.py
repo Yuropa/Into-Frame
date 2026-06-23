@@ -102,6 +102,12 @@ class SceneGenerationStage(PipelineStage):
                     continue
 
                 position, width, height = result
+                context.add_object(f"metadata_{idx}", {
+                    **(metadata or {}),
+                    "world_position": list(map(float, position)),
+                    "world_width": float(width),
+                    "world_height": float(height),
+                })
 
                 if context.input_mesh(mesh_name) is not None:
                     updated_mesh = context.input_mesh(mesh_name)

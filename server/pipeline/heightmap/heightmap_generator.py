@@ -4,7 +4,14 @@ from scipy.ndimage import gaussian_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
+from util.projection_utils import ground_projection_certainty, project_panorama_to_ground_grid
 from scene.camera import CameraIntrinsics
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
+
+# Integer indices of region types that produce reliable ground-plane depth.
+_VALID_REGION_INDICES = np.array(
+    [rt for rt in RegionType if rt.ground_valid], dtype=np.int32
+)
 
 
 class HeightMapGenerator:
@@ -22,14 +29,14 @@ class HeightMapGenerator:
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
         panorama_depth: Optional[Depth] = None,
-    ) -> np.ndarray:
+        region_type_mask: Optional[np.ndarray] = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
 
-        The output array is (grid_resolution, grid_resolution) float32 where:
-          - rows index Z (near → far), columns index X (left → right)
-          - values are Y in camera space (negative = below camera)
-          - missing cells are filled by interpolation from neighbours
+        Returns (height_array, certainty_array), both (grid_resolution, grid_resolution)
+        float32.  certainty is in [0, 1]: sin²(depression_angle) for cells with any
+        direct observation (primary or panorama depth), 0 for pure interpolation.
 
         camera_height_meters: assumed height of the camera above the ground plane
                               (used to derive the Y floor filter and flood-fill seed).
@@ -84,12 +91,22 @@ class HeightMapGenerator:
             & np.isfinite(d)
         )
 
+        # Restrict to reliable region types. Vegetation and built structures
+        # occlude the ground plane, so their depth cannot be trusted for terrain.
+        if region_type_mask is not None:
+            rm = np.round(region_type_mask).astype(np.int32)
+            if rm.shape != d.shape:
+                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+            valid_region = np.isin(rm, _VALID_REGION_INDICES)
+            ground_mask &= valid_region
+
         Xg = X[ground_mask]
         Yg = Y[ground_mask]
         Zg = Z[ground_mask]
 
         if len(Xg) == 0:
-            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+            zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+            return zeros, zeros.copy()
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
@@ -133,12 +150,41 @@ class HeightMapGenerator:
                 grid_resolution=grid_resolution,
                 ground_y_max=ground_y_max,
                 ground_y_min=ground_y_min,
+                region_type_mask=region_type_mask,
             )
+
+        # Certainty: projection-distortion based, zero for unobserved (interpolated) cells.
+        # Observed cells use sin²(elevation) = h² / (r² + h²), which is the inverse of
+        # the equirectangular Jacobian (ground-area per panorama pixel).
+        observed = ~np.isnan(height_map)
+        certainty = HeightMapGenerator._build_certainty(
+            observed, grid_size_meters, grid_resolution, camera_height_meters
+        )
 
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
-        return result
+        return result, certainty
+
+    @staticmethod
+    def _build_certainty(
+        observed: np.ndarray,
+        grid_size_meters: float,
+        grid_resolution: int,
+        camera_height: float,
+    ) -> np.ndarray:
+        """
+        Build a [0, 1] certainty map over the top-down grid.
+
+        Observed cells are scored by equirectangular projection certainty (see
+        ground_projection_certainty); unobserved (interpolated) cells get 0.
+        """
+        half = grid_size_meters / 2.0
+        x_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
+        z_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
+        X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
+        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height)
+        return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod
     def _flood_fill_ground(
@@ -197,52 +243,41 @@ class HeightMapGenerator:
         grid_resolution: int,
         ground_y_max: float,
         ground_y_min: float,
+        region_type_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Project a 360° equirectangular depth map into empty (NaN) cells of height_map.
 
         Only cells that are already NaN are written; existing data is never overwritten.
-        The same ground-plane filters used for the primary depth are applied so sky and
-        wall pixels in the panorama don't pollute the terrain grid.
         """
         missing = np.isnan(height_map)
         if not np.any(missing):
             return height_map
 
-        pd = panorama_depth.depth.astype(np.float32)
-        if sky_mask is not None and sky_mask.shape == pd.shape:
-            pd = pd.copy()
-            pd[sky_mask] = np.nan
+        # Build a combined exclusion mask: sky pixels plus any unreliable region types.
+        excl_mask = sky_mask
+        if region_type_mask is not None:
+            pd = panorama_depth.depth
+            rm = np.round(region_type_mask).astype(np.int32)
+            if rm.shape != pd.shape:
+                rm = zoom(rm, (pd.shape[0] / rm.shape[0], pd.shape[1] / rm.shape[1]), order=0)
+            valid_region = np.zeros(pd.shape, dtype=bool)
+            for idx in _VALID_REGION_INDICES:
+                valid_region |= (rm == idx)
+            invalid_region = ~valid_region
+            excl_mask = invalid_region if sky_mask is None else (sky_mask | invalid_region)
 
-        X, Y, Z = Panorama.equirectangular_unproject(Depth(pd))
-
-        half = grid_size_meters / 2.0
-        ground_mask = (
-            (Y <= ground_y_max)
-            & (Y >= ground_y_min)
-            & (np.abs(Z) <= half)
-            & (np.abs(X) <= half)
-            & np.isfinite(pd)
+        xi, zi, _, Yg, _ = project_panorama_to_ground_grid(
+            panorama_depth=panorama_depth,
+            grid_size_meters=grid_size_meters,
+            grid_resolution=grid_resolution,
+            ground_y_max=ground_y_max,
+            ground_y_min=ground_y_min,
+            sky_mask=excl_mask,
         )
 
-        Xg = X[ground_mask]
-        Yg = Y[ground_mask]
-        Zg = Z[ground_mask]
-
-        if len(Xg) == 0:
+        if len(xi) == 0:
             return height_map
-
-        x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(-half, half, grid_resolution + 1)
-
-        xi = np.digitize(Xg, x_edges) - 1
-        zi = np.digitize(Zg, z_edges) - 1
-
-        in_bounds = (
-            (xi >= 0) & (xi < grid_resolution)
-            & (zi >= 0) & (zi < grid_resolution)
-        )
-        xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
 
         pano_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
         pano_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)

@@ -9,10 +9,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.region_map.region_map_generator import RegionMapGenerator
 from pipeline.panorama_segmentation.panorama_region_result import (
-    ALL_REGION_TYPES,
-    REGION_TYPE_SKY,
-    REGION_TYPE_TERRAIN,
-    REGION_TYPE_WATER,
+    RegionType,
     colorize_region_type_map,
 )
 from util.depth_utils import Depth
@@ -97,7 +94,7 @@ class RegionMapStage(PipelineStage):
 
         type_idx_map = type_idx_depth.depth.astype(np.uint8)
 
-        region_map = RegionMapGenerator.generate(
+        region_map, certainty_array = RegionMapGenerator.generate(
             panorama_depth=panorama_depth,
             type_idx_map=type_idx_map,
             grid_size_meters=cfg.grid_size_meters,
@@ -109,27 +106,28 @@ class RegionMapStage(PipelineStage):
         self.advance_progress(task)
 
         context.add_depth(output_key, region_map.astype(np.float32))
+        context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 
-        unique_types = [
-            ALL_REGION_TYPES[i]
-            for i in np.unique(region_map)
-            if i < len(ALL_REGION_TYPES)
-        ]
-        self.log_info(f"Region map {region_map.shape}, types present: {unique_types}")
+        unique_types = [RegionType(i).label for i in np.unique(region_map) if i < len(RegionType)]
+        self.log_info(
+            f"Region map {region_map.shape}, types present: {unique_types}, "
+            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"
+        )
 
         if self.temp is not None:
             PILImage.fromarray(colorize_region_type_map(region_map)).save(
                 self.temp / "region_map.png"
             )
+            Depth(certainty_array).save_debug_image(self.temp / "region_map_certainty.png")
         self.advance_progress(task)
 
         # Mountain ridgeline — detect sky-terrain boundary per column, sample depth
         # just below it, and project to actual XZ positions on the top-down grid.
-        sky_idx = ALL_REGION_TYPES.index(REGION_TYPE_SKY)
-        terrain_idx = ALL_REGION_TYPES.index(REGION_TYPE_TERRAIN)
+        sky_idx = RegionType.SKY
+        terrain_idx = RegionType.TERRAIN
         sky_px = int((type_idx_map == sky_idx).sum())
         terrain_px = int((type_idx_map == terrain_idx).sum())
-        unique_types_pano = [ALL_REGION_TYPES[i] for i in np.unique(type_idx_map) if i < len(ALL_REGION_TYPES)]
+        unique_types_pano = [RegionType(i).label for i in np.unique(type_idx_map) if i < len(RegionType)]
         self.log_info(f"Ridgeline inputs: {sky_px} sky px, {terrain_px} terrain px — types in panorama: {unique_types_pano}")
         silhouette_grid = RegionMapGenerator.extract_mountain_ridgeline(
             type_idx_map=type_idx_map,
@@ -149,7 +147,7 @@ class RegionMapStage(PipelineStage):
         self.advance_progress(task)
 
         # Water skeleton — medial axis of water cells in the top-down region map.
-        water_idx = ALL_REGION_TYPES.index(REGION_TYPE_WATER)
+        water_idx = RegionType.WATER
         water_skeleton = RegionMapGenerator.extract_water_skeleton(
             region_map=region_map,
             water_idx=water_idx,

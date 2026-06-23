@@ -89,6 +89,8 @@ class HeightMapStage(PipelineStage):
         if isinstance(sky_mask, list):
             sky_mask = np.array(sky_mask, dtype=bool)
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        region_type_mask = region_type_depth.depth if region_type_depth is not None else None
         self.advance_progress(task)
 
         if depth is None:
@@ -107,7 +109,10 @@ class HeightMapStage(PipelineStage):
         if panorama_depth is not None:
             self.log_info("Panorama depth available — will fill unseen terrain regions")
 
-        height_array = HeightMapGenerator.generate(
+        if region_type_mask is not None:
+            self.log_info("Region type map available — restricting height to water/terrain/ground")
+
+        height_array, certainty_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -120,11 +125,13 @@ class HeightMapStage(PipelineStage):
             flood_fill=cfg.flood_fill,
             flood_fill_max_step=cfg.flood_fill_max_step,
             panorama_depth=panorama_depth,
+            region_type_mask=region_type_mask,
         )
         self.advance_progress(task)
 
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)
+        context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters": cfg.grid_size_meters,
@@ -134,10 +141,12 @@ class HeightMapStage(PipelineStage):
 
         if self.temp is not None:
             height_map.save_debug_image(self.temp / "heightmap.png")
+            Depth(certainty_array).save_debug_image(self.temp / "heightmap_certainty.png")
 
         self.log_info(
             f"Height map {height_array.shape}, "
-            f"Y range {height_array.min():.2f} → {height_array.max():.2f} m"
+            f"Y range {height_array.min():.2f} → {height_array.max():.2f} m, "
+            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"
         )
 
         self.finish_progress(task)

@@ -1,76 +1,90 @@
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import Self
 
 import numpy as np
 
 
-REGION_TYPE_SKY = "sky"
-REGION_TYPE_WATER = "water"
-REGION_TYPE_TERRAIN = "terrain"
-REGION_TYPE_GROUND = "ground"
-REGION_TYPE_VEGETATION = "vegetation"
-REGION_TYPE_BUILT = "built"
-REGION_TYPE_OTHER = "other"
+class RegionType(IntEnum):
+    """
+    Coarse semantic region types used across segmentation, height mapping, and
+    region mapping.  Integer values are stable pixel-map indices (uint8 arrays
+    store these directly).
+    """
+    SKY        = 0
+    WATER      = 1
+    TERRAIN    = 2
+    GROUND     = 3
+    VEGETATION = 4
+    BUILT      = 5
+    OTHER      = 6
 
-ALL_REGION_TYPES = (
-    REGION_TYPE_SKY,
-    REGION_TYPE_WATER,
-    REGION_TYPE_TERRAIN,
-    REGION_TYPE_GROUND,
-    REGION_TYPE_VEGETATION,
-    REGION_TYPE_BUILT,
-    REGION_TYPE_OTHER,
-)
+    @property
+    def ground_valid(self) -> bool:
+        """True for types whose depth can be trusted for ground-plane estimation.
+
+        Vegetation canopies and built structures occlude the ground, so their
+        projected depth cannot be used to build a reliable height or region map.
+        """
+        return self in (RegionType.WATER, RegionType.TERRAIN, RegionType.GROUND)
+
+    @property
+    def label(self) -> str:
+        """Lowercase string name, used in serialisation and display."""
+        return self.name.lower()
+
+    @classmethod
+    def from_label(cls, s: str) -> "RegionType":
+        return cls[s.upper()]
+
 
 # Keyword substrings that map ADE20K label names to coarse region types.
 # Checked in order; first match wins.
-_LABEL_RULES: list[tuple[tuple[str, ...], str]] = [
-    (("sky",), REGION_TYPE_SKY),
-    (("water", "sea", "ocean", "river", "lake", "pool", "waterfall", "fountain", "swamp"), REGION_TYPE_WATER),
-    (("mountain", "hill", "cliff", "rock", "stone", "boulder", "land"), REGION_TYPE_TERRAIN),
-    (("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), REGION_TYPE_VEGETATION),
-    (("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), REGION_TYPE_BUILT),
-    (("wall", "fence", "railing", "bannister", "column", "pillar"), REGION_TYPE_BUILT),
+_LABEL_RULES: list[tuple[tuple[str, ...], RegionType]] = [
+    (("sky",), RegionType.SKY),
+    (("water", "sea", "ocean", "river", "lake", "pool", "waterfall", "fountain", "swamp"), RegionType.WATER),
+    (("mountain", "hill", "cliff", "rock", "stone", "boulder", "land"), RegionType.TERRAIN),
+    (("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION),
+    (("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
+    (("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT),
     (("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
-      "path", "road", "sidewalk", "pavement", "runway", "floor", "snow", "ice"), REGION_TYPE_GROUND),
+      "path", "road", "sidewalk", "pavement", "runway", "floor", "snow", "ice"), RegionType.GROUND),
 ]
 
 
-def coarse_type_for_label(label_name: str) -> str:
+def coarse_type_for_label(label_name: str) -> RegionType:
     name = label_name.lower()
     for keywords, region_type in _LABEL_RULES:
         if any(kw in name for kw in keywords):
             return region_type
-    return REGION_TYPE_OTHER
+    return RegionType.OTHER
 
 
-REGION_TYPE_COLORS: dict[str, tuple[int, int, int]] = {
-    REGION_TYPE_SKY:        (135, 206, 235),
-    REGION_TYPE_WATER:      (30,  144, 255),
-    REGION_TYPE_TERRAIN:    (139, 90,  43),
-    REGION_TYPE_GROUND:     (160, 120, 60),
-    REGION_TYPE_VEGETATION: (34,  139, 34),
-    REGION_TYPE_BUILT:      (169, 169, 169),
-    REGION_TYPE_OTHER:      (200, 200, 200),
+REGION_TYPE_COLORS: dict[RegionType, tuple[int, int, int]] = {
+    RegionType.SKY:        (135, 206, 235),
+    RegionType.WATER:      (30,  144, 255),
+    RegionType.TERRAIN:    (139, 90,  43),
+    RegionType.GROUND:     (160, 120, 60),
+    RegionType.VEGETATION: (34,  139, 34),
+    RegionType.BUILT:      (169, 169, 169),
+    RegionType.OTHER:      (200, 200, 200),
 }
 
 
 def build_type_idx_map(label_map: np.ndarray, id2label: dict[int, str]) -> np.ndarray:
     """Map ADE20K per-pixel class IDs to a per-pixel coarse region type index array."""
-    other_idx = ALL_REGION_TYPES.index(REGION_TYPE_OTHER)
-    type_idx_map = np.full(label_map.shape, other_idx, dtype=np.uint8)
+    type_idx_map = np.full(label_map.shape, RegionType.OTHER, dtype=np.uint8)
     for class_id, label_name in id2label.items():
         region_type = coarse_type_for_label(label_name)
-        type_idx = ALL_REGION_TYPES.index(region_type)
-        type_idx_map[label_map == class_id] = type_idx
+        type_idx_map[label_map == class_id] = int(region_type)
     return type_idx_map
 
 
 def colorize_region_type_map(type_idx_map: np.ndarray) -> np.ndarray:
     """Convert a per-pixel region type index array (H, W) to an RGB image array (H, W, 3)."""
     rgb = np.zeros((*type_idx_map.shape, 3), dtype=np.uint8)
-    for i, region_type in enumerate(ALL_REGION_TYPES):
-        rgb[type_idx_map == i] = REGION_TYPE_COLORS.get(region_type, (200, 200, 200))
+    for rt in RegionType:
+        rgb[type_idx_map == rt] = REGION_TYPE_COLORS[rt]
     return rgb
 
 
