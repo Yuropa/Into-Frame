@@ -156,6 +156,8 @@ class RegionMapGenerator:
         grid_size_meters: float = 100.0,
         grid_resolution: int = 512,
         depth_offset_rows: int = 3,
+        depth_smooth_width: int = 15,
+        dilation_iters: int = 3,
     ) -> np.ndarray:
         """
         Extract the sky-foreground horizon per column, sample depth just below it,
@@ -202,6 +204,12 @@ class RegionMapGenerator:
                 np.nan,
             )
 
+        # Suppress single-column depth spikes before projecting to XZ.
+        if depth_smooth_width > 1 and np.any(np.isfinite(depths)):
+            from scipy.ndimage import median_filter as _med
+            _arr = np.where(np.isfinite(depths), depths, 0.0)
+            depths = np.where(np.isfinite(depths), _med(_arr, size=depth_smooth_width, mode='nearest'), depths)
+
         phi_sil = (0.5 - sample_rows / h) * np.pi   # elevation angle at ridgeline row
         cos_phi_sil = np.cos(phi_sil)               # horizontal scale factor
         theta = (cols / w - 0.5) * 2.0 * np.pi     # longitude: 0 = +Z (forward)
@@ -227,6 +235,12 @@ class RegionMapGenerator:
 
         grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
         grid[zi, xi] = 1.0
+
+        # Fill gaps and give the ridgeline coherent thickness for the terrain solver.
+        if dilation_iters > 0:
+            from scipy.ndimage import binary_dilation
+            grid = binary_dilation(grid > 0, iterations=dilation_iters).astype(np.float32)
+
         return grid
 
     @staticmethod
