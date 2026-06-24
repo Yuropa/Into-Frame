@@ -1,5 +1,6 @@
 import numpy as np
 from dataclasses import dataclass, field
+from typing import Optional
 from scipy.spatial import KDTree
 
 
@@ -8,7 +9,8 @@ class LinearStructure:
     """A single road, river, trail, etc. as a polyline in world space."""
     type: str          # "road" | "river" | "trail"
     path: np.ndarray   # (K, 3) float32 — world (x, y, z) along the centreline
-    width: float       # estimated width in metres
+    width: float       # mean estimated width in metres (scalar fallback)
+    widths: Optional[np.ndarray] = None  # (K,) per-point widths in metres, aligned to path
 
 
 class LinearGraph:

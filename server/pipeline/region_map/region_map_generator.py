@@ -158,6 +158,8 @@ class RegionMapGenerator:
         depth_offset_rows: int = 3,
         depth_smooth_width: int = 15,
         dilation_iters: int = 3,
+        connect_radius_px: int = 30,
+        chain_smooth_window: int = 15,
     ) -> np.ndarray:
         """
         Extract the sky-foreground horizon per column, sample depth just below it,
@@ -173,6 +175,11 @@ class RegionMapGenerator:
         are more reliable than at the exact edge). NaN depth values are interpolated
         from neighboring columns. Each valid column is unprojected to XZ and placed
         in the grid — close mountains land near the centre, distant ones near the edge.
+
+        Projected points are chained via greedy nearest-neighbour search within
+        connect_radius_px grid cells, then smoothed with a moving average of width
+        chain_smooth_window, and finally rasterised with filled line segments so the
+        result is a continuous ridge rather than isolated scattered pixels.
 
         Returns float32 (grid_resolution, grid_resolution) binary mask.
         """
@@ -230,13 +237,60 @@ class RegionMapGenerator:
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
-        xi = np.clip(np.digitize(Xs, x_edges) - 1, 0, grid_resolution - 1)
-        zi = np.clip(np.digitize(Zs, z_edges) - 1, 0, grid_resolution - 1)
+
+        # ── Greedy nearest-neighbour chain ────────────────────────────────────
+        # Depth noise projects consecutive panorama columns to scattered XZ
+        # positions.  Walk the points in order, always stepping to the closest
+        # unvisited neighbour within connect_radius_px grid cells, so the result
+        # is a single connected path rather than isolated pixels.
+        from scipy.spatial import KDTree as _KDTree
+        from scipy.ndimage import uniform_filter1d as _uf1d
+
+        cell_m = grid_size_meters / grid_resolution
+        connect_m = connect_radius_px * cell_m
+
+        pts = np.stack([Xs.astype(np.float64), Zs.astype(np.float64)], axis=-1)
+        tree = _KDTree(pts)
+        visited = np.zeros(len(pts), dtype=bool)
+        visited[0] = True
+        chain = [0]
+
+        while True:
+            curr = chain[-1]
+            idxs = tree.query_ball_point(pts[curr], connect_m)
+            candidates = [i for i in idxs if not visited[i]]
+            if not candidates:
+                break
+            dists = np.linalg.norm(pts[candidates] - pts[curr], axis=1)
+            nxt = candidates[int(np.argmin(dists))]
+            chain.append(nxt)
+            visited[nxt] = True
+
+        chain_pts = pts[chain].copy()   # (M, 2) ordered metres
+
+        # ── Smooth the chain to remove per-column depth jitter ────────────────
+        if len(chain_pts) >= 3 and chain_smooth_window > 1:
+            win = min(chain_smooth_window, len(chain_pts))
+            chain_pts[:, 0] = _uf1d(chain_pts[:, 0], size=win)
+            chain_pts[:, 1] = _uf1d(chain_pts[:, 1], size=win)
+
+        # ── Rasterise as connected line segments ──────────────────────────────
+        xi_c = np.clip(np.digitize(chain_pts[:, 0], x_edges) - 1, 0, grid_resolution - 1).astype(int)
+        zi_c = np.clip(np.digitize(chain_pts[:, 1], z_edges) - 1, 0, grid_resolution - 1).astype(int)
 
         grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-        grid[zi, xi] = 1.0
+        for k in range(len(xi_c) - 1):
+            x0, z0 = xi_c[k],     zi_c[k]
+            x1, z1 = xi_c[k + 1], zi_c[k + 1]
+            n_steps = max(abs(x1 - x0), abs(z1 - z0), 1) + 1
+            xs_seg = np.round(np.linspace(x0, x1, n_steps)).astype(int)
+            zs_seg = np.round(np.linspace(z0, z1, n_steps)).astype(int)
+            valid = (xs_seg >= 0) & (xs_seg < grid_resolution) & (zs_seg >= 0) & (zs_seg < grid_resolution)
+            grid[zs_seg[valid], xs_seg[valid]] = 1.0
+        if len(xi_c) > 0:
+            grid[zi_c[-1], xi_c[-1]] = 1.0
 
-        # Fill gaps and give the ridgeline coherent thickness for the terrain solver.
+        # Dilate to give the ridgeline coherent thickness for the terrain solver.
         if dilation_iters > 0:
             from scipy.ndimage import binary_dilation
             grid = binary_dilation(grid > 0, iterations=dilation_iters).astype(np.float32)

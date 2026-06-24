@@ -14,6 +14,7 @@ from pipeline.linear_structures.graph import LinearGraph, LinearStructure
 
 
 _MIN_PATH_PX = 12
+_PATH_DOWNSAMPLE = 3  # must match the downsample used in _pixel_paths_to_world
 
 
 def _neighbour_count_image(skel: np.ndarray) -> np.ndarray:
@@ -96,14 +97,23 @@ def _pixel_paths_to_world(
     return world_paths
 
 
-def _estimate_width(mask: np.ndarray, paths: list[list[tuple[int, int]]], cell_size: float) -> float:
-    """Estimate average structure width from mask area / skeleton length."""
-    total_path_px = sum(len(p) for p in paths)
-    if total_path_px == 0:
-        return 1.0
-    area_px = float(mask.sum())
-    width_px = area_px / max(1, total_path_px)
-    return max(0.5, width_px * cell_size)
+def _sample_widths_from_edt(
+    path: list[tuple[int, int]],
+    edt: np.ndarray,
+    cell_size: float,
+) -> np.ndarray:
+    """
+    Sample per-point full width in metres along a skeleton path.
+
+    edt[r, c] is the distance (pixels) from that pixel to the nearest
+    non-region pixel — i.e. the local half-width of the region.  We sample
+    every _PATH_DOWNSAMPLE steps to stay aligned with _pixel_paths_to_world.
+    """
+    pts = path[::_PATH_DOWNSAMPLE]
+    return np.array(
+        [max(0.5, float(edt[r, c]) * 2.0 * cell_size) for r, c in pts],
+        dtype=np.float32,
+    )
 
 
 def _path_mask_from_polylines(
@@ -117,14 +127,37 @@ def _path_mask_from_polylines(
     return mask
 
 
-def _carve_valley(hm_arr: np.ndarray, path_mask: np.ndarray,
-                  width_m: float, cell_size: float) -> np.ndarray:
-    """Gaussian valley carved along a river path."""
-    dist_px   = distance_transform_edt(~path_mask)
-    sigma_px  = max(1.0, (width_m / 2.0) / cell_size)
-    depth_m   = max(0.2, width_m * 0.15)
-    influence = np.exp(-dist_px ** 2 / (2.0 * sigma_px ** 2))
-    return hm_arr - depth_m * influence.astype(np.float32)
+def _carve_valley(
+    hm_arr: np.ndarray,
+    path_mask: np.ndarray,
+    fallback_width_m: float,
+    cell_size: float,
+    path_px: Optional[list[tuple[int, int]]] = None,
+    widths_m: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Gaussian valley carved along a river path with spatially-varying width."""
+    dist_px, nn_idx = distance_transform_edt(~path_mask, return_indices=True)
+    row_nn, col_nn = nn_idx
+
+    if widths_m is not None and path_px is not None and len(widths_m) > 0:
+        # Paint per-point widths onto the skeleton pixels, then propagate to
+        # every grid pixel via the nearest-skeleton-point index from the EDT.
+        H, W = hm_arr.shape
+        width_grid = np.zeros((H, W), dtype=np.float32)
+        for (r, c), w in zip(path_px, widths_m):
+            if 0 <= r < H and 0 <= c < W:
+                width_grid[r, c] = w
+        local_w = width_grid[row_nn, col_nn]
+        # Pixels not covered by a path point fall back to the median width.
+        med_w = float(np.median(widths_m))
+        local_w = np.where(local_w > 0, local_w, med_w)
+    else:
+        local_w = fallback_width_m
+
+    sigma_px  = np.maximum(1.0, local_w / (2.0 * cell_size))
+    depth_m   = np.maximum(0.2, local_w * 0.15)
+    influence = np.exp(-dist_px.astype(np.float32) ** 2 / (2.0 * sigma_px ** 2))
+    return hm_arr - (depth_m * influence).astype(np.float32)
 
 
 def _smooth_road(hm_arr: np.ndarray, path_mask: np.ndarray,
@@ -180,12 +213,21 @@ class LinearStructureDetector:
             paths = _skeleton_to_polylines(skel)
             if not paths:
                 continue
-            mask_for_width = area_mask if area_mask is not None else skel
-            width_m     = _estimate_width(mask_for_width, paths, cell_size)
-            world_paths = _pixel_paths_to_world(paths, hm_arr, grid_size, hm_res)
-            for wp in world_paths:
-                if len(wp) >= 2:
-                    graph.add(LinearStructure(type=structure_type, path=wp, width=width_m))
+
+            # EDT of the area mask gives per-pixel half-width (distance to region edge).
+            edt = distance_transform_edt(area_mask) if area_mask is not None and area_mask.any() else None
+
+            world_paths = _pixel_paths_to_world(paths, hm_arr, grid_size, hm_res, downsample=_PATH_DOWNSAMPLE)
+            for path, wp in zip(paths, world_paths):
+                if len(wp) < 2:
+                    continue
+                if edt is not None:
+                    widths_m = _sample_widths_from_edt(path, edt, cell_size)
+                    mean_w   = float(widths_m.mean())
+                else:
+                    widths_m = None
+                    mean_w   = 1.0
+                graph.add(LinearStructure(type=structure_type, path=wp, width=mean_w, widths=widths_m))
 
         return graph
 
@@ -224,7 +266,10 @@ class LinearStructureDetector:
             path_mask = _path_mask_from_polylines([path_px], hm_res)
 
             if structure.type == "river" and modify_rivers:
-                hm_arr = _carve_valley(hm_arr, path_mask, structure.width, cell_size)
+                hm_arr = _carve_valley(
+                    hm_arr, path_mask, structure.width, cell_size,
+                    path_px=path_px, widths_m=structure.widths,
+                )
             elif structure.type in ("road", "trail") and modify_roads:
                 hm_arr = _smooth_road(hm_arr, path_mask, structure.width, cell_size)
 
