@@ -2,6 +2,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image as PILImage, ImageFilter
 
+from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -12,14 +13,21 @@ from util.panorama_utils import Panorama
 from scipy.ndimage import binary_dilation
 
 
-def _sky_prompt(input_caption: str) -> str:
-    """Build a Flux prompt for sky in-fill from the scene caption."""
-    sky_words = {"sky", "cloud", "clouds", "sun", "moon", "star", "stars",
-                 "horizon", "twilight", "dusk", "dawn", "sunset", "sunrise",
-                 "overcast", "clear", "atmosphere", "blue"}
-    tokens = [t for t in input_caption.lower().split() if t in sky_words]
-    sky_desc = " ".join(tokens) if tokens else "clear blue sky"
-    return f"photorealistic panoramic sky, {sky_desc}, seamless, high quality"
+def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Image:
+    """Crop the horizontal band containing sky pixels."""
+    rows = np.any(sky_mask, axis=1)
+    if not rows.any():
+        return source_pil
+    rmin = int(np.where(rows)[0][0])
+    rmax = int(np.where(rows)[0][-1])
+    return source_pil.crop((0, rmin, source_pil.width, rmax + 1))
+
+
+def _sky_prompt(sky_caption: str) -> str:
+    return (
+        f"photorealistic panoramic sky, {sky_caption}, "
+        "seamless, high quality, equirectangular"
+    )
 
 
 class SkyboxInpaintingStage(PipelineStage):
@@ -98,9 +106,13 @@ class SkyboxInpaintingStage(PipelineStage):
         if self.output is not None:
             fill_mask_pil.save(self.output / "fill_mask.png")
 
-        # Caption from the scene to guide Flux toward appropriate sky content.
-        scene_caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
-        prompt = _sky_prompt(scene_caption)
+        # Caption the sky region directly so the prompt reflects its actual appearance.
+        sky_crop = _crop_sky(source_pil, sky_mask)
+        captioner = ImageCaptioning(self.preferred_device)
+        sky_caption = captioner.caption(Image(sky_crop), prompt="a photo of the sky with")
+        del captioner
+        prompt = _sky_prompt(sky_caption)
+        self.log_info(f"Sky caption: {sky_caption!r}")
         self.log_info(f"Sky prompt: {prompt!r}")
 
         self.advance_progress(task)
@@ -137,7 +149,7 @@ class SkyboxInpaintingStage(PipelineStage):
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=36,
-            guidance_scale=10.0,
+            guidance_scale=28.0,
             seed=self.seed,
         )
         flux.close()
@@ -181,7 +193,8 @@ class SkyboxInpaintingStage(PipelineStage):
 
     def model_names(self) -> list[str]:
         return (
-            InPainting.model_names(InPaintingType.LAMA)
+            ImageCaptioning.model_names()
+            + InPainting.model_names(InPaintingType.LAMA)
             + InPainting.model_names(InPaintingType.FLUX)
         )
 
