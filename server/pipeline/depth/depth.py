@@ -100,6 +100,35 @@ class DepthStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ImageDepth.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        from pipeline.report.report_utils import colorize_depth
+        input_key, output_key, intrinsics_key, _ = self._resolved_keys()
+        depth = context.depth(output_key)
+        if depth is None:
+            return None
+        intrinsics = context.intrinsics(intrinsics_key)
+        stats = {
+            "Resolution": f"{depth.width} × {depth.height} px",
+            "Depth range": f"{depth.min():.2f} – {depth.max():.2f} m",
+        }
+        if intrinsics is not None:
+            stats["Field of view"] = f"{intrinsics.fov:.1f}°"
+        return ReportSection(
+            stage_name=self.name,
+            title="Monocular Depth Estimation",
+            body=(
+                "Metric depth was estimated for every pixel of the input image using "
+                "Depth Anything 3, a state-of-the-art monocular depth model. The resulting "
+                "depth map is used to reconstruct camera intrinsics, guide panorama "
+                "synthesis, and project ground-plane points into the terrain height grid. "
+                "Brighter regions in the visualisation below indicate surfaces closer to "
+                "the camera."
+            ),
+            images=[(colorize_depth(depth), "Estimated depth map (bright = near)")],
+            stats=stats,
+        )
+
     def clean_up(self):
         if self._depth is not None:
             self._depth.close()

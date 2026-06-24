@@ -119,6 +119,31 @@ class PanoramaStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ImagePanorama.model_names(self.config.generator_type)
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        _, _, output_key, _, _, _ = self._resolved_keys()
+        pano = context.panorama(output_key)
+        if pano is None:
+            return None
+        pil = pano.rgb()
+        stats = {
+            "Generator": self.config.generator_type.name,
+            "Resolution": f"{pano.width} × {pano.height} px",
+        }
+        return ReportSection(
+            stage_name=self.name,
+            title="360° Panorama Synthesis",
+            body=(
+                "The input image was extended into a full 360° equirectangular panorama "
+                f"using the {self.config.generator_type.name} generator. The panorama "
+                "provides a complete spherical view of the environment and is used as the "
+                "primary source for terrain texturing, environment lighting estimation, "
+                "and skybox rendering."
+            ),
+            images=[(pil, "Generated 360° equirectangular panorama")],
+            stats=stats,
+        )
+
     def clean_up(self):
         if self._pano is not None:
             self._pano.close()

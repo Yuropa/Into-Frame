@@ -116,3 +116,24 @@ class TerrainTextureBakeStage(PipelineStage):
 
     def model_names(self) -> list[str]:
         return []
+
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        texture = context.image(ContextKey.TERRAIN_TEXTURE)
+        if texture is None:
+            return None
+        cfg: TerrainTextureBakeConfiguration = self.config
+        return ReportSection(
+            stage_name=self.name,
+            title="Terrain Texture Bake",
+            body=(
+                "A top-down terrain texture was baked from the equirectangular panorama "
+                "using an orthographic projection aligned with the height map grid. "
+                "A per-texel certainty map encodes reliability based on equirectangular "
+                "sampling latitude, heightmap observation coverage, and proximity to the "
+                "nadir dead-zone. Low-certainty regions are flagged for inpainting in a "
+                "subsequent refinement stage."
+            ),
+            images=[(texture.image, "Baked top-down terrain texture")],
+            stats={"Texture resolution": f"{cfg.tex_size} × {cfg.tex_size} px"},
+        )

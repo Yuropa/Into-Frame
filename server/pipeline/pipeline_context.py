@@ -73,6 +73,7 @@ class PipelineContext():
         self._stage_order = []
         self._dirty_state: set[str] = set()
         self._dirty_stage_state: dict[str, set[str]] = {}
+        self._report_sections: list = []
 
     def push_stage(self, name: str):
         self._current_stage = name
@@ -293,6 +294,13 @@ class PipelineContext():
 
     def input_panorama_regions(self, name: ContextKeyName) -> Optional["PanoramaRegionResult"]:
         return self._value(name, self._previous_stage).panorama_regions()
+
+    # Report sections — in-memory only, not persisted
+    def add_report_section(self, section) -> None:
+        self._report_sections.append(section)
+
+    def report_sections(self) -> list:
+        return list(self._report_sections)
 
     def has_stage_output(self, name: ContextKeyName) -> bool:
         """True only if the current stage has already written this key (cache hit for this stage)."""

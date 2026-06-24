@@ -54,6 +54,28 @@ class RecognizeAnythingStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ImageRecognize.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        _, output_key = self._resolved_keys()
+        tags = context.object(output_key)
+        if not tags:
+            return None
+        tag_list = [t.strip() for t in tags.split("|") if t.strip()]
+        return ReportSection(
+            stage_name=self.name,
+            title="Scene Recognition",
+            body=(
+                "Recognize Anything Plus (RAM++) analysed the input image and extracted "
+                "a set of semantic scene tags. These tags describe the objects, materials, "
+                "and environmental context present in the photograph and are used by "
+                "downstream stages to classify and distribute scene elements."
+            ),
+            stats={
+                "Tag count": str(len(tag_list)),
+                "Tags": ", ".join(tag_list),
+            },
+        )
+
     def clean_up(self):
         if self._recognize is not None:
             self._recognize.close()

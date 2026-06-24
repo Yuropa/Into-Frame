@@ -128,6 +128,10 @@ class PipelineStage:
     def has_expected_output(self, context: PipelineContext) -> bool:
         return False
 
+    def contribute_report(self, context: PipelineContext) -> Optional[Any]:
+        """Return a ReportSection describing this stage's output, or None to omit."""
+        return None
+
     def set_total_tasks(self, count: int):
         self.total_tasks = count
 
