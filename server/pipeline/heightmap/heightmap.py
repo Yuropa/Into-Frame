@@ -139,6 +139,7 @@ class HeightMapStage(PipelineStage):
             panorama_depth=fill_panorama_depth,
             region_type_mask=region_type_mask,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
+            debug_dir=self.temp,
         )
         self.advance_progress(task)
 

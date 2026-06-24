@@ -161,3 +161,6 @@ stages:
   - name: Panorama Cubemap
     stage: PanoramaToCubemapStage
     enabled: false
+
+  - name: Report
+    stage: ReportGenerationStage

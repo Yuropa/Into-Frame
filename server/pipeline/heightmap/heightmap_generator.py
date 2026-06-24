@@ -1,5 +1,8 @@
+import json
 import numpy as np
+import PIL.Image
 from collections import deque
+from pathlib import Path
 from scipy.ndimage import gaussian_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
@@ -32,6 +35,7 @@ class HeightMapGenerator:
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
         nadir_exclusion_radius: float = 0.0,
+        debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -174,28 +178,37 @@ class HeightMapGenerator:
         # Certainty: projection-distortion based, zero for unobserved (interpolated) cells.
         # Observed cells use sin²(elevation) = h² / (r² + h²), which is the inverse of
         # the equirectangular Jacobian (ground-area per panorama pixel).
+        # Note: nadir_exclusion_radius already removes the most unreliable near-nadir cells
+        # (they are NaN → observed=False → certainty=0). A separate certainty taper over an
+        # annular zone beyond the exclusion radius creates a hard circular boundary in
+        # confidence which the terrain solver converts to a visible ring artifact.
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
             observed, grid_size_meters, grid_resolution, camera_height_meters
         )
 
-        if use_equirectangular:
-            # Equirectangular near-nadir depth is unreliable: the panorama bottom is
-            # typically inpainted and depth models lack perspective cues there.
-            # Taper certainty to zero within 2×camera_height of the origin so the
-            # terrain solver can smooth out artifacts instead of locking them in.
-            half = grid_size_meters / 2.0
-            x_c = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
-            z_c = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
-            X_g, Z_g = np.meshgrid(x_c, z_c)
-            r_g = np.sqrt(X_g ** 2 + Z_g ** 2).astype(np.float32)
-            min_r = camera_height_meters * 2.0
-            taper = np.minimum(r_g / min_r, 1.0) ** 2
-            certainty = certainty * taper
+        if debug_dir is not None:
+            PIL.Image.fromarray((observed * 255).astype(np.uint8), "L").save(
+                debug_dir / "heightmap_observed_mask.png"
+            )
+            # Raw height map before interpolation: NaN cells shown as the minimum value.
+            raw_viz = height_map.copy()
+            fill_val = float(np.nanmin(raw_viz)) if observed.any() else 0.0
+            raw_viz[~observed] = fill_val
+            Depth(raw_viz).normalize().save_debug_image(debug_dir / "heightmap_raw.png")
+            Depth(certainty.copy()).normalize().save_debug_image(
+                debug_dir / "heightmap_certainty_pre_taper.png"
+            )
 
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
+
+        if debug_dir is not None:
+            HeightMapGenerator._save_radial_profile(
+                result, certainty, grid_size_meters, debug_dir / "heightmap_radial_profile.json"
+            )
+
         return result, certainty
 
     @staticmethod
@@ -437,3 +450,46 @@ class HeightMapGenerator:
 
         # Restore original known values exactly — diffusion must not drift them.
         return np.where(known_mask, height_map, ZI).astype(np.float32)
+
+    @staticmethod
+    def _save_radial_profile(
+        height_map: np.ndarray,
+        certainty: np.ndarray,
+        grid_size_meters: float,
+        path: Path,
+        n_bins: int = 64,
+    ) -> None:
+        """
+        Compute mean height and certainty as a function of radial distance from the
+        camera origin and write the result as JSON.  Useful for spotting concentric
+        ring artifacts: a ripple shows up as an oscillation in mean_height_m.
+        """
+        h, w = height_map.shape
+        half = grid_size_meters / 2.0
+        x_c = np.linspace(-half, half, w, endpoint=False) + half / w
+        z_c = np.linspace(-half, half, h, endpoint=False) + half / h
+        X_g, Z_g = np.meshgrid(x_c, z_c)
+        r_2d = np.sqrt(X_g ** 2 + Z_g ** 2).ravel()
+
+        hm_flat   = height_map.ravel()
+        cert_flat = certainty.ravel()
+
+        max_r    = float(r_2d.max())
+        r_edges  = np.linspace(0.0, max_r, n_bins + 1)
+        r_mids   = ((r_edges[:-1] + r_edges[1:]) / 2.0).tolist()
+        bin_idx  = np.digitize(r_2d, r_edges) - 1
+        bin_idx  = bin_idx.clip(0, n_bins - 1)
+
+        height_means: list = []
+        cert_means:   list = []
+        for i in range(n_bins):
+            mask = bin_idx == i
+            height_means.append(float(hm_flat[mask].mean()) if mask.any() else None)
+            cert_means.append(float(cert_flat[mask].mean()) if mask.any() else None)
+
+        with open(path, "w") as f:
+            json.dump({
+                "radius_m":       r_mids,
+                "mean_height_m":  height_means,
+                "mean_certainty": cert_means,
+            }, f, indent=2)
