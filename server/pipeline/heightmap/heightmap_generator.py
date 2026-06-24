@@ -162,6 +162,20 @@ class HeightMapGenerator:
             observed, grid_size_meters, grid_resolution, camera_height_meters
         )
 
+        if use_equirectangular:
+            # Equirectangular near-nadir depth is unreliable: the panorama bottom is
+            # typically inpainted and depth models lack perspective cues there.
+            # Taper certainty to zero within 2×camera_height of the origin so the
+            # terrain solver can smooth out artifacts instead of locking them in.
+            half = grid_size_meters / 2.0
+            x_c = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
+            z_c = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
+            X_g, Z_g = np.meshgrid(x_c, z_c)
+            r_g = np.sqrt(X_g ** 2 + Z_g ** 2).astype(np.float32)
+            min_r = camera_height_meters * 2.0
+            taper = np.minimum(r_g / min_r, 1.0) ** 2
+            certainty = certainty * taper
+
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)

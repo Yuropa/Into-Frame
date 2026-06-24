@@ -4,7 +4,7 @@ from logging import Logger
 import numpy as np
 import PIL.Image
 import torch
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, gaussian_filter
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -116,11 +116,16 @@ class TerrainTextureRefinementStage(PipelineStage):
         )
         self.advance_progress(task)
 
-        # ── Soft blend at boundary (certainty as alpha) ───────────────────────
-        cert_alpha = certainty[:, :, np.newaxis]  # (H, W, 1)
+        # ── Soft blend at boundary (smoothstep certainty as alpha) ───────────
+        # Gaussian-smooth certainty to remove jagged observation-mask boundaries,
+        # then apply smoothstep so the transition feathers naturally without
+        # visible linear ramps.
+        cert_smooth = gaussian_filter(certainty, sigma=6.0).clip(0.0, 1.0)
+        t = cert_smooth[:, :, np.newaxis]  # (H, W, 1)
+        t = t * t * (3.0 - 2.0 * t)       # smoothstep
         tex_arr     = np.array(texture_pil,   dtype=np.float32)
         inp_arr     = np.array(inpainted_pil.convert("RGB"), dtype=np.float32)
-        blended_arr = cert_alpha * tex_arr + (1.0 - cert_alpha) * inp_arr
+        blended_arr = t * tex_arr + (1.0 - t) * inp_arr
         blended_pil = PIL.Image.fromarray(np.clip(blended_arr, 0, 255).astype(np.uint8), "RGB")
         self.advance_progress(task)
 
@@ -146,7 +151,11 @@ class TerrainTextureRefinementStage(PipelineStage):
     def _build_prompt(self, context: PipelineContext) -> str:
         caption = context.input_object(ContextKey.INPUT_CAPTION)
         base = caption if isinstance(caption, str) and caption else "outdoor natural scene"
-        return f"{base}, ground texture viewed from directly above, top-down aerial view, natural terrain"
+        return (
+            f"{base}, seamless aerial ground texture, top-down orthographic view, "
+            "natural terrain surface, consistent with surrounding area, "
+            "photorealistic, no shadows, no people, no vehicles"
+        )
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.has_stage_output(ContextKey.TERRAIN_TEXTURE)
