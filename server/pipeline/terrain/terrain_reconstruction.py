@@ -170,9 +170,16 @@ class TerrainReconstructionStage(PipelineStage):
 
         if self.temp is not None:
             Depth(new_hm).save_debug_image(self.temp / "heightmap_reconstructed.png")
-            # Diff visualisation
             diff = np.abs(new_hm - heightmap)
             Depth(diff).save_debug_image(self.temp / "heightmap_reconstruction_diff.png")
+            # Radial profile post-solver — a ring artifact shows as oscillation here
+            from pipeline.heightmap.heightmap_generator import HeightMapGenerator
+            cert = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
+            cert_arr = cert.depth if cert is not None else np.zeros_like(new_hm)
+            HeightMapGenerator._save_radial_profile(
+                new_hm, cert_arr, grid_size,
+                self.temp / "heightmap_reconstructed_radial_profile.json",
+            )
 
         y_before = (heightmap.min(), heightmap.max())
         y_after  = (new_hm.min(), new_hm.max())

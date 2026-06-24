@@ -82,8 +82,13 @@ class TerrainSolver:
     def _build_data_term(self) -> None:
         conf_flat = self._conf.ravel()
         orig_flat = self._hm.ravel()
-        # Floor weight prevents rank deficiency at zero-confidence pixels
-        w = np.maximum(conf_flat, 1e-4)
+        # Floor at laplacian_weight (not near-zero) so unobserved cells stay close to
+        # their interpolated values. A floor of 1e-4 with lap_w=0.1 leaves unobserved
+        # cells ~1000× under-constrained relative to the Laplacian; LSQR starting from
+        # zero drifts the entire unobserved region away from the pre-solver values before
+        # converging, creating bowl/ring artifacts. Equal footing (floor = lap_w) keeps
+        # the interpolated surface intact while still allowing feature constraints to act.
+        w = np.maximum(conf_flat, self._lap_w)
         n = self._N
         self._add_block(np.arange(n), np.arange(n), w, w * orig_flat)
 
