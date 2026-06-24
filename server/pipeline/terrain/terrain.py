@@ -152,3 +152,33 @@ class TerrainMeshStage(PipelineStage):
 
     def model_names(self) -> list[str]:
         return []
+
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        _, _, _, output_key = self._resolved_keys()
+        mesh = context.mesh(output_key)
+        if mesh is None:
+            return None
+        params = context.object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        cfg: TerrainMeshConfiguration = self.config
+        grid_size = cfg.z_far or params.get("grid_size_meters") or 100.0
+        return ReportSection(
+            stage_name=self.name,
+            title="Terrain Mesh Generation",
+            body=(
+                "The height map was converted into a variable-density terrain mesh. "
+                "Vertex density is highest near the camera (inner region) using logarithmic "
+                "spacing, providing fine detail for close inspection while the mesh still "
+                "extends to the full environment extent. Multi-octave smooth noise is "
+                "blended in with distance for a natural ground surface appearance. "
+                "The mesh is textured from a pre-baked panorama projection or directly "
+                "from the original image using camera intrinsics."
+            ),
+            stats={
+                "Vertices": f"{mesh.vertex_count:,}",
+                "Triangles": f"{mesh.face_count:,}",
+                "Grid extent": f"{grid_size:.0f} m",
+                "Inner min dist": f"{cfg.inner_min_dist:.1f} m",
+                "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
+            },
+        )

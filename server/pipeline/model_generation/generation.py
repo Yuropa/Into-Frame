@@ -104,5 +104,49 @@ class ModelGenerationStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ModelGenerator.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        count = context.object("count")
+        if count is None or count == 0:
+            return None
+        images = []
+        total_verts = 0
+        total_faces = 0
+        reconstructed = 0
+        for i in range(count):
+            mesh = context.mesh(f"mesh_{i}")
+            crop = context.image(f"crop_{i}")
+            meta = context.object(f"metadata_{i}") or {}
+            obj_class = meta.get("class", f"Object {i + 1}")
+            if mesh is not None:
+                total_verts += mesh.vertex_count
+                total_faces += mesh.face_count
+                reconstructed += 1
+            if crop is not None and len(images) < 6:
+                label = obj_class
+                if mesh is not None:
+                    label += f" ({mesh.vertex_count:,}v)"
+                images.append((crop.image, label))
+        stats = {"Objects reconstructed": str(reconstructed)}
+        if reconstructed > 0:
+            stats["Total vertices"] = f"{total_verts:,}"
+            stats["Total triangles"] = f"{total_faces:,}"
+            stats["Avg vertices / object"] = f"{total_verts // reconstructed:,}"
+            stats["Generator"] = self.config.generator_type.name
+        return ReportSection(
+            stage_name=self.name,
+            title="3D Object Reconstruction",
+            body=(
+                "Each segmented foreground object was individually reconstructed as a "
+                "textured 3D mesh using a single-image 3D reconstruction model. The "
+                f"{self.config.generator_type.name} model lifts each 2D crop into a "
+                "full 3D asset with UV-mapped texture, then applies mesh repair to "
+                "produce watertight geometry suitable for real-time rendering. Meshes "
+                "are placed in the scene using depth-derived position estimates."
+            ),
+            images=images,
+            stats=stats,
+        )
+
     def clean_up(self):
         super().clean_up()

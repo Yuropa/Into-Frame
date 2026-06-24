@@ -72,6 +72,28 @@ class CaptioningStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ImageCaptioning.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        input_key, output_key = self._resolved_keys()
+        caption = context.object(output_key)
+        if caption is None:
+            return None
+        input_img = context.image(input_key)
+        images = []
+        if input_img is not None:
+            images.append((input_img.image, "Input photograph"))
+        return ReportSection(
+            stage_name=self.name,
+            title="Scene Description",
+            body=(
+                "The input image was processed by a vision-language model to produce a "
+                "natural language description of the scene. This caption is used throughout "
+                "the pipeline to guide panorama synthesis and other text-conditioned stages."
+            ),
+            images=images,
+            stats={"Caption": caption},
+        )
+
     def clean_up(self):
         super().clean_up()
         self._caption = None

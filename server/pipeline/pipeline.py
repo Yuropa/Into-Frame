@@ -48,6 +48,7 @@ from pipeline.linear_structures.linear_structures import LinearStructureStage, L
 from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, TerrainReconstructionConfiguration
 from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
 from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
+from pipeline.report.report import ReportGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
 from pipeline.pipeline_context import PipelineContext, ContextKey, ContextKeyName
 from pipeline.pipeline_monitor import PipelineMonitor
@@ -328,6 +329,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "RegionMapStage": RegionMapStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
+    "ReportGenerationStage": ReportGenerationStage,
 }
 
 
@@ -470,6 +472,10 @@ class Pipeline:
                     ran = False
 
                 context.pop_stage()
+
+                section = stage.contribute_report(context)
+                if section is not None:
+                    context.add_report_section(section)
 
                 self._save_context(context)
                 self.current_step_index += 1

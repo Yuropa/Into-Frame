@@ -171,3 +171,32 @@ class HeightMapStage(PipelineStage):
 
     def model_names(self) -> list[str]:
         return []
+
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        from pipeline.report.report_utils import colorize_depth
+        _, _, output_key = self._resolved_keys()
+        height_map = context.depth(output_key)
+        if height_map is None:
+            return None
+        params = context.object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        cfg: HeightMapConfiguration = self.config
+        stats = {
+            "Grid resolution": f"{height_map.width} × {height_map.height} cells",
+            "Grid size": f"{params.get('grid_size_meters', cfg.grid_size_meters):.0f} m",
+            "Height range": f"{height_map.min():.2f} – {height_map.max():.2f} m",
+        }
+        return ReportSection(
+            stage_name=self.name,
+            title="Terrain Height Map",
+            body=(
+                "Ground-plane points from the depth map were projected into a top-down "
+                "height grid using the estimated camera intrinsics. The grid is flood-filled "
+                "from the camera position outward, stopping at height discontinuities, to "
+                "produce a connected ground surface free of sky-pixel artefacts. Cells "
+                "lacking direct observations are interpolated from their neighbours. "
+                "The resulting height map drives terrain mesh generation."
+            ),
+            images=[(colorize_depth(height_map), "Ground-plane height map (bright = high elevation)")],
+            stats=stats,
+        )

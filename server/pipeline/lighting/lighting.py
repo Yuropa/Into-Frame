@@ -106,6 +106,27 @@ class PanoramaLightingStage(PipelineStage):
     def model_names(self) -> list[str]:
         return LuxDiT.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        _, output_key = self._resolved_keys()
+        lighting = context.lighting(output_key)
+        if lighting is None:
+            return None
+        return ReportSection(
+            stage_name=self.name,
+            title="Environment Lighting Estimation",
+            body=(
+                "Environment lighting was estimated from the panorama using LuxDiT, a "
+                "diffusion-based illumination estimation model. The model produces an LDR "
+                "environment map and a log-domain map that together encode the full "
+                "spherical lighting of the scene. Both maps are embedded in the scene "
+                "description and used by the real-time renderer for physically-based "
+                "shading of all reconstructed 3D assets."
+            ),
+            images=[(lighting.ldr.convert("RGB"), "Estimated LDR environment map")],
+            stats={"Environment map resolution": f"{lighting.width} × {lighting.height} px"},
+        )
+
     def clean_up(self):
         if self._lux_dit is not None:
             self._lux_dit.close()

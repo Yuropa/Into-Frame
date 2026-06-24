@@ -128,6 +128,35 @@ class SegmentationStage(PipelineStage):
     def model_names(self) -> list[str]:
         return ImageSeg.model_names() + ForegroundSeg.model_names() + MaskInPainting.model_names()
 
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        _, output_key = self._resolved_keys()
+        count = context.object(output_key)
+        if count is None:
+            return None
+        images = []
+        for i in range(min(count, 8)):
+            crop_img = context.image(f"crop_{i}")
+            if crop_img is not None:
+                meta = context.object(f"metadata_{i}") or {}
+                label = meta.get("class") or f"Object {i + 1}"
+                score = meta.get("score")
+                cap = label if score is None else f"{label} ({score:.2f})"
+                images.append((crop_img.image, cap))
+        return ReportSection(
+            stage_name=self.name,
+            title="Object Segmentation",
+            body=(
+                "Foreground objects were detected and segmented from the input image. "
+                "Each detected object is isolated as a masked crop for downstream 3D "
+                "reconstruction. The segmentation uses SAM-based instance segmentation "
+                "to produce clean per-object masks with associated bounding boxes and "
+                "confidence scores."
+            ),
+            images=images,
+            stats={"Objects detected": str(count)},
+        )
+
     def clean_up(self):
         if self._seg is not None:
             self._seg.close()
