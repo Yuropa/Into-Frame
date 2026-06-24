@@ -312,7 +312,7 @@ class TerrainMeshGenerator:
                 order=1,
                 mode="nearest",
             ).astype(np.float32)
-            certainty *= (obs > 0.0).astype(np.float32)
+            certainty *= obs.clip(0.0, 1.0)
 
         return color, certainty.reshape(tex_size, tex_size)
 
