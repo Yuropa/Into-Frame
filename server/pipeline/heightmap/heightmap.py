@@ -27,6 +27,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         camera_height_meters: float = 1.0,
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
+        nadir_exclusion_radius: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -47,6 +48,11 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.flood_fill = flood_fill
         # Maximum Y change (metres) between adjacent grid cells during flood-fill.
         self.flood_fill_max_step = flood_fill_max_step
+        # Equirectangular depth near the nadir (directly below camera) is unreliable —
+        # the panoramic distortion is worst there and depth models have poor coverage.
+        # Ground pixels with horizontal distance < this radius are excluded; they are
+        # filled later by interpolation from the surrounding reliable ring.
+        self.nadir_exclusion_radius = nadir_exclusion_radius
 
 
 class HeightMapStage(PipelineStage):
@@ -106,7 +112,13 @@ class HeightMapStage(PipelineStage):
         if sky_mask is not None:
             self.log_info("Using sky mask to exclude horizon artefacts")
 
-        if panorama_depth is not None:
+        # When the primary depth is already equirectangular (depth_key == PANORAMA_DEPTH),
+        # using the same map as the panorama fill source would silently undo the flood-fill:
+        # cells rejected for having bad depth values would be re-projected with those same
+        # bad values. Skip the fill in that case; interpolation handles the gaps instead.
+        fill_panorama_depth = panorama_depth if depth_key != ContextKey.PANORAMA_DEPTH else None
+
+        if fill_panorama_depth is not None:
             self.log_info("Panorama depth available — will fill unseen terrain regions")
 
         if region_type_mask is not None:
@@ -124,8 +136,9 @@ class HeightMapStage(PipelineStage):
             sky_mask=sky_mask,
             flood_fill=cfg.flood_fill,
             flood_fill_max_step=cfg.flood_fill_max_step,
-            panorama_depth=panorama_depth,
+            panorama_depth=fill_panorama_depth,
             region_type_mask=region_type_mask,
+            nadir_exclusion_radius=cfg.nadir_exclusion_radius,
         )
         self.advance_progress(task)
 

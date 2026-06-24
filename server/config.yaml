@@ -62,6 +62,9 @@ stages:
                                  # sky-pixel artefacts near the horizon, and as the flood-fill reference.
     flood_fill: true             # BFS from grid centre outward; stops at height jumps and sky gaps
     flood_fill_max_step: 1.5    # max Y change (metres) between adjacent cells in the flood-fill
+    nadir_exclusion_radius: 1.0 # metres: discard near-nadir equirectangular pixels within this
+                                 # radius of the camera; their depth is unreliable and projects
+                                 # directly below the user, creating a spurious bowl/valley.
 
   - name: Region Map
     stage: RegionMapStage

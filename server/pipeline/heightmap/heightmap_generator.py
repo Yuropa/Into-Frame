@@ -31,6 +31,7 @@ class HeightMapGenerator:
         flood_fill_max_step: float = 1.5,
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
+        nadir_exclusion_radius: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
@@ -56,6 +57,14 @@ class HeightMapGenerator:
         panorama_depth: optional 360° equirectangular depth map (radial metres). After
                         the primary depth is projected and flood-filled, any still-empty
                         grid cells are filled from this source before interpolation.
+        nadir_exclusion_radius: when use_equirectangular=True, ground pixels whose
+                                horizontal distance from the camera is less than this
+                                value (metres) are discarded.  Equirectangular depth
+                                models are unreliable near the nadir (bottom of the
+                                panorama), where distortion peaks; those bad estimates
+                                project directly under the camera and generate a deep
+                                bowl.  The excluded cells are later filled by
+                                interpolation from the surrounding reliable ring.
         """
         d = depth.depth.astype(np.float32)
 
@@ -91,6 +100,14 @@ class HeightMapGenerator:
             & (np.abs(X) <= half)
             & np.isfinite(d)
         )
+
+        # Equirectangular depth near the nadir is unreliable — the panoramic distortion
+        # is worst there and depth models are rarely trained on near-nadir ground views.
+        # Exclude pixels whose projected horizontal distance is below the exclusion radius;
+        # those cells will be filled by interpolation from the surrounding reliable ring.
+        if use_equirectangular and nadir_exclusion_radius > 0:
+            r_xz = np.sqrt(X ** 2 + Z ** 2)
+            ground_mask &= r_xz >= nadir_exclusion_radius
 
         # Restrict to reliable region types. Vegetation and built structures
         # occlude the ground plane, so their depth cannot be trusted for terrain.
