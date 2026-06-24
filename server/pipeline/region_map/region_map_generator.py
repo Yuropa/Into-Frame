@@ -202,9 +202,11 @@ class RegionMapGenerator:
                 np.nan,
             )
 
-        theta = (cols / w - 0.5) * 2.0 * np.pi  # longitude: 0 = +Z (forward)
-        Xs = depths * np.sin(theta)
-        Zs = depths * np.cos(theta)
+        phi_sil = (0.5 - sample_rows / h) * np.pi   # elevation angle at ridgeline row
+        cos_phi_sil = np.cos(phi_sil)               # horizontal scale factor
+        theta = (cols / w - 0.5) * 2.0 * np.pi     # longitude: 0 = +Z (forward)
+        Xs = depths * cos_phi_sil * np.sin(theta)
+        Zs = depths * cos_phi_sil * np.cos(theta)
 
         half = grid_size_meters / 2.0
         in_bounds = (

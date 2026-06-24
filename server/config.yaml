@@ -73,7 +73,7 @@ stages:
   - name: Linear Structures
     stage: LinearStructureStage
     enabled: true
-    modify_rivers: true   # carve valley into height map along detected rivers
+    modify_rivers: false  # carve valley into height map along detected rivers
     modify_roads: true    # gently flatten height map along detected roads
 
   - name: Terrain Reconstruction
