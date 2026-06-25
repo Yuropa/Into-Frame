@@ -433,9 +433,9 @@ class HeightMapGenerator:
             ds_vals = np.where(ds_mask, ds, 0.0)
 
             if ZI is None:
-                # Coarsest level: diffuse from known cells to establish structure
-                # before any noise is added, matching pixels2peaks inpaint_noise.
-                ZI = diffuse_heightmap(ds_vals, ds_mask, n_iters=max(200, sh * 4))
+                # Coarsest level: seed from nearest known neighbour so diffusion
+                # starts at the last-seen boundary height, not the global mean.
+                ZI = diffuse_heightmap(ds_vals, ds_mask, n_iters=max(200, sh * 4), seed_from='nearest')
             else:
                 # Upsample bicubically and inject noise with cubic amplitude scaling.
                 # Cubic front-loads structure at coarse levels; fine levels are near
@@ -446,7 +446,8 @@ class HeightMapGenerator:
                 ZI = np.where(ds_mask, ds_vals, ZI_up + noise)
 
             n_iters = max(20, sh * 2 if octave == n_octaves - 1 else sh // 4)
-            ZI = diffuse_heightmap(ZI, ds_mask, n_iters=n_iters)
+            # 'keep': preserve the upsampled+noise state already set above.
+            ZI = diffuse_heightmap(ZI, ds_mask, n_iters=n_iters, seed_from='keep')
 
         # Restore original known values exactly — diffusion must not drift them.
         return np.where(known_mask, height_map, ZI).astype(np.float32)
