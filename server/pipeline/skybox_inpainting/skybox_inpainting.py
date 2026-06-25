@@ -117,10 +117,22 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
+        # Replace non-sky pixels with the average sky color before inpainting so
+        # LaMa and Flux never see landscape content as context — they only extend
+        # from actual sky, preventing the hallucinated-landscape problem.
+        sky_pixels = source_arr[sky_mask]
+        sky_fill = sky_pixels.mean(axis=0).astype(np.uint8) if len(sky_pixels) > 0 else np.array([135, 206, 235], dtype=np.uint8)
+        context_arr = source_arr.copy()
+        context_arr[fill_mask] = sky_fill
+        context_pil = PILImage.fromarray(context_arr)
+
+        if self.output is not None:
+            context_pil.save(self.output / "context.png")
+
         # Phase 1: LaMa — structural fill of the full panorama.
         self.log_info(f"LaMa: full panorama ({w}×{h}px)")
         lama = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.LAMA)
-        lama_pil = lama.inpaint(source_pil, fill_mask_pil, temp_path=self.temp)
+        lama_pil = lama.inpaint(context_pil, fill_mask_pil, temp_path=self.temp)
         lama.close()
         lama_arr = np.array(lama_pil)
 
@@ -161,19 +173,16 @@ class SkyboxInpaintingStage(PipelineStage):
         if self.output is not None:
             flux_pil.save(self.output / "flux.png")
 
-        # Composite: keep original sky pixels exactly; blend fill mask boundary.
+        # Feather the LaMa↔Flux blend across the dilated mask boundary.
+        # No hard sky restore — the dilation zone (a thin ring of sky near the
+        # boundary) is intentionally replaced by generated content for a seamless
+        # seam. Pure sky pixels far from the boundary are preserved by LaMa.
         feather_radius = max(8, min(w, h) // 100)
         feathered = np.array(
             fill_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
         ).astype(np.float32)[..., np.newaxis] / 255.0
 
-        # Blend against the LaMa fill (not the original) so the feather zone doesn't
-        # reveal removed content at the seam.
-        blended_arr = (lama_arr * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
-
-        # Restore original sky pixels unchanged.
-        sky_3d = sky_mask[..., np.newaxis]
-        result_arr = np.where(sky_3d, source_arr, blended_arr).astype(np.uint8)
+        result_arr = (lama_arr * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
 
         result_pil = PILImage.fromarray(result_arr)
         if self.output is not None:

@@ -156,6 +156,8 @@ stages:
 
   - name: Scene Generation
     stage: SceneGenerationStage
+    keys:
+      panorama: panorama_sky
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting
