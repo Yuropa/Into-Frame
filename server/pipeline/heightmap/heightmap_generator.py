@@ -7,7 +7,11 @@ from scipy.ndimage import gaussian_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
-from util.projection_utils import ground_projection_certainty, project_panorama_to_ground_grid
+from util.projection_utils import (
+    ground_projection_certainty,
+    inverse_map_panorama_to_grid,
+    nearest_sample_grid,
+)
 from util.terrain_noise_utils import diffuse_heightmap
 from scene.camera import CameraIntrinsics
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
@@ -71,18 +75,54 @@ class HeightMapGenerator:
                                 interpolation from the surrounding reliable ring.
         """
         d = depth.depth.astype(np.float32)
-
-        # Mask sky pixels before projection. Sky pixels assigned far depth (e.g. 100 m)
-        # project near the horizon at Y ≈ -camera_height, polluting the height grid.
-        if sky_mask is not None and sky_mask.shape == d.shape:
-            d = d.copy()
-            d[sky_mask] = np.nan
-
         h, w = d.shape
+        half = grid_size_meters / 2.0
+        ground_y_min = -(camera_height_meters + 5.0)
 
         if use_equirectangular:
-            X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+            # Inverse mapping: for each grid cell, look up the panorama pixel that
+            # would observe a ground point there, then sample depth directly.
+            # Every cell gets exactly one clean lookup, avoiding the spatial stretching
+            # that plagues forward projection near the horizon.
+            d_masked = d.copy()
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                d_masked[sky_mask] = np.nan
+
+            sampled_depth, pano_u, pano_v, X_grid, Z_grid = inverse_map_panorama_to_grid(
+                Depth(d_masked), grid_size_meters, grid_resolution, camera_height_meters
+            )
+            r_grid = np.sqrt(
+                X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
+            ).astype(np.float32)
+            phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+            Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
+
+            valid = (
+                np.isfinite(sampled_depth) & (sampled_depth > 0)
+                & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)
+            )
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                valid &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
+            if region_type_mask is not None:
+                rm = np.round(region_type_mask).astype(np.int32)
+                if rm.shape != d.shape:
+                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+                valid &= np.isin(nearest_sample_grid(rm, pano_u, pano_v), _VALID_REGION_INDICES)
+            if nadir_exclusion_radius > 0:
+                valid &= r_grid >= nadir_exclusion_radius
+
+            if not np.any(valid):
+                zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+                return zeros, zeros.copy()
+
+            height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
+            height_map[valid] = Y_grid[valid]
+
         else:
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                d = d.copy()
+                d[sky_mask] = np.nan
+
             cx = np.arange(w, dtype=np.float32)
             cy = np.arange(h, dtype=np.float32)
             cx, cy = np.meshgrid(cx, cy)
@@ -90,66 +130,40 @@ class HeightMapGenerator:
             Y = -((cy - intrinsics.py) * d / intrinsics.fy)
             Z = d
 
-        half = grid_size_meters / 2.0
+            ground_mask = (
+                (Y <= ground_y_max) & (Y >= ground_y_min)
+                & (np.abs(Z) <= half) & (np.abs(X) <= half)
+                & np.isfinite(d)
+            )
+            if region_type_mask is not None:
+                rm = np.round(region_type_mask).astype(np.int32)
+                if rm.shape != d.shape:
+                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+                ground_mask &= np.isin(rm, _VALID_REGION_INDICES)
 
-        # Floor filter: sky pixels assigned ~100 m depth project to Y << -camera_height.
-        # Allowing ±5 m of terrain variation around the expected ground plane catches
-        # hills and slopes while excluding any sky artefacts that slipped through.
-        ground_y_min = -(camera_height_meters + 5.0)
+            Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
+            if len(Xg) == 0:
+                zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+                return zeros, zeros.copy()
 
-        ground_mask = (
-            (Y <= ground_y_max)
-            & (Y >= ground_y_min)
-            & (np.abs(Z) <= half)
-            & (np.abs(X) <= half)
-            & np.isfinite(d)
-        )
+            x_edges = np.linspace(-half, half, grid_resolution + 1)
+            z_edges = np.linspace(-half, half, grid_resolution + 1)
+            xi = np.digitize(Xg, x_edges) - 1
+            zi = np.digitize(Zg, z_edges) - 1
+            in_bounds = (
+                (xi >= 0) & (xi < grid_resolution)
+                & (zi >= 0) & (zi < grid_resolution)
+            )
+            xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
 
-        # Equirectangular depth near the nadir is unreliable — the panoramic distortion
-        # is worst there and depth models are rarely trained on near-nadir ground views.
-        # Exclude pixels whose projected horizontal distance is below the exclusion radius;
-        # those cells will be filled by interpolation from the surrounding reliable ring.
-        if use_equirectangular and nadir_exclusion_radius > 0:
-            r_xz = np.sqrt(X ** 2 + Z ** 2)
-            ground_mask &= r_xz >= nadir_exclusion_radius
+            height_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
+            height_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
+            np.add.at(height_sum, (zi, xi), Yg)
+            np.add.at(height_cnt, (zi, xi), 1)
 
-        # Restrict to reliable region types. Vegetation and built structures
-        # occlude the ground plane, so their depth cannot be trusted for terrain.
-        if region_type_mask is not None:
-            rm = np.round(region_type_mask).astype(np.int32)
-            if rm.shape != d.shape:
-                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-            valid_region = np.isin(rm, _VALID_REGION_INDICES)
-            ground_mask &= valid_region
-
-        Xg = X[ground_mask]
-        Yg = Y[ground_mask]
-        Zg = Z[ground_mask]
-
-        if len(Xg) == 0:
-            zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-            return zeros, zeros.copy()
-
-        x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(-half, half, grid_resolution + 1)
-
-        xi = np.digitize(Xg, x_edges) - 1
-        zi = np.digitize(Zg, z_edges) - 1
-
-        in_bounds = (
-            (xi >= 0) & (xi < grid_resolution)
-            & (zi >= 0) & (zi < grid_resolution)
-        )
-        xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
-
-        height_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
-        height_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
-        np.add.at(height_sum, (zi, xi), Yg)
-        np.add.at(height_cnt, (zi, xi), 1)
-
-        height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
-        has_data = height_cnt > 0
-        height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
+            height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
+            has_data = height_cnt > 0
+            height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
 
         # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
         # the starting point with small height steps are kept; everything else is set to
@@ -172,6 +186,7 @@ class HeightMapGenerator:
                 grid_resolution=grid_resolution,
                 ground_y_max=ground_y_max,
                 ground_y_min=ground_y_min,
+                camera_height_meters=camera_height_meters,
                 region_type_mask=region_type_mask,
             )
 
@@ -288,19 +303,20 @@ class HeightMapGenerator:
         grid_resolution: int,
         ground_y_max: float,
         ground_y_min: float,
+        camera_height_meters: float,
         region_type_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
-        Project a 360° equirectangular depth map into empty (NaN) cells of height_map.
-
-        Only cells that are already NaN are written; existing data is never overwritten.
+        Fill empty (NaN) grid cells from a 360° equirectangular depth map via inverse
+        mapping.  Existing data is never overwritten.
         """
         missing = np.isnan(height_map)
         if not np.any(missing):
             return height_map
 
-        # Build a combined exclusion mask: sky pixels plus any unreliable region types.
-        excl_mask = sky_mask
+        d_excl = panorama_depth.depth.astype(np.float32).copy()
+        if sky_mask is not None and sky_mask.shape == d_excl.shape:
+            d_excl[sky_mask] = np.nan
         if region_type_mask is not None:
             pd = panorama_depth.depth
             rm = np.round(region_type_mask).astype(np.int32)
@@ -309,29 +325,23 @@ class HeightMapGenerator:
             valid_region = np.zeros(pd.shape, dtype=bool)
             for idx in _VALID_REGION_INDICES:
                 valid_region |= (rm == idx)
-            invalid_region = ~valid_region
-            excl_mask = invalid_region if sky_mask is None else (sky_mask | invalid_region)
+            d_excl[~valid_region] = np.nan
 
-        xi, zi, _, Yg, _ = project_panorama_to_ground_grid(
-            panorama_depth=panorama_depth,
-            grid_size_meters=grid_size_meters,
-            grid_resolution=grid_resolution,
-            ground_y_max=ground_y_max,
-            ground_y_min=ground_y_min,
-            sky_mask=excl_mask,
+        sampled_depth, _, _, X_grid, Z_grid = inverse_map_panorama_to_grid(
+            Depth(d_excl), grid_size_meters, grid_resolution, camera_height_meters
         )
+        r_grid = np.sqrt(
+            X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
+        ).astype(np.float32)
+        phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+        Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
 
-        if len(xi) == 0:
-            return height_map
-
-        pano_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
-        pano_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
-        np.add.at(pano_sum, (zi, xi), Yg)
-        np.add.at(pano_cnt, (zi, xi), 1)
-
-        has_pano = (pano_cnt > 0) & missing
+        pano_valid = (
+            np.isfinite(sampled_depth) & (sampled_depth > 0)
+            & (Y_grid >= ground_y_min) & (Y_grid <= ground_y_max)
+        )
         result = height_map.copy()
-        result[has_pano] = (pano_sum[has_pano] / pano_cnt[has_pano]).astype(np.float32)
+        result[missing & pano_valid] = Y_grid[missing & pano_valid]
         return result
 
     @staticmethod
