@@ -43,6 +43,7 @@ class ContextKey:
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
     MOUNTAIN_RIDGE_CHAINS = "mountain_ridge_chains"
+    PANORAMA_HORIZON = "panorama_horizon"
     WATER_CHAINS = "water_chains"
     INTERIOR_PEAKS = "interior_peaks"
     WATER_SKELETON = "water_skeleton"
@@ -52,7 +53,7 @@ class ContextKey:
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
-    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "panorama_sky", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "mountain_ridge_chains", "water_chains", "interior_peaks", "water_skeleton", "road_skeleton", "trail_skeleton", "height_map_certainty", "region_map_certainty", "terrain_texture", "terrain_texture_certainty"]
+    Type = Literal["input", "depth", "scene", "intrinsics", "panorama", "panorama_terrain", "panorama_sky", "input_caption", "panorama_cubemap", "count", "foreground_masked_image", "panorama_depth", "panorama_sky_mask", "height_map", "height_map_params", "terrain_mesh", "lighting", "recognize_tags", "object_correlation", "object_distribution", "linear_graph", "panorama_regions", "panorama_region_type_map", "region_map", "mountain_silhouette", "mountain_ridge_chains", "panorama_horizon", "water_chains", "interior_peaks", "water_skeleton", "road_skeleton", "trail_skeleton", "height_map_certainty", "region_map_certainty", "terrain_texture", "terrain_texture_certainty"]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
 

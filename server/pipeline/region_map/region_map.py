@@ -151,10 +151,37 @@ class RegionMapStage(PipelineStage):
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
         self.advance_progress(task)
 
+        # Panorama-space horizon silhouette — sky/terrain boundary in equirectangular
+        # pixel coordinates, stored at the segmentation model's native resolution.
+        _sky_above = np.zeros(type_idx_map.shape, dtype=bool)
+        _sky_above[1:] = (type_idx_map == sky_idx)[:-1]
+        horizon_mask = ((type_idx_map != sky_idx) & _sky_above).astype(np.float32)
+        context.add_depth(ContextKey.PANORAMA_HORIZON, Depth(horizon_mask))
+        self.log_info(f"Panorama horizon: {int(horizon_mask.sum())} pixels")
+        if self.temp is not None:
+            PILImage.fromarray((horizon_mask * 255).astype(np.uint8)).save(
+                self.temp / "panorama_horizon.png"
+            )
+
         # Interior peaks — depth jumps + Canny/corners on RGB to find elevated
         # terrain features that appear against background terrain, not against sky.
         panorama_img = context.input_image(ContextKey.PANORAMA)
         panorama_rgb = np.array(panorama_img.rgb()) if panorama_img is not None else None
+        if self.temp is not None and panorama_rgb is not None:
+            from PIL import Image as _PILImage
+            import cv2 as _cv2
+            h_pano, w_pano = panorama_rgb.shape[:2]
+            h_seg, w_seg = horizon_mask.shape
+            if (h_seg, w_seg) != (h_pano, w_pano):
+                hm_up = _cv2.resize(
+                    horizon_mask, (w_pano, h_pano), interpolation=_cv2.INTER_NEAREST
+                )
+            else:
+                hm_up = horizon_mask
+            overlay = panorama_rgb.copy()
+            overlay[hm_up > 0] = [255, 60, 60]
+            _PILImage.fromarray(overlay).save(self.temp / "panorama_horizon_overlay.png")
+
         interior_peaks = RegionMapGenerator.extract_interior_peaks(
             type_idx_map=type_idx_map,
             panorama_depth=panorama_depth,
