@@ -9,6 +9,7 @@ jaxtyping>=0.2.31
 kornia
 loralib>=0.1.2
 matplotlib>=3.5.0
+noise
 numpy>=2
 opencv-python>=4.8.0
 pandas>=2.0.0
