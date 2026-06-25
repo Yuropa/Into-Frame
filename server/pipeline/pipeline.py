@@ -46,6 +46,7 @@ from pipeline.terrain.terrain_texture_bake import TerrainTextureBakeStage, Terra
 from pipeline.terrain.terrain_texture_refinement import TerrainTextureRefinementStage, TerrainTextureRefinementConfiguration
 from pipeline.linear_structures.linear_structures import LinearStructureStage, LinearStructureConfiguration
 from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, TerrainReconstructionConfiguration
+from pipeline.terrain.terrain_noise_refinement import TerrainNoiseRefinementStage
 from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
 from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
 from pipeline.report.report import ReportGenerationStage
@@ -325,6 +326,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectDistributionStage": ObjectDistributionStage,
     "LinearStructureStage": LinearStructureStage,
     "TerrainReconstructionStage": TerrainReconstructionStage,
+    "TerrainNoiseRefinementStage": TerrainNoiseRefinementStage,
     "PanoramaRegionStage": PanoramaRegionStage,
     "RegionMapStage": RegionMapStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,

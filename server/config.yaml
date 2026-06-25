@@ -75,9 +75,9 @@ stages:
 
   - name: Linear Structures
     stage: LinearStructureStage
-    enabled: true
-    modify_rivers: false  # carve valley into height map along detected rivers
-    modify_roads: true    # gently flatten height map along detected roads
+    enabled: false
+    modify_rivers: false
+    modify_roads: false
 
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
@@ -90,6 +90,19 @@ stages:
     river_drop_per_segment: 0.05 # metres drop per ordered polyline segment
     river_sigma: 10.0            # Gaussian falloff radius in pixels
     solver_iter_lim: 500         # LSQR iteration cap
+
+  - name: Terrain Noise Refinement
+    stage: TerrainNoiseRefinementStage
+    road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
+    road_blur_sigma: 2.0          # pixel radius for softening road mask edges
+    road_terrain_smooth_sigma: 3.0 # smoothing radius for the graded road proxy
+    noise_scale: 40.0             # Perlin frequency (larger = broader features)
+    noise_octaves: 4              # fractal octave count
+    noise_amplitude: 0.4          # metres of peak noise displacement
+    noise_gradient_k: 0.3         # slope magnitude (hm units/px) that halves noise
+    weathering_iterations: 5      # thermal weathering passes
+    weathering_rate: 0.15         # fraction of Laplacian delta redistributed per pass
+    talus_threshold: 0.05         # Laplacian magnitude (m) that triggers weathering
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
