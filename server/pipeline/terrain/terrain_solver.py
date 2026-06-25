@@ -36,6 +36,7 @@ class TerrainSolver:
         heightmap: np.ndarray,
         confidence: np.ndarray,
         laplacian_weight: float = 0.1,
+        data_weight: float = 1.0,
         iter_lim: int = 500,
     ):
         """
@@ -44,6 +45,13 @@ class TerrainSolver:
             confidence:       (H, W) float32 — per-pixel confidence in [0, 1].
                               1.0 = do not move; 0.0 = free to change.
             laplacian_weight: weight for the smoothness term.
+            data_weight:      multiplier on the confidence map for the data term.
+                              Reduce below 1.0 to treat the initial height map as
+                              a weak prior — unobserved cells (confidence ≈ 0) get
+                              no data term at all and are shaped by the Laplacian
+                              and feature constraints instead. Values around 0.3
+                              leave high-confidence observed cells influential while
+                              letting feature constraints (ridges, rivers) dominate.
             iter_lim:         maximum LSQR iterations.
         """
         self._hm = heightmap.astype(np.float64)
@@ -51,6 +59,7 @@ class TerrainSolver:
         self._H, self._W = heightmap.shape
         self._N = self._H * self._W
         self._lap_w = laplacian_weight
+        self._data_weight = data_weight
         self._iter_lim = iter_lim
 
         # Triplet accumulator: (local_row_indices, col_indices, values, n_rows)
@@ -82,15 +91,16 @@ class TerrainSolver:
     def _build_data_term(self) -> None:
         conf_flat = self._conf.ravel()
         orig_flat = self._hm.ravel()
-        # Floor at laplacian_weight (not near-zero) so unobserved cells stay close to
-        # their interpolated values. A floor of 1e-4 with lap_w=0.1 leaves unobserved
-        # cells ~1000× under-constrained relative to the Laplacian; LSQR starting from
-        # zero drifts the entire unobserved region away from the pre-solver values before
-        # converging, creating bowl/ring artifacts. Equal footing (floor = lap_w) keeps
-        # the interpolated surface intact while still allowing feature constraints to act.
-        w = np.maximum(conf_flat, self._lap_w)
-        n = self._N
-        self._add_block(np.arange(n), np.arange(n), w, w * orig_flat)
+        # Scale confidence by data_weight. Cells with negligible weight (unobserved /
+        # interpolated) are skipped entirely so they are shaped by the Laplacian and
+        # feature constraints rather than being anchored to noisy interpolated values.
+        w = conf_flat * self._data_weight
+        active = w > 1e-4
+        if not active.any():
+            return
+        idxs = np.where(active)[0]
+        n = len(idxs)
+        self._add_block(np.arange(n), idxs, w[active], w[active] * orig_flat[active])
 
     def _build_laplacian_term(self) -> None:
         if self._lap_w <= 0.0:
@@ -453,6 +463,94 @@ class TerrainSolver:
             np.full(n, weight),
             np.full(n, weight * level),
         )
+
+    def add_ridge_polyline_anchored(
+        self,
+        points_xyz: np.ndarray,
+        grid_size_meters: float,
+        weight: float = 1.0,
+        crest_height: float = 0.5,
+        sigma: float = 20.0,
+        anchor_weight: float = 5.0,
+        anchor_stride: int = 5,
+    ) -> None:
+        """
+        Ridge constraint with Gaussian cross-section profile + absolute elevation
+        anchors derived from observed 3D depth.
+
+        points_xyz:    (N, 3) world (X, Y, Z). Y is the camera-relative elevation
+                       of the ridge crest from panorama silhouette depth.
+        anchor_stride: pin every nth chain point to avoid over-constraining noisy
+                       depth estimates along the silhouette.
+        """
+        if len(points_xyz) < 2:
+            return
+        H, W = self._H, self._W
+        x_half = z_far = grid_size_meters / 2.0
+
+        col = np.clip((points_xyz[:, 0] + x_half) / grid_size_meters * (W - 1), 0, W - 1)
+        row = np.clip((points_xyz[:, 2] + z_far)  / (2.0 * z_far)  * (H - 1), 0, H - 1)
+        pts_rc = np.stack([row, col], axis=1)
+
+        lr, cols, vals, rhs = self._perpendicular_profile_constraints(
+            pts_rc, H, W, weight, crest_height, sigma, sign=+1
+        )
+        self._add_block(lr, cols, vals, rhs)
+
+        anchor_idxs = np.arange(0, len(points_xyz), anchor_stride)
+        if len(anchor_idxs) == 0:
+            return
+        r_anch = np.clip(np.round(row[anchor_idxs]).astype(int), 0, H - 1)
+        c_anch = np.clip(np.round(col[anchor_idxs]).astype(int), 0, W - 1)
+        elev   = points_xyz[anchor_idxs, 1].astype(np.float64)
+        idxs   = r_anch * W + c_anch
+        n      = len(idxs)
+        w_arr  = np.full(n, float(anchor_weight))
+        self._add_block(np.arange(n), idxs, w_arr, w_arr * elev)
+
+    def add_river_polyline_anchored(
+        self,
+        points_xyz: np.ndarray,
+        grid_size_meters: float,
+        weight: float = 1.0,
+        valley_depth: float = 0.5,
+        sigma: float = 10.0,
+        anchor_weight: float = 2.0,
+        anchor_stride: int = 5,
+    ) -> None:
+        """
+        River valley constraint with Gaussian cross-section + absolute water-surface
+        elevation anchors derived from observed panorama depth.
+
+        points_xyz:    (N, 3) world (X, Y, Z) ordered upstream → downstream. Y is
+                       the camera-relative water surface elevation.
+        anchor_weight: intentionally lower than ridge anchors — water surface depth
+                       estimation is less reliable than sky-terrain silhouette depth.
+        """
+        if len(points_xyz) < 2:
+            return
+        H, W = self._H, self._W
+        x_half = z_far = grid_size_meters / 2.0
+
+        col = np.clip((points_xyz[:, 0] + x_half) / grid_size_meters * (W - 1), 0, W - 1)
+        row = np.clip((points_xyz[:, 2] + z_far)  / (2.0 * z_far)  * (H - 1), 0, H - 1)
+        pts_rc = np.stack([row, col], axis=1)
+
+        lr, cols_arr, vals, rhs = self._perpendicular_profile_constraints(
+            pts_rc, H, W, weight, valley_depth, sigma, sign=-1
+        )
+        self._add_block(lr, cols_arr, vals, rhs)
+
+        anchor_idxs = np.arange(0, len(points_xyz), anchor_stride)
+        if len(anchor_idxs) == 0:
+            return
+        r_anch = np.clip(np.round(row[anchor_idxs]).astype(int), 0, H - 1)
+        c_anch = np.clip(np.round(col[anchor_idxs]).astype(int), 0, W - 1)
+        elev   = points_xyz[anchor_idxs, 1].astype(np.float64)
+        idxs   = r_anch * W + c_anch
+        n      = len(idxs)
+        w_arr  = np.full(n, float(anchor_weight))
+        self._add_block(np.arange(n), idxs, w_arr, w_arr * elev)
 
     # ── Solve ─────────────────────────────────────────────────────────────────
 

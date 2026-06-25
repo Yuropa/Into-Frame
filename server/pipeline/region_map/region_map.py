@@ -133,7 +133,7 @@ class RegionMapStage(PipelineStage):
         terrain_px = int((type_idx_map == terrain_idx).sum())
         unique_types_pano = [RegionType(i).label for i in np.unique(type_idx_map) if i < len(RegionType)]
         self.log_info(f"Ridgeline inputs: {sky_px} sky px, {terrain_px} terrain px — types in panorama: {unique_types_pano}")
-        silhouette_grid = RegionMapGenerator.extract_mountain_ridgeline(
+        silhouette_grid, ridge_chains = RegionMapGenerator.extract_mountain_ridgeline(
             type_idx_map=type_idx_map,
             panorama_depth=panorama_depth,
             sky_idx=sky_idx,
@@ -142,8 +142,9 @@ class RegionMapStage(PipelineStage):
             grid_resolution=cfg.grid_resolution,
         )
         context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
+        context.add_object(ContextKey.MOUNTAIN_RIDGE_CHAINS, ridge_chains)
         silhouette_px = int(silhouette_grid.sum())
-        self.log_info(f"Mountain silhouette: {silhouette_px} grid cells")
+        self.log_info(f"Mountain silhouette: {silhouette_px} grid cells, {len(ridge_chains)} ridge chain(s)")
         if self.temp is not None:
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)
@@ -186,6 +187,18 @@ class RegionMapStage(PipelineStage):
                 rgb[skeleton > 0] = color
                 PILImage.fromarray(rgb).save(self.temp / filename)
 
+        water_chains = RegionMapGenerator.extract_water_chains(
+            type_idx_map=type_idx_map,
+            panorama_depth=panorama_depth,
+            water_idx=int(RegionType.WATER),
+            grid_size_meters=cfg.grid_size_meters,
+            grid_resolution=cfg.grid_resolution,
+            ground_y_max=cfg.ground_y_max,
+            camera_height_meters=cfg.camera_height_meters,
+        )
+        context.add_object(ContextKey.WATER_CHAINS, water_chains)
+        self.log_info(f"Water chains: {len(water_chains)}")
+
         self.finish_progress(task)
         return context
 
@@ -194,6 +207,8 @@ class RegionMapStage(PipelineStage):
         return (
             context.depth(output_key) is not None
             and context.depth(ContextKey.MOUNTAIN_SILHOUETTE) is not None
+            and context.object(ContextKey.MOUNTAIN_RIDGE_CHAINS) is not None
+            and context.object(ContextKey.WATER_CHAINS) is not None
             and context.depth(ContextKey.INTERIOR_PEAKS) is not None
             and context.depth(ContextKey.WATER_SKELETON) is not None
             and context.depth(ContextKey.ROAD_SKELETON) is not None

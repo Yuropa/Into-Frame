@@ -13,7 +13,9 @@ Reads:
   ContextKey.HEIGHT_MAP_CERTAINTY    (Depth)         — per-pixel confidence [0, 1]
   ContextKey.HEIGHT_MAP_PARAMS       (dict)          — grid_size_meters, etc.
   ContextKey.LINEAR_GRAPH            (LinearGraph)   — world-space polylines
-  ContextKey.MOUNTAIN_SILHOUETTE     (Depth)         — binary ridge grid
+  ContextKey.MOUNTAIN_SILHOUETTE     (Depth)         — binary ridge grid (fallback)
+  ContextKey.MOUNTAIN_RIDGE_CHAINS   (list[ndarray]) — (M,3) XYZ ridge polylines
+  ContextKey.WATER_CHAINS            (list[ndarray]) — (M,3) XYZ water polylines
 
 Writes:
   ContextKey.HEIGHT_MAP              (Depth)         — refined DEM
@@ -41,24 +43,36 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         laplacian_weight: float = 0.1,
+        heightmap_data_weight: float = 0.3,
         ridge_weight: float = 2.0,
         ridge_crest_height: float = 0.5,
         ridge_sigma: float = 15.0,
+        ridge_anchor_weight: float = 5.0,
+        ridge_anchor_stride: int = 5,
         river_weight: float = 2.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         river_sigma: float = 10.0,
+        river_anchor_weight: float = 2.0,
+        river_anchor_stride: int = 5,
+        lake_y_range_threshold: float = 0.3,
         solver_iter_lim: int = 500,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.laplacian_weight = laplacian_weight
+        self.heightmap_data_weight = heightmap_data_weight
         self.ridge_weight = ridge_weight
         self.ridge_crest_height = ridge_crest_height
         self.ridge_sigma = ridge_sigma
+        self.ridge_anchor_weight = ridge_anchor_weight
+        self.ridge_anchor_stride = ridge_anchor_stride
         self.river_weight = river_weight
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.river_sigma = river_sigma
+        self.river_anchor_weight = river_anchor_weight
+        self.river_anchor_stride = river_anchor_stride
+        self.lake_y_range_threshold = lake_y_range_threshold
         self.solver_iter_lim = solver_iter_lim
 
 
@@ -105,34 +119,52 @@ class TerrainReconstructionStage(PipelineStage):
         self.advance_progress(task)
 
         # ── Build solver ──────────────────────────────────────────────────────
+        self.log_info(f"Terrain reconstruction: heightmap_data_weight={cfg.heightmap_data_weight}")
         solver = TerrainSolver(
             heightmap=heightmap,
             confidence=confidence,
             laplacian_weight=cfg.laplacian_weight,
+            data_weight=cfg.heightmap_data_weight,
             iter_lim=cfg.solver_iter_lim,
         )
 
-        # ── Ridge constraints from mountain silhouette ────────────────────────
-        sil_depth = context.input_depth(ContextKey.MOUNTAIN_SILHOUETTE)
-        n_ridge = 0
-        if sil_depth is not None:
-            sil = sil_depth.depth
-            # Resize silhouette to height-map dimensions if needed
-            if sil.shape != (H, W):
-                from PIL import Image as PILImage
-                sil_img = PILImage.fromarray((sil > 0).astype(np.uint8) * 255)
-                sil_img = sil_img.resize((W, H), resample=PILImage.NEAREST)
-                sil = np.asarray(sil_img).astype(np.float32) / 255.0
-
-            ridge_mask = sil > 0
-            n_ridge = int(ridge_mask.sum())
-            if n_ridge > 0:
-                solver.add_ridge_mask(
-                    ridge_mask,
+        # ── Ridge constraints ─────────────────────────────────────────────────
+        # Prefer depth-anchored 3D chains; fall back to binary mask when absent.
+        ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
+        n_ridge_chains = 0
+        n_ridge_mask_cells = 0
+        if ridge_chains:
+            for chain in ridge_chains:
+                if len(chain) < 2:
+                    continue
+                solver.add_ridge_polyline_anchored(
+                    chain,
+                    grid_size,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
                     sigma=cfg.ridge_sigma,
+                    anchor_weight=cfg.ridge_anchor_weight,
+                    anchor_stride=cfg.ridge_anchor_stride,
                 )
+                n_ridge_chains += 1
+        else:
+            sil_depth = context.input_depth(ContextKey.MOUNTAIN_SILHOUETTE)
+            if sil_depth is not None:
+                sil = sil_depth.depth
+                if sil.shape != (H, W):
+                    from PIL import Image as PILImage
+                    sil_img = PILImage.fromarray((sil > 0).astype(np.uint8) * 255)
+                    sil_img = sil_img.resize((W, H), resample=PILImage.NEAREST)
+                    sil = np.asarray(sil_img).astype(np.float32) / 255.0
+                ridge_mask = sil > 0
+                n_ridge_mask_cells = int(ridge_mask.sum())
+                if n_ridge_mask_cells > 0:
+                    solver.add_ridge_mask(
+                        ridge_mask,
+                        weight=cfg.ridge_weight,
+                        crest_height=cfg.ridge_crest_height,
+                        sigma=cfg.ridge_sigma,
+                    )
         self.advance_progress(task)
 
         # ── River constraints from LinearGraph ────────────────────────────────
@@ -144,7 +176,6 @@ class TerrainReconstructionStage(PipelineStage):
                 if structure.type != "river":
                     continue
                 path = structure.path  # (K, 3) world (x, y, z)
-                # Convert world XZ → height-map (row, col)
                 col = np.clip((path[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
                 row = np.clip((path[:, 2] + z_far) / (2.0 * z_far) * (H - 1), 0, H - 1)
                 pts = np.stack([row, col], axis=1)
@@ -156,11 +187,44 @@ class TerrainReconstructionStage(PipelineStage):
                     sigma=cfg.river_sigma,
                 )
                 n_rivers += 1
+
+        # ── Water chains from panorama depth ─────────────────────────────────
+        water_chains = context.input_object(ContextKey.WATER_CHAINS) or []
+        n_water_chains = 0
+        for chain in water_chains:
+            if len(chain) < 2:
+                continue
+            y_range = float(chain[:, 1].max() - chain[:, 1].min())
+            if y_range < cfg.lake_y_range_threshold:
+                # Flat water body: pin to median surface elevation uniformly.
+                flat_chain = chain.copy()
+                flat_chain[:, 1] = float(np.median(chain[:, 1]))
+                solver.add_river_polyline_anchored(
+                    flat_chain,
+                    grid_size,
+                    weight=cfg.river_weight,
+                    valley_depth=0.0,
+                    sigma=cfg.river_sigma,
+                    anchor_weight=cfg.river_anchor_weight * 2.0,
+                    anchor_stride=cfg.river_anchor_stride,
+                )
+            else:
+                solver.add_river_polyline_anchored(
+                    chain,
+                    grid_size,
+                    weight=cfg.river_weight,
+                    valley_depth=cfg.river_valley_depth,
+                    sigma=cfg.river_sigma,
+                    anchor_weight=cfg.river_anchor_weight,
+                    anchor_stride=cfg.river_anchor_stride,
+                )
+            n_water_chains += 1
         self.advance_progress(task)
 
         self.log_info(
             f"Terrain reconstruction: {H}×{W} grid, "
-            f"{n_ridge} ridge cells, {n_rivers} river paths"
+            f"{n_ridge_chains} ridge chain(s) / {n_ridge_mask_cells} mask cells, "
+            f"{n_rivers} linear-graph river(s), {n_water_chains} water chain(s)"
         )
 
         # ── Solve ─────────────────────────────────────────────────────────────

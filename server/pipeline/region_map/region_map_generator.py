@@ -160,7 +160,7 @@ class RegionMapGenerator:
         dilation_iters: int = 3,
         connect_radius_px: int = 30,
         chain_smooth_window: int = 15,
-    ) -> np.ndarray:
+    ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column, sample depth just below it,
         and project to a top-down grid using actual XZ positions.
@@ -173,15 +173,20 @@ class RegionMapGenerator:
         For each panorama column, finds the first non-sky row below sky, then
         samples depth depth_offset_rows below that boundary (where depth estimators
         are more reliable than at the exact edge). NaN depth values are interpolated
-        from neighboring columns. Each valid column is unprojected to XZ and placed
+        from neighboring columns. Each valid column is unprojected to XYZ and placed
         in the grid — close mountains land near the centre, distant ones near the edge.
 
         Projected points are chained via greedy nearest-neighbour search within
         connect_radius_px grid cells, then smoothed with a moving average of width
         chain_smooth_window, and finally rasterised with filled line segments so the
         result is a continuous ridge rather than isolated scattered pixels.
+        Disconnected ridge segments produce separate chains.
 
-        Returns float32 (grid_resolution, grid_resolution) binary mask.
+        Returns (grid, chains) where:
+          grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).
+          chains — list of (M, 3) float32 arrays of world (X, Y, Z) per ridge chain,
+                   where Y is the camera-relative elevation of the ridge crest
+                   (Y = depth * sin(phi), positive = above camera).
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
@@ -230,72 +235,241 @@ class RegionMapGenerator:
             & (np.abs(Xs) <= half)
             & (np.abs(Zs) <= half)
         )
+        # Camera-relative Y at each valid silhouette point: depth * sin(phi).
+        # Mountains above horizon have phi > 0, so Ys > 0 (above camera).
+        Ys_valid = depths[in_bounds] * np.sin(phi_sil[in_bounds])
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
 
         if len(Xs) == 0:
-            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+            return np.zeros((grid_resolution, grid_resolution), dtype=np.float32), []
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)
 
-        # ── Greedy nearest-neighbour chain ────────────────────────────────────
-        # Depth noise projects consecutive panorama columns to scattered XZ
-        # positions.  Walk the points in order, always stepping to the closest
-        # unvisited neighbour within connect_radius_px grid cells, so the result
-        # is a single connected path rather than isolated pixels.
+        # ── Multi-chain greedy nearest-neighbour ──────────────────────────────
+        # Build one chain per connected ridge segment. Each restart seeds from
+        # the next unvisited point, capturing separate mountains in one pass.
         from scipy.spatial import KDTree as _KDTree
         from scipy.ndimage import uniform_filter1d as _uf1d
 
         cell_m = grid_size_meters / grid_resolution
         connect_m = connect_radius_px * cell_m
 
-        pts = np.stack([Xs.astype(np.float64), Zs.astype(np.float64)], axis=-1)
-        tree = _KDTree(pts)
-        visited = np.zeros(len(pts), dtype=bool)
-        visited[0] = True
-        chain = [0]
+        pts   = np.stack([Xs.astype(np.float64), Zs.astype(np.float64)], axis=-1)
+        pts_y = Ys_valid.astype(np.float64)
+        tree  = _KDTree(pts)
 
-        while True:
-            curr = chain[-1]
-            idxs = tree.query_ball_point(pts[curr], connect_m)
-            candidates = [i for i in idxs if not visited[i]]
-            if not candidates:
-                break
-            dists = np.linalg.norm(pts[candidates] - pts[curr], axis=1)
-            nxt = candidates[int(np.argmin(dists))]
-            chain.append(nxt)
-            visited[nxt] = True
+        all_chains_data: list[tuple[np.ndarray, np.ndarray]] = []
+        remaining = set(range(len(pts)))
 
-        chain_pts = pts[chain].copy()   # (M, 2) ordered metres
+        while remaining:
+            seed = next(iter(remaining))
+            remaining.discard(seed)
+            chain = [seed]
 
-        # ── Smooth the chain to remove per-column depth jitter ────────────────
-        if len(chain_pts) >= 3 and chain_smooth_window > 1:
-            win = min(chain_smooth_window, len(chain_pts))
-            chain_pts[:, 0] = _uf1d(chain_pts[:, 0], size=win)
-            chain_pts[:, 1] = _uf1d(chain_pts[:, 1], size=win)
+            while True:
+                curr = chain[-1]
+                idxs = tree.query_ball_point(pts[curr], connect_m)
+                candidates = [i for i in idxs if i in remaining]
+                if not candidates:
+                    break
+                dists = np.linalg.norm(pts[candidates] - pts[curr], axis=1)
+                nxt = candidates[int(np.argmin(dists))]
+                chain.append(nxt)
+                remaining.discard(nxt)
 
-        # ── Rasterise as connected line segments ──────────────────────────────
-        xi_c = np.clip(np.digitize(chain_pts[:, 0], x_edges) - 1, 0, grid_resolution - 1).astype(int)
-        zi_c = np.clip(np.digitize(chain_pts[:, 1], z_edges) - 1, 0, grid_resolution - 1).astype(int)
+            if len(chain) < 3:
+                continue
 
+            chain_xz  = pts[chain].copy()
+            chain_y   = pts_y[chain].copy()
+
+            if chain_smooth_window > 1:
+                win = min(chain_smooth_window, len(chain))
+                chain_xz[:, 0] = _uf1d(chain_xz[:, 0], size=win)
+                chain_xz[:, 1] = _uf1d(chain_xz[:, 1], size=win)
+                chain_y        = _uf1d(chain_y, size=win)
+
+            all_chains_data.append((chain_xz, chain_y))
+
+        # ── Rasterise all chains into binary grid ─────────────────────────────
         grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-        for k in range(len(xi_c) - 1):
-            x0, z0 = xi_c[k],     zi_c[k]
-            x1, z1 = xi_c[k + 1], zi_c[k + 1]
-            n_steps = max(abs(x1 - x0), abs(z1 - z0), 1) + 1
-            xs_seg = np.round(np.linspace(x0, x1, n_steps)).astype(int)
-            zs_seg = np.round(np.linspace(z0, z1, n_steps)).astype(int)
-            valid = (xs_seg >= 0) & (xs_seg < grid_resolution) & (zs_seg >= 0) & (zs_seg < grid_resolution)
-            grid[zs_seg[valid], xs_seg[valid]] = 1.0
-        if len(xi_c) > 0:
-            grid[zi_c[-1], xi_c[-1]] = 1.0
+        for chain_xz, _ in all_chains_data:
+            xi_c = np.clip(np.digitize(chain_xz[:, 0], x_edges) - 1, 0, grid_resolution - 1).astype(int)
+            zi_c = np.clip(np.digitize(chain_xz[:, 1], z_edges) - 1, 0, grid_resolution - 1).astype(int)
+            for k in range(len(xi_c) - 1):
+                x0, z0 = xi_c[k],     zi_c[k]
+                x1, z1 = xi_c[k + 1], zi_c[k + 1]
+                n_steps = max(abs(x1 - x0), abs(z1 - z0), 1) + 1
+                xs_seg = np.round(np.linspace(x0, x1, n_steps)).astype(int)
+                zs_seg = np.round(np.linspace(z0, z1, n_steps)).astype(int)
+                valid_seg = (xs_seg >= 0) & (xs_seg < grid_resolution) & (zs_seg >= 0) & (zs_seg < grid_resolution)
+                grid[zs_seg[valid_seg], xs_seg[valid_seg]] = 1.0
+            if len(xi_c) > 0:
+                grid[zi_c[-1], xi_c[-1]] = 1.0
 
-        # Dilate to give the ridgeline coherent thickness for the terrain solver.
         if dilation_iters > 0:
             from scipy.ndimage import binary_dilation
             grid = binary_dilation(grid > 0, iterations=dilation_iters).astype(np.float32)
 
-        return grid
+        # ── Assemble XYZ chains ───────────────────────────────────────────────
+        xyz_chains: list[np.ndarray] = []
+        for chain_xz, chain_y in all_chains_data:
+            xyz_chains.append(np.stack([
+                chain_xz[:, 0].astype(np.float32),
+                chain_y.astype(np.float32),
+                chain_xz[:, 1].astype(np.float32),
+            ], axis=1))
+
+        return grid, xyz_chains
+
+    @staticmethod
+    def extract_water_chains(
+        type_idx_map: np.ndarray,
+        panorama_depth: Depth,
+        water_idx: int,
+        grid_size_meters: float = 100.0,
+        grid_resolution: int = 512,
+        ground_y_max: float = -0.5,
+        camera_height_meters: float = 1.0,
+        min_chain_len: int = 8,
+        smooth_radius: int = 20,
+        connect_radius_px: int = 10,
+        chain_smooth_window: int = 7,
+    ) -> list[np.ndarray]:
+        """
+        Extract water surface centerlines as ordered 3D polylines.
+
+        Projects water-classified pixels from the panorama to the top-down grid,
+        builds a skeleton of the water region, then chains skeleton cells into
+        ordered polylines. Each chain is oriented upstream → downstream (higher
+        camera-relative Y first: less-negative Y = higher terrain elevation).
+
+        Returns list of (M, 3) float32 arrays of world (X, Y, Z) in camera-relative
+        coordinates. Chains shorter than min_chain_len are discarded.
+        """
+        half = grid_size_meters / 2.0
+        ground_y_min = -(camera_height_meters + 5.0)
+
+        # Project water pixels to 3D; mask everything else.
+        d = panorama_depth.depth.astype(np.float32).copy()
+        d[type_idx_map != water_idx] = np.nan
+
+        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+
+        gnd = (
+            (Y <= ground_y_max)
+            & (Y >= ground_y_min)
+            & (np.abs(X) <= half)
+            & (np.abs(Z) <= half)
+            & np.isfinite(d)
+        )
+        Xg, Yg, Zg = X[gnd], Y[gnd], Z[gnd]
+        if len(Xg) == 0:
+            return []
+
+        x_edges = np.linspace(-half, half, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
+
+        xi = np.digitize(Xg, x_edges) - 1
+        zi = np.digitize(Zg, z_edges) - 1
+        in_b = (xi >= 0) & (xi < grid_resolution) & (zi >= 0) & (zi < grid_resolution)
+        xi, zi, Yg = xi[in_b], zi[in_b], Yg[in_b]
+
+        y_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
+        y_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
+        np.add.at(y_sum, (zi, xi), Yg)
+        np.add.at(y_cnt, (zi, xi), 1)
+
+        water_grid = y_cnt > 0
+        if not np.any(water_grid):
+            return []
+
+        y_mean = np.where(water_grid, y_sum / np.maximum(y_cnt, 1), np.nan)
+
+        # Skeletonize the projected water region.
+        from skimage.morphology import skeletonize as _skel, disk, binary_closing, binary_opening
+        mask = water_grid.copy()
+        if smooth_radius > 0:
+            d_morph = disk(smooth_radius)
+            mask = binary_closing(mask, d_morph)
+            mask = binary_opening(mask, d_morph)
+        skeleton = _skel(mask)
+
+        skel_zi, skel_xi = np.where(skeleton)
+        if len(skel_zi) == 0:
+            return []
+
+        cell_m = grid_size_meters / grid_resolution
+        skel_X = (skel_xi + 0.5) * cell_m - half
+        skel_Z = (skel_zi + 0.5) * cell_m - half
+        skel_Y = y_mean[skel_zi, skel_xi]
+
+        # Fill any NaN Y values via nearest-neighbor from valid skeleton cells.
+        nan_mask = ~np.isfinite(skel_Y)
+        if nan_mask.any() and (~nan_mask).any():
+            from scipy.spatial import cKDTree as _cKDTree
+            valid_xz  = np.stack([skel_X[~nan_mask], skel_Z[~nan_mask]], axis=1)
+            nan_xz    = np.stack([skel_X[nan_mask],  skel_Z[nan_mask]],  axis=1)
+            _, nn_idx = _cKDTree(valid_xz).query(nan_xz)
+            skel_Y = skel_Y.copy()
+            skel_Y[nan_mask] = skel_Y[~nan_mask][nn_idx]
+
+        if not np.all(np.isfinite(skel_Y)):
+            return []
+
+        # Chain skeleton points using greedy nearest-neighbor, multiple chains.
+        from scipy.spatial import KDTree as _KDTree
+        from scipy.ndimage import uniform_filter1d as _uf1d
+
+        pts   = np.stack([skel_X.astype(np.float64), skel_Z.astype(np.float64)], axis=1)
+        pts_y = skel_Y.astype(np.float64)
+        tree  = _KDTree(pts)
+        connect_m = connect_radius_px * cell_m
+
+        all_chains: list[np.ndarray] = []
+        remaining = set(range(len(pts)))
+
+        while remaining:
+            seed = next(iter(remaining))
+            remaining.discard(seed)
+            chain = [seed]
+
+            while True:
+                curr = chain[-1]
+                idxs = tree.query_ball_point(pts[curr], connect_m)
+                candidates = [i for i in idxs if i in remaining]
+                if not candidates:
+                    break
+                dists = np.linalg.norm(pts[candidates] - pts[curr], axis=1)
+                nxt = candidates[int(np.argmin(dists))]
+                chain.append(nxt)
+                remaining.discard(nxt)
+
+            if len(chain) < min_chain_len:
+                continue
+
+            chain_xz = pts[chain].copy()
+            chain_y  = pts_y[chain].copy()
+
+            if len(chain) >= 3 and chain_smooth_window > 1:
+                win = min(chain_smooth_window, len(chain))
+                chain_xz[:, 0] = _uf1d(chain_xz[:, 0], size=win)
+                chain_xz[:, 1] = _uf1d(chain_xz[:, 1], size=win)
+                chain_y        = _uf1d(chain_y, size=win)
+
+            # Orient upstream → downstream: higher Y (less negative) = higher elevation.
+            if chain_y[0] < chain_y[-1]:
+                chain_xz = chain_xz[::-1].copy()
+                chain_y  = chain_y[::-1].copy()
+
+            all_chains.append(np.stack([
+                chain_xz[:, 0].astype(np.float32),
+                chain_y.astype(np.float32),
+                chain_xz[:, 1].astype(np.float32),
+            ], axis=1))
+
+        return all_chains
 
     @staticmethod
     def extract_region_skeleton(
