@@ -141,6 +141,7 @@ class TerrainReconstructionStage(PipelineStage):
         if ridge_chains:
             x_half = z_far = grid_size / 2.0
             for chain in ridge_chains:
+                chain = np.asarray(chain, dtype=np.float32)
                 if len(chain) < 2:
                     continue
                 col = np.clip((chain[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
@@ -198,6 +199,7 @@ class TerrainReconstructionStage(PipelineStage):
         water_chains = context.input_object(ContextKey.WATER_CHAINS) or []
         n_water_chains = 0
         for chain in water_chains:
+            chain = np.asarray(chain, dtype=np.float32)
             if len(chain) < 2:
                 continue
             y_range = float(chain[:, 1].max() - chain[:, 1].min())
