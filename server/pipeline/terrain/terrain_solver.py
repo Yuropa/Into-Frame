@@ -584,5 +584,20 @@ class TerrainSolver:
 
         AtA = (A.T @ A).tocsr()
         Atb = A.T @ b
-        x = scipy.sparse.linalg.spsolve(AtA, Atb)
+
+        # Jacobi (diagonal) preconditioner — cheap to build, effective for
+        # Laplacian-regularized systems, avoids the O(N^1.5) fill-in that
+        # makes direct Cholesky factorization infeasible at 4096² resolution.
+        diag = AtA.diagonal()
+        diag = np.where(diag > 1e-12, diag, 1.0)
+        M = scipy.sparse.diags(1.0 / diag)
+
+        x, info = scipy.sparse.linalg.cg(AtA, Atb, M=M, maxiter=3000, tol=1e-5, atol=1e-5)
+        if info != 0:
+            import warnings
+            warnings.warn(
+                f"TerrainSolver CG did not converge (info={info}); result is approximate.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return x.reshape(self._H, self._W).astype(np.float32)
