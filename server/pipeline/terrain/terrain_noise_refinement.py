@@ -1,14 +1,17 @@
 """
 TerrainNoiseRefinementStage — post-reconstruction heightmap enhancement.
 
-Applies two passes after TerrainReconstructionStage:
+Applies three passes after TerrainReconstructionStage:
 
-  1. Road grading        : blends terrain with a locally smooth proxy along the
-                           detected road skeleton, simulating cut-and-fill.
-  2. Anisotropic noise   : Perlin noise modulated by the inverse gradient magnitude,
-     + thermal weathering  so cragginess builds on natural slopes but is muted on
-                           roads and river channels.  A Laplacian weathering pass
-                           then redistributes material from unstable slopes.
+  1. Road grading     : blends terrain with a locally smooth proxy along the
+                        detected road skeleton, simulating cut-and-fill.
+  2. fBm noise        : multi-octave Perlin (fractal Brownian motion) applied
+                        uniformly, creating rolling hills at the meso-scale
+                        (noise_scale controls the base wavelength).
+  3. Thermal erosion  : angle-of-repose erosion that moves material from slopes
+                        steeper than talus_threshold toward lower neighbours,
+                        rounding sharp peaks and depositing detritus on valley
+                        floors.
 
 Pipeline position: after TerrainReconstructionStage, before TerrainMeshStage.
 
@@ -22,7 +25,7 @@ Writes:
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, laplace
+from scipy.ndimage import gaussian_filter
 from typing import Any
 from logging import Logger
 
@@ -74,8 +77,8 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
 
 class TerrainNoiseRefinementStage(PipelineStage):
     """
-    Adds fine-grained surface detail and road grading to the reconstructed
-    heightmap without disturbing the solver's ridge/river constraints.
+    Adds meso-scale terrain variation and realistic slopes to the reconstructed
+    heightmap via fBm noise and angle-of-repose thermal erosion.
     """
 
     @classmethod
@@ -124,21 +127,27 @@ class TerrainNoiseRefinementStage(PipelineStage):
             self.log_info("Terrain noise refinement: no road skeleton, skipping road grading")
         self.advance_progress(task)
 
-        # ── Pass 2: Gradient-Weighted Perlin Noise ────────────────────────────
+        # ── Pass 2: fBm Noise ─────────────────────────────────────────────────
+        # Add Perlin fBm uniformly — no gradient suppression. Gradient suppression
+        # was muting noise on mountain slopes, making them look like flat mesas, and
+        # the previous noise_scale (80 px ≈ 4 m at 4.9 cm/cell) produced features
+        # far too small to be visible in a 200 m terrain.  Rolling hills need 50–100 m
+        # wavelengths; fine texture is added by higher octaves automatically.
         noise_layer = self._make_noise(H, W, cfg.noise_scale, cfg.noise_octaves, cfg.seed)
-
-        gy, gx = np.gradient(terrain)
-        slope_mag = np.sqrt(gx ** 2 + gy ** 2)
-        diffusion_coeff = np.exp(-(slope_mag / cfg.noise_gradient_k) ** 2)
-
-        terrain += noise_layer * diffusion_coeff * cfg.noise_amplitude
+        terrain += noise_layer * cfg.noise_amplitude
         self.advance_progress(task)
 
-        # ── Pass 3: Thermal Weathering ────────────────────────────────────────
-        for _ in range(cfg.weathering_iterations):
-            deltas = laplace(terrain)
-            erode_mask = np.abs(deltas) > cfg.talus_threshold
-            terrain[erode_mask] += deltas[erode_mask] * cfg.weathering_rate
+        # ── Pass 3: Thermal Erosion ───────────────────────────────────────────
+        # Real angle-of-repose erosion: move material from any slope that exceeds
+        # `talus_threshold` (m/cell) toward the lower neighbour.  This rounds off
+        # sharp peaks and deposits material on valley floors, unlike the previous
+        # Laplacian-diffusion approach which just smoothed everything uniformly.
+        terrain = TerrainNoiseRefinementStage._thermal_erode(
+            terrain,
+            n_iters=cfg.weathering_iterations,
+            rate=cfg.weathering_rate,
+            talus=cfg.talus_threshold,
+        )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))
 
@@ -157,6 +166,47 @@ class TerrainNoiseRefinementStage(PipelineStage):
 
         self.finish_progress(task)
         return context
+
+    @staticmethod
+    def _thermal_erode(
+        terrain: np.ndarray,
+        n_iters: int,
+        rate: float,
+        talus: float,
+    ) -> np.ndarray:
+        """
+        Angle-of-repose thermal erosion.
+
+        For every pair of adjacent cells whose height difference exceeds `talus`
+        (in heightmap units per grid cell), a fraction `rate` of the excess is
+        moved from the higher cell to the lower one.  Repeated many times this
+        rounds sharp peaks into smooth slopes and deposits detritus on valley
+        floors, without the uniform blurring produced by Laplacian diffusion.
+
+        talus: maximum stable slope in metres per grid cell.
+               At 4.9 cm/cell, talus=0.025 ≈ 27° (natural loose-rock slope).
+        rate:  fraction of excess moved per iteration (keep < 0.25 for stability).
+        """
+        terrain = terrain.copy()
+        for _ in range(n_iters):
+            north = np.vstack([terrain[:1, :],  terrain[:-1, :]])
+            south = np.vstack([terrain[1:, :],  terrain[-1:, :]])
+            west  = np.hstack([terrain[:, :1],  terrain[:, :-1]])
+            east  = np.hstack([terrain[:, 1:],  terrain[:, -1:]])
+
+            dn = np.maximum(0.0, terrain - north - talus)
+            ds = np.maximum(0.0, terrain - south - talus)
+            dw = np.maximum(0.0, terrain - west  - talus)
+            de = np.maximum(0.0, terrain - east  - talus)
+
+            # Remove from high cells and deposit on their lower neighbours.
+            terrain -= (dn + ds + dw + de) * rate
+            terrain[:-1, :] += dn[1:, :]  * rate   # north neighbour receives
+            terrain[1:,  :] += ds[:-1, :] * rate   # south neighbour receives
+            terrain[:, :-1] += dw[:, 1:]  * rate   # west  neighbour receives
+            terrain[:, 1:]  += de[:, :-1] * rate   # east  neighbour receives
+
+        return terrain
 
     @staticmethod
     def _make_noise(H: int, W: int, scale: float, octaves: int, seed: int) -> np.ndarray:
