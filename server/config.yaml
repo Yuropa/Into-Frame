@@ -24,7 +24,6 @@ stages:
 
   - name: Panorama Supersampling
     stage: SupersamplingStage
-    enabled: false
     keys:
       input: panorama
       output: panorama
@@ -38,11 +37,9 @@ stages:
 
   - name: Skybox Inpainting
     stage: SkyboxInpaintingStage
-    enabled: false
 
   - name: Panorama Lighting
     stage: PanoramaLightingStage
-    enabled: false
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
@@ -99,13 +96,13 @@ stages:
     road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
     road_blur_sigma: 4.0          # pixel radius for softening road mask edges (×2 for 4.9 cm/cell)
     road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy (×2 for 4.9 cm/cell)
-    noise_scale: 1200.0           # fBm base wavelength in pixels (~59 m at 4.9 cm/cell → rolling hills)
-    noise_octaves: 6              # fractal octave count (6 gives detail down to ~2 m)
-    noise_amplitude: 3.0          # metres of peak fBm displacement (visible rolling hills)
-    noise_gradient_k: 0.15        # retained for API compat; no longer used for suppression
-    weathering_iterations: 50     # thermal erosion passes (enough to round sharp peaks)
-    weathering_rate: 0.05         # fraction of excess slope moved per pass (keep < 0.25)
-    talus_threshold: 0.025        # max stable slope in m/cell (≈27° at 4.9 cm/cell)
+    noise_scale: 80.0             # Perlin frequency in pixels (×2 for 4.9 cm/cell → same ~4 m features)
+    noise_octaves: 4              # fractal octave count
+    noise_amplitude: 0.4          # metres of peak noise displacement
+    noise_gradient_k: 0.15        # slope (hm units/px) that halves noise (×0.5 for 4.9 cm/cell)
+    weathering_iterations: 5      # thermal weathering passes
+    weathering_rate: 0.15         # fraction of Laplacian delta redistributed per pass
+    talus_threshold: 0.012        # Laplacian magnitude that triggers weathering (÷4 for 4.9 cm/cell)
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
@@ -132,31 +129,24 @@ stages:
 
   - name: Object Segmentation
     stage: SegmentationStage
-    enabled: false
 
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
-    enabled: false
 
   - name: Object Typing
     stage: ObjectTypingStage
-    enabled: false
 
   - name: Object Recognition
     stage: RecognizeAnythingStage
-    enabled: false
 
   - name: Object Detection
     stage: ObjectDetectionStage
-    enabled: false
 
   - name: Object Correlation
     stage: ObjectCorrelationStage
-    enabled: false
 
   - name: Object Distribution
     stage: ObjectDistributionStage
-    enabled: false
     bin_count: 48
     # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
 
@@ -201,4 +191,3 @@ stages:
 
   - name: Report
     stage: ReportGenerationStage
-    enabled: false
