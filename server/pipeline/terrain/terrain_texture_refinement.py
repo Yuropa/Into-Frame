@@ -68,7 +68,6 @@ class TerrainTextureRefinementStage(PipelineStage):
         super().__init__(config)
         self._inpainter: Optional[InPainting] = None
         self._sampler: Optional[ImageSupersampling] = None
-        self._ss_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureRefinementConfiguration = self.config
@@ -103,7 +102,8 @@ class TerrainTextureRefinementStage(PipelineStage):
         prompt = self._build_prompt(context)
 
         if self._inpainter is None:
-            self._inpainter = InPainting(self.device, self.torch_dtype, cfg.inpainting_type)
+            inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
+            self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
 
         inpainted_pil = self._inpainter.inpaint(
             input_image=texture_pil,
@@ -131,7 +131,8 @@ class TerrainTextureRefinementStage(PipelineStage):
 
         # ── Supersample 1k → 2k ──────────────────────────────────────────────
         if self._sampler is None:
-            self._sampler = ImageSupersampling(self._ss_device)
+            ss_device, _ = preferred_device(DeviceStrategy.MEMORY)
+            self._sampler = ImageSupersampling(ss_device)
 
         supersampled = self._sampler.supersample(Image(blended_pil), self.temp)
         self.log_info(
