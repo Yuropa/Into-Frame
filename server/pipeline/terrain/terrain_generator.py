@@ -219,7 +219,7 @@ class TerrainMeshGenerator:
         height_map: np.ndarray,
         x_half: float,
         z_far: float,
-        tex_size: int = 1024,
+        tex_size: int = 4096,
     ) -> PIL.Image.Image:
         """
         Rasterise the panorama into a top-down orthographic texture.
@@ -253,7 +253,7 @@ class TerrainMeshGenerator:
         height_map: np.ndarray,
         x_half: float,
         z_far: float,
-        tex_size: int = 1024,
+        tex_size: int = 4096,
         height_certainty: Optional[np.ndarray] = None,
         nadir_cutoff_deg: float = -35.0,
         nadir_fade_deg: float = 10.0,

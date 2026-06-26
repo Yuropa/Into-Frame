@@ -17,7 +17,6 @@ import numpy as np
 import scipy.sparse
 import scipy.sparse.linalg
 from scipy.ndimage import distance_transform_edt
-from typing import Optional
 
 
 class TerrainSolver:
@@ -37,7 +36,6 @@ class TerrainSolver:
         confidence: np.ndarray,
         laplacian_weight: float = 0.1,
         data_weight: float = 1.0,
-        iter_lim: int = 500,
     ):
         """
         Args:
@@ -52,7 +50,6 @@ class TerrainSolver:
                               and feature constraints instead. Values around 0.3
                               leave high-confidence observed cells influential while
                               letting feature constraints (ridges, rivers) dominate.
-            iter_lim:         maximum LSQR iterations.
         """
         self._hm = heightmap.astype(np.float64)
         self._conf = np.clip(confidence, 0.0, 1.0).astype(np.float64)
@@ -60,7 +57,6 @@ class TerrainSolver:
         self._N = self._H * self._W
         self._lap_w = laplacian_weight
         self._data_weight = data_weight
-        self._iter_lim = iter_lim
 
         # Triplet accumulator: (local_row_indices, col_indices, values, n_rows)
         self._blocks: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
@@ -586,6 +582,7 @@ class TerrainSolver:
             shape=(row_offset, self._N),
         ).tocsr()
 
-        result = scipy.sparse.linalg.lsqr(A, b, iter_lim=self._iter_lim)
-        x = result[0]
+        AtA = (A.T @ A).tocsr()
+        Atb = A.T @ b
+        x = scipy.sparse.linalg.spsolve(AtA, Atb)
         return x.reshape(self._H, self._W).astype(np.float32)

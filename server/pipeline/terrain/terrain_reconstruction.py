@@ -56,7 +56,6 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         river_anchor_weight: float = 2.0,
         river_anchor_stride: int = 5,
         lake_y_range_threshold: float = 0.3,
-        solver_iter_lim: int = 500,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.laplacian_weight = laplacian_weight
@@ -73,7 +72,6 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.river_anchor_weight = river_anchor_weight
         self.river_anchor_stride = river_anchor_stride
         self.lake_y_range_threshold = lake_y_range_threshold
-        self.solver_iter_lim = solver_iter_lim
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -125,7 +123,6 @@ class TerrainReconstructionStage(PipelineStage):
             confidence=confidence,
             laplacian_weight=cfg.laplacian_weight,
             data_weight=cfg.heightmap_data_weight,
-            iter_lim=cfg.solver_iter_lim,
         )
 
         # ── Ridge constraints ─────────────────────────────────────────────────

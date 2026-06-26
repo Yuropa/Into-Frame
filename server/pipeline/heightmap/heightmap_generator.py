@@ -29,7 +29,7 @@ class HeightMapGenerator:
         depth: Depth,
         intrinsics: Optional[CameraIntrinsics],
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
         smooth_sigma: float = 0.0,

@@ -25,7 +25,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 1024,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         water_skeleton_smooth_radius: int = 40,

@@ -210,18 +210,51 @@ class TerrainNoiseRefinementStage(PipelineStage):
 
     @staticmethod
     def _make_noise(H: int, W: int, scale: float, octaves: int, seed: int) -> np.ndarray:
-        """Vectorized Perlin noise, offset by seed so each run is uncorrelated."""
-        from noise import pnoise2
+        """
+        fBm-like terrain noise via per-octave Gaussian-smoothed white noise.
 
-        offset_x = (seed * 0.3713) % 1024.0
-        offset_y = (seed * 0.1931) % 1024.0
+        For each octave, white noise is generated at a coarse grid sized so that
+        the Gaussian smoothing radius is always ~2 px, then bicubic-upsampled to
+        (H, W).  This is fully vectorized and runs in under a second at 4096²,
+        unlike the previous pnoise2 Python loop which iterated 16 M times.
+        """
+        import PIL.Image as _PIL
 
-        ii = (np.arange(H, dtype=np.float64) + offset_y) / scale
-        jj = (np.arange(W, dtype=np.float64) + offset_x) / scale
-        ig, jg = np.meshgrid(ii, jj, indexing="ij")
+        rng = np.random.default_rng(seed)
+        noise = np.zeros((H, W), dtype=np.float64)
+        amplitude = 1.0
+        total_amplitude = 0.0
 
-        fn = np.frompyfunc(lambda x, y: pnoise2(x, y, octaves=octaves), 2, 1)
-        noise = fn(ig.ravel(), jg.ravel()).astype(np.float64).reshape(H, W)
+        for octave in range(octaves):
+            sigma_px = scale / (2.0 ** octave)
+            if sigma_px < 1.0:
+                break
+
+            # Downsample so the target wavelength maps to ~2 px, smooth, upsample.
+            factor = max(1, int(sigma_px / 2.0))
+            oh = max(H // factor, 4)
+            ow = max(W // factor, 4)
+
+            raw = rng.standard_normal((oh, ow))
+            smoothed_small = gaussian_filter(raw, sigma=2.0, truncate=3.0)
+
+            if oh != H or ow != W:
+                img = _PIL.fromarray(smoothed_small.astype(np.float32))
+                img = img.resize((W, H), _PIL.BICUBIC)
+                smoothed = np.asarray(img).astype(np.float64)
+            else:
+                smoothed = smoothed_small.astype(np.float64)
+
+            s = float(smoothed.std())
+            if s > 1e-9:
+                smoothed /= s
+
+            noise += amplitude * smoothed
+            total_amplitude += amplitude
+            amplitude *= 0.5
+
+        if total_amplitude > 0:
+            noise /= total_amplitude
 
         lo, hi = noise.min(), noise.max()
         if hi > lo:
