@@ -25,7 +25,8 @@ def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Imag
 
 def _sky_prompt(sky_caption: str) -> str:
     return (
-        f"photorealistic panoramic sky, {sky_caption}, "
+        f"photorealistic 360-degree sky panorama, {sky_caption}, "
+        "sky fills entire frame in all directions, only sky and clouds visible, "
         "seamless, high quality, equirectangular"
     )
 
@@ -117,10 +118,21 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
+        # Pre-fill non-sky regions with the average sky color so that LaMa and Flux
+        # see sky everywhere as context, preventing them from generating terrain.
+        sky_pixels = source_arr[sky_mask]
+        sky_mean = sky_pixels.mean(axis=0).astype(np.uint8)
+        prefilled_arr = source_arr.copy()
+        prefilled_arr[~sky_mask] = sky_mean
+        prefilled_pil = PILImage.fromarray(prefilled_arr)
+
+        if self.output is not None:
+            prefilled_pil.save(self.output / "prefilled.png")
+
         # Phase 1: LaMa — structural fill of the full panorama.
         self.log_info(f"LaMa: full panorama ({w}×{h}px)")
         lama = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.LAMA)
-        lama_pil = lama.inpaint(source_pil, fill_mask_pil, temp_path=self.temp)
+        lama_pil = lama.inpaint(prefilled_pil, fill_mask_pil, temp_path=self.temp)
         lama.close()
         lama_arr = np.array(lama_pil)
 
