@@ -10,7 +10,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, distance_transform_edt
 
 
 def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Image:
@@ -118,12 +118,11 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
-        # Pre-fill non-sky regions with the average sky color so that LaMa and Flux
-        # see sky everywhere as context, preventing them from generating terrain.
-        sky_pixels = source_arr[sky_mask]
-        sky_mean = sky_pixels.mean(axis=0).astype(np.uint8)
-        prefilled_arr = source_arr.copy()
-        prefilled_arr[~sky_mask] = sky_mean
+        # Pre-fill non-sky regions by propagating the nearest sky pixel's color
+        # outward. This gives LaMa and Flux a smooth sky-colored context everywhere
+        # instead of a hard boundary, preventing them from generating terrain.
+        _, nearest_sky_idx = distance_transform_edt(~sky_mask, return_indices=True)
+        prefilled_arr = source_arr[nearest_sky_idx[0], nearest_sky_idx[1]]
         prefilled_pil = PILImage.fromarray(prefilled_arr)
 
         if self.output is not None:
