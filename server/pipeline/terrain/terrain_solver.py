@@ -592,7 +592,7 @@ class TerrainSolver:
         diag = np.where(diag > 1e-12, diag, 1.0)
         M = scipy.sparse.diags(1.0 / diag)
 
-        x, info = scipy.sparse.linalg.cg(AtA, Atb, M=M, maxiter=3000, tol=1e-5, atol=1e-5)
+        x, info = scipy.sparse.linalg.cg(AtA, Atb, M=M, maxiter=3000, rtol=1e-5)
         if info != 0:
             import warnings
             warnings.warn(
