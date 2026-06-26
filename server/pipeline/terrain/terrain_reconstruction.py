@@ -264,8 +264,7 @@ class TerrainReconstructionStage(PipelineStage):
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        # Always re-run if upstream changed; no independent cache key yet.
-        return False
+        return context.has_stage_output(ContextKey.HEIGHT_MAP)
 
     def model_names(self) -> list[str]:
         return []

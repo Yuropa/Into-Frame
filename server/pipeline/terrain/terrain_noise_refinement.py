@@ -262,7 +262,7 @@ class TerrainNoiseRefinementStage(PipelineStage):
         return noise
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return False
+        return context.has_stage_output(ContextKey.HEIGHT_MAP)
 
     def model_names(self) -> list[str]:
         return []
