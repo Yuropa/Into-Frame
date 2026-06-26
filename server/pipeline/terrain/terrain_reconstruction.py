@@ -56,7 +56,6 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         river_anchor_weight: float = 2.0,
         river_anchor_stride: int = 5,
         lake_y_range_threshold: float = 0.3,
-        solver_iter_lim: int = 500,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.laplacian_weight = laplacian_weight
@@ -73,7 +72,6 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.river_anchor_weight = river_anchor_weight
         self.river_anchor_stride = river_anchor_stride
         self.lake_y_range_threshold = lake_y_range_threshold
-        self.solver_iter_lim = solver_iter_lim
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -125,26 +123,35 @@ class TerrainReconstructionStage(PipelineStage):
             confidence=confidence,
             laplacian_weight=cfg.laplacian_weight,
             data_weight=cfg.heightmap_data_weight,
-            iter_lim=cfg.solver_iter_lim,
         )
 
         # ── Ridge constraints ─────────────────────────────────────────────────
-        # Prefer depth-anchored 3D chains; fall back to binary mask when absent.
+        # Prefer 3D chains; fall back to binary mask when absent.
+        # We do NOT use add_ridge_polyline_anchored because the ridge chain Y
+        # values come from equirectangular_pixels_to_world at the sky-terrain
+        # boundary: for mountains above the horizon phi>0 → Y = depth*sin(phi) > 0,
+        # while the ground heightmap sits at Y ≈ -camera_height. Using those large
+        # positive Y values as absolute anchors (with weight 5×) overwhelms the
+        # data term and creates mesa/spike artifacts instead of smooth slopes.
+        # The profile-only form lets the Laplacian + data term set the absolute
+        # level while the Gaussian cross-section shapes the ridge.
         ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
         n_ridge_chains = 0
         n_ridge_mask_cells = 0
         if ridge_chains:
+            x_half = z_far = grid_size / 2.0
             for chain in ridge_chains:
+                chain = np.asarray(chain, dtype=np.float32)
                 if len(chain) < 2:
                     continue
-                solver.add_ridge_polyline_anchored(
-                    chain,
-                    grid_size,
+                col = np.clip((chain[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
+                row = np.clip((chain[:, 2] + z_far) / (2.0 * z_far) * (H - 1), 0, H - 1)
+                pts_rc = np.stack([row, col], axis=1)
+                solver.add_ridge_polyline(
+                    pts_rc,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
                     sigma=cfg.ridge_sigma,
-                    anchor_weight=cfg.ridge_anchor_weight,
-                    anchor_stride=cfg.ridge_anchor_stride,
                 )
                 n_ridge_chains += 1
         else:
@@ -192,6 +199,7 @@ class TerrainReconstructionStage(PipelineStage):
         water_chains = context.input_object(ContextKey.WATER_CHAINS) or []
         n_water_chains = 0
         for chain in water_chains:
+            chain = np.asarray(chain, dtype=np.float32)
             if len(chain) < 2:
                 continue
             y_range = float(chain[:, 1].max() - chain[:, 1].min())
@@ -256,8 +264,7 @@ class TerrainReconstructionStage(PipelineStage):
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        # Always re-run if upstream changed; no independent cache key yet.
-        return False
+        return context.has_stage_output(ContextKey.HEIGHT_MAP)
 
     def model_names(self) -> list[str]:
         return []

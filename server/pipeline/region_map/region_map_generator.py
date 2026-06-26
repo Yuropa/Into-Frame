@@ -1,11 +1,18 @@
 import cv2
 import numpy as np
-from scipy.ndimage import distance_transform_edt, zoom
+from scipy.ndimage import zoom
 from typing import Optional
 
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
-from util.projection_utils import ground_projection_certainty
+from util.projection_utils import (
+    ground_projection_certainty,
+    equirectangular_pixels_to_world,
+    inverse_map_panorama_to_grid,
+    nearest_sample_grid,
+    project_panorama_to_ground_grid,
+)
+from util.grid_utils import confidence_flood_fill
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
@@ -15,24 +22,25 @@ class RegionMapGenerator:
         panorama_depth: Depth,
         type_idx_map: np.ndarray,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         sky_mask: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project per-pixel region type labels from an equirectangular panorama onto a
-        top-down grid, using the same XZ binning as the height map.
+        top-down grid via inverse mapping.
 
-        Each grid cell is assigned the majority region type among all ground-plane
-        pixels that project into it.  Empty cells are filled by nearest-neighbour
-        propagation from the closest labelled cell.
+        For each grid cell, the panorama pixel that corresponds to a flat ground point
+        at that cell's (X, Z) centre is computed analytically and the region type is
+        sampled there directly — one lookup per cell, no point-cloud scattering.
+        Empty cells (sky, invalid depth) are filled by confidence-weighted BFS: cells
+        close to the camera (high geometric certainty) propagate their type first.
 
         Returns (region_map, certainty_map):
-          region_map   — (grid_resolution, grid_resolution) uint8 of RegionType indices.
-          certainty_map — (grid_resolution, grid_resolution) float32 in [0, 1]: projection
-                         certainty (sin²(depression angle)) for cells with direct observations,
-                         0 for cells filled by nearest-neighbour propagation.
+          region_map    — (grid_resolution, grid_resolution) uint8 of RegionType indices.
+          certainty_map — (grid_resolution, grid_resolution) float32 in [0, 1]:
+                          sin²(depression angle) for directly observed cells, 0 for filled.
 
         Grid layout matches the height map: rows = Z near→far, cols = X left→right.
         """
@@ -40,112 +48,48 @@ class RegionMapGenerator:
         other_idx = RegionType.OTHER
 
         d = panorama_depth.depth.astype(np.float32)
+        # NaN sky pixels so bilinear sampling near the sky boundary doesn't blend
+        # sky depth values into ground cells.
+        d_masked = d.copy()
         if sky_mask is not None and sky_mask.shape == d.shape:
-            d = d.copy()
-            d[sky_mask] = np.nan
+            d_masked[sky_mask] = np.nan
 
-        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
-
-        ground_y_min = -(camera_height_meters + 5.0)
-        half = grid_size_meters / 2.0
-
-        ground_mask = (
-            (Y <= ground_y_max)
-            & (Y >= ground_y_min)
-            & (np.abs(X) <= half)
-            & (np.abs(Z) <= half)
-            & np.isfinite(d)
-            & (type_idx_map != sky_idx)
+        sampled_depth, pano_u, pano_v, X_grid, Z_grid = inverse_map_panorama_to_grid(
+            Depth(d_masked), grid_size_meters, grid_resolution, camera_height_meters
         )
 
-        if not np.any(ground_mask):
+        # Sample the discrete region type at each cell's panorama pixel.
+        type_sampled = nearest_sample_grid(type_idx_map, pano_u, pano_v).astype(np.uint8)
+
+        r_grid = np.sqrt(
+            X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
+        ).astype(np.float32)
+        phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+        Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
+
+        ground_y_min = -(camera_height_meters + 5.0)
+        has_data = (
+            np.isfinite(sampled_depth) & (sampled_depth > 0)
+            & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)
+            & (type_sampled != sky_idx)
+        )
+        if sky_mask is not None and sky_mask.shape == d.shape:
+            has_data &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
+
+        if not np.any(has_data):
             zero_certainty = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
             return np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8), zero_certainty
 
-        Xg = X[ground_mask]
-        Zg = Z[ground_mask]
-        Tg = type_idx_map[ground_mask]
-
-        x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(-half, half, grid_resolution + 1)
-
-        xi = np.digitize(Xg, x_edges) - 1
-        zi = np.digitize(Zg, z_edges) - 1
-
-        in_bounds = (
-            (xi >= 0) & (xi < grid_resolution)
-            & (zi >= 0) & (zi < grid_resolution)
-        )
-        xi, zi, Tg = xi[in_bounds], zi[in_bounds], Tg[in_bounds]
-
-        n_types = len(RegionType)
-        vote_counts = np.zeros((grid_resolution, grid_resolution, n_types), dtype=np.int32)
-        np.add.at(vote_counts, (zi, xi, Tg.astype(np.intp)), 1)
-
-        has_data = vote_counts.sum(axis=2) > 0
         region_map = np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8)
-        region_map[has_data] = vote_counts[has_data].argmax(axis=1).astype(np.uint8)
+        region_map[has_data] = type_sampled[has_data]
 
-        # Certainty: normalised geometric distortion × observation-density ratio.
-        #
-        # Geometric component — sin²(φ) = h²/(r²+h²) measures how much
-        # equirectangular projection distorts each cell.  With camera_height ≈ 1 m
-        # and a 100 m grid the raw values span four orders of magnitude (≈0.0001 at
-        # 50 m vs 1.0 directly below the camera), making the map unreadable.  We
-        # normalise to the *range of distortions actually present* in this scene so
-        # the least-distorted observed cell gets 1.0 and the most-distorted gets 0.0.
-        # This makes certainty relative to the scene rather than absolute.
-        #
-        # Observation-density component — compares the actual per-cell pixel count
-        # against the expected count if every ground point had an unobstructed view
-        # (expected ∝ geometric certainty).  Cells that received fewer observations
-        # than predicted are (partially) occluded → their certainty is scaled down.
-        # This is the "clear line of sight" factor.  NN-filled cells stay at 0.
-        x_centers = (x_edges[:-1] + x_edges[1:]) / 2.0
-        z_centers = (z_edges[:-1] + z_edges[1:]) / 2.0
-        X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
-        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height_meters)
+        certainty = np.where(
+            has_data,
+            ground_projection_certainty(X_grid, Z_grid, camera_height_meters),
+            0.0,
+        ).astype(np.float32)
 
-        obs_count = vote_counts.sum(axis=2).astype(np.float32)
-        if has_data.any():
-            # Log-normalise the geometric field within the observed region.
-            # sin²(φ) spans ~4 orders of magnitude across a 100 m grid, so a
-            # linear rescale still clusters everything near zero.  Taking -log
-            # converts the multiplicative range to an additive one and then we
-            # rescale so the least-distorted observed cell → 1.0 and the most
-            # distorted → 0.0.  This gives a perceptually even spread.
-            log_field = -np.log(np.maximum(certainty_field, 1e-9))
-            log_obs = log_field[has_data]
-            log_min, log_max = float(log_obs.min()), float(log_obs.max())
-            geom_normalised = 1.0 - (log_field - log_min) / max(log_max - log_min, 1e-9)
-            geom_normalised = np.clip(geom_normalised, 0.0, 1.0)
-
-            # Observation-density: actual pixel count vs. geometric expectation.
-            geom_sum = float(certainty_field[has_data].sum())
-            obs_sum = float(obs_count[has_data].sum())
-            scale = obs_sum / geom_sum if geom_sum > 0 else 1.0
-            expected = certainty_field * scale
-            obs_density = np.where(
-                has_data,
-                np.minimum(obs_count / np.maximum(expected, 1e-6), 1.0),
-                0.0,
-            )
-        else:
-            geom_normalised = certainty_field
-            obs_density = np.zeros_like(certainty_field)
-        certainty = np.where(has_data, geom_normalised * obs_density, 0.0).astype(np.float32)
-
-        return RegionMapGenerator._fill_nearest(region_map, has_data), certainty
-
-    @staticmethod
-    def _fill_nearest(region_map: np.ndarray, has_data: np.ndarray) -> np.ndarray:
-        empty = ~has_data
-        if not np.any(empty) or not np.any(has_data):
-            return region_map
-        _, indices = distance_transform_edt(empty, return_indices=True)
-        result = region_map.copy()
-        result[empty] = region_map[indices[0][empty], indices[1][empty]]
-        return result
+        return confidence_flood_fill(region_map, has_data, certainty), certainty
 
     @staticmethod
     def extract_mountain_ridgeline(
@@ -154,7 +98,7 @@ class RegionMapGenerator:
         sky_idx: int,
         terrain_idx: int = -1,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         depth_offset_rows: int = 3,
         depth_smooth_width: int = 15,
         dilation_iters: int = 3,
@@ -222,11 +166,7 @@ class RegionMapGenerator:
             _arr = np.where(np.isfinite(depths), depths, 0.0)
             depths = np.where(np.isfinite(depths), _med(_arr, size=depth_smooth_width, mode='nearest'), depths)
 
-        phi_sil = (0.5 - sample_rows / h) * np.pi   # elevation angle at ridgeline row
-        cos_phi_sil = np.cos(phi_sil)               # horizontal scale factor
-        theta = (cols / w - 0.5) * 2.0 * np.pi     # longitude: 0 = +Z (forward)
-        Xs = depths * cos_phi_sil * np.sin(theta)
-        Zs = depths * cos_phi_sil * np.cos(theta)
+        Xs, Ys, Zs = equirectangular_pixels_to_world(sample_rows, cols, depths, h, w)
 
         half = grid_size_meters / 2.0
         in_bounds = (
@@ -235,9 +175,8 @@ class RegionMapGenerator:
             & (np.abs(Xs) <= half)
             & (np.abs(Zs) <= half)
         )
-        # Camera-relative Y at each valid silhouette point: depth * sin(phi).
-        # Mountains above horizon have phi > 0, so Ys > 0 (above camera).
-        Ys_valid = depths[in_bounds] * np.sin(phi_sil[in_bounds])
+        # Mountains above the horizon have phi > 0, so Ys > 0 (above camera).
+        Ys_valid = Ys[in_bounds]
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
 
         if len(Xs) == 0:
@@ -329,7 +268,7 @@ class RegionMapGenerator:
         panorama_depth: Depth,
         water_idx: int,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         min_chain_len: int = 8,
@@ -352,29 +291,14 @@ class RegionMapGenerator:
         ground_y_min = -(camera_height_meters + 5.0)
 
         # Project water pixels to 3D; mask everything else.
-        d = panorama_depth.depth.astype(np.float32).copy()
-        d[type_idx_map != water_idx] = np.nan
+        d_water = panorama_depth.depth.astype(np.float32).copy()
+        d_water[type_idx_map != water_idx] = np.nan
 
-        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
-
-        gnd = (
-            (Y <= ground_y_max)
-            & (Y >= ground_y_min)
-            & (np.abs(X) <= half)
-            & (np.abs(Z) <= half)
-            & np.isfinite(d)
+        xi, zi, _, Yg, _ = project_panorama_to_ground_grid(
+            Depth(d_water), grid_size_meters, grid_resolution, ground_y_max, ground_y_min
         )
-        Xg, Yg, Zg = X[gnd], Y[gnd], Z[gnd]
-        if len(Xg) == 0:
+        if len(xi) == 0:
             return []
-
-        x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(-half, half, grid_resolution + 1)
-
-        xi = np.digitize(Xg, x_edges) - 1
-        zi = np.digitize(Zg, z_edges) - 1
-        in_b = (xi >= 0) & (xi < grid_resolution) & (zi >= 0) & (zi < grid_resolution)
-        xi, zi, Yg = xi[in_b], zi[in_b], Yg[in_b]
 
         y_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
         y_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
@@ -388,12 +312,12 @@ class RegionMapGenerator:
         y_mean = np.where(water_grid, y_sum / np.maximum(y_cnt, 1), np.nan)
 
         # Skeletonize the projected water region.
-        from skimage.morphology import skeletonize as _skel, disk, binary_closing, binary_opening
+        from skimage.morphology import skeletonize as _skel, disk, closing, opening
         mask = water_grid.copy()
         if smooth_radius > 0:
             d_morph = disk(smooth_radius)
-            mask = binary_closing(mask, d_morph)
-            mask = binary_opening(mask, d_morph)
+            mask = closing(mask, d_morph)
+            mask = opening(mask, d_morph)
         skeleton = _skel(mask)
 
         skel_zi, skel_xi = np.where(skeleton)
@@ -487,14 +411,14 @@ class RegionMapGenerator:
         larger values for area features like water bodies; smaller values for
         inherently linear features like roads and trails.
         """
-        from skimage.morphology import skeletonize as sk_skeletonize, disk, binary_closing, binary_opening
+        from skimage.morphology import skeletonize as sk_skeletonize, disk, closing, opening
         mask = region_map == type_idx
         if not np.any(mask):
             return np.zeros(region_map.shape, dtype=np.float32)
         if smooth_radius > 0:
             d = disk(smooth_radius)
-            mask = binary_closing(mask, d)
-            mask = binary_opening(mask, d)
+            mask = closing(mask, d)
+            mask = opening(mask, d)
         return sk_skeletonize(mask).astype(np.float32)
 
     @staticmethod
@@ -504,7 +428,7 @@ class RegionMapGenerator:
         sky_idx: int,
         panorama_rgb: Optional[np.ndarray] = None,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         depth_jump_rel: float = 0.20,
         canny_low: int = 50,
         canny_high: int = 150,
@@ -624,11 +548,7 @@ class RegionMapGenerator:
         depths = min_d[rows, cols]
 
         half = grid_size_meters / 2.0
-        theta = (cols / work_w - 0.5) * 2.0 * np.pi
-        phi   = (0.5 - rows / work_h) * np.pi
-        cos_phi = np.cos(phi)
-        Xs = depths * cos_phi * np.sin(theta)
-        Zs = depths * cos_phi * np.cos(theta)
+        Xs, _, Zs = equirectangular_pixels_to_world(rows, cols, depths, work_h, work_w)
 
         in_bounds = (
             np.isfinite(Xs) & np.isfinite(Zs)

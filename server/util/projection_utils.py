@@ -37,6 +37,133 @@ def ground_projection_certainty(
     return (h_sq / (r_sq + h_sq)).astype(np.float32)
 
 
+def equirectangular_pixels_to_world(
+    rows: np.ndarray,
+    cols: np.ndarray,
+    depths: np.ndarray,
+    pano_h: int,
+    pano_w: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert sparse equirectangular pixel coordinates + radial depth to world XYZ.
+
+    Useful when working with a selected subset of pixels (e.g. a silhouette row per
+    column, or detected edge pixels) rather than the full depth image.
+
+    rows, cols, depths: 1-D arrays of matching length.
+    Returns (X, Y, Z) float32 arrays in the same camera-relative convention as
+    equirectangular_unproject (theta=0 at +Z, +Y up).
+    """
+    theta   = (np.asarray(cols, dtype=np.float64) / pano_w - 0.5) * 2.0 * np.pi
+    phi     = (0.5 - np.asarray(rows, dtype=np.float64) / pano_h) * np.pi
+    cos_phi = np.cos(phi)
+    d       = np.asarray(depths, dtype=np.float64)
+    X = (d * cos_phi * np.sin(theta)).astype(np.float32)
+    Y = (d * np.sin(phi)).astype(np.float32)
+    Z = (d * cos_phi * np.cos(theta)).astype(np.float32)
+    return X, Y, Z
+
+
+def bilinear_sample_grid(
+    img: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> np.ndarray:
+    """
+    Bilinearly sample a 2-D float array at fractional pixel coordinates (u, v).
+    Wraps horizontally (equirectangular panorama convention); clamps vertically.
+    img: (H, W) float32-compatible.  u, v: arbitrary matching shape.
+    Returns float32 array with the same shape as u/v.
+    """
+    h, w = img.shape[:2]
+    u0 = np.floor(u).astype(np.int32)
+    v0 = np.floor(v).astype(np.int32)
+    fu = (u - np.floor(u)).astype(np.float32)
+    fv = (v - np.floor(v)).astype(np.float32)
+    u0w = u0 % w
+    u1w = (u0 + 1) % w
+    v0c = np.clip(v0, 0, h - 1)
+    v1c = np.clip(v0 + 1, 0, h - 1)
+    return (
+        img[v0c, u0w] * (1 - fu) * (1 - fv)
+        + img[v0c, u1w] * fu * (1 - fv)
+        + img[v1c, u0w] * (1 - fu) * fv
+        + img[v1c, u1w] * fu * fv
+    ).astype(np.float32)
+
+
+def nearest_sample_grid(
+    img: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+) -> np.ndarray:
+    """
+    Nearest-neighbour sample a 2-D array at pixel coordinates (u, v).
+    Wraps horizontally; clamps vertically.
+    """
+    h, w = img.shape[:2]
+    ui = np.round(u).astype(np.int32) % w
+    vi = np.clip(np.round(v).astype(np.int32), 0, h - 1)
+    return img[vi, ui]
+
+
+def inverse_map_panorama_to_grid(
+    panorama_depth: "Depth",
+    grid_size_meters: float,
+    grid_resolution: int,
+    camera_height_meters: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Inverse mapping from terrain grid cells to equirectangular panorama pixels.
+
+    For each cell in a (grid_resolution × grid_resolution) top-down grid, computes
+    the panorama column/row (u, v) that would observe a flat ground point at that
+    cell's (X, Z) centre from a camera at camera_height_meters above ground, then
+    bilinearly samples the radial depth there.
+
+    This is the inverse of forward projection: instead of scattering panorama pixels
+    outward onto an unorganised point cloud, every grid cell gets exactly one clean
+    depth lookup, eliminating the spatial stretching that affects near-horizon pixels.
+
+    Grid layout: rows index Z (near → far), cols index X (left → right).
+
+    Returns (sampled_depth, pano_u, pano_v, X_grid, Z_grid), each (G, G) float32:
+      sampled_depth — bilinear depth sample at each cell's panorama pixel (metres).
+      pano_u        — fractional panorama column for each cell.
+      pano_v        — fractional panorama row for each cell.
+      X_grid        — world X at each cell centre.
+      Z_grid        — world Z at each cell centre.
+    """
+    half = grid_size_meters / 2.0
+    cell_m = grid_size_meters / grid_resolution
+    x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
+    z_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
+    X_grid, Z_grid = np.meshgrid(x_c, z_c)  # rows = Z, cols = X
+
+    r_safe = np.sqrt(X_grid ** 2 + Z_grid ** 2)
+    np.maximum(r_safe, 1e-6, out=r_safe)
+
+    # Azimuth: 0 at +Z (forward), matches equirectangular_unproject convention.
+    theta = np.arctan2(X_grid, Z_grid)
+    # Depression angle: negative = below horizon, magnitude = atan(h / r).
+    phi = -np.arctan2(camera_height_meters, r_safe)
+
+    d = panorama_depth.depth.astype(np.float32)
+    pano_h, pano_w = d.shape
+
+    pano_u = ((theta / (2.0 * np.pi)) + 0.5) * pano_w  # col in [0, W]
+    pano_v = (0.5 - phi / np.pi) * pano_h               # row in [H/2, H]
+
+    sampled = bilinear_sample_grid(d, pano_u, pano_v)
+    return (
+        sampled.astype(np.float32),
+        pano_u.astype(np.float32),
+        pano_v.astype(np.float32),
+        X_grid.astype(np.float32),
+        Z_grid.astype(np.float32),
+    )
+
+
 def project_panorama_to_ground_grid(
     panorama_depth: Depth,
     grid_size_meters: float,

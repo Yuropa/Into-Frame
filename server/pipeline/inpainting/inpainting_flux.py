@@ -19,6 +19,7 @@ class InPaintingFlux:
         )
         
         offload_pipeline(device, self.pipeline)
+        self.pipeline.enable_vae_tiling()
         self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod

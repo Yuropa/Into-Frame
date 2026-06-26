@@ -1,4 +1,5 @@
 import json
+import warnings
 import numpy as np
 import PIL.Image
 from collections import deque
@@ -7,7 +8,11 @@ from scipy.ndimage import gaussian_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
-from util.projection_utils import ground_projection_certainty, project_panorama_to_ground_grid
+from util.projection_utils import (
+    ground_projection_certainty,
+    inverse_map_panorama_to_grid,
+    nearest_sample_grid,
+)
 from util.terrain_noise_utils import diffuse_heightmap
 from scene.camera import CameraIntrinsics
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
@@ -24,7 +29,7 @@ class HeightMapGenerator:
         depth: Depth,
         intrinsics: Optional[CameraIntrinsics],
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
         smooth_sigma: float = 0.0,
@@ -35,6 +40,8 @@ class HeightMapGenerator:
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
         nadir_exclusion_radius: float = 0.0,
+        nadir_ramp_width: float = 5.0,
+        flat_zone_certainty: float = 0.15,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -71,18 +78,54 @@ class HeightMapGenerator:
                                 interpolation from the surrounding reliable ring.
         """
         d = depth.depth.astype(np.float32)
-
-        # Mask sky pixels before projection. Sky pixels assigned far depth (e.g. 100 m)
-        # project near the horizon at Y ≈ -camera_height, polluting the height grid.
-        if sky_mask is not None and sky_mask.shape == d.shape:
-            d = d.copy()
-            d[sky_mask] = np.nan
-
         h, w = d.shape
+        half = grid_size_meters / 2.0
+        ground_y_min = -(camera_height_meters + 5.0)
 
         if use_equirectangular:
-            X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+            # Inverse mapping: for each grid cell, look up the panorama pixel that
+            # would observe a ground point there, then sample depth directly.
+            # Every cell gets exactly one clean lookup, avoiding the spatial stretching
+            # that plagues forward projection near the horizon.
+            d_masked = d.copy()
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                d_masked[sky_mask] = np.nan
+
+            sampled_depth, pano_u, pano_v, X_grid, Z_grid = inverse_map_panorama_to_grid(
+                Depth(d_masked), grid_size_meters, grid_resolution, camera_height_meters
+            )
+            r_grid = np.sqrt(
+                X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
+            ).astype(np.float32)
+            phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+            Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
+
+            valid = (
+                np.isfinite(sampled_depth) & (sampled_depth > 0)
+                & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)
+            )
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                valid &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
+            if region_type_mask is not None:
+                rm = np.round(region_type_mask).astype(np.int32)
+                if rm.shape != d.shape:
+                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+                valid &= np.isin(nearest_sample_grid(rm, pano_u, pano_v), _VALID_REGION_INDICES)
+            if nadir_exclusion_radius > 0:
+                valid &= r_grid >= nadir_exclusion_radius
+
+            if not np.any(valid):
+                zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+                return zeros, zeros.copy()
+
+            height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
+            height_map[valid] = Y_grid[valid]
+
         else:
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                d = d.copy()
+                d[sky_mask] = np.nan
+
             cx = np.arange(w, dtype=np.float32)
             cy = np.arange(h, dtype=np.float32)
             cx, cy = np.meshgrid(cx, cy)
@@ -90,66 +133,40 @@ class HeightMapGenerator:
             Y = -((cy - intrinsics.py) * d / intrinsics.fy)
             Z = d
 
-        half = grid_size_meters / 2.0
+            ground_mask = (
+                (Y <= ground_y_max) & (Y >= ground_y_min)
+                & (np.abs(Z) <= half) & (np.abs(X) <= half)
+                & np.isfinite(d)
+            )
+            if region_type_mask is not None:
+                rm = np.round(region_type_mask).astype(np.int32)
+                if rm.shape != d.shape:
+                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+                ground_mask &= np.isin(rm, _VALID_REGION_INDICES)
 
-        # Floor filter: sky pixels assigned ~100 m depth project to Y << -camera_height.
-        # Allowing ±5 m of terrain variation around the expected ground plane catches
-        # hills and slopes while excluding any sky artefacts that slipped through.
-        ground_y_min = -(camera_height_meters + 5.0)
+            Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
+            if len(Xg) == 0:
+                zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+                return zeros, zeros.copy()
 
-        ground_mask = (
-            (Y <= ground_y_max)
-            & (Y >= ground_y_min)
-            & (np.abs(Z) <= half)
-            & (np.abs(X) <= half)
-            & np.isfinite(d)
-        )
+            x_edges = np.linspace(-half, half, grid_resolution + 1)
+            z_edges = np.linspace(-half, half, grid_resolution + 1)
+            xi = np.digitize(Xg, x_edges) - 1
+            zi = np.digitize(Zg, z_edges) - 1
+            in_bounds = (
+                (xi >= 0) & (xi < grid_resolution)
+                & (zi >= 0) & (zi < grid_resolution)
+            )
+            xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
 
-        # Equirectangular depth near the nadir is unreliable — the panoramic distortion
-        # is worst there and depth models are rarely trained on near-nadir ground views.
-        # Exclude pixels whose projected horizontal distance is below the exclusion radius;
-        # those cells will be filled by interpolation from the surrounding reliable ring.
-        if use_equirectangular and nadir_exclusion_radius > 0:
-            r_xz = np.sqrt(X ** 2 + Z ** 2)
-            ground_mask &= r_xz >= nadir_exclusion_radius
+            height_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
+            height_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
+            np.add.at(height_sum, (zi, xi), Yg)
+            np.add.at(height_cnt, (zi, xi), 1)
 
-        # Restrict to reliable region types. Vegetation and built structures
-        # occlude the ground plane, so their depth cannot be trusted for terrain.
-        if region_type_mask is not None:
-            rm = np.round(region_type_mask).astype(np.int32)
-            if rm.shape != d.shape:
-                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-            valid_region = np.isin(rm, _VALID_REGION_INDICES)
-            ground_mask &= valid_region
-
-        Xg = X[ground_mask]
-        Yg = Y[ground_mask]
-        Zg = Z[ground_mask]
-
-        if len(Xg) == 0:
-            zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-            return zeros, zeros.copy()
-
-        x_edges = np.linspace(-half, half, grid_resolution + 1)
-        z_edges = np.linspace(-half, half, grid_resolution + 1)
-
-        xi = np.digitize(Xg, x_edges) - 1
-        zi = np.digitize(Zg, z_edges) - 1
-
-        in_bounds = (
-            (xi >= 0) & (xi < grid_resolution)
-            & (zi >= 0) & (zi < grid_resolution)
-        )
-        xi, zi, Yg = xi[in_bounds], zi[in_bounds], Yg[in_bounds]
-
-        height_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
-        height_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
-        np.add.at(height_sum, (zi, xi), Yg)
-        np.add.at(height_cnt, (zi, xi), 1)
-
-        height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
-        has_data = height_cnt > 0
-        height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
+            height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
+            has_data = height_cnt > 0
+            height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
 
         # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
         # the starting point with small height steps are kept; everything else is set to
@@ -172,20 +189,39 @@ class HeightMapGenerator:
                 grid_resolution=grid_resolution,
                 ground_y_max=ground_y_max,
                 ground_y_min=ground_y_min,
+                camera_height_meters=camera_height_meters,
                 region_type_mask=region_type_mask,
+                nadir_exclusion_radius=nadir_exclusion_radius,
             )
 
-        # Certainty: projection-distortion based, zero for unobserved (interpolated) cells.
-        # Observed cells use sin²(elevation) = h² / (r² + h²), which is the inverse of
-        # the equirectangular Jacobian (ground-area per panorama pixel).
-        # Note: nadir_exclusion_radius already removes the most unreliable near-nadir cells
-        # (they are NaN → observed=False → certainty=0). A separate certainty taper over an
-        # annular zone beyond the exclusion radius creates a hard circular boundary in
-        # confidence which the terrain solver converts to a visible ring artifact.
+        # Flat ground prior: pin all cells within the nadir exclusion radius to
+        # -camera_height_meters. The equirectangular depth model is unreliable near
+        # the nadir, and the ground directly under the user is expected to be
+        # approximately level. These cells receive a low fixed certainty so the solver
+        # treats them as a soft prior rather than an observation, letting the Laplacian
+        # blend them smoothly into real terrain observations beyond the zone.
+        cell_m = grid_size_meters / grid_resolution
+        _x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float32)
+        _X_cell, _Z_cell = np.meshgrid(_x_c, _x_c)
+        _r_cell = np.sqrt(_X_cell.astype(np.float64) ** 2 + _Z_cell.astype(np.float64) ** 2).astype(np.float32)
+
+        flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        if nadir_exclusion_radius > 0:
+            flat_prior_mask = _r_cell <= nadir_exclusion_radius
+            height_map[flat_prior_mask] = -camera_height_meters
+
+        # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
+        # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
+        # + nadir_ramp_width, avoiding the hard ring artifact a step boundary creates.
+        # Flat-prior cells get a fixed low certainty (flat_zone_certainty).
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
-            observed, grid_size_meters, grid_resolution, camera_height_meters
+            observed, grid_size_meters, grid_resolution, camera_height_meters,
+            nadir_exclusion_radius=nadir_exclusion_radius,
+            nadir_ramp_width=nadir_ramp_width,
         )
+        if flat_prior_mask.any():
+            certainty[flat_prior_mask] = flat_zone_certainty
 
         if debug_dir is not None:
             PIL.Image.fromarray((observed * 255).astype(np.uint8), "L").save(
@@ -197,7 +233,7 @@ class HeightMapGenerator:
             raw_viz[~observed] = fill_val
             Depth(raw_viz).normalize().save_debug_image(debug_dir / "heightmap_raw.png")
             Depth(certainty.copy()).normalize().save_debug_image(
-                debug_dir / "heightmap_certainty_pre_taper.png"
+                debug_dir / "heightmap_certainty.png"
             )
 
         result = HeightMapGenerator._interpolate(height_map)
@@ -217,18 +253,28 @@ class HeightMapGenerator:
         grid_size_meters: float,
         grid_resolution: int,
         camera_height: float,
+        nadir_exclusion_radius: float = 0.0,
+        nadir_ramp_width: float = 5.0,
     ) -> np.ndarray:
         """
         Build a [0, 1] certainty map over the top-down grid.
 
         Observed cells are scored by equirectangular projection certainty (see
-        ground_projection_certainty); unobserved (interpolated) cells get 0.
+        ground_projection_certainty) multiplied by a smooth nadir ramp. The ramp
+        rises from 0 at nadir_exclusion_radius to 1 at nadir_exclusion_radius +
+        nadir_ramp_width (squared so it has zero slope at the start, avoiding a
+        visible ring in the solver output). Unobserved cells get 0.
         """
         half = grid_size_meters / 2.0
         x_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
         z_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
         X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
-        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height)
+        r_grid = np.sqrt(X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2).astype(np.float32)
+        nadir_ramp = np.clip(
+            (r_grid - nadir_exclusion_radius) / max(float(nadir_ramp_width), 1e-6),
+            0.0, 1.0,
+        ).astype(np.float32) ** 2
+        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height) * nadir_ramp
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod
@@ -288,19 +334,21 @@ class HeightMapGenerator:
         grid_resolution: int,
         ground_y_max: float,
         ground_y_min: float,
+        camera_height_meters: float,
         region_type_mask: Optional[np.ndarray] = None,
+        nadir_exclusion_radius: float = 0.0,
     ) -> np.ndarray:
         """
-        Project a 360° equirectangular depth map into empty (NaN) cells of height_map.
-
-        Only cells that are already NaN are written; existing data is never overwritten.
+        Fill empty (NaN) grid cells from a 360° equirectangular depth map via inverse
+        mapping.  Existing data is never overwritten.
         """
         missing = np.isnan(height_map)
         if not np.any(missing):
             return height_map
 
-        # Build a combined exclusion mask: sky pixels plus any unreliable region types.
-        excl_mask = sky_mask
+        d_excl = panorama_depth.depth.astype(np.float32).copy()
+        if sky_mask is not None and sky_mask.shape == d_excl.shape:
+            d_excl[sky_mask] = np.nan
         if region_type_mask is not None:
             pd = panorama_depth.depth
             rm = np.round(region_type_mask).astype(np.int32)
@@ -309,29 +357,24 @@ class HeightMapGenerator:
             valid_region = np.zeros(pd.shape, dtype=bool)
             for idx in _VALID_REGION_INDICES:
                 valid_region |= (rm == idx)
-            invalid_region = ~valid_region
-            excl_mask = invalid_region if sky_mask is None else (sky_mask | invalid_region)
+            d_excl[~valid_region] = np.nan
 
-        xi, zi, _, Yg, _ = project_panorama_to_ground_grid(
-            panorama_depth=panorama_depth,
-            grid_size_meters=grid_size_meters,
-            grid_resolution=grid_resolution,
-            ground_y_max=ground_y_max,
-            ground_y_min=ground_y_min,
-            sky_mask=excl_mask,
+        sampled_depth, _, _, X_grid, Z_grid = inverse_map_panorama_to_grid(
+            Depth(d_excl), grid_size_meters, grid_resolution, camera_height_meters
         )
+        r_grid = np.sqrt(
+            X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
+        ).astype(np.float32)
+        phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+        Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
 
-        if len(xi) == 0:
-            return height_map
-
-        pano_sum = np.zeros((grid_resolution, grid_resolution), dtype=np.float64)
-        pano_cnt = np.zeros((grid_resolution, grid_resolution), dtype=np.int32)
-        np.add.at(pano_sum, (zi, xi), Yg)
-        np.add.at(pano_cnt, (zi, xi), 1)
-
-        has_pano = (pano_cnt > 0) & missing
+        pano_valid = (
+            np.isfinite(sampled_depth) & (sampled_depth > 0)
+            & (Y_grid >= ground_y_min) & (Y_grid <= ground_y_max)
+            & (r_grid >= nadir_exclusion_radius)
+        )
         result = height_map.copy()
-        result[has_pano] = (pano_sum[has_pano] / pano_cnt[has_pano]).astype(np.float32)
+        result[missing & pano_valid] = Y_grid[missing & pano_valid]
         return result
 
     @staticmethod
@@ -418,7 +461,8 @@ class HeightMapGenerator:
         def nan_downsample(factor: int) -> np.ndarray:
             sh, sw = max(1, h // factor), max(1, w // factor)
             crop = height_map[: sh * factor, : sw * factor]
-            with np.errstate(all="ignore"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
                 return np.nanmean(
                     crop.reshape(sh, factor, sw, factor), axis=(1, 3)
                 ).astype(np.float32)
@@ -433,9 +477,9 @@ class HeightMapGenerator:
             ds_vals = np.where(ds_mask, ds, 0.0)
 
             if ZI is None:
-                # Coarsest level: diffuse from known cells to establish structure
-                # before any noise is added, matching pixels2peaks inpaint_noise.
-                ZI = diffuse_heightmap(ds_vals, ds_mask, n_iters=max(200, sh * 4))
+                # Coarsest level: seed from nearest known neighbour so diffusion
+                # starts at the last-seen boundary height, not the global mean.
+                ZI = diffuse_heightmap(ds_vals, ds_mask, n_iters=max(200, sh * 4), seed_from='nearest')
             else:
                 # Upsample bicubically and inject noise with cubic amplitude scaling.
                 # Cubic front-loads structure at coarse levels; fine levels are near
@@ -446,7 +490,8 @@ class HeightMapGenerator:
                 ZI = np.where(ds_mask, ds_vals, ZI_up + noise)
 
             n_iters = max(20, sh * 2 if octave == n_octaves - 1 else sh // 4)
-            ZI = diffuse_heightmap(ZI, ds_mask, n_iters=n_iters)
+            # 'keep': preserve the upsampled+noise state already set above.
+            ZI = diffuse_heightmap(ZI, ds_mask, n_iters=n_iters, seed_from='keep')
 
         # Restore original known values exactly — diffusion must not drift them.
         return np.where(known_mask, height_map, ZI).astype(np.float32)

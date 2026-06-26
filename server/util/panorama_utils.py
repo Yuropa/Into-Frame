@@ -103,6 +103,24 @@ class Panorama:
         """Instance convenience wrapper for equirectangular_unproject."""
         return Panorama.equirectangular_unproject(depth)
 
+    def _project_vertices(
+        self,
+        vertices: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Shared equirectangular projection for uv_for_3d and sample_3d."""
+        X = vertices[:, 0].astype(np.float64)
+        Y = vertices[:, 1].astype(np.float64)
+        Z = vertices[:, 2].astype(np.float64)
+        W, H = self.width, self.height
+
+        r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
+        lat  = np.arctan2(Y, r_xz)
+        lon  = np.arctan2(X, Z)
+
+        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
+        pv = (0.5 - lat / np.pi) * (H - 1)
+        return pu, pv, lat
+
     def uv_for_3d(
         self,
         vertices: np.ndarray,
@@ -116,18 +134,7 @@ class Panorama:
           pv    — float pixel row     in [0, H-1].
           valid — bool mask; True where the vertex is below the horizon (lat < 0).
         """
-        X = vertices[:, 0].astype(np.float64)
-        Y = vertices[:, 1].astype(np.float64)
-        Z = vertices[:, 2].astype(np.float64)
-        W, H = self.width, self.height
-
-        r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
-        lat  = np.arctan2(Y, r_xz)
-        lon  = np.arctan2(X, Z)
-
-        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
-        pv = (0.5 - lat / np.pi) * (H - 1)
-
+        pu, pv, lat = self._project_vertices(vertices)
         return pu, pv, lat < 0.0
 
     def sample_3d(
@@ -149,20 +156,14 @@ class Panorama:
         Returns:     (N, 4) uint8 RGBA array.
         """
         X = vertices[:, 0].astype(np.float64)
-        Y = vertices[:, 1].astype(np.float64)
         Z = vertices[:, 2].astype(np.float64)
 
         pano = np.array(self.rgb(), dtype=np.float32)
         H, W = pano.shape[:2]
 
-        r_xz        = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
-        lat         = np.arctan2(Y, r_xz)
-        lon         = np.arctan2(X, Z)
-        min_lat_rad = np.radians(min_lat_deg)
-        valid       = (lat < 0.0) & (lat >= min_lat_rad)
-
-        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
-        pv = (0.5 - lat / np.pi) * (H - 1)
+        pu, pv, lat  = self._project_vertices(vertices)
+        min_lat_rad  = np.radians(min_lat_deg)
+        valid        = (lat < 0.0) & (lat >= min_lat_rad)
 
         pu0 = np.floor(pu).astype(np.int32) % W
         pu1 = (pu0 + 1) % W

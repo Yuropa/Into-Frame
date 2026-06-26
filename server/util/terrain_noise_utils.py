@@ -28,6 +28,7 @@ def diffuse_heightmap(
     mask: np.ndarray,
     n_iters: int = 500,
     z_max: np.ndarray | None = None,
+    seed_from: str = 'nearest',
 ) -> np.ndarray:
     """
     Fill unknown cells via iterative 4-neighbor Laplacian diffusion.
@@ -40,6 +41,17 @@ def diffuse_heightmap(
              proportionally; 200–1000 is typical depending on gap size.
     z_max:  optional (H, W) per-cell height ceiling; unknown cells are clamped
             after each step.
+    seed_from: how to initialise unknown cells before diffusion starts.
+        'nearest' — each unknown cell is seeded with the height of its nearest
+                    known neighbour.  Prevents cliffs at the visible-terrain
+                    boundary: the fill starts at the last-seen height and the
+                    diffusion then smooths it, rather than dragging every edge
+                    cell up from the global mean.
+        'mean'    — original behaviour: seed all unknown cells from the global
+                    mean of known cells.
+        'keep'    — leave unknown cells untouched; use when the caller has
+                    already provided a meaningful initial state (e.g. an
+                    upsampled result from a coarser level).
 
     Returns
     -------
@@ -49,8 +61,13 @@ def diffuse_heightmap(
     if not mask.any():
         return Z
 
-    # Seed unknown cells with the mean of known cells so diffusion starts close.
-    Z[~mask] = float(np.mean(Z[mask]))
+    if seed_from == 'nearest':
+        from scipy.ndimage import distance_transform_edt
+        _, nearest = distance_transform_edt(~mask, return_indices=True)
+        Z[~mask] = Z[nearest[0][~mask], nearest[1][~mask]]
+    elif seed_from == 'mean':
+        Z[~mask] = float(np.mean(Z[mask]))
+    # else 'keep': leave Z[~mask] as provided by the caller
 
     for _ in range(n_iters):
         top    = np.pad(Z, ((1, 0), (0, 0)), mode="edge")[:-1, :]
@@ -134,15 +151,18 @@ def inpaint_noise_multiscale(
             m_ds = known_mask.copy()
 
         if ZI is None:
-            # Coarsest level: seed with diffusion from known values.
-            ZI = diffuse_heightmap(z_ds, m_ds, n_iters=max(diffuse_iters * 10, 200))
+            # Coarsest level: seed from nearest known neighbour so diffusion
+            # starts at the boundary height rather than the global mean.
+            ZI = diffuse_heightmap(z_ds, m_ds, n_iters=max(diffuse_iters * 10, 200), seed_from='nearest')
         else:
             # Finer level: upsample previous result, inject scale-appropriate noise.
             amplitude = noise_scale * (fexp ** 3) * 1e-2
             ZI_up = zoom(ZI, (z_ds.shape[0] / ZI.shape[0], z_ds.shape[1] / ZI.shape[1]), order=3)
             noise = rng.standard_normal(z_ds.shape).astype(np.float32) * amplitude
             ZI = np.where(m_ds, np.nan_to_num(z_ds, nan=0.0), ZI_up + noise)
-            ZI = diffuse_heightmap(ZI, m_ds, n_iters=max(diffuse_iters, 10))
+            # 'keep': preserve the upsampled+noise values set above rather than
+            # overwriting them with a mean seed.
+            ZI = diffuse_heightmap(ZI, m_ds, n_iters=max(diffuse_iters, 10), seed_from='keep')
 
     # Restore known values exactly — diffusion must not drift them.
     return np.where(known_mask, heightmap, ZI).astype(np.float32)

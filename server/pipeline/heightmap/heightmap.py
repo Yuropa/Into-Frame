@@ -20,7 +20,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         grid_size_meters: float = 100.0,
-        grid_resolution: int = 512,
+        grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         use_equirectangular: bool = False,
         smooth_sigma: float = 0.0,
@@ -28,6 +28,8 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
         nadir_exclusion_radius: float = 1.0,
+        nadir_ramp_width: float = 5.0,
+        flat_zone_certainty: float = 0.15,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -48,11 +50,12 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.flood_fill = flood_fill
         # Maximum Y change (metres) between adjacent grid cells during flood-fill.
         self.flood_fill_max_step = flood_fill_max_step
-        # Equirectangular depth near the nadir (directly below camera) is unreliable —
-        # the panoramic distortion is worst there and depth models have poor coverage.
-        # Ground pixels with horizontal distance < this radius are excluded; they are
-        # filled later by interpolation from the surrounding reliable ring.
+        # Cells within nadir_exclusion_radius are pinned to -camera_height_meters (flat
+        # ground prior) with certainty flat_zone_certainty. Certainty then ramps smoothly
+        # up to full geometric certainty over nadir_ramp_width metres beyond that radius.
         self.nadir_exclusion_radius = nadir_exclusion_radius
+        self.nadir_ramp_width = nadir_ramp_width
+        self.flat_zone_certainty = flat_zone_certainty
 
 
 class HeightMapStage(PipelineStage):
@@ -139,6 +142,8 @@ class HeightMapStage(PipelineStage):
             panorama_depth=fill_panorama_depth,
             region_type_mask=region_type_mask,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
+            nadir_ramp_width=cfg.nadir_ramp_width,
+            flat_zone_certainty=cfg.flat_zone_certainty,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

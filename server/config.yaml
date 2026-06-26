@@ -52,11 +52,11 @@ stages:
     keys:
       depth: panorama_depth
       intrinsics: intrinsics
-    grid_size_meters: 100.0      # side length of the output grid in metres
-    grid_resolution: 1024        # grid cells per side
+    grid_size_meters: 200.0      # side length of the output grid in metres
+    grid_resolution: 4096        # grid cells per side → ~4.9 cm/cell over 200 m
     ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground candidates
     use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
-    smooth_sigma: 8.0            # distance-weighted smoothing: 0 at centre → this value (px) at corners
+    smooth_sigma: 16.0           # distance-weighted smoothing: 0 at centre → this value (px) at corners
     camera_height_meters: 1.0   # assumed camera height above ground (metres); used to derive the Y
                                  # floor filter (ground_y_min = -(camera_height + 5.0)) that rejects
                                  # sky-pixel artefacts near the horizon, and as the flood-fill reference.
@@ -68,36 +68,61 @@ stages:
 
   - name: Region Map
     stage: RegionMapStage
-    grid_size_meters: 100.0     # must match Height Map grid extent
-    grid_resolution: 1024       # must match Height Map resolution
+    grid_size_meters: 200.0     # must match Height Map grid extent
+    grid_resolution: 4096       # must match Height Map resolution
     ground_y_max: -0.5
     camera_height_meters: 1.0
 
   - name: Linear Structures
     stage: LinearStructureStage
-    enabled: true
-    modify_rivers: false  # carve valley into height map along detected rivers
-    modify_roads: true    # gently flatten height map along detected roads
+    enabled: false
+    modify_rivers: false
+    modify_roads: false
 
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
     laplacian_weight: 0.1        # smoothness regulariser
     ridge_weight: 2.0            # strength of ridge-crest constraints
-    ridge_crest_height: 0.5      # metres ridge should exceed neighbours
-    ridge_sigma: 15.0            # Gaussian falloff radius in pixels
+    ridge_crest_height: 8.0      # metres ridge should exceed neighbours (~8 m above surrounding terrain)
+    ridge_sigma: 200.0           # Gaussian falloff radius in pixels (9.8 m at 4.9 cm/cell)
     river_weight: 2.0            # strength of valley constraints
     river_valley_depth: 0.5      # metres neighbours exceed river channel
     river_drop_per_segment: 0.05 # metres drop per ordered polyline segment
-    river_sigma: 10.0            # Gaussian falloff radius in pixels
-    solver_iter_lim: 500         # LSQR iteration cap
+    river_sigma: 20.0            # Gaussian falloff radius in pixels (×2 for 4.9 cm/cell)
+    heightmap_data_weight: 0.3   # weak prior on observed cells; feature constraints dominate
+
+  - name: Terrain Noise Refinement
+    stage: TerrainNoiseRefinementStage
+    road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
+    road_blur_sigma: 4.0          # pixel radius for softening road mask edges (×2 for 4.9 cm/cell)
+    road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy (×2 for 4.9 cm/cell)
+    noise_scale: 80.0             # Perlin frequency in pixels (×2 for 4.9 cm/cell → same ~4 m features)
+    noise_octaves: 4              # fractal octave count
+    noise_amplitude: 0.4          # metres of peak noise displacement
+    noise_gradient_k: 0.15        # slope (hm units/px) that halves noise (×0.5 for 4.9 cm/cell)
+    weathering_iterations: 5      # thermal weathering passes
+    weathering_rate: 0.15         # fraction of Laplacian delta redistributed per pass
+    talus_threshold: 0.012        # Laplacian magnitude that triggers weathering (÷4 for 4.9 cm/cell)
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
-    inner_min_dist: 0.15    # metres between samples at the origin (15 cm)
-    outer_min_dist: 6.0     # metres between samples at the domain corners
-    n_boundary: 16          # anchor points per edge of the domain rectangle
+    inner_min_dist: 0.10    # metres between samples at the origin (10 cm)
+    outer_min_dist: 2.0     # metres between samples at the domain corners
+    n_boundary: 64          # anchor points per edge of the domain rectangle
     z_far: null
     noise_amplitude: 0.05   # metres of peak noise displacement
+
+  - name: Terrain Texture Bake
+    stage: TerrainTextureBakeStage
+    tex_size: 4096              # texels per side — matches heightmap resolution
+
+  - name: Terrain Texture Refinement
+    stage: TerrainTextureRefinementStage
+    certainty_threshold: 0.2   # texels below this are inpainted
+    dilation_px: 8             # mask dilation before inpainting
+    inpainting_type: FLUX
+    num_inference_steps: 30
+    guidance_scale: 30.0
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
@@ -143,6 +168,8 @@ stages:
 
   - name: Scene Generation
     stage: SceneGenerationStage
+    keys:
+      panorama: panorama_sky
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting
