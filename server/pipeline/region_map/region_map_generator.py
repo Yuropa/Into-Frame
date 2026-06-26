@@ -312,12 +312,12 @@ class RegionMapGenerator:
         y_mean = np.where(water_grid, y_sum / np.maximum(y_cnt, 1), np.nan)
 
         # Skeletonize the projected water region.
-        from skimage.morphology import skeletonize as _skel, disk, binary_closing, binary_opening
+        from skimage.morphology import skeletonize as _skel, disk, closing, opening
         mask = water_grid.copy()
         if smooth_radius > 0:
             d_morph = disk(smooth_radius)
-            mask = binary_closing(mask, d_morph)
-            mask = binary_opening(mask, d_morph)
+            mask = closing(mask, d_morph)
+            mask = opening(mask, d_morph)
         skeleton = _skel(mask)
 
         skel_zi, skel_xi = np.where(skeleton)
@@ -411,14 +411,14 @@ class RegionMapGenerator:
         larger values for area features like water bodies; smaller values for
         inherently linear features like roads and trails.
         """
-        from skimage.morphology import skeletonize as sk_skeletonize, disk, binary_closing, binary_opening
+        from skimage.morphology import skeletonize as sk_skeletonize, disk, closing, opening
         mask = region_map == type_idx
         if not np.any(mask):
             return np.zeros(region_map.shape, dtype=np.float32)
         if smooth_radius > 0:
             d = disk(smooth_radius)
-            mask = binary_closing(mask, d)
-            mask = binary_opening(mask, d)
+            mask = closing(mask, d)
+            mask = opening(mask, d)
         return sk_skeletonize(mask).astype(np.float32)
 
     @staticmethod

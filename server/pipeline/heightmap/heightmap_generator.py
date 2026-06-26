@@ -1,4 +1,5 @@
 import json
+import warnings
 import numpy as np
 import PIL.Image
 from collections import deque
@@ -460,7 +461,8 @@ class HeightMapGenerator:
         def nan_downsample(factor: int) -> np.ndarray:
             sh, sw = max(1, h // factor), max(1, w // factor)
             crop = height_map[: sh * factor, : sw * factor]
-            with np.errstate(all="ignore"):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", RuntimeWarning)
                 return np.nanmean(
                     crop.reshape(sh, factor, sw, factor), axis=(1, 3)
                 ).astype(np.float32)
