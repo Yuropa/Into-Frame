@@ -1,6 +1,6 @@
 import numpy as np
 from pathlib import Path
-from PIL import Image as PILImage, ImageFilter
+from PIL import Image as PILImage
 
 from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
@@ -133,8 +133,6 @@ class SkyboxInpaintingStage(PipelineStage):
         lama = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.LAMA)
         lama_pil = lama.inpaint(prefilled_pil, fill_mask_pil, temp_path=self.temp)
         lama.close()
-        lama_arr = np.array(lama_pil)
-
         if self.output is not None:
             lama_pil.save(self.output / "lama.png")
 
@@ -159,34 +157,22 @@ class SkyboxInpaintingStage(PipelineStage):
             flux_mask,
             temp_path=self.temp,
             prompt=prompt,
-            num_inference_steps=36,
-            guidance_scale=28.0,
+            num_inference_steps=50,
+            guidance_scale=30.0,
             seed=self.seed,
         )
         flux.close()
 
         if fw != w or fh != h:
             flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
-        flux_arr = np.array(flux_pil)
 
         if self.output is not None:
             flux_pil.save(self.output / "flux.png")
 
-        # Composite: keep original sky pixels exactly; blend fill mask boundary.
-        feather_radius = max(8, min(w, h) // 100)
-        feathered = np.array(
-            fill_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-        ).astype(np.float32)[..., np.newaxis] / 255.0
-
-        # Blend against the LaMa fill (not the original) so the feather zone doesn't
-        # reveal removed content at the seam.
-        blended_arr = (lama_arr * (1.0 - feathered) + flux_arr * feathered).astype(np.uint8)
-
-        # Restore original sky pixels unchanged.
-        sky_3d = sky_mask[..., np.newaxis]
-        result_arr = np.where(sky_3d, source_arr, blended_arr).astype(np.uint8)
-
-        result_pil = PILImage.fromarray(result_arr)
+        # Use Flux output directly as the result. FLUX Fill preserves unmasked
+        # (sky) pixels, so the sky stays similar to the original while the
+        # inpainted regions are fully coherent with it — no compositing seam.
+        result_pil = flux_pil
         if self.output is not None:
             result_pil.save(self.output / "skybox.png")
 
