@@ -83,8 +83,8 @@ stages:
     stage: TerrainReconstructionStage
     laplacian_weight: 0.1        # smoothness regulariser
     ridge_weight: 2.0            # strength of ridge-crest constraints
-    ridge_crest_height: 0.5      # metres ridge should exceed neighbours
-    ridge_sigma: 30.0            # Gaussian falloff radius in pixels (×2 for 4.9 cm/cell)
+    ridge_crest_height: 8.0      # metres ridge should exceed neighbours (~8 m above surrounding terrain)
+    ridge_sigma: 200.0           # Gaussian falloff radius in pixels (9.8 m at 4.9 cm/cell)
     river_weight: 2.0            # strength of valley constraints
     river_valley_depth: 0.5      # metres neighbours exceed river channel
     river_drop_per_segment: 0.05 # metres drop per ordered polyline segment

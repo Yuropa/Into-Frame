@@ -39,6 +39,8 @@ class HeightMapGenerator:
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
         nadir_exclusion_radius: float = 0.0,
+        nadir_ramp_width: float = 5.0,
+        flat_zone_certainty: float = 0.15,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -188,19 +190,37 @@ class HeightMapGenerator:
                 ground_y_min=ground_y_min,
                 camera_height_meters=camera_height_meters,
                 region_type_mask=region_type_mask,
+                nadir_exclusion_radius=nadir_exclusion_radius,
             )
 
-        # Certainty: projection-distortion based, zero for unobserved (interpolated) cells.
-        # Observed cells use sin²(elevation) = h² / (r² + h²), which is the inverse of
-        # the equirectangular Jacobian (ground-area per panorama pixel).
-        # Note: nadir_exclusion_radius already removes the most unreliable near-nadir cells
-        # (they are NaN → observed=False → certainty=0). A separate certainty taper over an
-        # annular zone beyond the exclusion radius creates a hard circular boundary in
-        # confidence which the terrain solver converts to a visible ring artifact.
+        # Flat ground prior: pin all cells within the nadir exclusion radius to
+        # -camera_height_meters. The equirectangular depth model is unreliable near
+        # the nadir, and the ground directly under the user is expected to be
+        # approximately level. These cells receive a low fixed certainty so the solver
+        # treats them as a soft prior rather than an observation, letting the Laplacian
+        # blend them smoothly into real terrain observations beyond the zone.
+        cell_m = grid_size_meters / grid_resolution
+        _x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float32)
+        _X_cell, _Z_cell = np.meshgrid(_x_c, _x_c)
+        _r_cell = np.sqrt(_X_cell.astype(np.float64) ** 2 + _Z_cell.astype(np.float64) ** 2).astype(np.float32)
+
+        flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        if nadir_exclusion_radius > 0:
+            flat_prior_mask = _r_cell <= nadir_exclusion_radius
+            height_map[flat_prior_mask] = -camera_height_meters
+
+        # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
+        # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
+        # + nadir_ramp_width, avoiding the hard ring artifact a step boundary creates.
+        # Flat-prior cells get a fixed low certainty (flat_zone_certainty).
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
-            observed, grid_size_meters, grid_resolution, camera_height_meters
+            observed, grid_size_meters, grid_resolution, camera_height_meters,
+            nadir_exclusion_radius=nadir_exclusion_radius,
+            nadir_ramp_width=nadir_ramp_width,
         )
+        if flat_prior_mask.any():
+            certainty[flat_prior_mask] = flat_zone_certainty
 
         if debug_dir is not None:
             PIL.Image.fromarray((observed * 255).astype(np.uint8), "L").save(
@@ -212,7 +232,7 @@ class HeightMapGenerator:
             raw_viz[~observed] = fill_val
             Depth(raw_viz).normalize().save_debug_image(debug_dir / "heightmap_raw.png")
             Depth(certainty.copy()).normalize().save_debug_image(
-                debug_dir / "heightmap_certainty_pre_taper.png"
+                debug_dir / "heightmap_certainty.png"
             )
 
         result = HeightMapGenerator._interpolate(height_map)
@@ -232,18 +252,28 @@ class HeightMapGenerator:
         grid_size_meters: float,
         grid_resolution: int,
         camera_height: float,
+        nadir_exclusion_radius: float = 0.0,
+        nadir_ramp_width: float = 5.0,
     ) -> np.ndarray:
         """
         Build a [0, 1] certainty map over the top-down grid.
 
         Observed cells are scored by equirectangular projection certainty (see
-        ground_projection_certainty); unobserved (interpolated) cells get 0.
+        ground_projection_certainty) multiplied by a smooth nadir ramp. The ramp
+        rises from 0 at nadir_exclusion_radius to 1 at nadir_exclusion_radius +
+        nadir_ramp_width (squared so it has zero slope at the start, avoiding a
+        visible ring in the solver output). Unobserved cells get 0.
         """
         half = grid_size_meters / 2.0
         x_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
         z_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
         X_grid, Z_grid = np.meshgrid(x_centers, z_centers)
-        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height)
+        r_grid = np.sqrt(X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2).astype(np.float32)
+        nadir_ramp = np.clip(
+            (r_grid - nadir_exclusion_radius) / max(float(nadir_ramp_width), 1e-6),
+            0.0, 1.0,
+        ).astype(np.float32) ** 2
+        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height) * nadir_ramp
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod
@@ -305,6 +335,7 @@ class HeightMapGenerator:
         ground_y_min: float,
         camera_height_meters: float,
         region_type_mask: Optional[np.ndarray] = None,
+        nadir_exclusion_radius: float = 0.0,
     ) -> np.ndarray:
         """
         Fill empty (NaN) grid cells from a 360° equirectangular depth map via inverse
@@ -339,6 +370,7 @@ class HeightMapGenerator:
         pano_valid = (
             np.isfinite(sampled_depth) & (sampled_depth > 0)
             & (Y_grid >= ground_y_min) & (Y_grid <= ground_y_max)
+            & (r_grid >= nadir_exclusion_radius)
         )
         result = height_map.copy()
         result[missing & pano_valid] = Y_grid[missing & pano_valid]

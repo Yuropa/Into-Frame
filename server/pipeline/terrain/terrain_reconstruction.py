@@ -129,22 +129,31 @@ class TerrainReconstructionStage(PipelineStage):
         )
 
         # ── Ridge constraints ─────────────────────────────────────────────────
-        # Prefer depth-anchored 3D chains; fall back to binary mask when absent.
+        # Prefer 3D chains; fall back to binary mask when absent.
+        # We do NOT use add_ridge_polyline_anchored because the ridge chain Y
+        # values come from equirectangular_pixels_to_world at the sky-terrain
+        # boundary: for mountains above the horizon phi>0 → Y = depth*sin(phi) > 0,
+        # while the ground heightmap sits at Y ≈ -camera_height. Using those large
+        # positive Y values as absolute anchors (with weight 5×) overwhelms the
+        # data term and creates mesa/spike artifacts instead of smooth slopes.
+        # The profile-only form lets the Laplacian + data term set the absolute
+        # level while the Gaussian cross-section shapes the ridge.
         ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
         n_ridge_chains = 0
         n_ridge_mask_cells = 0
         if ridge_chains:
+            x_half = z_far = grid_size / 2.0
             for chain in ridge_chains:
                 if len(chain) < 2:
                     continue
-                solver.add_ridge_polyline_anchored(
-                    chain,
-                    grid_size,
+                col = np.clip((chain[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
+                row = np.clip((chain[:, 2] + z_far) / (2.0 * z_far) * (H - 1), 0, H - 1)
+                pts_rc = np.stack([row, col], axis=1)
+                solver.add_ridge_polyline(
+                    pts_rc,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
                     sigma=cfg.ridge_sigma,
-                    anchor_weight=cfg.ridge_anchor_weight,
-                    anchor_stride=cfg.ridge_anchor_stride,
                 )
                 n_ridge_chains += 1
         else:
