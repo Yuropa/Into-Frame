@@ -10,8 +10,8 @@ from PIL import Image
 from transformers import Swin2SRForImageSuperResolution, Swin2SRImageProcessor
 from remote_connection.remote_server import RemoteServer
 
-_TILE_SIZE = 512   # input pixels per tile side
-_TILE_OVERLAP = 32 # input pixels of overlap between adjacent tiles
+_TILE_SIZE    = 512  # input pixels per tile side
+_TILE_OVERLAP = 64   # input pixels of overlap on each edge that borders a neighbour
 
 
 class SupersamplingServer(RemoteServer):
@@ -27,16 +27,13 @@ class SupersamplingServer(RemoteServer):
     def _supersample(self, image: Image.Image) -> Image.Image:
         W, H = image.size
 
-        # Small images fit in one shot; only tile when the image exceeds the tile size.
         if W <= _TILE_SIZE and H <= _TILE_SIZE:
             self.report_progress(0.1, "Running supersampling…")
             result = self._run_tile(image)
             self.report_progress(1.0, "Done")
             return result
 
-        # Tiled supersampling: split into overlapping tiles, blend with a per-tile
-        # Hanning window so seams are invisible, then reassemble.
-        scale = 2
+        scale   = 2
         out_W, out_H = W * scale, H * scale
         out_arr     = np.zeros((out_H, out_W, 3), dtype=np.float32)
         weight_arr  = np.zeros((out_H, out_W, 1), dtype=np.float32)
@@ -56,21 +53,27 @@ class SupersamplingServer(RemoteServer):
         total = len(ys) * len(xs)
         done  = 0
 
-        # Precompute the Hanning blend mask once (all tiles are the same size).
-        wy = np.hanning(_TILE_SIZE * scale).astype(np.float32)
-        wx = np.hanning(_TILE_SIZE * scale).astype(np.float32)
-        blend_mask = (wy[:, None] * wx[None, :])[:, :, None]  # (T*2, T*2, 1)
+        out_overlap = _TILE_OVERLAP * scale  # overlap in output pixels
 
-        for y in ys:
-            for x in xs:
+        for i, y in enumerate(ys):
+            for j, x in enumerate(xs):
                 tile_pil = Image.fromarray(img_arr[y : y + _TILE_SIZE, x : x + _TILE_SIZE])
-                tile_out = self._run_tile(tile_pil)  # PIL, size (T*2, T*2)
+                tile_out = self._run_tile(tile_pil)
                 tile_arr = np.array(tile_out).astype(np.float32) / 255.0
 
-                oy, ox = y * scale, x * scale
                 th, tw = tile_arr.shape[:2]
-                out_arr   [oy : oy + th, ox : ox + tw] += tile_arr * blend_mask[:th, :tw]
-                weight_arr[oy : oy + th, ox : ox + tw] += blend_mask[:th, :tw]
+                blend = self._blend_mask(
+                    th, tw,
+                    has_top    = i > 0,
+                    has_bottom = i < len(ys) - 1,
+                    has_left   = j > 0,
+                    has_right  = j < len(xs) - 1,
+                    overlap    = out_overlap,
+                )
+
+                oy, ox = y * scale, x * scale
+                out_arr   [oy : oy + th, ox : ox + tw] += tile_arr * blend
+                weight_arr[oy : oy + th, ox : ox + tw] += blend
 
                 done += 1
                 self.report_progress(0.1 + 0.85 * done / total, f"Tile {done}/{total}…")
@@ -79,6 +82,31 @@ class SupersamplingServer(RemoteServer):
         result = (result * 255).astype(np.uint8)
         self.report_progress(1.0, "Done")
         return Image.fromarray(result)
+
+    @staticmethod
+    def _blend_mask(
+        h: int, w: int,
+        has_top: bool, has_bottom: bool, has_left: bool, has_right: bool,
+        overlap: int,
+    ) -> np.ndarray:
+        """
+        Per-pixel blend weight for one tile.
+
+        Weight is 1 everywhere except in the overlap strip on each edge that
+        borders a neighbouring tile, where it ramps linearly from 0 (at the
+        edge) to 1 (at the inner boundary of the overlap zone).
+
+        Adjacent tiles share the same overlap strip with complementary ramps
+        (A fades 1→0 while B fades 0→1), so their weights always sum to 1.
+        """
+        wy = np.ones(h, dtype=np.float32)
+        wx = np.ones(w, dtype=np.float32)
+        ramp = np.linspace(0.0, 1.0, overlap, dtype=np.float32)
+        if has_top:    wy[:overlap]  = ramp
+        if has_bottom: wy[-overlap:] = ramp[::-1]
+        if has_left:   wx[:overlap]  = ramp
+        if has_right:  wx[-overlap:] = ramp[::-1]
+        return (wy[:, None] * wx[None, :])[:, :, None]
 
     def _run_tile(self, tile: Image.Image) -> Image.Image:
         inputs = self.processor(tile, return_tensors="pt").to(self.device)
