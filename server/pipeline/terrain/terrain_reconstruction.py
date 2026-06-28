@@ -47,7 +47,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         ridge_weight: float = 2.0,
         ridge_crest_height: float = 0.5,
         ridge_sigma: float = 15.0,
-        ridge_anchor_weight: float = 5.0,
+        ridge_anchor_weight: float = 1.0,
         ridge_anchor_stride: int = 5,
         river_weight: float = 2.0,
         river_valley_depth: float = 0.5,
@@ -127,31 +127,44 @@ class TerrainReconstructionStage(PipelineStage):
 
         # ── Ridge constraints ─────────────────────────────────────────────────
         # Prefer 3D chains; fall back to binary mask when absent.
-        # We do NOT use add_ridge_polyline_anchored because the ridge chain Y
-        # values come from equirectangular_pixels_to_world at the sky-terrain
-        # boundary: for mountains above the horizon phi>0 → Y = depth*sin(phi) > 0,
-        # while the ground heightmap sits at Y ≈ -camera_height. Using those large
-        # positive Y values as absolute anchors (with weight 5×) overwhelms the
-        # data term and creates mesa/spike artifacts instead of smooth slopes.
-        # The profile-only form lets the Laplacian + data term set the absolute
-        # level while the Gaussian cross-section shapes the ridge.
+        #
+        # chain[:, 1] = depth * sin(phi) gives the camera-relative elevation of
+        # each sky-terrain boundary point — the true absolute height the heightmap
+        # should reach at that XZ location.  We use add_ridge_polyline_anchored so
+        # the solver receives both the Gaussian cross-section profile (slope shape)
+        # and per-point absolute elevation pins (correct mountain height).
+        #
+        # The original spike/mesa problem came from anchor_weight=5.0 overwhelming
+        # the data term and sigma=15px being far too narrow (~0.4 m on a 4096/100 m
+        # grid) to build slopes.  Both are fixed here: anchor_weight is lowered to
+        # a soft prior and sigma is scaled to H/8 so the influence zone covers a
+        # realistic mountain footprint.
         ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
         n_ridge_chains = 0
         n_ridge_mask_cells = 0
+
+        # Sigma proportional to grid height: H/8 px ≈ one-eighth of the grid
+        # radius, giving enough reach to build genuine mountain slopes.
+        effective_sigma = max(cfg.ridge_sigma, H / 8.0)
+
         if ridge_chains:
-            x_half = z_far = grid_size / 2.0
+            self.log_info(
+                f"Ridge constraints: {len(ridge_chains)} chain(s), "
+                f"anchor_weight={cfg.ridge_anchor_weight:.2f}, "
+                f"sigma={effective_sigma:.1f} px (cfg={cfg.ridge_sigma:.1f})"
+            )
             for chain in ridge_chains:
                 chain = np.asarray(chain, dtype=np.float32)
                 if len(chain) < 2:
                     continue
-                col = np.clip((chain[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
-                row = np.clip((chain[:, 2] + z_far) / (2.0 * z_far) * (H - 1), 0, H - 1)
-                pts_rc = np.stack([row, col], axis=1)
-                solver.add_ridge_polyline(
-                    pts_rc,
+                solver.add_ridge_polyline_anchored(
+                    points_xyz=chain,
+                    grid_size_meters=grid_size,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
-                    sigma=cfg.ridge_sigma,
+                    sigma=effective_sigma,
+                    anchor_weight=cfg.ridge_anchor_weight,
+                    anchor_stride=cfg.ridge_anchor_stride,
                 )
                 n_ridge_chains += 1
         else:
@@ -170,7 +183,7 @@ class TerrainReconstructionStage(PipelineStage):
                         ridge_mask,
                         weight=cfg.ridge_weight,
                         crest_height=cfg.ridge_crest_height,
-                        sigma=cfg.ridge_sigma,
+                        sigma=effective_sigma,
                     )
         self.advance_progress(task)
 
