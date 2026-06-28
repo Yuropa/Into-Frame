@@ -87,28 +87,24 @@ stages:
 
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
-    laplacian_weight: 0.1        # smoothness regulariser
-    ridge_weight: 2.0            # strength of ridge-crest constraints
-    ridge_crest_height: 8.0      # metres ridge should exceed neighbours (~8 m above surrounding terrain)
-    ridge_sigma: 200.0           # Gaussian falloff radius in pixels (9.8 m at 4.9 cm/cell)
-    river_weight: 2.0            # strength of valley constraints
-    river_valley_depth: 0.5      # metres neighbours exceed river channel
-    river_drop_per_segment: 0.05 # metres drop per ordered polyline segment
-    river_sigma: 20.0            # Gaussian falloff radius in pixels (×2 for 4.9 cm/cell)
-    heightmap_data_weight: 0.3   # weak prior on observed cells; feature constraints dominate
+    solve_resolution: 512           # downsample to this for the harmonic solve, upsample after
+    confidence_threshold: 0.3       # cells above this are held fixed at their observed elevation
+    ridge_min_anchor_distance: 0.5  # fraction of grid half-radius; chains closer than this are skipped
+    river_valley_depth: 0.5         # metres to lower river nodes below observed terrain
+    river_drop_per_segment: 0.05    # additional metres drop per ordered river segment
+    lake_y_range_threshold: 0.3     # Y-range threshold (m) to distinguish flat lakes from sloped water
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage
     road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
-    road_blur_sigma: 4.0          # pixel radius for softening road mask edges (×2 for 4.9 cm/cell)
-    road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy (×2 for 4.9 cm/cell)
-    noise_scale: 80.0             # Perlin frequency in pixels (×2 for 4.9 cm/cell → same ~4 m features)
+    road_blur_sigma: 4.0          # pixel radius for softening road mask edges
+    road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
+    noise_scale: 80.0             # fBm base wavelength in pixels
     noise_octaves: 4              # fractal octave count
     noise_amplitude: 0.4          # metres of peak noise displacement
-    noise_gradient_k: 0.15        # slope (hm units/px) that halves noise (×0.5 for 4.9 cm/cell)
-    weathering_iterations: 5      # thermal weathering passes
-    weathering_rate: 0.15         # fraction of Laplacian delta redistributed per pass
-    talus_threshold: 0.012        # Laplacian magnitude that triggers weathering (÷4 for 4.9 cm/cell)
+    linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
+    diffusion_dt: 200.0           # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt)
+    landlab_resolution: 1024      # downsample to this resolution for Landlab, upsample after
 
   - name: Region Map Refinement
     stage: RegionMapRefinementStage

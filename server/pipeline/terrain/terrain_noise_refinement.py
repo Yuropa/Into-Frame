@@ -8,15 +8,17 @@ Applies three passes after TerrainReconstructionStage:
   2. fBm noise        : multi-octave Perlin (fractal Brownian motion) applied
                         uniformly, creating rolling hills at the meso-scale
                         (noise_scale controls the base wavelength).
-  3. Thermal erosion  : angle-of-repose erosion that moves material from slopes
-                        steeper than talus_threshold toward lower neighbours,
-                        rounding sharp peaks and depositing detritus on valley
-                        floors.
+  3. Landlab diffusion: Landlab LinearDiffuser applied at a reduced resolution
+                        for speed, giving hillslope creep that rounds sharp
+                        solver artefacts and creates geomorphically realistic
+                        slopes without the uniform blurring of Laplacian
+                        diffusion or the staircase artefacts of thermal erosion.
 
 Pipeline position: after TerrainReconstructionStage, before TerrainMeshStage.
 
 Reads:
   ContextKey.HEIGHT_MAP       (Depth)          — reconstructed DEM
+  ContextKey.HEIGHT_MAP_PARAMS (dict, optional) — grid_size_meters
   ContextKey.ROAD_SKELETON    (Depth, optional) — binary road/trail mask
 
 Writes:
@@ -25,7 +27,7 @@ Writes:
 from __future__ import annotations
 
 import numpy as np
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, zoom as nd_zoom
 from typing import Any
 from logging import Logger
 
@@ -49,18 +51,14 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         road_blend_weight: float = 0.8,
         road_blur_sigma: float = 2.0,
         road_terrain_smooth_sigma: float = 3.0,
-        # Anisotropic Perlin noise
+        # fBm noise
         noise_scale: float = 40.0,
         noise_octaves: int = 4,
         noise_amplitude: float = 0.4,
-        # Controls how aggressively steep slopes suppress noise.
-        # Units: height-map value per pixel. Increase if noise bleeds onto
-        # roads/rivers; decrease if natural slopes look too smooth.
-        noise_gradient_k: float = 0.3,
-        # Thermal weathering
-        weathering_iterations: int = 5,
-        weathering_rate: float = 0.15,
-        talus_threshold: float = 0.05,
+        # Landlab hillslope diffusion
+        linear_diffusivity: float = 1e-3,
+        diffusion_dt: float = 200.0,
+        landlab_resolution: int = 1024,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.road_blend_weight = road_blend_weight
@@ -69,16 +67,15 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.noise_scale = noise_scale
         self.noise_octaves = noise_octaves
         self.noise_amplitude = noise_amplitude
-        self.noise_gradient_k = noise_gradient_k
-        self.weathering_iterations = weathering_iterations
-        self.weathering_rate = weathering_rate
-        self.talus_threshold = talus_threshold
+        self.linear_diffusivity = linear_diffusivity
+        self.diffusion_dt = diffusion_dt
+        self.landlab_resolution = landlab_resolution
 
 
 class TerrainNoiseRefinementStage(PipelineStage):
     """
-    Adds meso-scale terrain variation and realistic slopes to the reconstructed
-    heightmap via fBm noise and angle-of-repose thermal erosion.
+    Adds meso-scale terrain variation and realistic hillslope morphology to the
+    reconstructed heightmap via fBm noise and Landlab hillslope diffusion.
     """
 
     @classmethod
@@ -100,6 +97,9 @@ class TerrainNoiseRefinementStage(PipelineStage):
 
         terrain = hm_depth.depth.copy().astype(np.float64)
         H, W = terrain.shape
+
+        params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        grid_size = float(params.get("grid_size_meters", 100.0))
 
         # ── Pass 1: Road Grading ──────────────────────────────────────────────
         road_depth = context.input_depth(ContextKey.ROAD_SKELETON)
@@ -128,26 +128,30 @@ class TerrainNoiseRefinementStage(PipelineStage):
         self.advance_progress(task)
 
         # ── Pass 2: fBm Noise ─────────────────────────────────────────────────
-        # Add Perlin fBm uniformly — no gradient suppression. Gradient suppression
-        # was muting noise on mountain slopes, making them look like flat mesas, and
-        # the previous noise_scale (80 px ≈ 4 m at 4.9 cm/cell) produced features
-        # far too small to be visible in a 200 m terrain.  Rolling hills need 50–100 m
-        # wavelengths; fine texture is added by higher octaves automatically.
         noise_layer = self._make_noise(H, W, cfg.noise_scale, cfg.noise_octaves, cfg.seed)
         terrain += noise_layer * cfg.noise_amplitude
         self.advance_progress(task)
 
-        # ── Pass 3: Thermal Erosion ───────────────────────────────────────────
-        # Real angle-of-repose erosion: move material from any slope that exceeds
-        # `talus_threshold` (m/cell) toward the lower neighbour.  This rounds off
-        # sharp peaks and deposits material on valley floors, unlike the previous
-        # Laplacian-diffusion approach which just smoothed everything uniformly.
-        terrain = TerrainNoiseRefinementStage._thermal_erode(
-            terrain,
-            n_iters=cfg.weathering_iterations,
-            rate=cfg.weathering_rate,
-            talus=cfg.talus_threshold,
-        )
+        # ── Pass 3: Landlab Hillslope Diffusion ───────────────────────────────
+        # Run LinearDiffuser at a reduced resolution (landlab_resolution) for
+        # speed, then bicubic-upsample the result back to original size.
+        # Edge nodes are held at FIXED_VALUE so ridge/boundary heights are
+        # preserved; only interior (CORE) nodes are shaped by diffusion.
+        solve_res = min(cfg.landlab_resolution, H, W)
+        if solve_res < H:
+            terrain_small = nd_zoom(terrain, solve_res / H, order=1)
+            cell_size_m = grid_size / solve_res
+            terrain_small = TerrainNoiseRefinementStage._landlab_diffuse(
+                terrain_small, cell_size_m,
+                cfg.linear_diffusivity, cfg.diffusion_dt,
+            )
+            terrain = nd_zoom(terrain_small, H / solve_res, order=3)
+        else:
+            cell_size_m = grid_size / H
+            terrain = TerrainNoiseRefinementStage._landlab_diffuse(
+                terrain, cell_size_m,
+                cfg.linear_diffusivity, cfg.diffusion_dt,
+            )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))
 
@@ -155,7 +159,7 @@ class TerrainNoiseRefinementStage(PipelineStage):
         self.log_info(
             f"Terrain noise refinement: {H}×{W}, "
             f"noise_amplitude={cfg.noise_amplitude:.3f}, "
-            f"weathering_iters={cfg.weathering_iterations}, "
+            f"landlab_resolution={solve_res}, "
             f"Y=[{y_min:.3f}, {y_max:.3f}]"
         )
 
@@ -168,45 +172,44 @@ class TerrainNoiseRefinementStage(PipelineStage):
         return context
 
     @staticmethod
-    def _thermal_erode(
+    def _landlab_diffuse(
         terrain: np.ndarray,
-        n_iters: int,
-        rate: float,
-        talus: float,
+        cell_size_m: float,
+        linear_diffusivity: float,
+        dt: float,
     ) -> np.ndarray:
         """
-        Angle-of-repose thermal erosion.
+        Apply Landlab LinearDiffuser (hillslope creep) to the terrain.
 
-        For every pair of adjacent cells whose height difference exceeds `talus`
-        (in heightmap units per grid cell), a fraction `rate` of the excess is
-        moved from the higher cell to the lower one.  Repeated many times this
-        rounds sharp peaks into smooth slopes and deposits detritus on valley
-        floors, without the uniform blurring produced by Laplacian diffusion.
+        Edge nodes are FIXED_VALUE: their elevations don't change, and the
+        diffusion only reshapes interior (CORE) nodes. This preserves ridge
+        heights and boundary anchors set by the solver while rounding solver
+        artefacts and creating smooth, geomorphically realistic slopes.
 
-        talus: maximum stable slope in metres per grid cell.
-               At 4.9 cm/cell, talus=0.025 ≈ 27° (natural loose-rock slope).
-        rate:  fraction of excess moved per iteration (keep < 0.25 for stability).
+        diffusion_length ≈ sqrt(4 * linear_diffusivity * dt). At the default
+        K=1e-3 and dt=200, that's ~0.89 m at 1024-cell resolution — enough to
+        round multi-cell artefacts without blurring large-scale terrain shape.
         """
-        terrain = terrain.copy()
-        for _ in range(n_iters):
-            north = np.vstack([terrain[:1, :],  terrain[:-1, :]])
-            south = np.vstack([terrain[1:, :],  terrain[-1:, :]])
-            west  = np.hstack([terrain[:, :1],  terrain[:, :-1]])
-            east  = np.hstack([terrain[:, 1:],  terrain[:, -1:]])
+        from landlab import RasterModelGrid
+        from landlab.components import LinearDiffuser
 
-            dn = np.maximum(0.0, terrain - north - talus)
-            ds = np.maximum(0.0, terrain - south - talus)
-            dw = np.maximum(0.0, terrain - west  - talus)
-            de = np.maximum(0.0, terrain - east  - talus)
+        H, W = terrain.shape
+        mg = RasterModelGrid((H, W), xy_spacing=cell_size_m)
 
-            # Remove from high cells and deposit on their lower neighbours.
-            terrain -= (dn + ds + dw + de) * rate
-            terrain[:-1, :] += dn[1:, :]  * rate   # north neighbour receives
-            terrain[1:,  :] += ds[:-1, :] * rate   # south neighbour receives
-            terrain[:, :-1] += dw[:, 1:]  * rate   # west  neighbour receives
-            terrain[:, 1:]  += de[:, :-1] * rate   # east  neighbour receives
+        # FIXED_VALUE at all edges: boundary elevations stay pinned.
+        mg.set_closed_boundaries_at_grid_edges(
+            right_is_closed=False,
+            top_is_closed=False,
+            left_is_closed=False,
+            bottom_is_closed=False,
+        )
 
-        return terrain
+        mg.add_field("topographic__elevation", terrain.ravel().copy(), at="node")
+
+        ld = LinearDiffuser(mg, linear_diffusivity=linear_diffusivity)
+        ld.run_one_step(dt)
+
+        return mg.at_node["topographic__elevation"].reshape(H, W).astype(np.float64)
 
     @staticmethod
     def _make_noise(H: int, W: int, scale: float, octaves: int, seed: int) -> np.ndarray:
@@ -230,7 +233,6 @@ class TerrainNoiseRefinementStage(PipelineStage):
             if sigma_px < 1.0:
                 break
 
-            # Downsample so the target wavelength maps to ~2 px, smooth, upsample.
             factor = max(1, int(sigma_px / 2.0))
             oh = max(H // factor, 4)
             ow = max(W // factor, 4)
