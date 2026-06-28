@@ -114,6 +114,10 @@ class TerrainTextureRefinementStage(PipelineStage):
             guidance_scale=cfg.guidance_scale,
             seed=self.seed,
         )
+        # Free the inpainter's GPU memory before loading the supersampler —
+        # both models together exceed available VRAM.
+        self._inpainter.close()
+        self._inpainter = None
         self.advance_progress(task)
 
         # ── Soft blend at boundary (smoothstep certainty as alpha) ───────────
