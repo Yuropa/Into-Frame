@@ -62,9 +62,11 @@ stages:
                                  # sky-pixel artefacts near the horizon, and as the flood-fill reference.
     flood_fill: true             # BFS from grid centre outward; stops at height jumps and sky gaps
     flood_fill_max_step: 1.5    # max Y change (metres) between adjacent cells in the flood-fill
-    nadir_exclusion_radius: 1.0 # metres: discard near-nadir equirectangular pixels within this
+    nadir_exclusion_radius: 3.0 # metres: discard near-nadir equirectangular pixels within this
                                  # radius of the camera; their depth is unreliable and projects
                                  # directly below the user, creating a spurious bowl/valley.
+    nadir_ramp_width: 5.0       # metres over which certainty ramps from 0 (at exclusion boundary)
+                                 # to full geometric certainty; prevents a hard ring artifact.
 
   - name: Region Map
     stage: RegionMapStage
@@ -72,6 +74,10 @@ stages:
     grid_resolution: 4096       # must match Height Map resolution
     ground_y_max: -0.5
     camera_height_meters: 1.0
+    nadir_exclusion_radius: 3.0 # metres: exclude near-nadir cells whose segmentation is
+                                 # unreliable due to equirectangular distortion at the bottom
+                                 # of the panorama; filled inward by the flood fill instead.
+    nadir_ramp_width: 5.0       # metres over which flood-fill certainty ramps up from 0.
 
   - name: Linear Structures
     stage: LinearStructureStage

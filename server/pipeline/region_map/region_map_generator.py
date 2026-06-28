@@ -26,6 +26,8 @@ class RegionMapGenerator:
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         sky_mask: Optional[np.ndarray] = None,
+        nadir_exclusion_radius: float = 3.0,
+        nadir_ramp_width: float = 5.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project per-pixel region type labels from an equirectangular panorama onto a
@@ -76,6 +78,13 @@ class RegionMapGenerator:
         if sky_mask is not None and sky_mask.shape == d.shape:
             has_data &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
 
+        # Exclude cells too close to the nadir: the panorama bottom is heavily distorted
+        # and segmentation models trained on rectilinear images are unreliable there.
+        # Without exclusion the flood fill seeds from the highest-certainty (near-center)
+        # cells first, propagating wrong types radially outward in a star pattern.
+        if nadir_exclusion_radius > 0:
+            has_data &= r_grid >= nadir_exclusion_radius
+
         if not np.any(has_data):
             zero_certainty = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
             return np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8), zero_certainty
@@ -83,9 +92,17 @@ class RegionMapGenerator:
         region_map = np.full((grid_resolution, grid_resolution), other_idx, dtype=np.uint8)
         region_map[has_data] = type_sampled[has_data]
 
+        # Nadir ramp: smoothly reduce certainty from 0 at the exclusion boundary to full
+        # geometric certainty at exclusion_radius + ramp_width.  This ensures the flood
+        # fill propagates inward from the reliable ring rather than outward from the
+        # edge of the exclusion zone, which is still somewhat distorted.
+        nadir_ramp = np.clip(
+            (r_grid - nadir_exclusion_radius) / max(float(nadir_ramp_width), 1e-6),
+            0.0, 1.0,
+        ).astype(np.float32) ** 2
         certainty = np.where(
             has_data,
-            ground_projection_certainty(X_grid, Z_grid, camera_height_meters),
+            ground_projection_certainty(X_grid, Z_grid, camera_height_meters) * nadir_ramp,
             0.0,
         ).astype(np.float32)
 
