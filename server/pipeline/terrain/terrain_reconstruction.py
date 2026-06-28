@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from typing import Any
 from logging import Logger
-from scipy.ndimage import zoom as nd_zoom, gaussian_filter
+from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 
@@ -49,6 +49,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         solve_resolution: int = 512,
         confidence_threshold: float = 0.3,
         ridge_min_anchor_distance: float = 0.5,
+        ridge_profile_sigma_m: float = 20.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         lake_y_range_threshold: float = 0.3,
@@ -59,6 +60,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.solve_resolution = solve_resolution
         self.confidence_threshold = confidence_threshold
         self.ridge_min_anchor_distance = ridge_min_anchor_distance
+        self.ridge_profile_sigma_m = ridge_profile_sigma_m
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.lake_y_range_threshold = lake_y_range_threshold
@@ -160,6 +162,45 @@ class TerrainReconstructionStage(PipelineStage):
             f"Ridge chains: {n_anchored} anchored (≥{min_anchor_m:.0f} m), "
             f"{n_skipped} foreground skipped"
         )
+
+        # ── Gaussian mountain profile halo ────────────────────────────────────
+        # The harmonic solve with only crest nodes produces a linear ramp from
+        # flat terrain to peak. Adding a Gaussian skirt of fixed nodes gives the
+        # solver the slope shape: steep near the top, tapering at the base.
+        if cfg.ridge_profile_sigma_m > 0.0 and n_anchored > 0:
+            sigma_px = cfg.ridge_profile_sigma_m / cell_size_m
+            profile_best = np.full((H_s, W_s), -np.inf)
+
+            for raw_chain in ridge_chains:
+                chain = np.asarray(raw_chain, dtype=np.float32)
+                if len(chain) < 2:
+                    continue
+                horiz = np.sqrt(chain[:, 0] ** 2 + chain[:, 2] ** 2)
+                if float(np.median(horiz)) < min_anchor_m:
+                    continue
+                rows_c, cols_c = world_to_grid(chain)
+
+                # Per-cell crest elevation (max where multiple chain points overlap)
+                crest_elev_map = np.zeros((H_s, W_s), dtype=np.float64)
+                np.maximum.at(crest_elev_map, (rows_c, cols_c), chain[:, 1].astype(np.float64))
+                crest_mask = np.zeros((H_s, W_s), dtype=bool)
+                crest_mask[rows_c, cols_c] = True
+
+                dist_px, src = distance_transform_edt(~crest_mask, return_indices=True)
+                nearest_elev = crest_elev_map[src[0], src[1]]
+                profile = nearest_elev * np.exp(-0.5 * (dist_px / sigma_px) ** 2)
+                profile_best = np.maximum(profile_best, profile)
+
+            # Pin slope nodes that aren't already fixed by high-confidence observations.
+            apply = (
+                ~fixed_mask
+                & (profile_best > fixed_elev + 0.1)
+                & (profile_best > 0.5)
+            )
+            fixed_mask[apply] = True
+            fixed_elev[apply] = profile_best[apply]
+            self.log_info(f"Ridge profile halo: {int(apply.sum())} slope nodes pinned (σ={cfg.ridge_profile_sigma_m:.0f} m)")
+
         self.advance_progress(task)
 
         # ── River constraints ─────────────────────────────────────────────────
@@ -272,12 +313,14 @@ class TerrainReconstructionStage(PipelineStage):
         mg = RasterModelGrid((H, W), xy_spacing=cell_size_m)
         z = mg.add_field("topographic__elevation", fixed_elev.ravel().copy(), at="node")
 
-        # Mark every node CORE first, then pin the boundary ring and user-fixed cells.
+        # Mark only explicitly-specified nodes as fixed — do not pin the grid
+        # perimeter. Boundary free nodes get natural Neumann (zero-flux) BCs:
+        # adjacent_nodes_at_node returns -1 for out-of-grid directions, so those
+        # nodes simply have lower degree in the Laplacian (2 or 3 instead of 4).
         mg.status_at_node[:] = mg.BC_NODE_IS_CORE
-        mg.status_at_node[mg.boundary_nodes] = mg.BC_NODE_IS_FIXED_VALUE
         mg.status_at_node[fixed_mask.ravel()] = mg.BC_NODE_IS_FIXED_VALUE
 
-        core = mg.core_nodes   # interior free nodes
+        core = mg.core_nodes   # all non-fixed nodes
         n_core = len(core)
         if n_core == 0:
             return fixed_elev.copy()
@@ -285,27 +328,29 @@ class TerrainReconstructionStage(PipelineStage):
         core_map = np.full(mg.number_of_nodes, -1, dtype=np.int64)
         core_map[core] = np.arange(n_core)
 
-        # Core nodes are never on the perimeter, so all 4 grid neighbours exist.
-        all_nb = np.stack(
-            [core - W, core + W, core - 1, core + 1], axis=1
-        )  # (n_core, 4)
+        # adjacent_nodes_at_node: (N, 4) — -1 where no grid neighbour exists.
+        # Handles perimeter nodes correctly without special-casing.
+        all_nb = mg.adjacent_nodes_at_node[core]  # (n_core, 4)
+        valid = all_nb >= 0
+        degree = valid.sum(axis=1).astype(np.float64)
 
-        is_fixed = mg.status_at_node != mg.BC_NODE_IS_CORE   # (N,) bool
-        nb_is_fixed = is_fixed[all_nb]                        # (n_core, 4)
+        is_fixed = mg.status_at_node != mg.BC_NODE_IS_CORE
+
+        ki, di = np.where(valid)
+        nb = all_nb[ki, di]
+        is_fixed_nb = is_fixed[nb]
 
         # RHS: sum fixed-neighbour elevations for each core node.
         rhs = np.zeros(n_core, dtype=np.float64)
-        ki_fix, _ = np.where(nb_is_fixed)
-        np.add.at(rhs, ki_fix, z[all_nb[nb_is_fixed]])
+        np.add.at(rhs, ki[is_fixed_nb], z[nb[is_fixed_nb]])
 
         # Off-diagonal: -1 coupling to each free neighbour.
-        ki_off, di_off = np.where(~nb_is_fixed)
-        j_off = core_map[all_nb[ki_off, di_off]]
+        ki_off = ki[~is_fixed_nb]
+        j_off = core_map[nb[~is_fixed_nb]]
 
-        # All core nodes have exactly 4 neighbours → diagonal = 4.
         rows = np.concatenate([np.arange(n_core), ki_off])
         cols = np.concatenate([np.arange(n_core), j_off])
-        vals = np.concatenate([np.full(n_core, 4.0), np.full(len(ki_off), -1.0)])
+        vals = np.concatenate([degree, np.full(len(ki_off), -1.0)])
 
         A = csr_matrix((vals, (rows, cols)), shape=(n_core, n_core))
         x = spsolve(A, rhs)
