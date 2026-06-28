@@ -104,6 +104,14 @@ stages:
     weathering_rate: 0.15         # fraction of Laplacian delta redistributed per pass
     talus_threshold: 0.012        # Laplacian magnitude that triggers weathering (÷4 for 4.9 cm/cell)
 
+  - name: Region Map Refinement
+    stage: RegionMapRefinementStage
+    certainty_threshold: 0.2        # cells below this are candidates for height-based reclassification
+    water_elevation_tolerance: 0.5  # metres; cells within this band of known water surface → WATER
+    water_gradient_threshold: 0.04  # m/m slope; flatter than this is eligible for WATER
+    terrain_gradient_threshold: 0.15 # m/m slope; steeper than this → TERRAIN
+    paint_width: 2                  # grid-cell half-width to dilate painted polylines
+
   - name: Terrain Mesh
     stage: TerrainMeshStage
     inner_min_dist: 0.10    # metres between samples at the origin (10 cm)

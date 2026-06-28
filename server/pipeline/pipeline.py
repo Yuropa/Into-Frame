@@ -41,6 +41,7 @@ from pipeline.object_detection.object_detection import ObjectDetectionStage
 from pipeline.object_distribution.object_distribution import ObjectDistributionStage
 from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
 from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguration
+from pipeline.region_map.region_map_refinement import RegionMapRefinementStage, RegionMapRefinementConfiguration
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.terrain.terrain_texture_bake import TerrainTextureBakeStage, TerrainTextureBakeConfiguration
 from pipeline.terrain.terrain_texture_refinement import TerrainTextureRefinementStage, TerrainTextureRefinementConfiguration
@@ -329,6 +330,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "TerrainNoiseRefinementStage": TerrainNoiseRefinementStage,
     "PanoramaRegionStage": PanoramaRegionStage,
     "RegionMapStage": RegionMapStage,
+    "RegionMapRefinementStage": RegionMapRefinementStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
     "ReportGenerationStage": ReportGenerationStage,
