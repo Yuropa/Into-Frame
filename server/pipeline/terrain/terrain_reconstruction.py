@@ -26,6 +26,7 @@ import numpy as np
 import torch
 from typing import Any
 from logging import Logger
+from scipy.ndimage import zoom as nd_zoom, gaussian_filter
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -56,6 +57,9 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         river_anchor_weight: float = 2.0,
         river_anchor_stride: int = 5,
         lake_y_range_threshold: float = 0.3,
+        solve_resolution: int = 512,
+        upsample_noise_amplitude: float = 0.02,
+        upsample_noise_octaves: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.laplacian_weight = laplacian_weight
@@ -72,6 +76,9 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.river_anchor_weight = river_anchor_weight
         self.river_anchor_stride = river_anchor_stride
         self.lake_y_range_threshold = lake_y_range_threshold
+        self.solve_resolution = solve_resolution
+        self.upsample_noise_amplitude = upsample_noise_amplitude
+        self.upsample_noise_octaves = upsample_noise_octaves
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -111,16 +118,36 @@ class TerrainReconstructionStage(PipelineStage):
 
         cert_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
         confidence = cert_depth.depth.copy() if cert_depth is not None else np.ones((H, W), dtype=np.float32)
+        # ground_projection_certainty → 0 as r → ∞, which makes the data term
+        # negligible for most of the grid and leaves absolute elevation
+        # underdetermined. A small floor keeps every cell weakly anchored to the
+        # original heightmap so ridge/river shape constraints can't drift it globally.
+        confidence = np.maximum(confidence, 0.05)
 
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = params.get("grid_size_meters", 100.0)
+
+        # ── Downsample to solve_resolution for speed ──────────────────────────
+        solve_res = min(cfg.solve_resolution, H, W)
+        scale_h = solve_res / H
+        scale_w = solve_res / W
+        if scale_h < 1.0:
+            heightmap_solve = nd_zoom(heightmap, (scale_h, scale_w), order=1).astype(np.float64)
+            confidence_solve = nd_zoom(confidence, (scale_h, scale_w), order=1).astype(np.float64)
+        else:
+            heightmap_solve = heightmap.astype(np.float64)
+            confidence_solve = confidence.astype(np.float64)
+        H_s, W_s = heightmap_solve.shape
+        self.log_info(
+            f"Terrain reconstruction: solving at {H_s}×{W_s} (original {H}×{W})"
+        )
         self.advance_progress(task)
 
         # ── Build solver ──────────────────────────────────────────────────────
         self.log_info(f"Terrain reconstruction: heightmap_data_weight={cfg.heightmap_data_weight}")
         solver = TerrainSolver(
-            heightmap=heightmap,
-            confidence=confidence,
+            heightmap=heightmap_solve,
+            confidence=confidence_solve,
             laplacian_weight=cfg.laplacian_weight,
             data_weight=cfg.heightmap_data_weight,
         )
@@ -128,53 +155,59 @@ class TerrainReconstructionStage(PipelineStage):
         # ── Ridge constraints ─────────────────────────────────────────────────
         # Prefer 3D chains; fall back to binary mask when absent.
         #
-        # chain[:, 1] = depth * sin(phi) gives the camera-relative elevation of
-        # each sky-terrain boundary point — the true absolute height the heightmap
-        # should reach at that XZ location.  We use add_ridge_polyline_anchored so
-        # the solver receives both the Gaussian cross-section profile (slope shape)
-        # and per-point absolute elevation pins (correct mountain height).
-        #
-        # The original spike/mesa problem came from anchor_weight=5.0 overwhelming
-        # the data term and sigma=15px being far too narrow (~0.4 m on a 4096/100 m
-        # grid) to build slopes.  Both are fixed here: anchor_weight is lowered to
-        # a soft prior and sigma is scaled to H/8 so the influence zone covers a
-        # realistic mountain footprint.
+        # Only the cross-section profile (Gaussian slope shape) is added — NOT
+        # absolute elevation anchors. Ridge chain Y values are camera-relative
+        # elevations of sky-terrain boundary points (mountains at the horizon),
+        # which are positive (mountains are above camera). Pinning heightmap cells
+        # to those positive values overwhelms the near-zero data term for distant
+        # cells and pulls the entire ground plane up to mountain elevation, making
+        # the texture bake return all-black (all terrain appears above the camera
+        # horizon). The profile constraints alone shape realistic slopes without
+        # disturbing the absolute elevation grounded by the data term.
         ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
         n_ridge_chains = 0
         n_ridge_mask_cells = 0
 
-        # Sigma proportional to grid height: H/8 px ≈ one-eighth of the grid
-        # radius, giving enough reach to build genuine mountain slopes.
-        effective_sigma = max(cfg.ridge_sigma, H / 8.0)
+        # Sigma proportional to solve grid height: H_s/8 px ≈ one-eighth of the
+        # grid radius, giving enough reach to build genuine mountain slopes.
+        effective_sigma = max(cfg.ridge_sigma, H_s / 8.0)
 
         if ridge_chains:
             self.log_info(
                 f"Ridge constraints: {len(ridge_chains)} chain(s), "
-                f"anchor_weight={cfg.ridge_anchor_weight:.2f}, "
                 f"sigma={effective_sigma:.1f} px (cfg={cfg.ridge_sigma:.1f})"
             )
+            x_half = z_far = grid_size / 2.0
             for chain in ridge_chains:
                 chain = np.asarray(chain, dtype=np.float32)
                 if len(chain) < 2:
                     continue
-                solver.add_ridge_polyline_anchored(
-                    points_xyz=chain,
-                    grid_size_meters=grid_size,
+                # Convert world XYZ → heightmap (row, col) coordinates.
+                # Only the cross-section profile (slope shape) is added — no
+                # absolute elevation anchors. Ridge chains come from panorama
+                # depth at large distances (mountains at horizon), so their Y
+                # values are positive (above camera). Anchoring the heightmap to
+                # those elevations pulls the entire low-certainty grid toward
+                # mountain height, making all terrain appear above the camera
+                # horizon and breaking texture bake.
+                col_rc = np.clip((chain[:, 0] + x_half) / grid_size * (W_s - 1), 0, W_s - 1)
+                row_rc = np.clip((chain[:, 2] + z_far) / (2.0 * z_far) * (H_s - 1), 0, H_s - 1)
+                pts_rc = np.stack([row_rc, col_rc], axis=1)
+                solver.add_ridge_polyline(
+                    points=pts_rc,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
                     sigma=effective_sigma,
-                    anchor_weight=cfg.ridge_anchor_weight,
-                    anchor_stride=cfg.ridge_anchor_stride,
                 )
                 n_ridge_chains += 1
         else:
             sil_depth = context.input_depth(ContextKey.MOUNTAIN_SILHOUETTE)
             if sil_depth is not None:
                 sil = sil_depth.depth
-                if sil.shape != (H, W):
+                if sil.shape != (H_s, W_s):
                     from PIL import Image as PILImage
                     sil_img = PILImage.fromarray((sil > 0).astype(np.uint8) * 255)
-                    sil_img = sil_img.resize((W, H), resample=PILImage.NEAREST)
+                    sil_img = sil_img.resize((W_s, H_s), resample=PILImage.NEAREST)
                     sil = np.asarray(sil_img).astype(np.float32) / 255.0
                 ridge_mask = sil > 0
                 n_ridge_mask_cells = int(ridge_mask.sum())
@@ -196,8 +229,8 @@ class TerrainReconstructionStage(PipelineStage):
                 if structure.type != "river":
                     continue
                 path = structure.path  # (K, 3) world (x, y, z)
-                col = np.clip((path[:, 0] + x_half) / grid_size * (W - 1), 0, W - 1)
-                row = np.clip((path[:, 2] + z_far) / (2.0 * z_far) * (H - 1), 0, H - 1)
+                col = np.clip((path[:, 0] + x_half) / grid_size * (W_s - 1), 0, W_s - 1)
+                row = np.clip((path[:, 2] + z_far) / (2.0 * z_far) * (H_s - 1), 0, H_s - 1)
                 pts = np.stack([row, col], axis=1)
                 solver.add_river_polyline(
                     pts,
@@ -249,7 +282,27 @@ class TerrainReconstructionStage(PipelineStage):
         )
 
         # ── Solve ─────────────────────────────────────────────────────────────
-        new_hm = solver.solve()
+        new_hm_small = solver.solve()
+
+        # ── Upsample back to original resolution ──────────────────────────────
+        if H_s < H or W_s < W:
+            new_hm = nd_zoom(new_hm_small, (H / H_s, W / W_s), order=3).astype(np.float32)
+        else:
+            new_hm = new_hm_small.astype(np.float32)
+
+        # ── Add fine-grain noise to restore sub-solver-resolution detail ───────
+        if cfg.upsample_noise_amplitude > 0.0:
+            rng = np.random.default_rng(cfg.seed)
+            noise = np.zeros((H, W), dtype=np.float32)
+            for octave in range(cfg.upsample_noise_octaves):
+                amplitude = 0.5 ** octave
+                raw = rng.standard_normal((H, W)).astype(np.float32) * amplitude
+                sigma = max(1.0, min(H, W) / (4.0 * (2 ** octave)))
+                noise += gaussian_filter(raw, sigma=sigma)
+            peak = float(np.abs(noise).max())
+            if peak > 0.0:
+                noise /= peak
+            new_hm += noise * cfg.upsample_noise_amplitude
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 

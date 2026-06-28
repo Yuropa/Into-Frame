@@ -109,12 +109,20 @@ class SupersamplingServer(RemoteServer):
         return (wy[:, None] * wx[None, :])[:, :, None]
 
     def _run_tile(self, tile: Image.Image) -> Image.Image:
+        in_w, in_h = tile.size
         inputs = self.processor(tile, return_tensors="pt").to(self.device)
         with torch.no_grad():
             output = self.model(**inputs).reconstruction
         out = output.squeeze().cpu().clamp(0, 1).numpy()
         out = (np.transpose(out, (1, 2, 0)) * 255).astype(np.uint8)
-        return Image.fromarray(out)
+        result = Image.fromarray(out)
+        # The processor pads the input to a window-size multiple before inference,
+        # so the output can be slightly larger than 2× the original tile size.
+        # Crop back to the expected dimensions so tile placement stays exact.
+        expected = (in_w * 2, in_h * 2)
+        if result.size != expected:
+            result = result.crop((0, 0, *expected))
+        return result
 
 
 if __name__ == "__main__":

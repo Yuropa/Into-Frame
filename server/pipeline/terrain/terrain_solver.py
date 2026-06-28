@@ -227,24 +227,39 @@ class TerrainSolver:
         cand = np.stack([ya, xa], axis=1).astype(np.float64)  # (M, 2)
 
         # ── Step 2: true perpendicular distance to polyline ───────────────────
-        float_pts  = pts.astype(np.float64)
-        min_dist   = np.full(len(ya), np.inf)
-        nearest_pt = np.zeros((len(ya), 2))
+        float_pts = pts.astype(np.float64)
+        p0s = float_pts[:-1]                              # (S, 2)
+        p1s = float_pts[1:]                               # (S, 2)
+        segs   = p1s - p0s                                # (S, 2)
+        len_sq = (segs * segs).sum(axis=1)                # (S,)
+        safe_len_sq = np.where(len_sq > 1e-10, len_sq, 1.0)
 
-        for i in range(len(float_pts) - 1):
-            p0    = float_pts[i]
-            p1    = float_pts[i + 1]
-            seg   = p1 - p0
-            len_sq = float(np.dot(seg, seg))
-            if len_sq < 1e-10:
-                t = np.zeros(len(ya))
-            else:
-                t = np.clip(((cand - p0) @ seg) / len_sq, 0.0, 1.0)
-            near = p0 + t[:, np.newaxis] * seg          # (M, 2) nearest points
-            dist = np.linalg.norm(cand - near, axis=1)  # (M,)
-            closer = dist < min_dist
-            min_dist[closer]   = dist[closer]
-            nearest_pt[closer] = near[closer]
+        M = len(ya)
+        min_dist   = np.full(M, np.inf)
+        nearest_pt = np.zeros((M, 2))
+
+        # Chunk over segments to keep memory at O(M × CHUNK) rather than O(M × S).
+        CHUNK = 64
+        for s in range(0, len(p0s), CHUNK):
+            p0c = p0s[s:s + CHUNK]            # (C, 2)
+            sc  = segs[s:s + CHUNK]           # (C, 2)
+            lc  = safe_len_sq[s:s + CHUNK]    # (C,)
+
+            diff = cand[:, None] - p0c[None]  # (M, C, 2)
+            t    = np.clip(
+                (diff * sc[None]).sum(axis=2) / lc[None],
+                0.0, 1.0,
+            )                                 # (M, C)
+            near = p0c[None] + t[:, :, None] * sc[None]          # (M, C, 2)
+            dist = np.linalg.norm(cand[:, None] - near, axis=2)  # (M, C)
+
+            best_c   = dist.argmin(axis=1)                        # (M,)
+            best_d   = dist[np.arange(M), best_c]                 # (M,)
+            best_near = near[np.arange(M), best_c]                # (M, 2)
+
+            closer = best_d < min_dist
+            min_dist[closer]    = best_d[closer]
+            nearest_pt[closer]  = best_near[closer]
 
         # ── Step 3: apply Gaussian profile using true distance ────────────────
         within = min_dist < n_sigma * sigma

@@ -27,6 +27,7 @@ class TerrainMeshGenerator:
         texture: Optional[PIL.Image.Image] = None,
         intrinsics: Optional[CameraIntrinsics] = None,
         precomputed_texture: Optional[PIL.Image.Image] = None,
+        texture_tile_factor: float = 1.0,
     ) -> Mesh:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -91,8 +92,11 @@ class TerrainMeshGenerator:
                 if panorama is not None else None)
         )
         if baked_tex is not None:
-            u = ((X_pos + x_half) / (2.0 * x_half)).clip(0.0, 1.0).astype(np.float32)
-            v = ((Z_pos + z_far)  / (2.0 * z_far )).clip(0.0, 1.0).astype(np.float32)
+            # UVs scaled by texture_tile_factor so the tile repeats that many
+            # times across the full terrain grid. Values > 1 are valid in glTF
+            # (default sampler wrap = REPEAT) and give higher texel density.
+            u = ((X_pos + x_half) / (2.0 * x_half) * texture_tile_factor).astype(np.float32)
+            v = ((Z_pos + z_far)  / (2.0 * z_far)  * texture_tile_factor).astype(np.float32)
             uv = np.stack([u, v], axis=-1)
             material = trimesh.visual.material.PBRMaterial(
                 baseColorTexture=baked_tex,

@@ -22,6 +22,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         n_boundary: int = 12,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
+        texture_tile_factor: float = 8.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.inner_min_dist = inner_min_dist
@@ -29,6 +30,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.n_boundary = n_boundary
         self.z_far = z_far
         self.noise_amplitude = noise_amplitude
+        self.texture_tile_factor = texture_tile_factor
 
 
 class TerrainMeshStage(PipelineStage):
@@ -130,6 +132,7 @@ class TerrainMeshStage(PipelineStage):
             texture=pinhole_texture,
             intrinsics=intrinsics,
             precomputed_texture=precomputed.image if precomputed is not None else None,
+            texture_tile_factor=cfg.texture_tile_factor if precomputed is not None else 1.0,
         )
         self.advance_progress(task)
 
@@ -180,5 +183,6 @@ class TerrainMeshStage(PipelineStage):
                 "Grid extent": f"{grid_size:.0f} m",
                 "Inner min dist": f"{cfg.inner_min_dist:.1f} m",
                 "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
+                "Texture tile factor": f"{cfg.texture_tile_factor:.0f}×",
             },
         )
