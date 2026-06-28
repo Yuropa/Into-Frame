@@ -81,7 +81,7 @@ def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
             label_map, type_mask, class_ids, id2label
         )
 
-        for comp_id in range(n_comps):
+        for comp_id in range(1, n_comps + 1):
             comp_mask = comp_labels == comp_id
             comp_pixels = int(comp_mask.sum())
             area_fraction = comp_pixels / total_pixels
