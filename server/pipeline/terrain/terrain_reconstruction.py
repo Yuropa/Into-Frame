@@ -43,7 +43,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        laplacian_weight: float = 0.1,
+        laplacian_weight: float = 0.01,
         heightmap_data_weight: float = 0.3,
         ridge_weight: float = 2.0,
         ridge_crest_height: float = 0.5,
@@ -155,15 +155,13 @@ class TerrainReconstructionStage(PipelineStage):
         # ── Ridge constraints ─────────────────────────────────────────────────
         # Prefer 3D chains; fall back to binary mask when absent.
         #
-        # Only the cross-section profile (Gaussian slope shape) is added — NOT
-        # absolute elevation anchors. Ridge chain Y values are camera-relative
-        # elevations of sky-terrain boundary points (mountains at the horizon),
-        # which are positive (mountains are above camera). Pinning heightmap cells
-        # to those positive values overwhelms the near-zero data term for distant
-        # cells and pulls the entire ground plane up to mountain elevation, making
-        # the texture bake return all-black (all terrain appears above the camera
-        # horizon). The profile constraints alone shape realistic slopes without
-        # disturbing the absolute elevation grounded by the data term.
+        # Ridge chain Y values are camera-relative elevations of the sky-terrain
+        # boundary (mountains at the horizon). We use add_ridge_polyline_anchored
+        # so those real elevations are applied as absolute pins on the ridge cells.
+        # This is safe now that laplacian_weight is low (0.01): the data term for
+        # nearby high-confidence cells (weight ≈ 0.24) dominates the Laplacian
+        # (≈ 0.04), keeping foreground terrain grounded while distant ridge cells
+        # are shaped by the anchor and profile constraints.
         ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
         n_ridge_chains = 0
         n_ridge_mask_cells = 0
@@ -177,27 +175,18 @@ class TerrainReconstructionStage(PipelineStage):
                 f"Ridge constraints: {len(ridge_chains)} chain(s), "
                 f"sigma={effective_sigma:.1f} px (cfg={cfg.ridge_sigma:.1f})"
             )
-            x_half = z_far = grid_size / 2.0
             for chain in ridge_chains:
                 chain = np.asarray(chain, dtype=np.float32)
                 if len(chain) < 2:
                     continue
-                # Convert world XYZ → heightmap (row, col) coordinates.
-                # Only the cross-section profile (slope shape) is added — no
-                # absolute elevation anchors. Ridge chains come from panorama
-                # depth at large distances (mountains at horizon), so their Y
-                # values are positive (above camera). Anchoring the heightmap to
-                # those elevations pulls the entire low-certainty grid toward
-                # mountain height, making all terrain appear above the camera
-                # horizon and breaking texture bake.
-                col_rc = np.clip((chain[:, 0] + x_half) / grid_size * (W_s - 1), 0, W_s - 1)
-                row_rc = np.clip((chain[:, 2] + z_far) / (2.0 * z_far) * (H_s - 1), 0, H_s - 1)
-                pts_rc = np.stack([row_rc, col_rc], axis=1)
-                solver.add_ridge_polyline(
-                    points=pts_rc,
+                solver.add_ridge_polyline_anchored(
+                    points_xyz=chain,
+                    grid_size_meters=grid_size,
                     weight=cfg.ridge_weight,
                     crest_height=cfg.ridge_crest_height,
                     sigma=effective_sigma,
+                    anchor_weight=cfg.ridge_anchor_weight,
+                    anchor_stride=cfg.ridge_anchor_stride,
                 )
                 n_ridge_chains += 1
         else:

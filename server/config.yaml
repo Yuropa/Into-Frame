@@ -205,3 +205,4 @@ stages:
 
   - name: Report
     stage: ReportGenerationStage
+    enabled: false
