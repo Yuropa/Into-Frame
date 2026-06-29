@@ -128,17 +128,18 @@ stages:
     z_far: null
     noise_amplitude: 0.05   # metres of peak noise displacement
 
-  - name: Terrain Texture Bake
-    stage: TerrainTextureBakeStage
-    tex_size: 4096              # texels per side — matches heightmap resolution
-
-  - name: Terrain Texture Refinement
-    stage: TerrainTextureRefinementStage
-    certainty_threshold: 0.2   # texels below this are inpainted
-    dilation_px: 8             # mask dilation before inpainting
+  - name: Terrain Texture Generation
+    stage: TerrainTextureGenerationStage
+    tile_size: 512              # px per seamless region tile (FLUX generates at this size)
+    output_size: 2048           # px for the final composite terrain texture
+    tile_factor: 8              # how many tile repetitions fill output_size (baked in)
+    blend_sigma: 0.05           # gaussian blend width at region boundaries (fraction of output_size)
+    min_region_fraction: 0.02   # regions smaller than this fraction are skipped
     inpainting_type: FLUX
-    num_inference_steps: 30
+    num_inference_steps: 28
     guidance_scale: 30.0
+    seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
+    seam_dilation_px: 8         # dilation applied to seam mask before inpainting
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.

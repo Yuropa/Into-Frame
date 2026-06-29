@@ -118,6 +118,16 @@ class TerrainMeshStage(PipelineStage):
                         "No texture source found — generating geometry-only terrain mesh"
                     )
 
+        # ── Resolve tile factor ───────────────────────────────────────────────
+        # TerrainTextureGenerationStage writes TERRAIN_TEXTURE_TILE_FACTOR=1.0 to
+        # signal that tiling is already baked into the composite; fall back to the
+        # config value for legacy baked textures that still need mesh-level tiling.
+        ctx_tile_factor = context.input_object(ContextKey.TERRAIN_TEXTURE_TILE_FACTOR)
+        if precomputed is not None:
+            tile_factor = float(ctx_tile_factor) if ctx_tile_factor is not None else cfg.texture_tile_factor
+        else:
+            tile_factor = 1.0
+
         # ── Generate mesh ─────────────────────────────────────────────────────
         mesh = TerrainMeshGenerator.generate(
             height_map=height_map,
@@ -132,7 +142,7 @@ class TerrainMeshStage(PipelineStage):
             texture=pinhole_texture,
             intrinsics=intrinsics,
             precomputed_texture=precomputed.image if precomputed is not None else None,
-            texture_tile_factor=cfg.texture_tile_factor if precomputed is not None else 1.0,
+            texture_tile_factor=tile_factor,
         )
         self.advance_progress(task)
 
