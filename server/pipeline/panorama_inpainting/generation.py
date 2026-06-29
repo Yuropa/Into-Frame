@@ -64,6 +64,16 @@ import numpy as np
 from PIL import Image as PILImage, ImageFilter
 from scipy.ndimage import binary_dilation
 
+# Environment labels that indicate natural terrain. When CLIP's best environment
+# match is one of these and its score is competitive with the winning object label,
+# the mask is terrain — not a foreground object — and should not be inpainted.
+_TERRAIN_ENV_LABELS: frozenset[str] = frozenset({
+    "mountain", "cliff", "trail", "ground", "field", "sand", "snow", "ice", "dirt", "mud",
+})
+# How much the object score may exceed the terrain environment score before we
+# stop protecting it (CLIP similarity scores, typically 0.20–0.35).
+_TERRAIN_PROTECTION_MARGIN: float = 0.03
+
 
 def _environment_prompt(scene_caption: str, removed_categories: set[str] | None = None) -> tuple[str, list[str]]:
     """
@@ -223,7 +233,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, clip_confidence, _, _ = self._classifier.classify_with_details(
+                obj_type, clip_confidence, _, criteria = self._classifier.classify_with_details(
                     crop_image,
                     scene_image=Image(original_pil),
                     box=box,
@@ -252,9 +262,18 @@ class PanoramaInpaintingStage(PipelineStage):
                     if mask_fraction > self.config.max_object_area_fraction:
                         self.log_info(f"  crop_{i}: skipping inpaint, mask too large ({mask_fraction:.1%} of panorama)")
                     else:
-                        object_masks.append(mask_array)
-                        pass_objects.append((mask_array, box))
-                        removed_object_types.add(inpaint_type)
+                        # Protect natural terrain: if the best environment match is a terrain
+                        # category and its score is within the margin, the "object" label is
+                        # likely a misclassification of a mountain/cliff/ground feature.
+                        best_env_label = criteria.get("best_env_label", "")
+                        best_env_score = criteria.get("best_env_score", 0.0)
+                        best_obj_score = criteria.get("best_obj_score", 0.0)
+                        if best_env_label in _TERRAIN_ENV_LABELS and best_env_score >= best_obj_score - _TERRAIN_PROTECTION_MARGIN:
+                            self.log_info(f"  crop_{i}: skipping inpaint, terrain env match ({best_env_label!r}, env={best_env_score:.3f} obj={best_obj_score:.3f})")
+                        else:
+                            object_masks.append(mask_array)
+                            pass_objects.append((mask_array, box))
+                            removed_object_types.add(inpaint_type)
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
