@@ -223,7 +223,7 @@ class PanoramaInpaintingStage(PipelineStage):
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, clip_confidence = self._classifier.classify(
+                obj_type, clip_confidence, _, _ = self._classifier.classify_with_details(
                     crop_image,
                     scene_image=Image(original_pil),
                     box=box,
