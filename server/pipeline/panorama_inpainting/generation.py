@@ -45,26 +45,39 @@ from PIL import Image as PILImage, ImageFilter
 from scipy.ndimage import binary_dilation
 
 
-def _environment_prompt(scene_caption: str) -> str:
+def _environment_prompt(scene_caption: str, removed_categories: set[str] | None = None) -> tuple[str, list[str]]:
     """
     Strip object names from the scene caption so Flux doesn't regenerate what
-    was just removed. Keeps location/environment words (city names, terrain
-    descriptors) and drops specific object category terms.
+    was just removed. Returns (cleaned_caption, list_of_stripped_words).
+
+    When removed_categories is provided, only those specific category keys are
+    stripped (used for the LaMa-output caption, where vegetation/background words
+    should be kept because they describe the revealed background). When None, all
+    OBJECT_CATEGORIES keys are stripped (used for the original scene caption).
     """
-    from pipeline.object_typing.categories import OBJECT_CATEGORIES
+    from pipeline.object_typing.categories import OBJECT_CATEGORIES, VEGETATION_CATEGORIES
     import re
 
+    if removed_categories is not None:
+        keys_to_strip = removed_categories
+    else:
+        # Strip everything except vegetation — vegetation is background, not foreground
+        keys_to_strip = set(OBJECT_CATEGORIES.keys()) - VEGETATION_CATEGORIES
+
     stop_words = set()
-    for key in OBJECT_CATEGORIES:
+    for key in keys_to_strip:
         stop_words.add(key.replace("_", " "))
         stop_words.add(key.replace("_", ""))
 
-    # Remove matched words, collapse whitespace
     result = scene_caption
+    stripped = []
     for word in sorted(stop_words, key=len, reverse=True):
-        result = re.sub(rf"\b{re.escape(word)}s?\b", "", result, flags=re.IGNORECASE)
+        new = re.sub(rf"\b{re.escape(word)}s?\b", "", result, flags=re.IGNORECASE)
+        if new != result:
+            stripped.append(word)
+        result = new
     result = re.sub(r"\s{2,}", " ", result).strip(" ,;.")
-    return result or "outdoor scene"
+    return result or "outdoor scene", stripped
 
 
 def _draw_extraction_overlay(
@@ -146,6 +159,7 @@ class PanoramaInpaintingStage(PipelineStage):
 
         object_masks = []  # foreground-object masks for the visual panorama composite
         all_masks = []     # every detected mask, for the extraction overlay
+        removed_object_types: set[str] = set()
         manifest = {"passes": [{"pass": 1, "crops": []}]}
         fraction_advanced = 0.0
         self.set_total_tasks(3)  # seg + classify + inpaint
@@ -204,6 +218,7 @@ class PanoramaInpaintingStage(PipelineStage):
                     else:
                         object_masks.append(mask_array)
                         pass_objects.append((mask_array, box))
+                        removed_object_types.add(obj_type)
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
@@ -229,7 +244,7 @@ class PanoramaInpaintingStage(PipelineStage):
             #     global context but runs on a downscaled panorama.
             inpaint_task = self.create_progress(len(pass_objects) * 2, "Inpainting…")
             scene_caption = context.input_object(ContextKey.INPUT_CAPTION) or ""
-            caption = _environment_prompt(scene_caption)
+            caption, _ = _environment_prompt(scene_caption)
 
             flux_max = 1024
 
@@ -237,11 +252,13 @@ class PanoramaInpaintingStage(PipelineStage):
                 terrain_pil = self._inpaint_full_panorama(
                     context, original_pil, pass_objects, caption,
                     w, h, flux_max, lama_dilation, inpaint_task,
+                    removed_categories=removed_object_types,
                 )
             else:
                 terrain_pil = self._inpaint_per_object(
                     context, original_pil, pass_objects, caption,
                     w, h, flux_max, lama_dilation, inpaint_task,
+                    removed_categories=removed_object_types,
                 )
 
             fraction_advanced += 1.0 / self.total_tasks
@@ -305,13 +322,17 @@ class PanoramaInpaintingStage(PipelineStage):
             pil = pil.resize((target_w, target_h), PILImage.LANCZOS)
         return pil
 
-    def _caption_from_lama(self, lama_arr: np.ndarray) -> str:
+    def _caption_from_lama(self, lama_arr: np.ndarray, removed_categories: set[str] | None = None) -> tuple[str, dict]:
         if self._captioner is None:
             self._captioner = ImageCaptioning(self.preferred_device)
-        raw = self._captioner.caption(Image(PILImage.fromarray(lama_arr)))
-        caption = _environment_prompt(raw)
-        self.log_info(f"Fill caption: {caption!r}")
-        return caption
+        # Prompt BLIP to focus on the outdoor background rather than a generic scene description
+        raw = self._captioner.caption(Image(PILImage.fromarray(lama_arr)), prompt="the outdoor background shows")
+        caption, stripped = _environment_prompt(raw, removed_categories=removed_categories)
+        self.log_info(f"Fill caption (raw):       {raw!r}")
+        self.log_info(f"Fill caption (stripped):  {stripped}")
+        self.log_info(f"Fill caption (final):     {caption!r}")
+        debug = {"raw_caption": raw, "stripped_words": stripped, "final_caption": caption}
+        return caption, debug
 
     def _inpaint_full_panorama(
         self,
@@ -324,6 +345,7 @@ class PanoramaInpaintingStage(PipelineStage):
         flux_max: int,
         lama_dilation: int,
         inpaint_task,
+        removed_categories: set[str] | None = None,
     ) -> PILImage.Image:
         """
         Research-baseline mode: one LaMa call on the full panorama with the
@@ -360,14 +382,21 @@ class PanoramaInpaintingStage(PipelineStage):
         for _ in pass_objects:
             self.advance_progress(inpaint_task)
 
-        caption = self._caption_from_lama(current_arr)
+        caption, caption_debug = self._caption_from_lama(current_arr, removed_categories=removed_categories)
 
-        # Phase 2: Flux — scale full panorama to fit flux_max, then scale back
+        # Phase 2: Flux — scale panorama to fit within height×width caps, preserving aspect ratio.
+        # We cap height at flux_max and width at 2×flux_max to keep the 2:1 equirectangular ratio
+        # at full resolution rather than downscaling based on the longest side (which would halve
+        # the height of a standard panorama and give Flux only 512px to work with vertically).
         flux_input = PILImage.fromarray(current_arr)
         flux_mask  = union_mask_pil
 
-        if w > flux_max or h > flux_max:
-            scale   = flux_max / max(w, h)
+        flux_max_h = flux_max        # 1024
+        flux_max_w = flux_max * 2    # 2048
+
+        if h > flux_max_h or w > flux_max_w:
+            scale   = min(flux_max_h / h if h > flux_max_h else 1.0,
+                          flux_max_w / w if w > flux_max_w else 1.0)
             flux_w  = max(16, (int(w * scale) // 16) * 16)
             flux_h  = max(16, (int(h * scale) // 16) * 16)
             flux_input_s = flux_input.resize((flux_w, flux_h), PILImage.LANCZOS)
@@ -376,17 +405,30 @@ class PanoramaInpaintingStage(PipelineStage):
             flux_input_s, flux_mask_s = flux_input, flux_mask
             flux_w, flux_h = w, h
 
-        self.log_info(f"  Flux: full panorama ({flux_w}×{flux_h}px)")
+        self.log_info(f"  Flux: full panorama input={w}×{h} → flux={flux_w}×{flux_h}px")
         flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
+        flux_guidance  = 30.0
+        flux_steps     = 50
         flux_pil = flux_inpainter.inpaint(
             flux_input_s,
             flux_mask_s,
             temp_path=self.temp,
             prompt=caption,
-            num_inference_steps=36,
-            guidance_scale=10.0,
+            num_inference_steps=flux_steps,
+            guidance_scale=flux_guidance,
         )
         flux_inpainter.close()
+
+        if self.temp is not None:
+            import json
+            debug = {
+                "mode": "full_panorama",
+                "panorama_resolution": {"w": w, "h": h},
+                "flux_resolution": {"w": flux_w, "h": flux_h},
+                "flux_params": {"guidance_scale": flux_guidance, "num_inference_steps": flux_steps},
+                **caption_debug,
+            }
+            (self.temp / "inpaint_debug.json").write_text(json.dumps(debug, indent=2))
 
         if self.temp is not None:
             flux_pil.save(self.temp / "inpaint_pass_2_flux_raw.png")
@@ -427,6 +469,7 @@ class PanoramaInpaintingStage(PipelineStage):
         flux_max: int,
         lama_dilation: int,
         inpaint_task,
+        removed_categories: set[str] | None = None,
     ) -> PILImage.Image:
         """
         Per-object mode: accumulating LaMa per crop, then Flux per crop.
@@ -483,10 +526,13 @@ class PanoramaInpaintingStage(PipelineStage):
 
         lama_inpainter.close()
 
-        caption = self._caption_from_lama(current_arr)
+        caption, caption_debug = self._caption_from_lama(current_arr, removed_categories=removed_categories)
 
         next_terrain_arr = np.array(original_pil)
         valid_states = [s for s in lama_states if s[2] is not None]
+        flux_guidance = 30.0
+        flux_steps = 50
+        crop_debug_entries: list[dict] = []
 
         if valid_states:
             flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
@@ -511,22 +557,28 @@ class PanoramaInpaintingStage(PipelineStage):
                 lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
                 mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
 
-                self.log_info(f"  Flux: crop_{flux_idx} ({crop_w}×{crop_h}px)")
+                flux_cw, flux_ch = crop_w, crop_h
                 if crop_w > flux_max or crop_h > flux_max:
                     scale     = flux_max / max(crop_w, crop_h)
-                    flux_w    = max(16, (int(crop_w * scale) // 16) * 16)
-                    flux_h    = max(16, (int(crop_h * scale) // 16) * 16)
-                    lama_crop = lama_crop.resize((flux_w, flux_h), PILImage.LANCZOS)
-                    mask_crop = mask_crop.resize((flux_w, flux_h), PILImage.NEAREST)
+                    flux_cw   = max(16, (int(crop_w * scale) // 16) * 16)
+                    flux_ch   = max(16, (int(crop_h * scale) // 16) * 16)
+                    lama_crop = lama_crop.resize((flux_cw, flux_ch), PILImage.LANCZOS)
+                    mask_crop = mask_crop.resize((flux_cw, flux_ch), PILImage.NEAREST)
 
+                self.log_info(f"  Flux: crop_{flux_idx} input={crop_w}×{crop_h} → flux={flux_cw}×{flux_ch}px")
                 flux_pil = flux_inpainter.inpaint(
                     lama_crop,
                     mask_crop,
                     temp_path=self.temp,
                     prompt=caption,
-                    num_inference_steps=36,
-                    guidance_scale=10.0,
+                    num_inference_steps=flux_steps,
+                    guidance_scale=flux_guidance,
                 )
+                crop_debug_entries.append({
+                    "crop_idx": flux_idx,
+                    "crop_resolution": {"w": crop_w, "h": crop_h},
+                    "flux_resolution": {"w": flux_cw, "h": flux_ch},
+                })
 
                 if self.temp is not None:
                     flux_pil.save(self.temp / f"inpaint_{global_idx}_flux_crop_raw.png")
@@ -559,6 +611,15 @@ class PanoramaInpaintingStage(PipelineStage):
         terrain_pil = PILImage.fromarray(next_terrain_arr)
         if self.temp is not None:
             terrain_pil.save(self.temp / "panorama_terrain.png")
+            import json
+            debug = {
+                "mode": "per_object",
+                "panorama_resolution": {"w": w, "h": h},
+                "flux_params": {"guidance_scale": flux_guidance, "num_inference_steps": flux_steps},
+                "crops": crop_debug_entries if valid_states else [],
+                **caption_debug,
+            }
+            (self.temp / "inpaint_debug.json").write_text(json.dumps(debug, indent=2))
         self.finish_progress(inpaint_task)
         return terrain_pil
 
