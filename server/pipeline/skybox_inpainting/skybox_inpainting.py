@@ -25,9 +25,10 @@ def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Imag
 
 def _sky_prompt(sky_caption: str) -> str:
     return (
-        f"photorealistic 360-degree sky panorama, {sky_caption}, "
-        "sky fills entire frame in all directions, only sky and clouds visible, "
-        "seamless, high quality, equirectangular"
+        f"photorealistic equirectangular 360-degree sky panorama, {sky_caption}, "
+        "seamless sky filling the entire frame in all directions, only sky and clouds, "
+        "no ground, no horizon line, no terrain, no landscape, no objects, "
+        "consistent natural lighting, ultra detailed, high quality"
     )
 
 
@@ -48,7 +49,6 @@ class SkyboxInpaintingStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
-        self._lama: InPainting | None = None
         self._flux: InPainting | None = None
 
     def _resolved_keys(self):
@@ -76,12 +76,10 @@ class SkyboxInpaintingStage(PipelineStage):
         h, w = source_pil.height, source_pil.width
         source_arr = np.array(source_pil)
 
-        # Region type map is stored as float32; cast back to uint8 for comparison.
         type_arr = type_map.depth.astype(np.uint8)
-        sky_mask = (type_arr == int(RegionType.SKY))       # True where sky
-        fill_mask = ~sky_mask                               # True where we must in-paint
+        sky_mask = (type_arr == int(RegionType.SKY))
+        fill_mask = ~sky_mask
 
-        # Store sky mask for downstream consumers.
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))
 
@@ -99,7 +97,6 @@ class SkyboxInpaintingStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        # Dilate fill mask so in-painting blends cleanly into the sky boundary.
         dilation_px = max(8, min(w, h) // 100)
         fill_dilated = binary_dilation(fill_mask, iterations=dilation_px).astype(np.float32)
         fill_mask_pil = PILImage.fromarray((fill_dilated * 255).astype(np.uint8), mode="L")
@@ -107,7 +104,6 @@ class SkyboxInpaintingStage(PipelineStage):
         if self.output is not None:
             fill_mask_pil.save(self.output / "fill_mask.png")
 
-        # Caption the sky region directly so the prompt reflects its actual appearance.
         sky_crop = _crop_sky(source_pil, sky_mask)
         captioner = ImageCaptioning(self.preferred_device)
         sky_caption = captioner.caption(Image(sky_crop), prompt="a photo of the sky with")
@@ -118,9 +114,8 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
-        # Pre-fill non-sky regions by propagating the nearest sky pixel's color
-        # outward. This gives LaMa and Flux a smooth sky-colored context everywhere
-        # instead of a hard boundary, preventing them from generating terrain.
+        # Pre-fill non-sky regions by propagating the nearest sky pixel colour outward.
+        # This gives FLUX a sky-coloured context everywhere instead of a hard boundary.
         _, nearest_sky_idx = distance_transform_edt(~sky_mask, return_indices=True)
         prefilled_arr = source_arr[nearest_sky_idx[0], nearest_sky_idx[1]]
         prefilled_pil = PILImage.fromarray(prefilled_arr)
@@ -128,29 +123,19 @@ class SkyboxInpaintingStage(PipelineStage):
         if self.output is not None:
             prefilled_pil.save(self.output / "prefilled.png")
 
-        # Phase 1: LaMa — structural fill of the full panorama.
-        self.log_info(f"LaMa: full panorama ({w}×{h}px)")
-        lama = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.LAMA)
-        lama_pil = lama.inpaint(prefilled_pil, fill_mask_pil, temp_path=self.temp)
-        lama.close()
-        if self.output is not None:
-            lama_pil.save(self.output / "lama.png")
-
-        self.advance_progress(task)
-
-        # Phase 2: Flux — perceptual refinement. Scale down if needed.
-        flux_max = 1024
+        # Scale to FLUX working resolution
+        flux_max = 1536
         if w > flux_max or h > flux_max:
             scale = flux_max / max(w, h)
             fw = max(16, (int(w * scale) // 16) * 16)
             fh = max(16, (int(h * scale) // 16) * 16)
-            flux_input = lama_pil.resize((fw, fh), PILImage.LANCZOS)
-            flux_mask = fill_mask_pil.resize((fw, fh), PILImage.NEAREST)
+            flux_input = prefilled_pil.resize((fw, fh), PILImage.LANCZOS)
+            flux_mask  = fill_mask_pil.resize((fw, fh), PILImage.NEAREST)
         else:
-            flux_input, flux_mask = lama_pil, fill_mask_pil
+            flux_input, flux_mask = prefilled_pil, fill_mask_pil
             fw, fh = w, h
 
-        self.log_info(f"Flux: {fw}×{fh}px")
+        self.log_info(f"FLUX pass 1: {fw}×{fh}px")
         flux = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX)
         flux_pil = flux.inpaint(
             flux_input,
@@ -161,22 +146,58 @@ class SkyboxInpaintingStage(PipelineStage):
             guidance_scale=30.0,
             seed=self.seed,
         )
+
+        if self.output is not None:
+            flux_pil.save(self.output / "flux_pass1.png")
+
+        self.advance_progress(task)
+
+        # Equirectangular wrap seam repair: if the fill region touches the left or
+        # right edge then the inpainted pixels on each side aren't guaranteed to
+        # match (FLUX sees a hard cut). Fix with a circular-shift + narrow inpaint.
+        flux_mask_arr = np.array(flux_mask)
+        seam_needed = (
+            fill_dilated[:, :5].any() or fill_dilated[:, -5:].any()
+        ) and flux_mask_arr.any()
+
+        if seam_needed:
+            self.log_info("FLUX pass 2: wrap seam repair")
+            half_fw = fw // 2
+            shifted_arr  = np.roll(np.array(flux_pil), half_fw, axis=1)
+            shifted_mask = np.roll(flux_mask_arr,       half_fw, axis=1)
+
+            seam_w = max(4, fw // 64)
+            seam_mask_arr = np.zeros((fh, fw), dtype=np.uint8)
+            seam_mask_arr[:, half_fw - seam_w : half_fw + seam_w] = 255
+            # Only touch pixels that were filled, not original sky
+            seam_mask_arr = np.minimum(seam_mask_arr, shifted_mask)
+
+            if seam_mask_arr.any():
+                seam_pil = flux.inpaint(
+                    PILImage.fromarray(shifted_arr),
+                    PILImage.fromarray(seam_mask_arr, "L"),
+                    temp_path=self.temp,
+                    prompt=prompt,
+                    num_inference_steps=30,
+                    guidance_scale=30.0,
+                    seed=self.seed + 1,
+                )
+                flux_pil = PILImage.fromarray(
+                    np.roll(np.array(seam_pil), -half_fw, axis=1)
+                )
+
+                if self.output is not None:
+                    flux_pil.save(self.output / "flux_pass2.png")
+
         flux.close()
 
         if fw != w or fh != h:
             flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
 
         if self.output is not None:
-            flux_pil.save(self.output / "flux.png")
+            flux_pil.save(self.output / "skybox.png")
 
-        # Use Flux output directly as the result. FLUX Fill preserves unmasked
-        # (sky) pixels, so the sky stays similar to the original while the
-        # inpainted regions are fully coherent with it — no compositing seam.
-        result_pil = flux_pil
-        if self.output is not None:
-            result_pil.save(self.output / "skybox.png")
-
-        context.add_panorama(output_key, Panorama(result_pil))
+        context.add_panorama(output_key, Panorama(flux_pil))
 
         self.advance_progress(task)
         self.finish_progress(task)
@@ -191,14 +212,10 @@ class SkyboxInpaintingStage(PipelineStage):
     def model_names(self) -> list[str]:
         return (
             ImageCaptioning.model_names()
-            + InPainting.model_names(InPaintingType.LAMA)
             + InPainting.model_names(InPaintingType.FLUX)
         )
 
     def clean_up(self):
-        if self._lama is not None:
-            self._lama.close()
-            self._lama = None
         if self._flux is not None:
             self._flux.close()
             self._flux = None
