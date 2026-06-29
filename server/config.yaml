@@ -130,7 +130,7 @@ stages:
 
   - name: Terrain Texture Generation
     stage: TerrainTextureGenerationStage
-    tile_size: 512              # px per seamless region tile (FLUX generates at this size)
+    tile_size: 1024             # px per seamless region tile (FLUX generates at this size)
     output_size: 2048           # px for the final composite terrain texture
     tile_factor: 8              # how many tile repetitions fill output_size (baked in)
     blend_sigma: 0.05           # gaussian blend width at region boundaries (fraction of output_size)

@@ -4,12 +4,13 @@ from logging import Logger
 import numpy as np
 import PIL.Image
 import torch
-from scipy.ndimage import binary_dilation, gaussian_filter, zoom
+from scipy.ndimage import binary_dilation
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
+from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image
 from util.device_utils import DeviceStrategy, preferred_device
 
@@ -49,9 +50,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        tile_size: int = 512,
-        output_size: int = 2048,
-        tile_factor: int = 8,
+        tile_size: int = 1024,
+        blend_map_size: int = 1024,
         blend_sigma: float = 0.05,
         min_region_fraction: float = 0.02,
         inpainting_type: str = "FLUX",
@@ -62,8 +62,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
-        self.output_size = output_size
-        self.tile_factor = tile_factor
+        self.blend_map_size = blend_map_size
         self.blend_sigma = blend_sigma
         self.min_region_fraction = min_region_fraction
         self.inpainting_type = InPaintingType[inpainting_type]
@@ -75,26 +74,23 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
 
 class TerrainTextureGenerationStage(PipelineStage):
     """
-    Generates a high-quality terrain texture from scratch for each ground region.
+    Generates high-quality tileable region textures and packages them as a SplatMaterial.
 
-    For each ground region type present in the REGION_MAP:
-      1. Generate a photorealistic seamlessly tileable tile using FLUX (two-pass:
+    For each ground region type present in the REGION_MAP (above min_region_fraction):
+      1. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
          full-mask generation → circular-shift seam inpainting).
-      2. Save the individual tile for future Unity per-region blending.
 
-    All tiles are then composited into a single output_size² terrain texture
-    by sampling each tile at tile_factor tiling density and blending with
-    gaussian-smoothed region weights.  The composite is applied to the mesh
-    at UV scale 1:1 — high-frequency detail comes from the tile sampling.
+    SplatMaterial.from_region_map handles weight computation, normalisation, and
+    RGBA blend map packing.  The first layer tile is also written to TERRAIN_TEXTURE
+    so the terrain mesh can embed a preview in the GLB.
 
     Reads:
       ContextKey.REGION_MAP     — top-down region type grid (optional)
       ContextKey.INPUT_CAPTION  — scene caption for prompt context (optional)
 
     Writes:
-      ContextKey.TERRAIN_TEXTURE            — composite texture (output_size²)
-      ContextKey.TERRAIN_TEXTURE_TILES      — dict[str, PIL.Image] per-region tiles
-      ContextKey.TERRAIN_TEXTURE_TILE_FACTOR — float hint (1.0) for the mesh stage
+      ContextKey.TERRAIN_MATERIAL — SplatMaterial (tiles + blend maps)
+      ContextKey.TERRAIN_TEXTURE  — first layer tile (GLB preview only)
     """
 
     @classmethod
@@ -109,47 +105,56 @@ class TerrainTextureGenerationStage(PipelineStage):
         cfg: TerrainTextureGenerationConfiguration = self.config
         caption = context.input_object(ContextKey.INPUT_CAPTION)
 
+        # Determine which region types to generate tiles for
         region_map_depth = context.input_depth(ContextKey.REGION_MAP)
-        present_types, weights_map = self._analyze_region_map(
-            region_map_depth, cfg.output_size, cfg.blend_sigma, cfg.min_region_fraction,
+        present_types = self._present_region_types(
+            region_map_depth, cfg.min_region_fraction,
         )
-        self.log_info(f"Region types: {[rt.label for rt in present_types]}")
+        self.log_info(f"Terrain regions: {[rt.label for rt in present_types]}")
 
-        # Two FLUX calls per region (generate + seam fix), plus two bookkeeping steps
-        task = self.create_progress(len(present_types) * 2 + 2, "Terrain Texture Generation…")
+        task = self.create_progress(len(present_types) * 2 + 1, "Terrain Texture Generation…")
 
         inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
         self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
 
-        tiles: dict[RegionType, np.ndarray] = {}
+        tiles: dict[str, PIL.Image.Image] = {}
         for idx, rt in enumerate(present_types):
             prompt = self._build_prompt(rt, caption)
-            tile = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
-            tiles[rt] = np.array(tile.convert("RGB"), dtype=np.uint8)
+            tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
             self.log_info(f"Generated {rt.label} tile ({cfg.tile_size}px, seamless)")
             self.advance_progress(task)
             self.advance_progress(task)
 
         self._inpainter.close()
         self._inpainter = None
-        self.advance_progress(task)
 
-        composite = self._blend_tiles(tiles, weights_map, cfg.output_size, cfg.tile_size, cfg.tile_factor)
-        composite_pil = PIL.Image.fromarray(composite)
+        # SplatMaterial.from_region_map handles weight maps, normalisation, and blend map packing
+        if region_map_depth is not None:
+            index_to_label = {int(rt): rt.label for rt in present_types}
+            material = SplatMaterial.from_region_map(
+                region_map=region_map_depth.depth.astype(np.float32),
+                index_to_label=index_to_label,
+                tiles=tiles,
+                blend_map_size=cfg.blend_map_size,
+                blend_sigma=cfg.blend_sigma,
+                min_fraction=cfg.min_region_fraction,
+            )
+        else:
+            label, tile = next(iter(tiles.items()))
+            material = SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
 
-        context.add_image(ContextKey.TERRAIN_TEXTURE, Image(composite_pil))
-        context.add_object(ContextKey.TERRAIN_TEXTURE_TILE_FACTOR, 1.0)
-        tiles_pil = {rt.label: PIL.Image.fromarray(arr) for rt, arr in tiles.items()}
-        context.add_object(ContextKey.TERRAIN_TEXTURE_TILES, tiles_pil)
+        context.add_object(ContextKey.TERRAIN_MATERIAL, material)
+
+        # Embed first tile in TERRAIN_TEXTURE so the mesh GLB has a preview texture
+        if material.layers:
+            context.add_image(ContextKey.TERRAIN_TEXTURE, Image(material.layers[0].tile))
 
         if self.temp is not None:
-            composite_pil.save(self.temp / "terrain_texture_composite.png")
-            for label, tile_img in tiles_pil.items():
-                tile_img.save(self.temp / f"terrain_texture_tile_{label}.png")
+            material.save(self.temp / "splat_material")
 
         self.log_info(
-            f"Terrain texture: {cfg.output_size}×{cfg.output_size} composite from "
-            f"{len(tiles)} region tile(s) at ×{cfg.tile_factor} density"
+            f"SplatMaterial: {material.layer_count} layer(s), "
+            f"{len(material.blend_maps)} blend map(s) at {cfg.blend_map_size}px"
         )
         self.advance_progress(task)
         self.finish_progress(task)
@@ -157,41 +162,23 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    def _analyze_region_map(
+    def _present_region_types(
         self,
         region_map_depth,
-        output_size: int,
-        blend_sigma: float,
         min_fraction: float,
-    ) -> tuple[list[RegionType], dict[RegionType, np.ndarray]]:
+    ) -> list[RegionType]:
         if region_map_depth is None:
-            uniform = np.ones((output_size, output_size), dtype=np.float32)
-            return [RegionType.GROUND], {RegionType.GROUND: uniform}
-
-        rm = region_map_depth.depth.astype(np.float32)
+            return [RegionType.GROUND]
+        rm = region_map_depth.depth
         total = rm.size
         present = [
             rt for rt in _GROUND_TYPES
             if (rm == int(rt)).sum() / total >= min_fraction
         ]
         if not present:
-            present = [RegionType.GROUND]
-
-        sigma_px = max(4.0, blend_sigma * output_size)
-        weights: dict[RegionType, np.ndarray] = {}
-        for rt in present:
-            mask = zoom(
-                (rm == int(rt)).astype(np.float32),
-                (output_size / rm.shape[0], output_size / rm.shape[1]),
-                order=1,
-            )
-            weights[rt] = gaussian_filter(mask, sigma=sigma_px)
-
-        total_w = sum(weights.values()) + 1e-6
-        for rt in weights:
-            weights[rt] /= total_w
-
-        return present, weights
+            return [RegionType.GROUND]
+        present.sort(key=lambda rt: -(rm == int(rt)).sum())
+        return present[:8]
 
     def _build_prompt(self, rt: RegionType, caption: Any) -> str:
         base = _BASE_PROMPTS.get(rt, "natural outdoor ground surface")
@@ -207,7 +194,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
 
-        # Pass 1: pure FLUX generation — 100% mask on neutral gray = text-to-image
+        # Pass 1: pure generation via 100%-masked neutral image
         gray = PIL.Image.new("RGB", (T, T), (128, 128, 128))
         full_mask = PIL.Image.new("L", (T, T), 255)
         generated = self._inpainter.inpaint(
@@ -245,36 +232,14 @@ class TerrainTextureGenerationStage(PipelineStage):
             seed=seed + 1000,
         )
 
-        # Shift back — the repaired seam is now at the tile edges, which tile seamlessly
         result = np.array(fixed.convert("RGB"), dtype=np.uint8)
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
         return PIL.Image.fromarray(result)
 
-    @staticmethod
-    def _blend_tiles(
-        tiles: dict[RegionType, np.ndarray],
-        weights: dict[RegionType, np.ndarray],
-        output_size: int,
-        tile_size: int,
-        tile_factor: int,
-    ) -> np.ndarray:
-        # For output pixel i, sample tile pixel: (i / output_size * tile_size * tile_factor) % tile_size
-        idx = (
-            np.arange(output_size, dtype=np.float32) / output_size * tile_size * tile_factor
-        ).astype(int) % tile_size
-
-        composite = np.zeros((output_size, output_size, 3), dtype=np.float64)
-        for rt, tile_arr in tiles.items():
-            if rt not in weights:
-                continue
-            w = weights[rt][:, :, np.newaxis]
-            sampled = tile_arr[idx[:, None], idx[None, :]]
-            composite += sampled.astype(np.float64) * w
-
-        return composite.clip(0, 255).astype(np.uint8)
+    # ── Stage bookkeeping ─────────────────────────────────────────────────────
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return context.has_stage_output(ContextKey.TERRAIN_TEXTURE)
+        return context.has_stage_output(ContextKey.TERRAIN_MATERIAL)
 
     def model_names(self) -> list[str]:
         return InPainting.model_names(self.config.inpainting_type)
@@ -287,27 +252,25 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def contribute_report(self, context: PipelineContext):
         from pipeline.report.report_section import ReportSection
-        texture = context.image(ContextKey.TERRAIN_TEXTURE)
-        if texture is None:
+        material: Optional[SplatMaterial] = context.object(ContextKey.TERRAIN_MATERIAL)
+        if material is None:
             return None
         cfg: TerrainTextureGenerationConfiguration = self.config
-        tiles_dict = context.object(ContextKey.TERRAIN_TEXTURE_TILES) or {}
         return ReportSection(
             stage_name=self.name,
             title="Terrain Texture Generation",
             body=(
-                "High-quality seamlessly tileable textures were generated for each ground "
-                "region type using FLUX inpainting (two-pass: full-mask generation then "
-                "circular-shift seam repair). The per-region tiles were composited into a "
-                f"single {cfg.output_size}×{cfg.output_size} terrain texture by sampling "
-                f"each tile at ×{cfg.tile_factor} density and blending with gaussian-smoothed "
-                "region weights. Individual tiles are also saved for runtime Unity blending."
+                f"High-quality seamlessly tileable textures were generated for "
+                f"{material.layer_count} ground region(s) using FLUX inpainting "
+                "(two-pass: full-mask generation then circular-shift seam repair). "
+                f"Region weights were packed into {len(material.blend_maps)} RGBA "
+                "blend map(s) for runtime per-region blending."
             ),
-            images=[(texture.image, "Composited terrain texture")],
+            images=[(layer.tile, layer.name) for layer in material.layers],
             stats={
-                "Regions": ", ".join(tiles_dict.keys()) or "ground",
+                "Regions": ", ".join(l.name for l in material.layers),
                 "Tile size": f"{cfg.tile_size} × {cfg.tile_size} px",
-                "Output size": f"{cfg.output_size} × {cfg.output_size} px",
-                "Tile density": f"×{cfg.tile_factor}",
+                "Blend maps": str(len(material.blend_maps)),
+                "Blend map size": f"{cfg.blend_map_size} × {cfg.blend_map_size} px",
             },
         )
