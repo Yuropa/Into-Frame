@@ -271,6 +271,9 @@ def _create_pipeline_config(args):
 def handle_server(args):
     from util.path_utils import resource_directory
 
+    if not args.seed:
+        args.seed = ["1557422243"]
+
     configuration = _create_pipeline_config(args=args)
 
     simulation_config = SimulationServerConfiguration()
