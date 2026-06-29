@@ -21,12 +21,32 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         back to the panorama resolution. Reduces the LANCZOS stretch ratio from
         4x to 2x, producing sharper fills. Only applies when Flux ran at a
         downscaled resolution (i.e. the panorama is larger than flux_max).
+
+    use_depth_filter (bool, default True):
+        Whether to run DepthObjectFilter on SAM masks before classification.
+        Requires PANORAMA_OBJECT_DEPTH in context (set by PanoramaDepthStage
+        before this stage).
+
+    depth_filter_threshold (float, default 0.05):
+        Signal 1 (row-wise baseline): a mask is kept if its median depth residual
+        is below this value. 0.0 = must be strictly closer than row max; small
+        positive values (e.g. 0.05) give objects a little slack for soft depth
+        edges, which is helpful on panorama depth maps.
+
+    depth_filter_edge_threshold (float, default 0.005):
+        Signal 2 (boundary edge gradient): a mask is kept if its edge-gradient
+        score exceeds this value. Lower = less strict. 0.01 (original) is too
+        tight for panorama depth models whose edges are softer than pinhole
+        depth; 0.005 is a better starting point.
     """
-    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, **kwargs):
+    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, use_depth_filter: bool = True, depth_filter_threshold: float = 0.05, depth_filter_edge_threshold: float = 0.005, **kwargs):
         super().__init__(*args, **kwargs)
         self.full_panorama = full_panorama
         self.max_object_area_fraction = max_object_area_fraction
         self.supersample_inpaint = supersample_inpaint
+        self.use_depth_filter = use_depth_filter
+        self.depth_filter_threshold = depth_filter_threshold
+        self.depth_filter_edge_threshold = depth_filter_edge_threshold
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
@@ -172,15 +192,17 @@ class PanoramaInpaintingStage(PipelineStage):
 
         sam_detected = result.length
         depth_filtered_out = 0
-        # Prefer the pre-inpainting object depth (original panorama) for SAM filtering.
-        # PANORAMA_DEPTH is computed post-inpainting (on the terrain panorama) so it
-        # is always None at this point in the pipeline — hence the object depth key.
-        depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH) or context.input_depth(ContextKey.PANORAMA_DEPTH)
-        if depth is not None:
-            result = DepthObjectFilter().filter(result, depth)
-            depth_filtered_out = sam_detected - result.length
-            if depth_filtered_out:
-                self.log_info(f"Depth filter removed {depth_filtered_out}/{sam_detected} background mask(s)")
+        if self.config.use_depth_filter:
+            depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH) or context.input_depth(ContextKey.PANORAMA_DEPTH)
+            if depth is not None:
+                result = DepthObjectFilter().filter(
+                    result, depth,
+                    threshold=self.config.depth_filter_threshold,
+                    edge_threshold=self.config.depth_filter_edge_threshold,
+                )
+                depth_filtered_out = sam_detected - result.length
+                if depth_filtered_out:
+                    self.log_info(f"Depth filter removed {depth_filtered_out}/{sam_detected} background mask(s)")
 
         manifest["passes"][0]["sam_detected"] = sam_detected
         manifest["passes"][0]["depth_filtered_out"] = depth_filtered_out
@@ -201,36 +223,48 @@ class PanoramaInpaintingStage(PipelineStage):
                 mask_array = np.array(crop.mask).astype(np.float32) / 255.0
                 crop_image = crop.image  # masked RGBA crop, equirectangular space
 
-                obj_type, clip_confidence = self._classifier.classify(crop_image)
+                obj_type, clip_confidence = self._classifier.classify(
+                    crop_image,
+                    scene_image=Image(original_pil),
+                    box=box,
+                )
+
+                # When CLIP is uncertain, fall back to "other" if SAM was confident.
+                # Small or distorted panorama crops rarely give CLIP enough signal to
+                # beat the 0.1 threshold, but a high SAM score means something real is there.
+                inpaint_type = obj_type
+                if obj_type == "indeterminate" and crop.score >= 0.7:
+                    inpaint_type = "other"
 
                 context.add_image(f"crop_{i}", crop_image)
                 context.add_object(f"metadata_{i}", {
                     "box":        box,
                     "score":      float(crop.score),
-                    "class":      obj_type,
+                    "class":      inpaint_type,
                     "confidence": round(clip_confidence, 4),
                 })
                 if self.temp is not None:
                     crop_image.image.save(self.temp / f"crop_{i}.png")
-                    crop_caption = f"class: {obj_type}\nconfidence: {clip_confidence:.3f}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
+                    crop_caption = f"class: {inpaint_type} (clip: {obj_type})\nconfidence: {clip_confidence:.3f}\nscore: {crop.score:.3f}\nbox: {[round(x, 1) for x in box]}\n"
                     (self.temp / f"crop_{i}.txt").write_text(crop_caption)
-                if obj_type in _OBJECT_CATEGORIES:
+                if inpaint_type in _OBJECT_CATEGORIES:
                     mask_fraction = float(mask_array.sum()) / (h * w)
                     if mask_fraction > self.config.max_object_area_fraction:
                         self.log_info(f"  crop_{i}: skipping inpaint, mask too large ({mask_fraction:.1%} of panorama)")
                     else:
                         object_masks.append(mask_array)
                         pass_objects.append((mask_array, box))
-                        removed_object_types.add(obj_type)
+                        removed_object_types.add(inpaint_type)
 
                 manifest["passes"][0]["crops"].append({
                     "index": i,
-                    "class": obj_type,
+                    "class": inpaint_type,
+                    "clip_class": obj_type,
                     "score": round(float(crop.score), 3),
                     "box":   [round(x, 1) for x in box],
                 })
 
-                self.log_info(f"  crop_{i}: {obj_type}  (conf={clip_confidence:.2f})")
+                self.log_info(f"  crop_{i}: {inpaint_type}  (clip={obj_type}, conf={clip_confidence:.2f}, sam={crop.score:.2f})")
                 self.advance_progress(classify_task)
             self.finish_progress(classify_task)
             fraction_advanced += 1.0 / self.total_tasks
