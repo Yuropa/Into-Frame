@@ -1,33 +1,72 @@
+from enum import Enum
 from util.image_utils import Image, make_context_composite
-from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image as PILImage
 import numpy as np
 import torch
 
 
+class CaptioningModel(Enum):
+    BLIP = "Salesforce/blip-image-captioning-large"
+    FLORENCE2 = "microsoft/Florence-2-large"
+
+
 class ImageCaptioning:
-    _MODEL_ID = "microsoft/Florence-2-large"
     # <MORE_DETAILED_CAPTION> produces a full sentence with colour, shape, context.
     # <DETAILED_CAPTION> is slightly shorter; <CAPTION> is one-liner.
-    _TASK = "<MORE_DETAILED_CAPTION>"
+    _FLORENCE_TASK = "<MORE_DETAILED_CAPTION>"
 
-    def __init__(self, device):
+    def __init__(self, device, model: CaptioningModel = CaptioningModel.FLORENCE2):
         self.device = device
+        self.model_type = model
 
-        self.processor = AutoProcessor.from_pretrained(
-            self._MODEL_ID, trust_remote_code=True
-        )
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self._MODEL_ID, trust_remote_code=True, torch_dtype=torch.float16
-        ).to(device)
-        self.model.eval()
+        if model == CaptioningModel.BLIP:
+            from transformers import BlipProcessor, BlipForConditionalGeneration
+            self.processor = BlipProcessor.from_pretrained(model.value)
+            self.net = BlipForConditionalGeneration.from_pretrained(model.value).to(device)
+        else:
+            self.processor, self.net = self._load_florence2(model.value)
+
+        self.net.eval()
+
+    def _load_florence2(self, model_id: str):
+        """Load Florence-2 processor and model.
+
+        Older cached configuration_florence2.py revisions access
+        self.forced_bos_token_id before super().__init__() sets it.
+        If that AttributeError fires we wipe the stale cached Python modules
+        (not the weights) and retry so the hub fetches the patched version.
+        """
+        from transformers import AutoProcessor, AutoModelForCausalLM
+        import glob, os, shutil
+
+        for attempt in range(2):
+            try:
+                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_id, trust_remote_code=True, torch_dtype=torch.float16
+                ).to(self.device)
+                return processor, model
+            except AttributeError as exc:
+                if "forced_bos_token_id" not in str(exc) or attempt > 0:
+                    raise
+                modules_root = os.path.expanduser(
+                    "~/.cache/huggingface/modules/transformers_modules"
+                )
+                for stale in glob.glob(os.path.join(modules_root, "microsoft", "Florence*")):
+                    shutil.rmtree(stale, ignore_errors=True)
+
+        raise RuntimeError("Florence-2 failed to load after cache refresh")
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return [cls._MODEL_ID]
+        return [m.value for m in CaptioningModel]
 
     def _to_rgb(self, image: Image) -> PILImage.Image:
-        """Convert to RGB, filling transparent pixels with the mean opaque colour."""
+        """Convert to RGB, filling transparent pixels with the mean opaque colour.
+
+        PIL's default RGBA→RGB fills alpha=0 areas with black, creating a dark
+        silhouette of masked-out content (e.g. a tower hole in a sky crop) that
+        causes BLIP to caption the hole instead of the actual content."""
         pil = image.image
         if pil.mode != "RGBA":
             return image.rgb()
@@ -47,26 +86,30 @@ class ImageCaptioning:
         box: list[float] | None = None,
         prompt: str = "",
     ) -> str:
-        """Generate a caption for input.
-
-        scene_image and box are accepted for API compatibility but Florence-2
-        doesn't use a freeform text prompt — the task token drives output style.
-        If scene_image is provided a context composite is still used so the model
-        sees the object in context.
-        """
         if scene_image is not None:
             pil_input = make_context_composite(self._to_rgb(input), scene_image.rgb(), box)
         else:
             pil_input = self._to_rgb(input)
 
+        if self.model_type == CaptioningModel.BLIP:
+            return self._caption_blip(pil_input, prompt)
+        return self._caption_florence(pil_input)
+
+    def _caption_blip(self, pil_input: PILImage.Image, prompt: str) -> str:
+        inputs = self.processor(pil_input, prompt, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            out = self.net.generate(**inputs)
+        return self.processor.decode(out[0], skip_special_tokens=True)
+
+    def _caption_florence(self, pil_input: PILImage.Image) -> str:
         inputs = self.processor(
-            text=self._TASK,
+            text=self._FLORENCE_TASK,
             images=pil_input,
             return_tensors="pt",
         ).to(self.device, torch.float16)
 
         with torch.no_grad():
-            generated_ids = self.model.generate(
+            generated_ids = self.net.generate(
                 input_ids=inputs["input_ids"],
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=256,
@@ -76,7 +119,7 @@ class ImageCaptioning:
         raw = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         parsed = self.processor.post_process_generation(
             raw,
-            task=self._TASK,
+            task=self._FLORENCE_TASK,
             image_size=(pil_input.width, pil_input.height),
         )
-        return parsed.get(self._TASK, "").strip()
+        return parsed.get(self._FLORENCE_TASK, "").strip()
