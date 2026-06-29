@@ -78,13 +78,22 @@ class SkyboxInpaintingStage(PipelineStage):
 
         type_arr = type_map.depth.astype(np.uint8)
         sky_mask = (type_arr == int(RegionType.SKY))
-        fill_mask = ~sky_mask
+
+        # Build a clean rectangular fill mask instead of tracing the mountain
+        # silhouette.  The exact sky-shaped mask tells Flux "there is a mountain
+        # outline here" and it obliges; a horizontal cutoff gives it a clean sky
+        # boundary so it generates pure sky all the way down.
+        sky_rows = np.where(np.any(sky_mask, axis=1))[0]
+        sky_bottom = int(sky_rows[-1]) + 1 if len(sky_rows) > 0 else h // 2
+        fill_mask = np.zeros((h, w), dtype=bool)
+        fill_mask[sky_bottom:] = True                  # rectangle below sky
+        fill_mask[:sky_bottom] = ~sky_mask[:sky_bottom] # holes inside sky band
 
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))
 
         sky_fraction = sky_mask.mean()
-        self.log_info(f"Sky coverage: {sky_fraction * 100:.1f}%  fill: {fill_mask.mean() * 100:.1f}%")
+        self.log_info(f"Sky coverage: {sky_fraction * 100:.1f}%  sky_bottom row: {sky_bottom}  fill: {fill_mask.mean() * 100:.1f}%")
 
         if self.output is not None:
             sky_mask_pil.save(self.output / "sky_mask.png")
