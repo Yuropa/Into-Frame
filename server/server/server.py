@@ -37,11 +37,13 @@ class SimulationServer():
         pipeline: Optional[Pipeline] = None,
         context: Optional[PipelineContext] = None,
         asset_dir: Optional[Path] = None,
+        input_path: Optional[Path] = None,
     ) -> None:
         self.config = config
         self.pipeline = pipeline
         self.log = config.log
         self.clients: set = set()
+        self._input_path = input_path or resource_directory() / "Mount Rainier.jpg"
 
         if asset_dir is not None:
             self.asset_dir = asset_dir
@@ -229,8 +231,7 @@ class SimulationServer():
 
         drain_task = asyncio.ensure_future(drain())
 
-        # TODO: Allow dynamic images
-        input = PipelineInput(resource_directory() / "Paris.jpg")
+        input = PipelineInput(self._input_path)
         runner = PipelineRunner(self.pipeline)
 
         def run_pipeline():

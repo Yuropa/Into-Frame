@@ -122,6 +122,12 @@ def create_parser():
         default=DEFAULT_CONFIG_PATH,
         help="Path to pipeline configuration YAML (default: config.yaml)"
     )
+    server_parser.add_argument(
+        "--input",
+        type=Path,
+        default=None,
+        help="Input image to generate from (default: samples/Mount Rainier.jpg)"
+    )
 
     # run
     run_parser = subparsers.add_parser(
@@ -263,6 +269,8 @@ def _create_pipeline_config(args):
     return config
 
 def handle_server(args):
+    from util.path_utils import resource_directory
+
     configuration = _create_pipeline_config(args=args)
 
     simulation_config = SimulationServerConfiguration()
@@ -277,8 +285,10 @@ def handle_server(args):
     # Ensure all the models are downloaded
     pipeline.download_models()
 
+    input_path = Path(args.input) if args.input else resource_directory() / "Mount Rainier.jpg"
+
     # Run the server!
-    server = SimulationServer(simulation_config, pipeline)
+    server = SimulationServer(simulation_config, pipeline, input_path=input_path)
     asyncio.run(server.run())
 
 
