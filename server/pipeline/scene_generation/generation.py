@@ -142,9 +142,9 @@ class SceneGenerationStage(PipelineStage):
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
         if terrain_mesh is not None:
             self.log_info("Adding terrain mesh to scene")
-            terrian = Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0)
-            terrian.name = "terrian"
-            scene.add_object(terrian)
+            terrain = Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0)
+            terrain.name = "terrain"
+            scene.add_object(terrain)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:
