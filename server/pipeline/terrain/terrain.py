@@ -96,7 +96,7 @@ class TerrainMeshStage(PipelineStage):
         intrinsics = None
         tile_factor = 1.0
 
-        splat: Optional[SplatMaterial] = context.input_object(ContextKey.TERRAIN_MATERIAL)
+        splat: Optional[SplatMaterial] = context.input_splat_material(ContextKey.TERRAIN_MATERIAL)
         if splat is not None and splat.layers:
             # UVs 0→1 so Unity samples blend maps directly at vertex UV coords.
             # Embed the first layer tile as a preview texture so the GLB is not blank.
@@ -177,7 +177,7 @@ class TerrainMeshStage(PipelineStage):
         cfg: TerrainMeshConfiguration = self.config
         grid_size = cfg.z_far or params.get("grid_size_meters") or 100.0
 
-        splat: Optional[SplatMaterial] = context.object(ContextKey.TERRAIN_MATERIAL)
+        splat: Optional[SplatMaterial] = context.splat_material(ContextKey.TERRAIN_MATERIAL)
         texture_desc = (
             f"SplatMaterial ({splat.layer_count} layers)" if splat
             else "single texture" if context.image(ContextKey.TERRAIN_TEXTURE)

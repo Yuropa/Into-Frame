@@ -26,18 +26,19 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 })
 
 _BASE_PROMPTS: dict[RegionType, str] = {
-    RegionType.GROUND:      "natural earth and soil ground surface, dirt and pebbles",
-    RegionType.TERRAIN:     "rocky mountain terrain, stone and gravel surface",
-    RegionType.VEGETATION:  "lush green grass meadow, small plants and wildflowers",
-    RegionType.WATER:       "calm shallow water surface, lake or river bed",
-    RegionType.ROAD:        "asphalt road surface, weathered pavement and tarmac",
-    RegionType.TRAIL:       "dirt hiking trail, packed earth and fine gravel",
-    RegionType.BUILT:       "concrete and stone pavement, urban ground tiles",
+    RegionType.GROUND:      "close-up macro photo of natural soil and earth, dirt and small pebbles, flat ground material",
+    RegionType.TERRAIN:     "close-up macro photo of rough stone and gravel, rocky surface, natural rock fragments and rubble",
+    RegionType.VEGETATION:  "close-up macro photo of lush green grass and small plants, dense ground cover, wildflowers",
+    RegionType.WATER:       "close-up macro photo of shallow clear water surface with gentle ripples, wet sandy lake bed",
+    RegionType.ROAD:        "close-up macro photo of asphalt road surface, weathered grey pavement, tarmac texture",
+    RegionType.TRAIL:       "close-up macro photo of packed dirt hiking trail, compressed earth and fine gravel",
+    RegionType.BUILT:       "close-up macro photo of concrete and stone pavement tiles, urban ground surface, cobblestones",
 }
 
 _TILE_SUFFIX = (
-    ", seamless tileable top-down aerial texture, photorealistic, "
-    "high detail, no shadows, no people, no vehicles, overhead view"
+    ", flat lay overhead photography, filling the entire frame, seamless repeating surface material, "
+    "photorealistic PBR texture, no horizon, no sky, no background, no depth of field, "
+    "uniform diffuse lighting, high detail surface"
 )
 
 
@@ -143,7 +144,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             label, tile = next(iter(tiles.items()))
             material = SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
 
-        context.add_object(ContextKey.TERRAIN_MATERIAL, material)
+        context.add_splat_material(ContextKey.TERRAIN_MATERIAL, material)
 
         # Embed first tile in TERRAIN_TEXTURE so the mesh GLB has a preview texture
         if material.layers:
@@ -182,9 +183,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         return present[:8]
 
     def _build_prompt(self, rt: RegionType, caption: Any) -> str:
-        base = _BASE_PROMPTS.get(rt, "natural outdoor ground surface")
-        prefix = f"{caption}, " if isinstance(caption, str) and caption else ""
-        return f"{prefix}{base}{_TILE_SUFFIX}"
+        base = _BASE_PROMPTS.get(rt, "close-up macro photo of natural outdoor ground surface material")
+        return f"{base}{_TILE_SUFFIX}"
 
     def _generate_tileable_tile(
         self,
@@ -302,7 +302,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def contribute_report(self, context: PipelineContext):
         from pipeline.report.report_section import ReportSection
-        material: Optional[SplatMaterial] = context.object(ContextKey.TERRAIN_MATERIAL)
+        material: Optional[SplatMaterial] = context.splat_material(ContextKey.TERRAIN_MATERIAL)
         if material is None:
             return None
         cfg: TerrainTextureGenerationConfiguration = self.config

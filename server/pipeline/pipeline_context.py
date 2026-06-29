@@ -343,6 +343,18 @@ class PipelineContext():
     def input_panorama_regions(self, name: ContextKeyName) -> Optional["PanoramaRegionResult"]:
         return self._value(name, self._previous_stage).panorama_regions()
 
+    def add_splat_material(self, name: ContextKeyName, input: "SplatMaterial"):
+        from scene.splat_material import SplatMaterial
+        value = ContextValue(name=name)
+        value.set_splat_material(input)
+        self._set_value(name, value)
+
+    def splat_material(self, name: ContextKeyName) -> Optional["SplatMaterial"]:
+        return self._value(name).splat_material()
+
+    def input_splat_material(self, name: ContextKeyName) -> Optional["SplatMaterial"]:
+        return self._value(name, self._previous_stage).splat_material()
+
     # Report sections — in-memory only, not persisted
     def add_report_section(self, section) -> None:
         self._report_sections.append(section)

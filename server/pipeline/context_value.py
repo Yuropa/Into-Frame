@@ -12,6 +12,7 @@ from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 from scene.lighting import SceneLighting
+from scene.splat_material import SplatMaterial
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult
 from pipeline.object_distribution.object_distribution_result import ObjectDistributionResult
 from pipeline.panorama_segmentation.panorama_region_result import PanoramaRegionResult
@@ -33,6 +34,7 @@ class ValueKeys(StrEnum):
     OBJECT_CORRELATION = "object_correlation"
     OBJECT_DISTRIBUTION = "object_distribution"
     PANORAMA_REGIONS = "panorama_regions"
+    SPLAT_MATERIAL = "splat_material"
 
     def preferred_extension(self) -> "str":
         match self:
@@ -64,6 +66,8 @@ class ValueKeys(StrEnum):
                 return "json"
             case ValueKeys.PANORAMA_REGIONS:
                 return "json"
+            case ValueKeys.SPLAT_MATERIAL:
+                return "splat"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -145,6 +149,10 @@ class ContextValue():
 
     def set_panorama_regions(self, obj: PanoramaRegionResult):
         self.type = ValueKeys.PANORAMA_REGIONS
+        self.value = obj
+
+    def set_splat_material(self, obj: SplatMaterial):
+        self.type = ValueKeys.SPLAT_MATERIAL
         self.value = obj
 
     def image(self) -> Optional[Image]:
@@ -231,6 +239,12 @@ class ContextValue():
         else:
             return None
 
+    def splat_material(self) -> Optional[SplatMaterial]:
+        if self.type == ValueKeys.SPLAT_MATERIAL:
+            return self.value
+        else:
+            return None
+
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
@@ -278,6 +292,8 @@ class ContextValue():
         elif value_type == ValueKeys.PANORAMA_REGIONS:
             with open(resolved_path) as f:
                 self.set_panorama_regions(PanoramaRegionResult.decode(json.load(f)))
+        elif value_type == ValueKeys.SPLAT_MATERIAL:
+            self.set_splat_material(SplatMaterial.load(resolved_path))
 
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
@@ -322,6 +338,8 @@ class ContextValue():
         elif self.type == ValueKeys.PANORAMA_REGIONS:
             with open(save_path, "w") as f:
                 json.dump(self.panorama_regions().encode(), f, indent=4)
+        elif self.type == ValueKeys.SPLAT_MATERIAL:
+            self.splat_material().save(save_path)
 
         return save_path
     
