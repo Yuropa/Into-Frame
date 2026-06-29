@@ -15,7 +15,7 @@ class ImageCaptioning:
     # <DETAILED_CAPTION> is slightly shorter; <CAPTION> is one-liner.
     _FLORENCE_TASK = "<MORE_DETAILED_CAPTION>"
 
-    def __init__(self, device, model: CaptioningModel = CaptioningModel.FLORENCE2):
+    def __init__(self, device, model: CaptioningModel = CaptioningModel.BLIP):
         self.device = device
         self.model_type = model
 
@@ -31,27 +31,18 @@ class ImageCaptioning:
     def _load_florence2(self, model_id: str):
         """Load Florence-2 processor and model.
 
-        Older cached configuration_florence2.py revisions access
-        self.forced_bos_token_id before super().__init__() sets it. If that
-        AttributeError fires, patch the line in the cached file (the hub still
-        serves the buggy revision) and evict the stale sys.modules entries, then retry.
+        Cached revision 21a599d4 of the Florence-2 custom modules has multiple
+        bugs incompatible with newer transformers. Patch them proactively before
+        every load; the patches are idempotent so this is a no-op once applied.
         """
         from transformers import AutoProcessor, AutoModelForCausalLM
-        import glob, os, sys
 
-        for attempt in range(2):
-            try:
-                processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
-                model = AutoModelForCausalLM.from_pretrained(
-                    model_id, trust_remote_code=True, torch_dtype=torch.float16
-                ).to(self.device)
-                return processor, model
-            except AttributeError as exc:
-                if "forced_bos_token_id" not in str(exc) or attempt > 0:
-                    raise
-                self._patch_florence2_config_cache()
-
-        raise RuntimeError("Florence-2 failed to load after cache refresh")
+        self._patch_florence2_config_cache()
+        processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id, trust_remote_code=True, torch_dtype=torch.float16
+        ).to(self.device)
+        return processor, model
 
     @staticmethod
     def _patch_florence2_config_cache() -> None:
