@@ -4,7 +4,8 @@ from logging import Logger
 import numpy as np
 import PIL.Image
 import torch
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, gaussian_filter, zoom
+from scipy.ndimage import map_coordinates
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -60,6 +61,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         guidance_scale: float = 30.0,
         seam_width_fraction: float = 0.08,
         seam_dilation_px: int = 8,
+        use_panorama_layer: bool = True,
+        panorama_blend_power: float = 2.0,
+        synthetic_tile_factor: float = 8.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -71,6 +75,17 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.guidance_scale = guidance_scale
         self.seam_width_fraction = seam_width_fraction
         self.seam_dilation_px = seam_dilation_px
+        # Whether to add a panorama-projection layer baked from PANORAMA_TERRAIN.
+        # Its blend weight is sin(depression_angle)^panorama_blend_power, favouring
+        # areas viewed steeply from the camera over grazing-angle / horizon regions.
+        self.use_panorama_layer = use_panorama_layer
+        # Exponent applied to sin(depression): higher = panorama fades out sooner
+        # as view angle approaches horizontal (2.0 gives a smooth quadratic rolloff).
+        self.panorama_blend_power = panorama_blend_power
+        # UV tiling factor for synthetic region tiles. The panorama layer always uses
+        # tile_factor=1.0 (one tile covers the full terrain); synthetic tiles repeat
+        # this many times so they stay at fine texel density.
+        self.synthetic_tile_factor = synthetic_tile_factor
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -129,20 +144,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         self._inpainter.close()
         self._inpainter = None
 
-        # SplatMaterial.from_region_map handles weight maps, normalisation, and blend map packing
-        if region_map_depth is not None:
-            index_to_label = {int(rt): rt.label for rt in present_types}
-            material = SplatMaterial.from_region_map(
-                region_map=region_map_depth.depth.astype(np.float32),
-                index_to_label=index_to_label,
-                tiles=tiles,
-                blend_map_size=cfg.blend_map_size,
-                blend_sigma=cfg.blend_sigma,
-                min_fraction=cfg.min_region_fraction,
-            )
-        else:
-            label, tile = next(iter(tiles.items()))
-            material = SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
+        material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
 
         context.add_splat_material(ContextKey.TERRAIN_MATERIAL, material)
 
@@ -161,6 +163,154 @@ class TerrainTextureGenerationStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    # ── Material construction ─────────────────────────────────────────────────
+
+    def _build_material(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+        present_types: list[RegionType],
+        tiles: dict[str, PIL.Image.Image],
+        region_map_depth,
+    ) -> SplatMaterial:
+        """
+        Assemble the SplatMaterial with an optional panorama layer prepended.
+
+        When PANORAMA_TERRAIN and HEIGHT_MAP are both available and
+        use_panorama_layer is True, the panorama-baked texture is inserted as
+        layer 0 with a view-angle blend weight (sin(depression)^power). The
+        synthetic region layer weights are scaled by (1 − panorama_weight) so
+        all weights sum to 1 everywhere.
+        """
+        # ── Compute raw synthetic region weights ──────────────────────────────
+        sigma_px = max(4.0, cfg.blend_sigma * cfg.blend_map_size)
+        synth_weight_maps: dict[str, np.ndarray] = {}
+
+        if region_map_depth is not None:
+            rm = region_map_depth.depth
+            for rt in present_types:
+                if rt.label not in tiles:
+                    continue
+                mask = zoom(
+                    (rm == int(rt)).astype(np.float32),
+                    (cfg.blend_map_size / rm.shape[0], cfg.blend_map_size / rm.shape[1]),
+                    order=1,
+                )
+                synth_weight_maps[rt.label] = gaussian_filter(mask, sigma=sigma_px)
+
+        if not synth_weight_maps and tiles:
+            # Fallback: uniform cover with the first available tile
+            label = next(iter(tiles))
+            synth_weight_maps[label] = np.ones((cfg.blend_map_size, cfg.blend_map_size), dtype=np.float32)
+
+        # Normalise synthetic weights so they sum to 1
+        synth_total = sum(synth_weight_maps.values()) + 1e-6
+        for label in synth_weight_maps:
+            synth_weight_maps[label] = synth_weight_maps[label] / synth_total
+
+        # ── Panorama layer ────────────────────────────────────────────────────
+        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.use_panorama_layer else None
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+
+        if panorama_terrain is not None and height_map_depth is not None:
+            grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+            half = grid_size / 2.0
+
+            pano_tile = self._panorama_tile(panorama_terrain, cfg.tile_size)
+            pano_weight = self._view_angle_weight(
+                height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power
+            )
+            self.log_info(
+                f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
+                f"coverage {(pano_weight > 0.1).mean() * 100:.0f}%"
+            )
+
+            # Scale synthetic weights by (1 − panorama_weight)
+            synth_scale = (1.0 - pano_weight).clip(0.0, 1.0)
+            weight_maps: dict[str, np.ndarray] = {"panorama": pano_weight}
+            for label, sw in synth_weight_maps.items():
+                weight_maps[label] = sw * synth_scale
+
+            layers = [SplatLayer(name="panorama", tile=pano_tile, tile_factor=1.0, equirect=True)]
+            layers += [
+                SplatLayer(name=rt.label, tile=tiles[rt.label], tile_factor=cfg.synthetic_tile_factor)
+                for rt in present_types if rt.label in tiles
+            ]
+        else:
+            weight_maps = synth_weight_maps
+            layers = [
+                SplatLayer(name=rt.label, tile=tiles[rt.label], tile_factor=cfg.synthetic_tile_factor)
+                for rt in present_types if rt.label in tiles
+            ]
+
+        if not layers:
+            label, tile = next(iter(tiles.items()))
+            return SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
+
+        return SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
+
+    @staticmethod
+    def _panorama_tile(panorama, tile_size: int) -> PIL.Image.Image:
+        """
+        Resize the full equirectangular panorama to a square tile for storage.
+
+        The full image is kept (not cropped to the lower half) so mountain detail
+        near and above the horizon is preserved.  The shader uses standard equirect
+        UV projection:
+            U = atan2(X, Z) / (2π) + 0.5
+            V = 0.5 − φ / π   where φ = atan2(Y, √(X²+Z²))
+        Mountains at φ > 0 (above camera level) sit at V < 0.5 in the tile.
+        Terrain below the horizon sits at V > 0.5.  Nadir maps to V = 1.0.
+        """
+        return panorama.image.convert("RGB").resize(
+            (tile_size, tile_size), PIL.Image.LANCZOS
+        )
+
+    @staticmethod
+    def _view_angle_weight(
+        height_map: np.ndarray,
+        half: float,
+        blend_map_size: int,
+        blend_power: float,
+        nadir_cutoff_deg: float = -35.0,
+        nadir_fade_deg: float = 10.0,
+        horizon_fade_deg: float = 5.0,
+    ) -> np.ndarray:
+        """
+        Per-texel view-angle quality weight for the panorama layer.
+
+        Computed purely from height-map geometry — no panorama sampling needed.
+        Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
+
+        Weight is high when the camera looks steeply down at the terrain point
+        (reliable, low-distortion equirectangular sample) and fades to 0 at:
+          • grazing / near-horizon angles (equirect pixels are stretched thin)
+          • the nadir dead-zone directly below the camera (high distortion)
+        """
+        us = np.linspace(0.0, 1.0, blend_map_size, dtype=np.float32)
+        ug, vg = np.meshgrid(us, us)
+        X = (ug - 0.5) * (2.0 * half)
+        Z = (vg - 0.5) * (2.0 * half)
+
+        hm_h, hm_w = height_map.shape
+        row_c = ((Z + half) / (2.0 * half) * (hm_h - 1)).clip(0, hm_h - 1)
+        col_c = ((X + half) / (2.0 * half) * (hm_w - 1)).clip(0, hm_w - 1)
+        Y = map_coordinates(
+            height_map, [row_c.ravel(), col_c.ravel()], order=1, mode="nearest"
+        ).reshape(blend_map_size, blend_map_size).astype(np.float32)
+        Y = np.nan_to_num(Y, nan=0.0)
+
+        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6).astype(np.float32)
+        lat = np.arctan2(Y.astype(np.float64), r_xz.astype(np.float64)).astype(np.float32)
+
+        min_lat = np.radians(nadir_cutoff_deg)
+        fade_in  = ((lat - min_lat) / max(np.radians(nadir_fade_deg), 1e-6)).clip(0.0, 1.0)
+        fade_out = ((-lat)          / max(np.radians(horizon_fade_deg), 1e-6)).clip(0.0, 1.0)
+        valid    = (lat < 0.0) & (lat >= min_lat)
+        weight   = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
+        return weight ** blend_power
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
