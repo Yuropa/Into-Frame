@@ -57,31 +57,51 @@ class ImageCaptioning:
     def _patch_florence2_config_cache() -> None:
         """Fix the forced_bos_token_id bug in the cached configuration_florence2.py.
 
-        The buggy line accesses self.forced_bos_token_id before super().__init__()
-        has run. Replace it with an equivalent kwargs lookup so the attribute is
-        never accessed early, then evict the stale sys.modules entries.
+        Two known bugs in cached revision 21a599d4 of the Florence-2 custom code:
+          1. configuration_florence2.py: accesses self.forced_bos_token_id before
+             super().__init__() sets it — fix: use kwargs.get() instead.
+          2. processing_florence2.py: accesses tokenizer.additional_special_tokens
+             which doesn't exist on RobertaTokenizer in newer transformers —
+             fix: guard with getattr(..., []).
+        After patching files, evict stale sys.modules entries so Python re-loads
+        from disk rather than the in-memory cached imports.
         """
         import glob, os, sys
 
         modules_root = os.path.expanduser(
             "~/.cache/huggingface/modules/transformers_modules"
         )
-        buggy = (
-            'if self.forced_bos_token_id is None'
-            ' and kwargs.get("force_bos_token_to_be_generated", False):'
-        )
-        fixed = (
-            'if kwargs.get("forced_bos_token_id", None) is None'
-            ' and kwargs.get("force_bos_token_to_be_generated", False):'
-        )
-        for config_file in glob.glob(
-            os.path.join(modules_root, "microsoft", "Florence*", "*", "configuration_florence2.py")
-        ):
-            with open(config_file) as f:
-                content = f.read()
-            if buggy in content:
-                with open(config_file, "w") as f:
-                    f.write(content.replace(buggy, fixed))
+
+        _CONFIG_PATCHES = [
+            (
+                'if self.forced_bos_token_id is None'
+                ' and kwargs.get("force_bos_token_to_be_generated", False):',
+                'if kwargs.get("forced_bos_token_id", None) is None'
+                ' and kwargs.get("force_bos_token_to_be_generated", False):',
+            ),
+        ]
+        _PROCESSING_PATCHES = [
+            (
+                'tokenizer.additional_special_tokens',
+                'getattr(tokenizer, "additional_special_tokens", [])',
+            ),
+        ]
+
+        def _apply(path_glob, patches):
+            for fpath in glob.glob(os.path.join(modules_root, "microsoft", "Florence*", "*", path_glob)):
+                with open(fpath) as f:
+                    content = f.read()
+                changed = False
+                for old, new in patches:
+                    if old in content:
+                        content = content.replace(old, new)
+                        changed = True
+                if changed:
+                    with open(fpath, "w") as f:
+                        f.write(content)
+
+        _apply("configuration_florence2.py", _CONFIG_PATCHES)
+        _apply("processing_florence2.py", _PROCESSING_PATCHES)
 
         for key in list(sys.modules):
             if "transformers_modules" in key:
