@@ -19,6 +19,7 @@ public class SceneClient : MonoBehaviour
     public SceneObjectManager objectManager;
     public SceneParamManager paramManager;
     public ProgressController progressController;
+    public TerrainMaterialManager terrainMaterialManager;
 
     private WebSocket _ws;
     private bool _reconnecting = false;
@@ -27,9 +28,10 @@ public class SceneClient : MonoBehaviour
 
     private void Start()
     {
-        if (objectManager      == null) objectManager      = FindObjectOfType<SceneObjectManager>();
-        if (paramManager       == null) paramManager       = FindObjectOfType<SceneParamManager>();
-        if (progressController == null) progressController = FindObjectOfType<ProgressController>();
+        if (objectManager         == null) objectManager         = FindObjectOfType<SceneObjectManager>();
+        if (paramManager          == null) paramManager          = FindObjectOfType<SceneParamManager>();
+        if (progressController    == null) progressController    = FindObjectOfType<ProgressController>();
+        if (terrainMaterialManager == null) terrainMaterialManager = FindObjectOfType<TerrainMaterialManager>();
         ConnectAsync();
     }
 
@@ -125,6 +127,7 @@ public class SceneClient : MonoBehaviour
                 var init = JsonUtility.FromJson<SceneInitPayload>(initPayload);
                 objectManager.ApplySceneInit(init);
                 paramManager.ApplyParams(init.scene);
+                terrainMaterialManager?.Apply(init.terrain_material);
                 break;
 
             case "OBJECT_SPAWN":
@@ -259,7 +262,25 @@ public class SceneParams
 }
 
 [Serializable]
+public class SplatLayerData
+{
+    public string name;   // region label, e.g. "vegetation", "terrain"
+    public string tile;   // base64-encoded PNG — 1024px tileable texture
+}
+
+[Serializable]
+public class SplatMaterialData
+{
+    public int              tile_size;    // px per tile
+    public SplatLayerData[] layers;       // ordered; channel assignment is positional
+    public string[]         blend_maps;   // base64-encoded RGBA PNGs (up to 2)
+                                          // blend_maps[0] RGBA → layers[0..3]
+                                          // blend_maps[1] RGBA → layers[4..7]
+}
+
+[Serializable]
 public class SceneInitPayload
 {
-    public SceneParams   scene;
+    public SceneParams     scene;
+    public SplatMaterialData terrain_material;   // null when not generated
 }

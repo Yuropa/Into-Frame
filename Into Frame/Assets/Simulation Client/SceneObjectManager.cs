@@ -28,6 +28,9 @@ public class SceneObjectManager : MonoBehaviour
     [Header("UI")]
     public ProgressController progress;
 
+    [Header("Terrain")]
+    public TerrainMaterialManager terrainMaterialManager;
+
     private readonly Dictionary<string, TrackedObject> _tracked = new();
     private readonly Dictionary<string, Texture2D> _textureCache = new();
     private readonly Dictionary<string, List<GameObject>> _textureWaiters = new();
@@ -300,6 +303,9 @@ public class SceneObjectManager : MonoBehaviour
         }
 
         Debug.Log($"[SceneObjectManager] Mesh '{meshId}' loaded into {container.name}");
+
+        // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
+        terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
     }
 
     // ── Texture Loading ────────────────────────────────────────────────────
