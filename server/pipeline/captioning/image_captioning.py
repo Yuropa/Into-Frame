@@ -32,12 +32,12 @@ class ImageCaptioning:
         """Load Florence-2 processor and model.
 
         Older cached configuration_florence2.py revisions access
-        self.forced_bos_token_id before super().__init__() sets it.
-        If that AttributeError fires we wipe the stale cached Python modules
-        (not the weights) and retry so the hub fetches the patched version.
+        self.forced_bos_token_id before super().__init__() sets it. If that
+        AttributeError fires, patch the line in the cached file (the hub still
+        serves the buggy revision) and evict the stale sys.modules entries, then retry.
         """
         from transformers import AutoProcessor, AutoModelForCausalLM
-        import glob, os, shutil
+        import glob, os, sys
 
         for attempt in range(2):
             try:
@@ -49,13 +49,43 @@ class ImageCaptioning:
             except AttributeError as exc:
                 if "forced_bos_token_id" not in str(exc) or attempt > 0:
                     raise
-                modules_root = os.path.expanduser(
-                    "~/.cache/huggingface/modules/transformers_modules"
-                )
-                for stale in glob.glob(os.path.join(modules_root, "microsoft", "Florence*")):
-                    shutil.rmtree(stale, ignore_errors=True)
+                self._patch_florence2_config_cache()
 
         raise RuntimeError("Florence-2 failed to load after cache refresh")
+
+    @staticmethod
+    def _patch_florence2_config_cache() -> None:
+        """Fix the forced_bos_token_id bug in the cached configuration_florence2.py.
+
+        The buggy line accesses self.forced_bos_token_id before super().__init__()
+        has run. Replace it with an equivalent kwargs lookup so the attribute is
+        never accessed early, then evict the stale sys.modules entries.
+        """
+        import glob, os, sys
+
+        modules_root = os.path.expanduser(
+            "~/.cache/huggingface/modules/transformers_modules"
+        )
+        buggy = (
+            'if self.forced_bos_token_id is None'
+            ' and kwargs.get("force_bos_token_to_be_generated", False):'
+        )
+        fixed = (
+            'if kwargs.get("forced_bos_token_id", None) is None'
+            ' and kwargs.get("force_bos_token_to_be_generated", False):'
+        )
+        for config_file in glob.glob(
+            os.path.join(modules_root, "microsoft", "Florence*", "*", "configuration_florence2.py")
+        ):
+            with open(config_file) as f:
+                content = f.read()
+            if buggy in content:
+                with open(config_file, "w") as f:
+                    f.write(content.replace(buggy, fixed))
+
+        for key in list(sys.modules):
+            if "transformers_modules" in key:
+                del sys.modules[key]
 
     @classmethod
     def model_names(cls) -> list[str]:
