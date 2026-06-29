@@ -28,6 +28,11 @@ stages:
       input: panorama
       output: panorama
 
+  - name: Panorama Object Depth
+    stage: PanoramaDepthStage
+    keys:
+      output: panorama_object_depth
+
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
     full_panorama: true

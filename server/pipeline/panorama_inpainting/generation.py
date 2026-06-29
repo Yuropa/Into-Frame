@@ -172,7 +172,10 @@ class PanoramaInpaintingStage(PipelineStage):
 
         sam_detected = result.length
         depth_filtered_out = 0
-        depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        # Prefer the pre-inpainting object depth (original panorama) for SAM filtering.
+        # PANORAMA_DEPTH is computed post-inpainting (on the terrain panorama) so it
+        # is always None at this point in the pipeline — hence the object depth key.
+        depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH) or context.input_depth(ContextKey.PANORAMA_DEPTH)
         if depth is not None:
             result = DepthObjectFilter().filter(result, depth)
             depth_filtered_out = sam_detected - result.length
