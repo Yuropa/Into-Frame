@@ -151,6 +151,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         if self.temp is not None:
             material.save(self.temp / "splat_material")
+            self._save_debug(material, self.temp / "splat_material")
 
         self.log_info(
             f"SplatMaterial: {material.layer_count} layer(s), "
@@ -235,6 +236,55 @@ class TerrainTextureGenerationStage(PipelineStage):
         result = np.array(fixed.convert("RGB"), dtype=np.uint8)
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
         return PIL.Image.fromarray(result)
+
+    # ── Debug output ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _save_debug(material: SplatMaterial, path: "Path") -> None:
+        """Write human-readable debug images alongside the raw splat files."""
+        import numpy as np
+        from PIL import Image as PILImage
+
+        if not material.blend_maps:
+            return
+
+        # Distinct colours per layer for the dominant-region overlay
+        palette = [
+            (106, 190, 106),   # green
+            (139, 90,  43),    # brown
+            (80,  140, 200),   # blue
+            (80,  80,  80),    # grey
+            (200, 180, 100),   # tan
+            (169, 80,  80),    # red-brown
+            (160, 110, 180),   # purple
+            (60,  180, 180),   # teal
+        ]
+
+        # Unpack all blend map channels into a list of weight arrays
+        weight_arrays: list[np.ndarray] = []
+        for bm in material.blend_maps:
+            arr = np.array(bm).astype(np.float32) / 255.0   # (H, W, 4)
+            for ch in range(4):
+                if len(weight_arrays) < material.layer_count:
+                    weight_arrays.append(arr[:, :, ch])
+
+        if not weight_arrays:
+            return
+
+        h, w = weight_arrays[0].shape
+        stack = np.stack(weight_arrays, axis=-1)   # (H, W, N)
+
+        # Dominant-region colour map
+        dominant_idx = stack.argmax(axis=-1)       # (H, W) — index of winning layer
+        color_map = np.zeros((h, w, 3), dtype=np.uint8)
+        for idx in range(material.layer_count):
+            color_map[dominant_idx == idx] = palette[idx % len(palette)]
+        PILImage.fromarray(color_map).save(path / "blend_dominant.png")
+
+        # Per-layer greyscale weight maps
+        for idx, layer in enumerate(material.layers):
+            grey = (weight_arrays[idx] * 255).clip(0, 255).astype(np.uint8)
+            PILImage.fromarray(grey, "L").save(path / f"blend_weight_{layer.name}.png")
 
     # ── Stage bookkeeping ─────────────────────────────────────────────────────
 

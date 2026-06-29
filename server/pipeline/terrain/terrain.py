@@ -35,26 +35,20 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
 
 class TerrainMeshStage(PipelineStage):
     """
-    Converts the ground-plane height map into a variable-density terrain mesh
-    with an embedded texture sampled from the panorama or original image.
+    Converts the ground-plane height map into a variable-density terrain mesh.
 
-    Vertex density is highest near the camera (origin) in both X and Z — driven by
-    logarithmic spacing — so the ground within 1–2 m can be inspected closely while
-    the mesh still extends to the full grid extents (~100 m).  Multi-octave smooth
-    noise is blended in with distance for a natural look.
+    Texture source priority:
+      1. SplatMaterial (TERRAIN_MATERIAL) — UVs are set 0→1 so Unity can sample
+         the blend maps directly; the first layer tile is embedded as a GLB preview.
+      2. Pre-baked single texture (TERRAIN_TEXTURE) — tiled at texture_tile_factor.
+      3. Equirectangular panorama — inline bake at UV scale 1.
+      4. Original image via pinhole projection.
+      5. Geometry-only (no UVs).
 
-    Texture source (tried in order):
-      1. Panorama image  → equirectangular UV projection (full 360° coverage)
-      2. Original image  → pinhole UV projection via camera intrinsics (FOV-limited)
-      3. No texture      → geometry-only mesh
-
-    Input key       (SemanticKey.INPUT)      → ContextKey.HEIGHT_MAP      (Depth)
-    Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA        (Image, optional)
-    Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (CameraIntrinsics, optional)
-    Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH    (Mesh, GLB with texture)
-
-    Also reads ContextKey.HEIGHT_MAP_PARAMS for grid_size_meters / z_far when
-    not overridden in TerrainMeshConfiguration.
+    Input key       (SemanticKey.INPUT)      → ContextKey.HEIGHT_MAP
+    Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA        (optional)
+    Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (optional)
+    Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH
     """
 
     @classmethod
@@ -73,6 +67,8 @@ class TerrainMeshStage(PipelineStage):
         })
 
     def run(self, context: PipelineContext) -> PipelineContext:
+        from scene.splat_material import SplatMaterial
+
         input_key, panorama_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: TerrainMeshConfiguration = self.config
 
@@ -93,42 +89,44 @@ class TerrainMeshStage(PipelineStage):
             or 100.0
         )
 
-        # ── Resolve texture source ────────────────────────────────────────────
-        # Prefer a pre-baked refined texture (written by TerrainTextureBakeStage
-        # + TerrainTextureRefinementStage) over baking inline from the panorama.
-        precomputed = context.input_image(ContextKey.TERRAIN_TEXTURE)
+        # ── Resolve texture source ─────────────────────────────────────────────
+        precomputed_image = None
         panorama_tex = None
         pinhole_texture = None
         intrinsics = None
+        tile_factor = 1.0
 
-        if precomputed is not None:
-            self.log_info("Terrain texture: pre-baked refined texture")
-        else:
-            panorama_tex = context.input_panorama(panorama_key)
-            if panorama_tex is not None:
-                self.log_info("Terrain texture: equirectangular panorama (inline bake)")
-            else:
-                original = context.input_image(ContextKey.INPUT)
-                intrinsics = context.input_intrinsics(intrinsics_key)
-                if original is not None and intrinsics is not None:
-                    pinhole_texture = original.rgb()
-                    self.log_info("Terrain texture: original image (pinhole projection)")
-                else:
-                    self.log_warning(
-                        "No texture source found — generating geometry-only terrain mesh"
-                    )
-
-        # ── Resolve tile factor ───────────────────────────────────────────────
-        # TerrainTextureGenerationStage writes TERRAIN_TEXTURE_TILE_FACTOR=1.0 to
-        # signal that tiling is already baked into the composite; fall back to the
-        # config value for legacy baked textures that still need mesh-level tiling.
-        ctx_tile_factor = context.input_object(ContextKey.TERRAIN_TEXTURE_TILE_FACTOR)
-        if precomputed is not None:
-            tile_factor = float(ctx_tile_factor) if ctx_tile_factor is not None else cfg.texture_tile_factor
-        else:
+        splat: Optional[SplatMaterial] = context.input_object(ContextKey.TERRAIN_MATERIAL)
+        if splat is not None and splat.layers:
+            # UVs 0→1 so Unity samples blend maps directly at vertex UV coords.
+            # Embed the first layer tile as a preview texture so the GLB is not blank.
+            precomputed_image = splat.layers[0].tile
             tile_factor = 1.0
+            self.log_info(
+                f"Terrain texture: SplatMaterial ({splat.layer_count} layer(s), "
+                f"{len(splat.blend_maps)} blend map(s)) — UVs 0→1"
+            )
+        else:
+            texture_img = context.input_image(ContextKey.TERRAIN_TEXTURE)
+            if texture_img is not None:
+                precomputed_image = texture_img.image
+                tile_factor = cfg.texture_tile_factor
+                self.log_info("Terrain texture: pre-baked single texture")
+            else:
+                panorama_tex = context.input_panorama(panorama_key)
+                if panorama_tex is not None:
+                    tile_factor = 1.0
+                    self.log_info("Terrain texture: equirectangular panorama (inline bake)")
+                else:
+                    original = context.input_image(ContextKey.INPUT)
+                    intrinsics = context.input_intrinsics(intrinsics_key)
+                    if original is not None and intrinsics is not None:
+                        pinhole_texture = original.rgb()
+                        self.log_info("Terrain texture: original image (pinhole projection)")
+                    else:
+                        self.log_warning("No texture source — geometry-only terrain mesh")
 
-        # ── Generate mesh ─────────────────────────────────────────────────────
+        # ── Generate mesh ──────────────────────────────────────────────────────
         mesh = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
@@ -141,7 +139,7 @@ class TerrainMeshStage(PipelineStage):
             panorama=panorama_tex,
             texture=pinhole_texture,
             intrinsics=intrinsics,
-            precomputed_texture=precomputed.image if precomputed is not None else None,
+            precomputed_texture=precomputed_image,
             texture_tile_factor=tile_factor,
         )
         self.advance_progress(task)
@@ -150,7 +148,7 @@ class TerrainMeshStage(PipelineStage):
 
         self.log_info(
             f"Terrain mesh: {mesh.vertex_count} vertices, {mesh.face_count} triangles, "
-            f"{grid_size:.0f} m grid"
+            f"{grid_size:.0f} m grid, UV scale ×{tile_factor:.0f}"
         )
 
         if self.temp is not None:
@@ -168,24 +166,31 @@ class TerrainMeshStage(PipelineStage):
 
     def contribute_report(self, context: PipelineContext):
         from pipeline.report.report_section import ReportSection
+        from scene.splat_material import SplatMaterial
+
         _, _, _, output_key = self._resolved_keys()
         mesh = context.mesh(output_key)
         if mesh is None:
             return None
+
         params = context.object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         cfg: TerrainMeshConfiguration = self.config
         grid_size = cfg.z_far or params.get("grid_size_meters") or 100.0
+
+        splat: Optional[SplatMaterial] = context.object(ContextKey.TERRAIN_MATERIAL)
+        texture_desc = (
+            f"SplatMaterial ({splat.layer_count} layers)" if splat
+            else "single texture" if context.image(ContextKey.TERRAIN_TEXTURE)
+            else "panorama / pinhole / none"
+        )
+
         return ReportSection(
             stage_name=self.name,
             title="Terrain Mesh Generation",
             body=(
                 "The height map was converted into a variable-density terrain mesh. "
-                "Vertex density is highest near the camera (inner region) using logarithmic "
-                "spacing, providing fine detail for close inspection while the mesh still "
-                "extends to the full environment extent. Multi-octave smooth noise is "
-                "blended in with distance for a natural ground surface appearance. "
-                "The mesh is textured from a pre-baked panorama projection or directly "
-                "from the original image using camera intrinsics."
+                "Vertex density is highest near the camera using logarithmic spacing. "
+                "Multi-octave smooth noise is blended in with distance."
             ),
             stats={
                 "Vertices": f"{mesh.vertex_count:,}",
@@ -193,6 +198,6 @@ class TerrainMeshStage(PipelineStage):
                 "Grid extent": f"{grid_size:.0f} m",
                 "Inner min dist": f"{cfg.inner_min_dist:.1f} m",
                 "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
-                "Texture tile factor": f"{cfg.texture_tile_factor:.0f}×",
+                "Texture": texture_desc,
             },
         )
