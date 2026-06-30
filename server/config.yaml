@@ -207,15 +207,6 @@ stages:
     stage: ForegroundInpainting
     enabled: false
 
-  - name: Mesh Generation
-    stage: ModelGenerationStage
-    exclude_categories:
-      - tree
-      - forest
-      - bush
-      - flower
-      - plant
-
   - name: Panorama Cubemap
     stage: PanoramaToCubemapStage
     enabled: false
