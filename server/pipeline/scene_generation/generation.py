@@ -7,34 +7,22 @@ from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 import numpy as np
 
+# Objects whose estimated real-world largest dimension exceeds this threshold (meters)
+# are assumed to be large scene elements (mountains, hills, sky) and are skipped.
+_MAX_OBJECT_SIZE_M = 40.0
 
-def _terrain_y_at(world_x: float, world_z: float, height_map: Depth, height_map_params: dict, extrinsics: CameraExtrinsics | None) -> float | None:
-    """Return world-space terrain Y at (world_x, world_z), or None if unavailable."""
-    grid_size = height_map_params.get("grid_size_meters", 200.0)
-    grid_res  = height_map_params.get("grid_resolution", 4096)
-    half = grid_size / 2.0
 
-    # Height map is indexed in camera space XZ; convert world → camera for the lookup.
-    if extrinsics is not None:
-        cam_pt = extrinsics.rotation.T @ (np.array([world_x, 0.0, world_z]) - extrinsics.translation)
-        cam_x, cam_z = float(cam_pt[0]), float(cam_pt[2])
-    else:
-        cam_x, cam_z = world_x, world_z
-
-    col = int((cam_x + half) / grid_size * grid_res)
-    row = int((cam_z + half) / grid_size * grid_res)
-    col = max(0, min(grid_res - 1, col))
-    row = max(0, min(grid_res - 1, row))
-
-    cam_y = float(height_map.depth[row, col])
-    if not np.isfinite(cam_y):
+def _mesh_y_at(world_x: float, world_z: float, terrain_mesh) -> float | None:
+    """Return world-space terrain Y at (world_x, world_z) by raycasting down into the mesh."""
+    import trimesh
+    mesh: trimesh.Trimesh = terrain_mesh.mesh
+    y_max = float(mesh.bounds[1][1]) + 1.0
+    ray_origin = np.array([[world_x, y_max, world_z]], dtype=np.float64)
+    ray_dir    = np.array([[0.0, -1.0, 0.0]], dtype=np.float64)
+    locs, _, _ = mesh.ray.intersects_location(ray_origin, ray_dir, multiple_hits=True)
+    if len(locs) == 0:
         return None
-
-    # Transform the looked-up camera-space point back to world space to get world Y.
-    if extrinsics is not None:
-        world_pt = extrinsics.transform((cam_x, cam_y, cam_z))
-        return float(world_pt[1])
-    return cam_y
+    return float(locs[:, 1].max())
 
 class SceneGenerationStage(PipelineStage):
     """
@@ -86,8 +74,7 @@ class SceneGenerationStage(PipelineStage):
         input = context.input_image(input_key)
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         panorama = context.input_panorama(panorama_key)
-        height_map = context.input_depth(ContextKey.HEIGHT_MAP)
-        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
 
         scene = Scene()
         scene.extrinsics = extrinsics
@@ -137,10 +124,16 @@ class SceneGenerationStage(PipelineStage):
 
                 position, width, height = result
 
+                max_dim = max(width, height)
+                if max_dim > _MAX_OBJECT_SIZE_M:
+                    self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
+                    self.advance_progress(generation_task)
+                    continue
+
                 # Snap the object's base to the terrain surface.
                 place_y = position[1]
-                if height_map is not None and height_map_params is not None:
-                    terrain_y = _terrain_y_at(position[0], position[2], height_map, height_map_params, extrinsics)
+                if terrain_mesh is not None:
+                    terrain_y = _mesh_y_at(position[0], position[2], terrain_mesh)
                     if terrain_y is not None:
                         place_y = terrain_y + height / 2.0
 

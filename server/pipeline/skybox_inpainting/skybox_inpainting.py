@@ -1,8 +1,12 @@
 import numpy as np
-from pathlib import Path
 from PIL import Image as PILImage
+from scipy.ndimage import (
+    gaussian_filter,
+    binary_dilation,
+    binary_erosion,
+    distance_transform_edt,
+)
 
-from pipeline.captioning.image_captioning import ImageCaptioning
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -10,36 +14,143 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from scipy.ndimage import binary_dilation
 
 
-def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Image:
-    """Crop the horizontal band containing sky pixels."""
-    rows = np.any(sky_mask, axis=1)
-    if not rows.any():
-        return source_pil
-    rmin = int(np.where(rows)[0][0])
-    rmax = int(np.where(rows)[0][-1])
-    return source_pil.crop((0, rmin, source_pil.width, rmax + 1))
+def _sun_from_lighting(ldr: PILImage.Image, panorama_h: int, panorama_w: int) -> tuple[int, int]:
+    """Find sun pixel in panorama coordinates from the LuxDiT LDR environment map."""
+    ldr_arr = np.array(ldr.convert("RGB")).astype(np.float32)
+    lum = 0.299 * ldr_arr[:, :, 0] + 0.587 * ldr_arr[:, :, 1] + 0.114 * ldr_arr[:, :, 2]
+    sigma = max(lum.shape) * 0.025
+    smooth = gaussian_filter(lum, sigma=sigma)
+    ldr_row, ldr_col = np.unravel_index(smooth.argmax(), smooth.shape)
+    # Rescale LDR pixel → panorama pixel
+    sun_row = int(ldr_row / ldr_arr.shape[0] * panorama_h)
+    sun_col = int(ldr_col / ldr_arr.shape[1] * panorama_w)
+    return sun_row, sun_col
 
 
-def _sky_prompt(sky_caption: str) -> str:
+def _sun_from_sky_pixels(source_arr: np.ndarray, sky_mask: np.ndarray) -> tuple[int, int]:
+    """Estimate sun as the smoothed luminance peak within sky pixels."""
+    lum = np.zeros(source_arr.shape[:2], dtype=np.float32)
+    lum[sky_mask] = (
+        0.299 * source_arr[sky_mask, 0].astype(np.float32)
+        + 0.587 * source_arr[sky_mask, 1].astype(np.float32)
+        + 0.114 * source_arr[sky_mask, 2].astype(np.float32)
+    )
+    sigma = max(source_arr.shape[0], source_arr.shape[1]) * 0.025
+    smooth = gaussian_filter(lum, sigma=sigma)
+    row, col = np.unravel_index(smooth.argmax(), smooth.shape)
+    return int(row), int(col)
+
+
+def _time_of_day_label(sun_el_deg: float) -> str:
+    if sun_el_deg > 55:
+        return "midday"
+    elif sun_el_deg > 30:
+        return "afternoon"
+    elif sun_el_deg > 10:
+        return "golden hour"
+    elif sun_el_deg > -3:
+        return "sunset"
+    else:
+        return "dusk"
+
+
+def _sky_prompt(time_label: str) -> str:
     return (
-        f"photorealistic equirectangular 360-degree sky panorama, {sky_caption}, "
-        "seamless sky filling the entire frame in all directions, only sky and clouds, "
+        f"photorealistic equirectangular 360-degree sky panorama, {time_label}, "
+        "seamless sky with natural clouds and atmospheric haze, only sky and clouds, "
         "no ground, no horizon line, no terrain, no landscape, no objects, "
         "consistent natural lighting, ultra detailed, high quality"
     )
 
 
+def _build_gradient_sky(
+    source_arr: np.ndarray,
+    sky_mask: np.ndarray,
+    sun_row: int,
+    sun_col: int,
+    n_bins: int = 24,
+) -> np.ndarray:
+    """
+    Full-sphere solar gradient from sky pixel colors.
+
+    Colors are sampled from the panorama's sky region, binned by angular
+    distance from the sun, then mapped back over every pixel.  Captures
+    solar glow, blue dome, and horizon haze for any time of day.
+    """
+    h, w = source_arr.shape[:2]
+
+    row_idx = np.arange(h, dtype=np.float32)[:, None]
+    col_idx = np.arange(w, dtype=np.float32)[None, :]
+    el = (0.5 - row_idx / h) * np.pi
+    az = (col_idx / w) * 2.0 * np.pi
+
+    cos_el = np.cos(el)
+    px = cos_el * np.cos(az)
+    py = cos_el * np.sin(az)
+    pz = np.sin(el)
+
+    sun_el = (0.5 - sun_row / h) * np.pi
+    sun_az = (sun_col / w) * 2.0 * np.pi
+    sx = np.cos(sun_el) * np.cos(sun_az)
+    sy = np.cos(sun_el) * np.sin(sun_az)
+    sz = np.sin(sun_el)
+
+    dot = np.clip(px * sx + py * sy + pz * sz, -1.0, 1.0)
+    angle_from_sun = np.arccos(dot)
+
+    bin_idx = np.clip(
+        (angle_from_sun / np.pi * n_bins).astype(np.int32), 0, n_bins - 1
+    )
+
+    bin_colors = np.zeros((n_bins, 3), dtype=np.float64)
+    bin_counts = np.zeros(n_bins, dtype=np.int64)
+    for i in range(n_bins):
+        in_bin = sky_mask & (bin_idx == i)
+        if in_bin.any():
+            bin_colors[i] = source_arr[in_bin].astype(np.float64).mean(axis=0)
+            bin_counts[i] = in_bin.sum()
+
+    filled = np.where(bin_counts > 0)[0]
+    if len(filled) == 0:
+        bin_colors[:] = [135, 206, 235]
+    else:
+        for i in range(n_bins):
+            if bin_counts[i] == 0:
+                left = filled[filled < i]
+                right = filled[filled > i]
+                if left.size and right.size:
+                    l, r = left[-1], right[0]
+                    t = float(i - l) / float(r - l)
+                    bin_colors[i] = (1.0 - t) * bin_colors[l] + t * bin_colors[r]
+                elif left.size:
+                    bin_colors[i] = bin_colors[left[-1]]
+                else:
+                    bin_colors[i] = bin_colors[right[0]]
+
+    return bin_colors[bin_idx].astype(np.uint8)
+
+
 class SkyboxInpaintingStage(PipelineStage):
     """
-    Masks out non-sky regions from the panorama and in-paints them with sky
-    content so the skybox contains only sky material.
+    Fills non-sky regions of the panorama with a two-pass sky:
+
+      1. Procedural solar gradient derived from the real sky pixels and sun
+         position estimated from the LuxDiT lighting output (or sky luminance
+         peak as fallback).  Gives the correct time-of-day structure.
+
+      2. FLUX inpainting on top of the gradient to add cloud and atmospheric
+         detail, prompted with the time-of-day derived from sun elevation.
+
+      3. Blended result: gradient at the sky boundary (smooth seam), FLUX
+         weighted up by distance from the boundary into the fill region.
 
     Reads:
       ContextKey.PANORAMA                — equirectangular source panorama
       ContextKey.PANORAMA_REGION_TYPE_MAP — per-pixel RegionType indices (float32)
+      ContextKey.LIGHTING                — SceneLighting from PanoramaLightingStage
+                                           (optional; falls back to sky-pixel estimate)
 
     Writes:
       ContextKey.PANORAMA_SKY_MASK — binary sky mask (Image, L mode, 255=sky)
@@ -49,7 +160,6 @@ class SkyboxInpaintingStage(PipelineStage):
     def __init__(self, config: PipelineStageConfiguration) -> None:
         super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
-        self._flux: InPainting | None = None
 
     def _resolved_keys(self):
         return self.keys({
@@ -70,7 +180,7 @@ class SkyboxInpaintingStage(PipelineStage):
             self.log_warning("No region type map in context — run PanoramaRegionStage first")
             return context
 
-        task = self.create_progress(4, "Building sky mask…")
+        task = self.create_progress(5, "Sky gradient…")
 
         source_pil = panorama.image.convert("RGB")
         h, w = source_pil.height, source_pil.width
@@ -79,84 +189,94 @@ class SkyboxInpaintingStage(PipelineStage):
         type_arr = type_map.depth.astype(np.uint8)
         sky_mask = (type_arr == int(RegionType.SKY))
 
-        sky_rows = np.where(np.any(sky_mask, axis=1))[0]
-        sky_bottom = int(sky_rows[-1]) + 1 if len(sky_rows) > 0 else h // 2
-
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))
 
-        # Cut at the midpoint of the sky band so terrain silhouettes near the
-        # horizon are fully covered and never shown to the model.
-        sky_top = int(sky_rows[0]) if len(sky_rows) > 0 else 0
-        preserve_cutoff = sky_top + int((sky_bottom - sky_top) * 0.5)
-
-        fill_mask = np.zeros((h, w), dtype=bool)
-        fill_mask[preserve_cutoff:] = True
-        fill_mask[:preserve_cutoff] = ~sky_mask[:preserve_cutoff]
-
-        sky_fraction = sky_mask.mean()
-        self.log_info(
-            f"Sky coverage: {sky_fraction * 100:.1f}%  sky_top: {sky_top}  "
-            f"sky_bottom: {sky_bottom}  preserve_cutoff: {preserve_cutoff}  "
-            f"fill: {fill_mask.mean() * 100:.1f}%"
-        )
-
         if self.output is not None:
-            sky_mask_pil.save(self.output / "sky_mask.png")
+            sky_mask_pil.save(self.output / "panorama_sky_mask.png")
 
+        self.log_info(f"Sky coverage: {sky_mask.mean() * 100:.1f}%")
         self.advance_progress(task)
 
-        if fill_mask.sum() == 0:
-            self.log_info("Entire panorama is sky, no in-painting needed")
+        if sky_mask.all():
+            self.log_info("Entire panorama is sky, no fill needed")
             context.add_panorama(output_key, Panorama(source_pil))
             self.finish_progress(task)
             return context
 
-        dilation_px = max(8, min(w, h) // 100)
-        fill_dilated = binary_dilation(fill_mask, iterations=dilation_px).astype(np.float32)
-        fill_mask_pil = PILImage.fromarray((fill_dilated * 255).astype(np.uint8), mode="L")
+        # --- Sun position ---
+        lighting = context.lighting(ContextKey.LIGHTING)
+        if lighting is not None:
+            sun_row, sun_col = _sun_from_lighting(lighting.ldr, h, w)
+            self.log_info("Sun position from LuxDiT lighting")
+        else:
+            sun_row, sun_col = _sun_from_sky_pixels(source_arr, sky_mask)
+            self.log_info("Sun position from sky-pixel luminance (no lighting in context)")
+
+        sun_el_deg = (0.5 - sun_row / h) * 180.0
+        sun_az_deg = sun_col / w * 360.0
+        time_label = _time_of_day_label(sun_el_deg)
+        self.log_info(
+            f"Sun: el={sun_el_deg:.1f}°  az={sun_az_deg:.1f}°  → {time_label}"
+        )
+
+        # --- Pass 1: gradient sky ---
+        gradient = _build_gradient_sky(source_arr, sky_mask, sun_row, sun_col)
+
+        # Gradient composite: real sky over gradient with feathered boundary
+        feather_px = max(4, min(w, h) // 80)
+        sky_eroded  = binary_erosion(sky_mask,  iterations=feather_px)
+        sky_dilated = binary_dilation(sky_mask, iterations=feather_px)
+        blend_zone  = sky_dilated & ~sky_eroded
+
+        dist_in  = distance_transform_edt(sky_mask)
+        dist_out = distance_transform_edt(~sky_mask)
+
+        if blend_zone.any():
+            sky_alpha = np.where(
+                sky_eroded,
+                1.0,
+                np.where(
+                    blend_zone,
+                    dist_in / (dist_in + dist_out + 1e-9),
+                    0.0,
+                ),
+            ).astype(np.float32)
+        else:
+            sky_alpha = sky_mask.astype(np.float32)
+
+        sky_alpha3 = sky_alpha[:, :, None]
+        gradient_composite = (
+            sky_alpha3 * source_arr.astype(np.float32)
+            + (1.0 - sky_alpha3) * gradient.astype(np.float32)
+        ).clip(0, 255).astype(np.uint8)
 
         if self.output is not None:
-            fill_mask_pil.save(self.output / "fill_mask.png")
-
-        sky_crop = _crop_sky(source_pil, sky_mask)
-        captioner = ImageCaptioning(self.preferred_device)
-        sky_caption = captioner.caption(Image(sky_crop), prompt="a photo of the sky with")
-        del captioner
-        prompt = _sky_prompt(sky_caption)
-        self.log_info(f"Sky caption: {sky_caption!r}")
-        self.log_info(f"Sky prompt: {prompt!r}")
+            PILImage.fromarray(gradient_composite).save(self.output / "gradient.png")
 
         self.advance_progress(task)
 
-        # Pre-fill the masked region with the average colour of the preserved sky
-        # rows.  A flat solid fill gives the model a clean, featureless starting
-        # point so it has no terrain shapes to trace or amplify.
-        preserved_sky_pixels = source_arr[:preserve_cutoff][sky_mask[:preserve_cutoff]]
-        if len(preserved_sky_pixels) > 0:
-            avg_sky_color = preserved_sky_pixels.mean(axis=0).astype(np.uint8)
-        else:
-            avg_sky_color = np.array([135, 206, 235], dtype=np.uint8)
-        prefilled_arr = source_arr.copy()
-        prefilled_arr[fill_mask] = avg_sky_color
-        prefilled_pil = PILImage.fromarray(prefilled_arr)
+        # --- Pass 2: FLUX detail on the non-sky region ---
+        # Mask is the non-sky area (where gradient filled in)
+        fill_mask = ~sky_mask
+        fill_mask_pil = PILImage.fromarray((fill_mask * 255).astype(np.uint8), mode="L")
 
-        if self.output is not None:
-            prefilled_pil.save(self.output / "prefilled.png")
+        prompt = _sky_prompt(time_label)
+        self.log_info(f"FLUX prompt: {prompt!r}")
 
-        # Scale to FLUX working resolution
         flux_max = 1536
+        gradient_pil = PILImage.fromarray(gradient_composite)
         if w > flux_max or h > flux_max:
             scale = flux_max / max(w, h)
             fw = max(16, (int(w * scale) // 16) * 16)
             fh = max(16, (int(h * scale) // 16) * 16)
-            flux_input = prefilled_pil.resize((fw, fh), PILImage.LANCZOS)
+            flux_input = gradient_pil.resize((fw, fh), PILImage.LANCZOS)
             flux_mask  = fill_mask_pil.resize((fw, fh), PILImage.NEAREST)
         else:
-            flux_input, flux_mask = prefilled_pil, fill_mask_pil
+            flux_input, flux_mask = gradient_pil, fill_mask_pil
             fw, fh = w, h
 
-        self.log_info(f"FLUX pass 1: {fw}×{fh}px")
+        self.log_info(f"FLUX: {fw}×{fh}px")
         flux = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX)
         flux_pil = flux.inpaint(
             flux_input,
@@ -167,58 +287,41 @@ class SkyboxInpaintingStage(PipelineStage):
             guidance_scale=30.0,
             seed=self.seed,
         )
-
-        if self.output is not None:
-            flux_pil.save(self.output / "flux_pass1.png")
-
-        self.advance_progress(task)
-
-        # Equirectangular wrap seam repair: if the fill region touches the left or
-        # right edge then the inpainted pixels on each side aren't guaranteed to
-        # match (FLUX sees a hard cut). Fix with a circular-shift + narrow inpaint.
-        flux_mask_arr = np.array(flux_mask)
-        seam_needed = (
-            fill_dilated[:, :5].any() or fill_dilated[:, -5:].any()
-        ) and flux_mask_arr.any()
-
-        if seam_needed:
-            self.log_info("FLUX pass 2: wrap seam repair")
-            half_fw = fw // 2
-            shifted_arr  = np.roll(np.array(flux_pil), half_fw, axis=1)
-            shifted_mask = np.roll(flux_mask_arr,       half_fw, axis=1)
-
-            seam_w = max(4, fw // 64)
-            seam_mask_arr = np.zeros((fh, fw), dtype=np.uint8)
-            seam_mask_arr[:, half_fw - seam_w : half_fw + seam_w] = 255
-            # Only touch pixels that were filled, not original sky
-            seam_mask_arr = np.minimum(seam_mask_arr, shifted_mask)
-
-            if seam_mask_arr.any():
-                seam_pil = flux.inpaint(
-                    PILImage.fromarray(shifted_arr),
-                    PILImage.fromarray(seam_mask_arr, "L"),
-                    temp_path=self.temp,
-                    prompt=prompt,
-                    num_inference_steps=30,
-                    guidance_scale=30.0,
-                    seed=self.seed + 1,
-                )
-                flux_pil = PILImage.fromarray(
-                    np.roll(np.array(seam_pil), -half_fw, axis=1)
-                )
-
-                if self.output is not None:
-                    flux_pil.save(self.output / "flux_pass2.png")
-
         flux.close()
 
         if fw != w or fh != h:
             flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
 
         if self.output is not None:
-            flux_pil.save(self.output / "skybox.png")
+            flux_pil.save(self.output / "flux.png")
 
-        context.add_panorama(output_key, Panorama(flux_pil))
+        self.advance_progress(task)
+
+        # --- Pass 3: blend gradient and FLUX ---
+        # At the sky boundary: pure gradient (smooth seam).
+        # Into the fill region: ramp up to FLUX weight (capped at 0.85 so
+        # gradient structure always underlies the FLUX texture).
+        max_blend_dist = max(w, h) * 0.15
+        flux_weight = np.clip(dist_out / max_blend_dist, 0.0, 0.85).astype(np.float32)
+        # Zero weight inside real sky
+        flux_weight[sky_mask] = 0.0
+
+        flux_arr = np.array(flux_pil).astype(np.float32)
+        grad_arr = gradient_composite.astype(np.float32)
+
+        w3 = flux_weight[:, :, None]
+        result_fill = (w3 * flux_arr + (1.0 - w3) * grad_arr).clip(0, 255).astype(np.uint8)
+
+        # Restore original sky pixels on top
+        result_arr = result_fill.copy()
+        result_arr[sky_mask] = source_arr[sky_mask]
+
+        result_pil = PILImage.fromarray(result_arr)
+
+        if self.output is not None:
+            result_pil.save(self.output / "panorama_sky.png")
+
+        context.add_panorama(output_key, Panorama(result_pil))
 
         self.advance_progress(task)
         self.finish_progress(task)
@@ -231,13 +334,7 @@ class SkyboxInpaintingStage(PipelineStage):
         )
 
     def model_names(self) -> list[str]:
-        return (
-            ImageCaptioning.model_names()
-            + InPainting.model_names(InPaintingType.FLUX)
-        )
+        return InPainting.model_names(InPaintingType.FLUX)
 
     def clean_up(self):
-        if self._flux is not None:
-            self._flux.close()
-            self._flux = None
         super().clean_up()
