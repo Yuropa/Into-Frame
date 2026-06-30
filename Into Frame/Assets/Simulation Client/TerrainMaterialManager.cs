@@ -10,11 +10,11 @@ using UnityEngine;
 /// SceneObjectManager calls RegisterMeshLoaded() after every GLB load — this manager
 /// checks whether the name matches the terrain and applies textures if so.
 ///
-/// Shader wiring (TODO — add once the splat shader exists):
-///   _BlendMap0   RGBA — R=layer0  G=layer1  B=layer2  A=layer3
-///   _BlendMap1   RGBA — R=layer4  G=layer5  B=layer6  A=layer7
-///   _Layer0Tile  .. _Layer7Tile — per-region tileable textures
-///   _TileSize    float — px per tile (from manifest)
+/// Shader wiring (IntoFrame/TerrainSplat):
+///   _BlendMap0/_BlendMap1   RGBA — R=layer0  G=layer1  B=layer2  A=layer3 (per map)
+///   _LayerNTile             — per-region tileable texture
+///   _LayerNTileRepeat       — UV repeat count for each layer
+///   _EquirectLayers         — int bitmask: bit i set = layer i uses equirect world-UV
 /// </summary>
 public class TerrainMaterialManager : MonoBehaviour
 {
@@ -27,11 +27,12 @@ public class TerrainMaterialManager : MonoBehaviour
 
     // ── Decoded data ───────────────────────────────────────────────────────
 
-    public string[]    LayerNames  { get; private set; } = Array.Empty<string>();
-    public Texture2D[] LayerTiles  { get; private set; } = Array.Empty<Texture2D>();
-    public Texture2D[] BlendMaps   { get; private set; } = Array.Empty<Texture2D>();
-    public int         TileSize    { get; private set; }
-    public bool        IsReady     { get; private set; }
+    public string[]    LayerNames    { get; private set; } = Array.Empty<string>();
+    public Texture2D[] LayerTiles    { get; private set; } = Array.Empty<Texture2D>();
+    public float[]     LayerFactors  { get; private set; } = Array.Empty<float>();
+    public Texture2D[] BlendMaps     { get; private set; } = Array.Empty<Texture2D>();
+    public int         EquirectMask  { get; private set; }
+    public bool        IsReady       { get; private set; }
 
     // ── Shader property IDs ────────────────────────────────────────────────
 
@@ -53,7 +54,19 @@ public class TerrainMaterialManager : MonoBehaviour
         Shader.PropertyToID("_Layer7Tile"),
     };
 
-    static readonly int _tileSizeId = Shader.PropertyToID("_TileRepeat");
+    static readonly int[] _layerTileRepeatIds =
+    {
+        Shader.PropertyToID("_Layer0TileRepeat"),
+        Shader.PropertyToID("_Layer1TileRepeat"),
+        Shader.PropertyToID("_Layer2TileRepeat"),
+        Shader.PropertyToID("_Layer3TileRepeat"),
+        Shader.PropertyToID("_Layer4TileRepeat"),
+        Shader.PropertyToID("_Layer5TileRepeat"),
+        Shader.PropertyToID("_Layer6TileRepeat"),
+        Shader.PropertyToID("_Layer7TileRepeat"),
+    };
+
+    static readonly int _equirectLayersId = Shader.PropertyToID("_EquirectLayers");
 
     // Deferred: terrain may arrive before or after the splat data
     private readonly List<Renderer> _pendingRenderers = new();
@@ -72,14 +85,18 @@ public class TerrainMaterialManager : MonoBehaviour
 
         IsReady = false;
 
-        TileSize   = data.tile_size;
-        LayerNames = new string[data.layers.Length];
-        LayerTiles = new Texture2D[data.layers.Length];
+        LayerNames   = new string[data.layers.Length];
+        LayerTiles   = new Texture2D[data.layers.Length];
+        LayerFactors = new float[data.layers.Length];
+        EquirectMask = 0;
 
         for (int i = 0; i < data.layers.Length; i++)
         {
-            LayerNames[i] = data.layers[i].name;
-            LayerTiles[i] = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: true);
+            LayerNames[i]   = data.layers[i].name;
+            LayerTiles[i]   = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: true);
+            LayerFactors[i] = data.layers[i].tile_factor > 0f ? data.layers[i].tile_factor : 1.0f;
+            if (data.layers[i].equirect)
+                EquirectMask |= (1 << i);
         }
 
         int blendCount = data.blend_maps?.Length ?? 0;
@@ -90,10 +107,9 @@ public class TerrainMaterialManager : MonoBehaviour
         IsReady = true;
 
         Debug.Log($"[TerrainMaterialManager] Ready — {LayerTiles.Length} layer(s), " +
-                  $"{BlendMaps.Length} blend map(s), tile size {TileSize}px. " +
+                  $"{BlendMaps.Length} blend map(s), equirect mask 0x{EquirectMask:X}. " +
                   $"Layers: {string.Join(", ", LayerNames)}");
 
-        // Apply to any terrain renderers that loaded before the data arrived
         foreach (var r in _pendingRenderers)
             if (r != null) ApplyToRenderer(r);
         _pendingRenderers.Clear();
@@ -108,13 +124,12 @@ public class TerrainMaterialManager : MonoBehaviour
         if (string.IsNullOrEmpty(meshName)) return;
         if (meshName.IndexOf(terrainNamePattern, StringComparison.OrdinalIgnoreCase) < 0) return;
 
-        // Terrain may have multiple child renderers (LODs, sub-meshes)
         foreach (var r in go.GetComponentsInChildren<Renderer>())
         {
             if (IsReady)
                 ApplyToRenderer(r);
             else
-                _pendingRenderers.Add(r);   // data not yet arrived — queue for later
+                _pendingRenderers.Add(r);
         }
     }
 
@@ -148,15 +163,20 @@ public class TerrainMaterialManager : MonoBehaviour
                 mpb.SetTexture(_blendMapIds[i], BlendMaps[i]);
 
         for (int i = 0; i < LayerTiles.Length && i < _layerTileIds.Length; i++)
+        {
             if (LayerTiles[i] != null)
                 mpb.SetTexture(_layerTileIds[i], LayerTiles[i]);
+            if (i < LayerFactors.Length)
+                mpb.SetFloat(_layerTileRepeatIds[i], LayerFactors[i]);
+        }
 
-        mpb.SetFloat(_tileSizeId, TileSize);
+        mpb.SetInt(_equirectLayersId, EquirectMask);
 
         r.SetPropertyBlock(mpb);
 
         Debug.Log($"[TerrainMaterialManager] Applied to '{r.gameObject.name}' — " +
-                  $"{LayerTiles.Length} tile(s), {BlendMaps.Length} blend map(s).");
+                  $"{LayerTiles.Length} tile(s), {BlendMaps.Length} blend map(s), " +
+                  $"equirect mask 0x{EquirectMask:X}.");
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -171,7 +191,6 @@ public class TerrainMaterialManager : MonoBehaviour
             return Texture2D.whiteTexture;
         }
 
-        // TextureFormat.RGBA32, no mipmaps on import — Unity generates them if needed
         var tex = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false, linear: linear);
         if (!tex.LoadImage(bytes))
         {

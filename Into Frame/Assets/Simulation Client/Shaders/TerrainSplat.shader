@@ -16,8 +16,19 @@ Shader "IntoFrame/TerrainSplat"
         _Layer6Tile ("Layer 6 Tile", 2D) = "white" {}
         _Layer7Tile ("Layer 7 Tile", 2D) = "white" {}
 
-        // How many times each tile repeats across the full terrain
-        _TileRepeat ("Tile Repeat",  Float) = 8.0
+        // Per-layer tile repeat factors (how many times the tile repeats across the terrain)
+        _Layer0TileRepeat ("Layer 0 Tile Repeat", Float) = 1.0
+        _Layer1TileRepeat ("Layer 1 Tile Repeat", Float) = 8.0
+        _Layer2TileRepeat ("Layer 2 Tile Repeat", Float) = 8.0
+        _Layer3TileRepeat ("Layer 3 Tile Repeat", Float) = 8.0
+        _Layer4TileRepeat ("Layer 4 Tile Repeat", Float) = 8.0
+        _Layer5TileRepeat ("Layer 5 Tile Repeat", Float) = 8.0
+        _Layer6TileRepeat ("Layer 6 Tile Repeat", Float) = 8.0
+        _Layer7TileRepeat ("Layer 7 Tile Repeat", Float) = 8.0
+
+        // Bitmask: bit i set means layer i uses equirectangular UV from world position
+        // rather than planar tiled UV. Used for the panorama layer (typically layer 0).
+        _EquirectLayers ("Equirect Layers Bitmask", Int) = 0
     }
 
     SubShader
@@ -79,7 +90,15 @@ Shader "IntoFrame/TerrainSplat"
                 float4 _Layer5Tile_ST;
                 float4 _Layer6Tile_ST;
                 float4 _Layer7Tile_ST;
-                float  _TileRepeat;
+                float  _Layer0TileRepeat;
+                float  _Layer1TileRepeat;
+                float  _Layer2TileRepeat;
+                float  _Layer3TileRepeat;
+                float  _Layer4TileRepeat;
+                float  _Layer5TileRepeat;
+                float  _Layer6TileRepeat;
+                float  _Layer7TileRepeat;
+                int    _EquirectLayers;
             CBUFFER_END
 
             // ── Structs ────────────────────────────────────────────────────
@@ -100,6 +119,34 @@ Shader "IntoFrame/TerrainSplat"
                 float  fogFactor  : TEXCOORD3;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
+
+            // ── Helpers ────────────────────────────────────────────────────
+
+            // Equirectangular UV from world position relative to camera.
+            // Matches the server-side convention:
+            //   U = atan2(X, Z) / (2π) + 0.5
+            //   V = 0.5 − φ / π   where φ = atan2(Y, √(X²+Z²))
+            // Terrain below the camera has φ < 0, so V > 0.5 (lower half of panorama).
+            float2 EquirectUV(float3 posWS)
+            {
+                float3 camPos = GetCameraPositionWS();
+                float3 dir    = posWS - camPos;
+                float  theta  = atan2(dir.x, dir.z);
+                float  r_xz   = max(length(dir.xz), 0.001);
+                float  phi    = atan2(dir.y, r_xz);
+                return float2(
+                    theta / TWO_PI + 0.5,
+                    0.5 - phi / PI
+                );
+            }
+
+            // Per-layer UV: equirect projection for panorama layers, tiled planar for synthetic.
+            float2 LayerUV(float2 meshUV, float3 posWS, float tileRepeat, int layerBit)
+            {
+                if (layerBit != 0)
+                    return EquirectUV(posWS);
+                return meshUV * tileRepeat;
+            }
 
             // ── Vertex ─────────────────────────────────────────────────────
             Varyings Vert(Attributes IN)
@@ -124,22 +171,31 @@ Shader "IntoFrame/TerrainSplat"
             {
                 UNITY_SETUP_STEREO_EYE_INDEX_POST_VERTEX(IN);
 
-                float2 uv     = IN.uv;
-                float2 tileUV = uv * _TileRepeat;
+                float2 uv = IN.uv;
 
                 // Blend maps sampled at terrain UV (0→1)
                 half4 blend0 = SAMPLE_TEXTURE2D(_BlendMap0, sampler_BlendMap0, uv);
                 half4 blend1 = SAMPLE_TEXTURE2D(_BlendMap1, sampler_BlendMap1, uv);
 
-                // Layer tiles sampled at tiled UV
-                half3 col0 = SAMPLE_TEXTURE2D(_Layer0Tile, sampler_Layer0Tile, tileUV).rgb;
-                half3 col1 = SAMPLE_TEXTURE2D(_Layer1Tile, sampler_Layer1Tile, tileUV).rgb;
-                half3 col2 = SAMPLE_TEXTURE2D(_Layer2Tile, sampler_Layer2Tile, tileUV).rgb;
-                half3 col3 = SAMPLE_TEXTURE2D(_Layer3Tile, sampler_Layer3Tile, tileUV).rgb;
-                half3 col4 = SAMPLE_TEXTURE2D(_Layer4Tile, sampler_Layer4Tile, tileUV).rgb;
-                half3 col5 = SAMPLE_TEXTURE2D(_Layer5Tile, sampler_Layer5Tile, tileUV).rgb;
-                half3 col6 = SAMPLE_TEXTURE2D(_Layer6Tile, sampler_Layer6Tile, tileUV).rgb;
-                half3 col7 = SAMPLE_TEXTURE2D(_Layer7Tile, sampler_Layer7Tile, tileUV).rgb;
+                // Per-layer UV — equirect for panorama layers, tiled planar for synthetic
+                float2 uv0 = LayerUV(uv, IN.positionWS, _Layer0TileRepeat, (_EquirectLayers >> 0) & 1);
+                float2 uv1 = LayerUV(uv, IN.positionWS, _Layer1TileRepeat, (_EquirectLayers >> 1) & 1);
+                float2 uv2 = LayerUV(uv, IN.positionWS, _Layer2TileRepeat, (_EquirectLayers >> 2) & 1);
+                float2 uv3 = LayerUV(uv, IN.positionWS, _Layer3TileRepeat, (_EquirectLayers >> 3) & 1);
+                float2 uv4 = LayerUV(uv, IN.positionWS, _Layer4TileRepeat, (_EquirectLayers >> 4) & 1);
+                float2 uv5 = LayerUV(uv, IN.positionWS, _Layer5TileRepeat, (_EquirectLayers >> 5) & 1);
+                float2 uv6 = LayerUV(uv, IN.positionWS, _Layer6TileRepeat, (_EquirectLayers >> 6) & 1);
+                float2 uv7 = LayerUV(uv, IN.positionWS, _Layer7TileRepeat, (_EquirectLayers >> 7) & 1);
+
+                // Layer tiles
+                half3 col0 = SAMPLE_TEXTURE2D(_Layer0Tile, sampler_Layer0Tile, uv0).rgb;
+                half3 col1 = SAMPLE_TEXTURE2D(_Layer1Tile, sampler_Layer1Tile, uv1).rgb;
+                half3 col2 = SAMPLE_TEXTURE2D(_Layer2Tile, sampler_Layer2Tile, uv2).rgb;
+                half3 col3 = SAMPLE_TEXTURE2D(_Layer3Tile, sampler_Layer3Tile, uv3).rgb;
+                half3 col4 = SAMPLE_TEXTURE2D(_Layer4Tile, sampler_Layer4Tile, uv4).rgb;
+                half3 col5 = SAMPLE_TEXTURE2D(_Layer5Tile, sampler_Layer5Tile, uv5).rgb;
+                half3 col6 = SAMPLE_TEXTURE2D(_Layer6Tile, sampler_Layer6Tile, uv6).rgb;
+                half3 col7 = SAMPLE_TEXTURE2D(_Layer7Tile, sampler_Layer7Tile, uv7).rgb;
 
                 // Weighted blend — weights pre-normalised by server, no normalisation needed
                 half3 albedo =
@@ -197,7 +253,7 @@ Shader "IntoFrame/TerrainSplat"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
-                float _TileRepeat;
+                float _Layer0TileRepeat;
             CBUFFER_END
 
             float3 _LightDirection;
@@ -247,7 +303,7 @@ Shader "IntoFrame/TerrainSplat"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
-                float _TileRepeat;
+                float _Layer0TileRepeat;
             CBUFFER_END
 
             struct DepthAttribs
