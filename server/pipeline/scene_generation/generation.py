@@ -7,6 +7,35 @@ from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 import numpy as np
 
+
+def _terrain_y_at(world_x: float, world_z: float, height_map: Depth, height_map_params: dict, extrinsics: CameraExtrinsics | None) -> float | None:
+    """Return world-space terrain Y at (world_x, world_z), or None if unavailable."""
+    grid_size = height_map_params.get("grid_size_meters", 200.0)
+    grid_res  = height_map_params.get("grid_resolution", 4096)
+    half = grid_size / 2.0
+
+    # Height map is indexed in camera space XZ; convert world → camera for the lookup.
+    if extrinsics is not None:
+        cam_pt = extrinsics.rotation.T @ (np.array([world_x, 0.0, world_z]) - extrinsics.translation)
+        cam_x, cam_z = float(cam_pt[0]), float(cam_pt[2])
+    else:
+        cam_x, cam_z = world_x, world_z
+
+    col = int((cam_x + half) / grid_size * grid_res)
+    row = int((cam_z + half) / grid_size * grid_res)
+    col = max(0, min(grid_res - 1, col))
+    row = max(0, min(grid_res - 1, row))
+
+    cam_y = float(height_map.depth[row, col])
+    if not np.isfinite(cam_y):
+        return None
+
+    # Transform the looked-up camera-space point back to world space to get world Y.
+    if extrinsics is not None:
+        world_pt = extrinsics.transform((cam_x, cam_y, cam_z))
+        return float(world_pt[1])
+    return cam_y
+
 class SceneGenerationStage(PipelineStage):
     """
     Assembles the final 3D scene by unprojecting each detected object's bounding box
@@ -57,6 +86,8 @@ class SceneGenerationStage(PipelineStage):
         input = context.input_image(input_key)
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         panorama = context.input_panorama(panorama_key)
+        height_map = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
 
         scene = Scene()
         scene.extrinsics = extrinsics
@@ -102,9 +133,17 @@ class SceneGenerationStage(PipelineStage):
                     continue
 
                 position, width, height = result
+
+                # Snap the object's base to the terrain surface.
+                place_y = position[1]
+                if height_map is not None and height_map_params is not None:
+                    terrain_y = _terrain_y_at(position[0], position[2], height_map, height_map_params, extrinsics)
+                    if terrain_y is not None:
+                        place_y = terrain_y + height / 2.0
+
                 context.add_object(f"metadata_{idx}", {
                     **(metadata or {}),
-                    "world_position": list(map(float, position)),
+                    "world_position": list(map(float, (position[0], place_y, position[2]))),
                     "world_width": float(width),
                     "world_height": float(height),
                 })
@@ -118,7 +157,7 @@ class SceneGenerationStage(PipelineStage):
                     mesh_obj = Object3D.mesh(
                         mesh_name,
                         x=position[0],
-                        y=position[1],
+                        y=place_y,
                         z=position[2],
                     )
                     mesh_obj.name = mesh_name
@@ -126,11 +165,11 @@ class SceneGenerationStage(PipelineStage):
                 else:
                     self.log_info(f"Creating billboard for {idx}")
                     billboard = Object3D.billboard(
-                        texture_name, 
+                        texture_name,
                         width=width,
                         height=height,
                         x=position[0],
-                        y=position[1],
+                        y=place_y,
                         z=position[2],
                     )
                     billboard.name = mesh_name
