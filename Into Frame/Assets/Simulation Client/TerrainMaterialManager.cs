@@ -53,10 +53,11 @@ public class TerrainMaterialManager : MonoBehaviour
         Shader.PropertyToID("_Layer7Tile"),
     };
 
-    static readonly int _tileSizeId = Shader.PropertyToID("_TileSize");
+    static readonly int _tileSizeId = Shader.PropertyToID("_TileRepeat");
 
     // Deferred: terrain may arrive before or after the splat data
     private readonly List<Renderer> _pendingRenderers = new();
+    private Material _runtimeSplatMaterial;
 
     // ── Public API ─────────────────────────────────────────────────────────
 
@@ -119,11 +120,25 @@ public class TerrainMaterialManager : MonoBehaviour
 
     // ── Apply to renderer ──────────────────────────────────────────────────
 
+    private Material GetSplatMaterial()
+    {
+        if (splatMaterial != null) return splatMaterial;
+        if (_runtimeSplatMaterial != null) return _runtimeSplatMaterial;
+        var shader = Shader.Find("IntoFrame/TerrainSplat");
+        if (shader == null)
+        {
+            Debug.LogWarning("[TerrainMaterialManager] Shader 'IntoFrame/TerrainSplat' not found. Assign splatMaterial in the Inspector.");
+            return null;
+        }
+        _runtimeSplatMaterial = new Material(shader) { name = "TerrainSplat (runtime)" };
+        return _runtimeSplatMaterial;
+    }
+
     private void ApplyToRenderer(Renderer r)
     {
-        // Swap material to the splat shader if one is assigned
-        if (splatMaterial != null)
-            r.sharedMaterial = splatMaterial;
+        var mat = GetSplatMaterial();
+        if (mat != null)
+            r.sharedMaterial = mat;
 
         var mpb = new MaterialPropertyBlock();
         r.GetPropertyBlock(mpb);

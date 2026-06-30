@@ -3142,6 +3142,11 @@ RectTransform:
   m_CorrespondingSourceObject: {fileID: 1035790433963668018, guid: 085ce58b196caa446a8545c9dd388793, type: 3}
   m_PrefabInstance: {fileID: 1556058166}
   m_PrefabAsset: {fileID: 0}
+--- !u!1 &1765174497 stripped
+GameObject:
+  m_CorrespondingSourceObject: {fileID: 8806329115733545877, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
+  m_PrefabInstance: {fileID: 1373153106}
+  m_PrefabAsset: {fileID: 0}
 --- !u!1 &1783572213
 GameObject:
   m_ObjectHideFlags: 0
@@ -3377,6 +3382,7 @@ GameObject:
   serializedVersion: 6
   m_Component:
   - component: {fileID: 1862969863}
+  - component: {fileID: 1862969865}
   - component: {fileID: 1862969862}
   - component: {fileID: 1862969861}
   - component: {fileID: 1862969860}
@@ -3415,6 +3421,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SceneParamManager
   directionalLight: {fileID: 1815318736}
   camera: {fileID: 877652245}
+  xrOrigin: {fileID: 1765174497}
   skybox: {fileID: 341509118}
   environmentLighting: {fileID: 1862969864}
 --- !u!114 &1862969861
@@ -3434,6 +3441,7 @@ MonoBehaviour:
   lerpSpeed: 10
   server: {fileID: 2130367361}
   progress: {fileID: 605623678}
+  terrainMaterialManager: {fileID: 1862969865}
 --- !u!114 &1862969862
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -3451,6 +3459,7 @@ MonoBehaviour:
   objectManager: {fileID: 1862969861}
   paramManager: {fileID: 1862969860}
   progressController: {fileID: 605623678}
+  terrainMaterialManager: {fileID: 1862969865}
 --- !u!4 &1862969863
 Transform:
   m_ObjectHideFlags: 0
@@ -3479,6 +3488,20 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::EnvironmentLighting
   reflectionProbe: {fileID: 1598269140}
+--- !u!114 &1862969865
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1862969858}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: f5a6b7c8d9e00000f5a6b7c8d9e00001, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::TerrainMaterialManager
+  terrainNamePattern: terrain
+  splatMaterial: {fileID: 2100000, guid: e4f5a6b7c8d90000e4f5a6b7c8d90001, type: 2}
 --- !u!1 &2046629158
 GameObject:
   m_ObjectHideFlags: 0

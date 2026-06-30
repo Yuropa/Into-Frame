@@ -153,9 +153,10 @@ class HeightMapStage(PipelineStage):
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
-            "grid_size_meters": cfg.grid_size_meters,
-            "grid_resolution": cfg.grid_resolution,
-            "ground_y_max": cfg.ground_y_max,
+            "grid_size_meters":    cfg.grid_size_meters,
+            "grid_resolution":     cfg.grid_resolution,
+            "ground_y_max":        cfg.ground_y_max,
+            "camera_height_meters": cfg.camera_height_meters,
         })
 
         if self.temp is not None:

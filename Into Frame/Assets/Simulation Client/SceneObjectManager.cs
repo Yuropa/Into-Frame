@@ -31,6 +31,12 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Terrain")]
     public TerrainMaterialManager terrainMaterialManager;
 
+    private void Start()
+    {
+        if (terrainMaterialManager == null)
+            terrainMaterialManager = FindObjectOfType<TerrainMaterialManager>();
+    }
+
     private readonly Dictionary<string, TrackedObject> _tracked = new();
     private readonly Dictionary<string, Texture2D> _textureCache = new();
     private readonly Dictionary<string, List<GameObject>> _textureWaiters = new();

@@ -10,6 +10,7 @@ class Scene:
         self.near_clip_plane = 0.1
         self.far_clip_plane = 100.0
         self.skybox_rotation = 0.0
+        self.camera_height = 0.0  # eye height above ground in metres; 0 = not set
         self.extrinsics = CameraExtrinsics.identity()
         self.objects = []
         self.skybox = ""
@@ -29,6 +30,7 @@ class Scene:
             "extrinsics":    self.extrinsics.encode(),
             "skybox":         self.skybox,
             "skyboxRotation": self.skybox_rotation,
+            "cameraHeight":   self.camera_height,
             "lighting":       self.lighting.encode() if self.lighting is not None else None,
         }
 
@@ -45,6 +47,7 @@ class Scene:
         obj.objects         = [Object3D.decode(o) for o in data["objects"]]
         obj.skybox          = data["skybox"]
         obj.skybox_rotation = data.get("skyboxRotation", 0.0)
+        obj.camera_height   = data.get("cameraHeight", 0.0)
         lighting_data       = data.get("lighting")
         obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
         return obj

@@ -17,6 +17,8 @@ public class SceneParamManager : MonoBehaviour
 
     [Header("Camera")]
     public new GameObject camera;
+    [Tooltip("Root of the XR rig (XROrigin). Its Y position is shifted so the user's eye level matches the server camera height.")]
+    public GameObject xrOrigin;
 
     [Header("Skybox")]
     public GameObject skybox;
@@ -59,6 +61,17 @@ public class SceneParamManager : MonoBehaviour
             Quaternion rotation = m.rotation;
 
             camera.transform.SetPositionAndRotation(position, rotation);
+        }
+
+        // Offset the XR rig so the user's eyes sit at camera_height above the terrain floor.
+        // camera.localPosition.y is the headset-tracked eye height above the rig origin,
+        // so xrOrigin.y = cameraHeight - eyeHeight places the virtual camera at the right level.
+        if (p.cameraHeight > 0f && xrOrigin != null && camera != null)
+        {
+            float eyeHeight = camera.transform.localPosition.y;
+            var pos = xrOrigin.transform.position;
+            pos.y = p.cameraHeight - eyeHeight;
+            xrOrigin.transform.position = pos;
         }
 
         if (p.skybox != null)

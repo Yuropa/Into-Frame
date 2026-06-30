@@ -91,6 +91,7 @@ class SceneGenerationStage(PipelineStage):
 
         scene = Scene()
         scene.extrinsics = extrinsics
+        scene.camera_height = float((height_map_params or {}).get("camera_height_meters", 0.0))
 
         # Rotate the skybox to align the panorama center with the camera's forward direction.
         # The panorama center (theta=0) = +Z in camera space; the extrinsics rotation tells

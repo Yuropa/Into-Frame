@@ -255,6 +255,7 @@ public class SceneParams
     public float  farClipPlane;
     public string skybox;
     public float  skyboxRotation;
+    public float  cameraHeight;
 
     public SceneObject[]    objects;
     public ExtrinsicsParams extrinsics;
