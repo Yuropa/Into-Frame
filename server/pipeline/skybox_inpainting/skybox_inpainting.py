@@ -10,7 +10,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from scipy.ndimage import binary_dilation, distance_transform_edt
+from scipy.ndimage import binary_dilation
 
 
 def _crop_sky(source_pil: PILImage.Image, sky_mask: np.ndarray) -> PILImage.Image:
@@ -79,21 +79,27 @@ class SkyboxInpaintingStage(PipelineStage):
         type_arr = type_map.depth.astype(np.uint8)
         sky_mask = (type_arr == int(RegionType.SKY))
 
-        # Build a clean rectangular fill mask instead of tracing the mountain
-        # silhouette.  The exact sky-shaped mask tells Flux "there is a mountain
-        # outline here" and it obliges; a horizontal cutoff gives it a clean sky
-        # boundary so it generates pure sky all the way down.
         sky_rows = np.where(np.any(sky_mask, axis=1))[0]
         sky_bottom = int(sky_rows[-1]) + 1 if len(sky_rows) > 0 else h // 2
-        fill_mask = np.zeros((h, w), dtype=bool)
-        fill_mask[sky_bottom:] = True                  # rectangle below sky
-        fill_mask[:sky_bottom] = ~sky_mask[:sky_bottom] # holes inside sky band
 
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))
 
+        # Cut at the midpoint of the sky band so terrain silhouettes near the
+        # horizon are fully covered and never shown to the model.
+        sky_top = int(sky_rows[0]) if len(sky_rows) > 0 else 0
+        preserve_cutoff = sky_top + int((sky_bottom - sky_top) * 0.5)
+
+        fill_mask = np.zeros((h, w), dtype=bool)
+        fill_mask[preserve_cutoff:] = True
+        fill_mask[:preserve_cutoff] = ~sky_mask[:preserve_cutoff]
+
         sky_fraction = sky_mask.mean()
-        self.log_info(f"Sky coverage: {sky_fraction * 100:.1f}%  sky_bottom row: {sky_bottom}  fill: {fill_mask.mean() * 100:.1f}%")
+        self.log_info(
+            f"Sky coverage: {sky_fraction * 100:.1f}%  sky_top: {sky_top}  "
+            f"sky_bottom: {sky_bottom}  preserve_cutoff: {preserve_cutoff}  "
+            f"fill: {fill_mask.mean() * 100:.1f}%"
+        )
 
         if self.output is not None:
             sky_mask_pil.save(self.output / "sky_mask.png")
@@ -123,10 +129,16 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
-        # Pre-fill non-sky regions by propagating the nearest sky pixel colour outward.
-        # This gives FLUX a sky-coloured context everywhere instead of a hard boundary.
-        _, nearest_sky_idx = distance_transform_edt(~sky_mask, return_indices=True)
-        prefilled_arr = source_arr[nearest_sky_idx[0], nearest_sky_idx[1]]
+        # Pre-fill the masked region with the average colour of the preserved sky
+        # rows.  A flat solid fill gives the model a clean, featureless starting
+        # point so it has no terrain shapes to trace or amplify.
+        preserved_sky_pixels = source_arr[:preserve_cutoff][sky_mask[:preserve_cutoff]]
+        if len(preserved_sky_pixels) > 0:
+            avg_sky_color = preserved_sky_pixels.mean(axis=0).astype(np.uint8)
+        else:
+            avg_sky_color = np.array([135, 206, 235], dtype=np.uint8)
+        prefilled_arr = source_arr.copy()
+        prefilled_arr[fill_mask] = avg_sky_color
         prefilled_pil = PILImage.fromarray(prefilled_arr)
 
         if self.output is not None:
