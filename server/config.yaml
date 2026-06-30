@@ -196,6 +196,7 @@ stages:
 
   - name: Tree Mesh Generation
     stage: TreeMeshGenerationStage
+    enabled: false
 
   - name: Scene Generation
     stage: SceneGenerationStage
