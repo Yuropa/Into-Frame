@@ -7,6 +7,10 @@ from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 import numpy as np
 
+# Objects whose estimated real-world largest dimension exceeds this threshold (meters)
+# are assumed to be large scene elements (mountains, hills, sky) and are skipped.
+_MAX_OBJECT_SIZE_M = 40.0
+
 
 def _mesh_y_at(world_x: float, world_z: float, terrain_mesh) -> float | None:
     """Return world-space terrain Y at (world_x, world_z) by raycasting down into the mesh."""
@@ -119,6 +123,12 @@ class SceneGenerationStage(PipelineStage):
                     continue
 
                 position, width, height = result
+
+                max_dim = max(width, height)
+                if max_dim > _MAX_OBJECT_SIZE_M:
+                    self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
+                    self.advance_progress(generation_task)
+                    continue
 
                 # Snap the object's base to the terrain surface.
                 place_y = position[1]
