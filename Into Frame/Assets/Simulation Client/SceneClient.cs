@@ -269,6 +269,7 @@ public class SplatLayerData
     public string tile;        // base64-encoded PNG — tileable texture
     public float  tile_factor; // UV repeat count across terrain (0 treated as 1.0)
     public bool   equirect;    // true → sample with equirectangular world-position UV
+    public float  smoothness;  // PBR smoothness [0,1]: 0 = matte, ~0.88 = water
 }
 
 [Serializable]

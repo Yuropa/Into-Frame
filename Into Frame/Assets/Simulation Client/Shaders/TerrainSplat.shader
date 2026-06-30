@@ -29,6 +29,17 @@ Shader "IntoFrame/TerrainSplat"
         _Layer6TileRepeat ("Layer 6 Tile Repeat", Float) = 50.0
         _Layer7TileRepeat ("Layer 7 Tile Repeat", Float) = 50.0
 
+        // Per-layer PBR smoothness (0 = perfectly matte, 1 = mirror-smooth).
+        // Water should be ~0.88; soil/grass/gravel near 0.
+        _Layer0Smoothness ("Layer 0 Smoothness", Range(0,1)) = 0.1
+        _Layer1Smoothness ("Layer 1 Smoothness", Range(0,1)) = 0.1
+        _Layer2Smoothness ("Layer 2 Smoothness", Range(0,1)) = 0.1
+        _Layer3Smoothness ("Layer 3 Smoothness", Range(0,1)) = 0.1
+        _Layer4Smoothness ("Layer 4 Smoothness", Range(0,1)) = 0.1
+        _Layer5Smoothness ("Layer 5 Smoothness", Range(0,1)) = 0.1
+        _Layer6Smoothness ("Layer 6 Smoothness", Range(0,1)) = 0.1
+        _Layer7Smoothness ("Layer 7 Smoothness", Range(0,1)) = 0.1
+
         // Bitmask: bit i set means layer i uses equirectangular UV from world position
         // rather than planar tiled UV. Used for the panorama layer (typically layer 0).
         _EquirectLayers ("Equirect Layers Bitmask", Int) = 0
@@ -101,6 +112,14 @@ Shader "IntoFrame/TerrainSplat"
                 float  _Layer5TileRepeat;
                 float  _Layer6TileRepeat;
                 float  _Layer7TileRepeat;
+                float  _Layer0Smoothness;
+                float  _Layer1Smoothness;
+                float  _Layer2Smoothness;
+                float  _Layer3Smoothness;
+                float  _Layer4Smoothness;
+                float  _Layer5Smoothness;
+                float  _Layer6Smoothness;
+                float  _Layer7Smoothness;
                 int    _EquirectLayers;
             CBUFFER_END
 
@@ -205,6 +224,13 @@ Shader "IntoFrame/TerrainSplat"
                     col0 * blend0.r + col1 * blend0.g + col2 * blend0.b + col3 * blend0.a +
                     col4 * blend1.r + col5 * blend1.g + col6 * blend1.b + col7 * blend1.a;
 
+                // Blend per-layer smoothness with the same weights
+                half smoothness =
+                    _Layer0Smoothness * blend0.r + _Layer1Smoothness * blend0.g +
+                    _Layer2Smoothness * blend0.b + _Layer3Smoothness * blend0.a +
+                    _Layer4Smoothness * blend1.r + _Layer5Smoothness * blend1.g +
+                    _Layer6Smoothness * blend1.b + _Layer7Smoothness * blend1.a;
+
                 // URP PBR lighting
                 InputData inputData = (InputData)0;
                 inputData.positionWS             = IN.positionWS;
@@ -225,7 +251,7 @@ Shader "IntoFrame/TerrainSplat"
                 SurfaceData surfaceData = (SurfaceData)0;
                 surfaceData.albedo     = albedo;
                 surfaceData.metallic   = 0.0h;
-                surfaceData.smoothness = 0.1h;
+                surfaceData.smoothness = smoothness;
                 surfaceData.normalTS   = half3(0.0h, 0.0h, 1.0h);
                 surfaceData.occlusion  = 1.0h;
                 surfaceData.alpha      = 1.0h;

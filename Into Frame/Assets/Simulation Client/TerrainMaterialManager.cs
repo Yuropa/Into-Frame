@@ -27,12 +27,13 @@ public class TerrainMaterialManager : MonoBehaviour
 
     // ── Decoded data ───────────────────────────────────────────────────────
 
-    public string[]    LayerNames    { get; private set; } = Array.Empty<string>();
-    public Texture2D[] LayerTiles    { get; private set; } = Array.Empty<Texture2D>();
-    public float[]     LayerFactors  { get; private set; } = Array.Empty<float>();
-    public Texture2D[] BlendMaps     { get; private set; } = Array.Empty<Texture2D>();
-    public int         EquirectMask  { get; private set; }
-    public bool        IsReady       { get; private set; }
+    public string[]    LayerNames      { get; private set; } = Array.Empty<string>();
+    public Texture2D[] LayerTiles      { get; private set; } = Array.Empty<Texture2D>();
+    public float[]     LayerFactors    { get; private set; } = Array.Empty<float>();
+    public float[]     LayerSmoothness { get; private set; } = Array.Empty<float>();
+    public Texture2D[] BlendMaps       { get; private set; } = Array.Empty<Texture2D>();
+    public int         EquirectMask    { get; private set; }
+    public bool        IsReady         { get; private set; }
 
     // ── Shader property IDs ────────────────────────────────────────────────
 
@@ -66,6 +67,18 @@ public class TerrainMaterialManager : MonoBehaviour
         Shader.PropertyToID("_Layer7TileRepeat"),
     };
 
+    static readonly int[] _layerSmoothnessIds =
+    {
+        Shader.PropertyToID("_Layer0Smoothness"),
+        Shader.PropertyToID("_Layer1Smoothness"),
+        Shader.PropertyToID("_Layer2Smoothness"),
+        Shader.PropertyToID("_Layer3Smoothness"),
+        Shader.PropertyToID("_Layer4Smoothness"),
+        Shader.PropertyToID("_Layer5Smoothness"),
+        Shader.PropertyToID("_Layer6Smoothness"),
+        Shader.PropertyToID("_Layer7Smoothness"),
+    };
+
     static readonly int _equirectLayersId = Shader.PropertyToID("_EquirectLayers");
 
     // Deferred: terrain may arrive before or after the splat data
@@ -85,16 +98,18 @@ public class TerrainMaterialManager : MonoBehaviour
 
         IsReady = false;
 
-        LayerNames   = new string[data.layers.Length];
-        LayerTiles   = new Texture2D[data.layers.Length];
-        LayerFactors = new float[data.layers.Length];
-        EquirectMask = 0;
+        LayerNames      = new string[data.layers.Length];
+        LayerTiles      = new Texture2D[data.layers.Length];
+        LayerFactors    = new float[data.layers.Length];
+        LayerSmoothness = new float[data.layers.Length];
+        EquirectMask    = 0;
 
         for (int i = 0; i < data.layers.Length; i++)
         {
-            LayerNames[i]   = data.layers[i].name;
-            LayerTiles[i]   = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: true);
-            LayerFactors[i] = data.layers[i].tile_factor > 0f ? data.layers[i].tile_factor : 1.0f;
+            LayerNames[i]      = data.layers[i].name;
+            LayerTiles[i]      = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: true);
+            LayerFactors[i]    = data.layers[i].tile_factor > 0f ? data.layers[i].tile_factor : 1.0f;
+            LayerSmoothness[i] = data.layers[i].smoothness;
             if (data.layers[i].equirect)
                 EquirectMask |= (1 << i);
         }
@@ -168,6 +183,8 @@ public class TerrainMaterialManager : MonoBehaviour
                 mpb.SetTexture(_layerTileIds[i], LayerTiles[i]);
             if (i < LayerFactors.Length)
                 mpb.SetFloat(_layerTileRepeatIds[i], LayerFactors[i]);
+            if (i < LayerSmoothness.Length)
+                mpb.SetFloat(_layerSmoothnessIds[i], LayerSmoothness[i]);
         }
 
         mpb.SetInt(_equirectLayersId, EquirectMask);

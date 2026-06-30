@@ -29,39 +29,53 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 _BASE_PROMPTS: dict[RegionType, str] = {
     RegionType.GROUND: (
         "close-up macro top-down photo of natural bare earth and soil, "
-        "loose dirt with fine grit and small pebbles, subtle mineral color variation, "
+        "loose ochre-brown dirt with fine grit and small pebbles, subtle mineral color variation, "
         "scattered organic fragments and root fibers, weathered natural ground surface"
     ),
     RegionType.TERRAIN: (
         "close-up macro top-down photo of mountain rock and gravel surface, "
-        "fractured stone pieces in varied sizes from pebble to fist-sized, "
-        "mineral color variation from grey to rust-brown, lichen patches, rough weathered rock"
+        "fractured grey and rust-brown stone pieces in varied sizes, "
+        "mineral color variation, olive lichen patches, sharp edges, rough weathered rock"
     ),
     RegionType.VEGETATION: (
         "close-up macro top-down photo of dense mixed grass ground cover, "
-        "intertwined grass blades of varying length and shade of green, "
-        "tiny wildflowers and clover scattered throughout, rich lush natural vegetation"
+        "vibrant emerald and olive green grass blades of varying length, "
+        "tiny yellow wildflowers and white clover scattered throughout, "
+        "rich lush natural vegetation carpet, varied green hues"
     ),
     RegionType.WATER: (
-        "close-up macro top-down photo of calm water surface viewed from directly above, "
-        "subtle concentric ripple patterns, clear translucent water with pale blue-green tint, "
-        "gentle surface undulation, fine caustic light patterns on the bottom"
+        "close-up macro top-down photo of lake water surface viewed from directly above, "
+        "deep blue-teal water with clear overlapping ripple and wave patterns, "
+        "subtle shimmer, transparent water showing sandy bottom texture, "
+        "rich saturated cobalt and turquoise blue color, water texture"
     ),
     RegionType.ROAD: (
-        "close-up macro top-down photo of weathered asphalt road surface, "
-        "grey tarmac with exposed stone aggregate and tar binder, "
+        "close-up macro top-down photo of weathered dark asphalt road surface, "
+        "dark charcoal-grey tarmac with exposed stone aggregate and tar binder, "
         "fine hairline cracks, age patina and wear, rough granular road texture"
     ),
     RegionType.TRAIL: (
         "close-up macro top-down photo of compacted dirt hiking trail, "
-        "hard-packed earth with fine gravel, small embedded stones and exposed roots, "
+        "hard-packed warm tan earth with fine gravel, small embedded stones and exposed roots, "
         "subtle bootprint impressions and erosion channels, natural trail surface"
     ),
     RegionType.BUILT: (
-        "close-up macro top-down photo of weathered stone cobblestone paving, "
-        "rectangular stones with mortar joints, varied grey and brown stone colors, "
+        "close-up macro top-down photo of weathered granite cobblestone paving, "
+        "rectangular stone blocks with mortar joints, varied grey and brown stone colors, "
         "worn rounded edges and minor surface chips, aged urban ground surface"
     ),
+}
+
+# PBR smoothness per region: 0 = perfectly rough/matte, 1 = mirror-smooth.
+# Water is high (reflective surface); soil/grass/gravel are near-zero (diffuse).
+_LAYER_SMOOTHNESS: dict[RegionType, float] = {
+    RegionType.GROUND:      0.05,
+    RegionType.TERRAIN:     0.08,
+    RegionType.VEGETATION:  0.04,
+    RegionType.WATER:       0.88,
+    RegionType.ROAD:        0.18,
+    RegionType.TRAIL:       0.05,
+    RegionType.BUILT:       0.28,
 }
 
 _TILE_SUFFIX = (
@@ -258,15 +272,25 @@ class TerrainTextureGenerationStage(PipelineStage):
             for label, sw in synth_weight_maps.items():
                 weight_maps[label] = sw * synth_scale
 
-            layers = [SplatLayer(name="panorama", tile=pano_tile, tile_factor=1.0, equirect=True)]
+            layers = [SplatLayer(name="panorama", tile=pano_tile, tile_factor=1.0, equirect=True, smoothness=0.1)]
             layers += [
-                SplatLayer(name=rt.label, tile=tiles[rt.label], tile_factor=cfg.synthetic_tile_factor)
+                SplatLayer(
+                    name=rt.label,
+                    tile=tiles[rt.label],
+                    tile_factor=cfg.synthetic_tile_factor,
+                    smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
+                )
                 for rt in present_types if rt.label in tiles
             ]
         else:
             weight_maps = synth_weight_maps
             layers = [
-                SplatLayer(name=rt.label, tile=tiles[rt.label], tile_factor=cfg.synthetic_tile_factor)
+                SplatLayer(
+                    name=rt.label,
+                    tile=tiles[rt.label],
+                    tile_factor=cfg.synthetic_tile_factor,
+                    smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
+                )
                 for rt in present_types if rt.label in tiles
             ]
 

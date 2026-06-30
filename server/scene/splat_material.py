@@ -22,7 +22,7 @@ class SplatLayer:
     tile: PILImage.Image
     # How many times this layer's tile repeats across the full terrain UV space.
     # 1.0 = the tile covers the terrain exactly once (used for the panorama layer).
-    # Higher values (e.g. 8.0) tile the texture for synthetic region layers.
+    # Higher values (e.g. 50.0) tile the texture for synthetic region layers.
     tile_factor: float = 1.0
     # When True the shader derives UVs from the vertex world position using
     # standard equirectangular projection rather than from TEXCOORD_0 × tile_factor.
@@ -31,6 +31,10 @@ class SplatLayer:
     # The tile is the full equirectangular image resized to square.
     # V = 0.5 at the horizon; V < 0.5 for above-horizon (mountains); V = 1.0 at nadir.
     equirect: bool = False
+    # PBR smoothness for this layer's surface in [0, 1].
+    # 0 = perfectly rough/matte (soil, grass); 1 = perfectly mirror-smooth.
+    # Water sits at ~0.88; concrete ~0.25; rock/trail/vegetation < 0.1.
+    smoothness: float = 0.1
 
 
 class SplatMaterial:
@@ -209,7 +213,16 @@ class SplatMaterial:
 
         return {
             "tile_size": self.tile_size,
-            "layers": [{"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect, "tile": _b64(layer.tile)} for layer in self.layers],
+            "layers": [
+                {
+                    "name": layer.name,
+                    "tile_factor": layer.tile_factor,
+                    "equirect": layer.equirect,
+                    "smoothness": layer.smoothness,
+                    "tile": _b64(layer.tile),
+                }
+                for layer in self.layers
+            ],
             "blend_maps": [_b64(bm) for bm in self.blend_maps],
         }
 
@@ -219,7 +232,13 @@ class SplatMaterial:
             return PILImage.open(io.BytesIO(base64.b64decode(b64))).copy()
 
         layers = [
-            SplatLayer(name=entry["name"], tile=_from_b64(entry["tile"]), tile_factor=entry.get("tile_factor", 1.0), equirect=entry.get("equirect", False))
+            SplatLayer(
+                name=entry["name"],
+                tile=_from_b64(entry["tile"]),
+                tile_factor=entry.get("tile_factor", 1.0),
+                equirect=entry.get("equirect", False),
+                smoothness=entry.get("smoothness", 0.1),
+            )
             for entry in data["layers"]
         ]
         blend_maps = [_from_b64(bm) for bm in data["blend_maps"]]
@@ -231,7 +250,10 @@ class SplatMaterial:
         path.mkdir(parents=True, exist_ok=True)
         manifest = {
             "tile_size": self.tile_size,
-            "layers": [{"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect} for layer in self.layers],
+            "layers": [
+                {"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect, "smoothness": layer.smoothness}
+                for layer in self.layers
+            ],
         }
         (path / "splat_material.json").write_text(json.dumps(manifest, indent=2))
         for i, bm in enumerate(self.blend_maps):
@@ -249,6 +271,7 @@ class SplatMaterial:
                 tile=PILImage.open(path / f"tile_{entry['name']}.png").copy(),
                 tile_factor=entry.get("tile_factor", 1.0),
                 equirect=entry.get("equirect", False),
+                smoothness=entry.get("smoothness", 0.1),
             )
             for entry in manifest["layers"]
         ]
