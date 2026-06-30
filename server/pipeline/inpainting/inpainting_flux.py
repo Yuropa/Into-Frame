@@ -72,15 +72,30 @@ class InPaintingFlux:
     def close(self):
         import gc
         if self.pipeline is not None:
-            # enable_model_cpu_offload registers accelerate hooks on each
-            # component, creating reference cycles that prevent GC. Remove them
-            # first so del actually frees the CUDA tensors.
+            # Drain any in-flight GPU work before tearing down the model.
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            # enable_model_cpu_offload registers accelerate hooks that create
+            # reference cycles. Remove them so the del can reach refcount 0
+            # without waiting for cyclic GC.
             try:
                 from accelerate.hooks import remove_hook_from_module
                 remove_hook_from_module(self.pipeline, recurse=True)
             except Exception:
                 pass
+            # Explicitly move all components to CPU so no GPU tensors are left
+            # stranded on-device after accelerate deferred an offload.
+            for component in list(getattr(self.pipeline, 'components', {}).values()):
+                if hasattr(component, 'to') and callable(component.to):
+                    try:
+                        component.to('cpu')
+                    except Exception:
+                        pass
             del self.pipeline
             self.pipeline = None
+        # Multiple GC rounds to break deep cycles in accelerate/diffusers
+        # internals before releasing the CUDA allocator cache.
         gc.collect()
-        torch.cuda.empty_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

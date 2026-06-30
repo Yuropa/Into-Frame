@@ -173,15 +173,16 @@ class TerrainTextureGenerationStage(PipelineStage):
         self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
 
         tiles: dict[str, PIL.Image.Image] = {}
-        for idx, rt in enumerate(present_types):
-            prompt = self._build_prompt(rt, caption)
-            tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
-            self.log_info(f"Generated {rt.label} tile ({cfg.tile_size}px, seamless)")
-            self.advance_progress(task)
-            self.advance_progress(task)
-
-        self._inpainter.close()
-        self._inpainter = None
+        try:
+            for idx, rt in enumerate(present_types):
+                prompt = self._build_prompt(rt, caption)
+                tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
+                self.log_info(f"Generated {rt.label} tile ({cfg.tile_size}px, seamless)")
+                self.advance_progress(task)
+                self.advance_progress(task)
+        finally:
+            self._inpainter.close()
+            self._inpainter = None
 
         material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
 

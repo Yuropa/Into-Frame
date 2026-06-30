@@ -155,6 +155,7 @@ class PanoramaInpaintingStage(PipelineStage):
         self._classifier = None
         self._captioner = None
         self._samp = None
+        self._flux_inpainter = None
         self.preferred_device, self.preferred_dtype = preferred_device(DeviceStrategy.MEMORY)
 
     @classmethod
@@ -462,18 +463,21 @@ class PanoramaInpaintingStage(PipelineStage):
             flux_w, flux_h = w, h
 
         self.log_info(f"  Flux: full panorama input={w}×{h} → flux={flux_w}×{flux_h}px")
-        flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
         flux_guidance  = 30.0
         flux_steps     = 50
-        flux_pil = flux_inpainter.inpaint(
-            flux_input_s,
-            flux_mask_s,
-            temp_path=self.temp,
-            prompt=caption,
-            num_inference_steps=flux_steps,
-            guidance_scale=flux_guidance,
-        )
-        flux_inpainter.close()
+        self._flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
+        try:
+            flux_pil = self._flux_inpainter.inpaint(
+                flux_input_s,
+                flux_mask_s,
+                temp_path=self.temp,
+                prompt=caption,
+                num_inference_steps=flux_steps,
+                guidance_scale=flux_guidance,
+            )
+        finally:
+            self._flux_inpainter.close()
+            self._flux_inpainter = None
 
         if self.temp is not None:
             import json
@@ -591,74 +595,75 @@ class PanoramaInpaintingStage(PipelineStage):
         crop_debug_entries: list[dict] = []
 
         if valid_states:
-            flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
+            self._flux_inpainter = InPainting(self.preferred_device, self.preferred_dtype, InPaintingType.FLUX)
             lama_count = len(pass_objects)
+            try:
+                for flux_idx, (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1) in enumerate(valid_states):
+                    global_idx = lama_count + flux_idx
+                    bx, by, bw, bh = box
+                    left   = max(0, int(bx))
+                    top    = max(0, int(by))
+                    right  = min(w, int(bx + bw))
+                    bottom = min(h, int(by + bh))
 
-            for flux_idx, (mask_array, box, dilated_crop, crop_y0, crop_y1, crop_x0, crop_x1) in enumerate(valid_states):
-                global_idx = lama_count + flux_idx
-                bx, by, bw, bh = box
-                left   = max(0, int(bx))
-                top    = max(0, int(by))
-                right  = min(w, int(bx + bw))
-                bottom = min(h, int(by + bh))
+                    region_mask = mask_array[top:bottom, left:right]
+                    if region_mask.sum() == 0:
+                        self.advance_progress(inpaint_task)
+                        continue
 
-                region_mask = mask_array[top:bottom, left:right]
-                if region_mask.sum() == 0:
+                    crop_h = crop_y1 - crop_y0
+                    crop_w = crop_x1 - crop_x0
+
+                    lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
+                    mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
+
+                    flux_cw, flux_ch = crop_w, crop_h
+                    if crop_w > flux_max or crop_h > flux_max:
+                        scale     = flux_max / max(crop_w, crop_h)
+                        flux_cw   = max(16, (int(crop_w * scale) // 16) * 16)
+                        flux_ch   = max(16, (int(crop_h * scale) // 16) * 16)
+                        lama_crop = lama_crop.resize((flux_cw, flux_ch), PILImage.LANCZOS)
+                        mask_crop = mask_crop.resize((flux_cw, flux_ch), PILImage.NEAREST)
+
+                    self.log_info(f"  Flux: crop_{flux_idx} input={crop_w}×{crop_h} → flux={flux_cw}×{flux_ch}px")
+                    flux_pil = self._flux_inpainter.inpaint(
+                        lama_crop,
+                        mask_crop,
+                        temp_path=self.temp,
+                        prompt=caption,
+                        num_inference_steps=flux_steps,
+                        guidance_scale=flux_guidance,
+                    )
+                    crop_debug_entries.append({
+                        "crop_idx": flux_idx,
+                        "crop_resolution": {"w": crop_w, "h": crop_h},
+                        "flux_resolution": {"w": flux_cw, "h": flux_ch},
+                    })
+
+                    if self.temp is not None:
+                        flux_pil.save(self.temp / f"inpaint_{global_idx}_flux_crop_raw.png")
+
+                    flux_pil = self._supersample_flux(flux_pil, crop_w, crop_h)
+                    flux_crop_arr = np.array(flux_pil)
+
+                    feather_radius = max(4, min(right - left, bottom - top) // 50)
+                    region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
+                    feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))).astype(np.float32)[..., np.newaxis] / 255.0
+
+                    orig_region = current_arr[top:bottom, left:right]
+                    flux_region = flux_crop_arr[top - crop_y0 : bottom - crop_y0,
+                                                left - crop_x0 : right  - crop_x0]
+                    next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
+
+                    if self.temp is not None:
+                        flux_pil.save(self.temp / f"inpaint_{global_idx}_flux_crop.png")
+                        region_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius)).save(self.temp / f"inpaint_{global_idx}_flux_feather_mask.png")
+                        PILImage.fromarray(next_terrain_arr).save(self.temp / f"inpaint_{global_idx}_flux_panorama.png")
+
                     self.advance_progress(inpaint_task)
-                    continue
-
-                crop_h = crop_y1 - crop_y0
-                crop_w = crop_x1 - crop_x0
-
-                lama_crop = PILImage.fromarray(current_arr[crop_y0:crop_y1, crop_x0:crop_x1])
-                mask_crop = PILImage.fromarray((dilated_crop * 255).astype(np.uint8), mode="L")
-
-                flux_cw, flux_ch = crop_w, crop_h
-                if crop_w > flux_max or crop_h > flux_max:
-                    scale     = flux_max / max(crop_w, crop_h)
-                    flux_cw   = max(16, (int(crop_w * scale) // 16) * 16)
-                    flux_ch   = max(16, (int(crop_h * scale) // 16) * 16)
-                    lama_crop = lama_crop.resize((flux_cw, flux_ch), PILImage.LANCZOS)
-                    mask_crop = mask_crop.resize((flux_cw, flux_ch), PILImage.NEAREST)
-
-                self.log_info(f"  Flux: crop_{flux_idx} input={crop_w}×{crop_h} → flux={flux_cw}×{flux_ch}px")
-                flux_pil = flux_inpainter.inpaint(
-                    lama_crop,
-                    mask_crop,
-                    temp_path=self.temp,
-                    prompt=caption,
-                    num_inference_steps=flux_steps,
-                    guidance_scale=flux_guidance,
-                )
-                crop_debug_entries.append({
-                    "crop_idx": flux_idx,
-                    "crop_resolution": {"w": crop_w, "h": crop_h},
-                    "flux_resolution": {"w": flux_cw, "h": flux_ch},
-                })
-
-                if self.temp is not None:
-                    flux_pil.save(self.temp / f"inpaint_{global_idx}_flux_crop_raw.png")
-
-                flux_pil = self._supersample_flux(flux_pil, crop_w, crop_h)
-                flux_crop_arr = np.array(flux_pil)
-
-                feather_radius = max(4, min(right - left, bottom - top) // 50)
-                region_mask_pil = PILImage.fromarray((region_mask * 255).astype(np.uint8), mode="L")
-                feathered = np.array(region_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))).astype(np.float32)[..., np.newaxis] / 255.0
-
-                orig_region = current_arr[top:bottom, left:right]
-                flux_region = flux_crop_arr[top - crop_y0 : bottom - crop_y0,
-                                            left - crop_x0 : right  - crop_x0]
-                next_terrain_arr[top:bottom, left:right] = (orig_region * (1.0 - feathered) + flux_region * feathered).astype(np.uint8)
-
-                if self.temp is not None:
-                    flux_pil.save(self.temp / f"inpaint_{global_idx}_flux_crop.png")
-                    region_mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius)).save(self.temp / f"inpaint_{global_idx}_flux_feather_mask.png")
-                    PILImage.fromarray(next_terrain_arr).save(self.temp / f"inpaint_{global_idx}_flux_panorama.png")
-
-                self.advance_progress(inpaint_task)
-
-            flux_inpainter.close()
+            finally:
+                self._flux_inpainter.close()
+                self._flux_inpainter = None
 
         # Advance skipped Flux slots (objects with empty masks skipped above)
         for _ in [s for s in lama_states if s[2] is None]:
@@ -702,6 +707,9 @@ class PanoramaInpaintingStage(PipelineStage):
         return names
 
     def clean_up(self):
+        if self._flux_inpainter is not None:
+            self._flux_inpainter.close()
+            self._flux_inpainter = None
         if self._seg is not None:
             self._seg.close()
             self._seg = None

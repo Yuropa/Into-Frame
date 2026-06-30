@@ -22,31 +22,26 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         billboard_distance_m: float = 10.0,
         generator_type: str = "TRELLIS",
-        lod_max_error_fraction: float = 0.03,
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.billboard_distance_m = float(billboard_distance_m)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
-        self.lod_max_error_fraction = float(lod_max_error_fraction)
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
 
 
 class PanoramaAssetGenerationStage(PipelineStage):
     """
-    For each non-environment panorama object (as classified by
-    PanoramaObjectClassificationStage), samples the object's depth from
-    PANORAMA_DEPTH and decides:
-      - depth < billboard_distance_m  → generate a 3D mesh (writes mesh_{i})
-      - depth >= billboard_distance_m → leave as billboard (no mesh written)
+    For each object category present in the scene, meshifies one representative
+    crop (the closest instance to the camera) and stores it as category_mesh_{class}.
+    Categories where every instance is farther than billboard_distance_m are left
+    as billboards; SceneGenerationStage will draw from the category's crop pool for
+    those.
 
-    SceneGenerationStage already falls back to billboard when mesh_{i} is absent,
-    so no changes to that stage are needed for the far-object path.
-
-    Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class'),
+    Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class' and 'box'),
             crop_{i}, ContextKey.PANORAMA_DEPTH, ContextKey.PANORAMA
-    Writes: mesh_{i} for objects closer than billboard_distance_m
+    Writes: category_mesh_{class} for each qualifying category
     Config: billboard_distance_m (default 10.0 m), generator_type (default TRELLIS)
     """
 
@@ -71,82 +66,76 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
-        # First pass: decide which objects need 3D generation
-        near_indices = []
+        # First pass: for each category, find the closest instance within threshold.
+        # That instance's crop becomes the representative mesh for the whole category.
+        category_best: dict[str, tuple[int, float]] = {}  # class → (idx, depth)
         skipped_debug = []
         billboard_debug = []
+
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}")
             if metadata is None:
                 continue
             obj_class = metadata.get("class")
             if obj_class in _ENV_CATEGORIES or obj_class == "indeterminate":
-                self.log_info(f"  crop_{idx}: {obj_class} — skipped")
                 skipped_debug.append({
                     "idx": idx,
                     "class": obj_class,
-                    "caption": metadata.get("caption", ""),
-                    "confidence": metadata.get("confidence"),
                     "reason": "environment" if obj_class in _ENV_CATEGORIES else "indeterminate",
                 })
                 continue
             if not self.config.category_filter.allows(obj_class or ""):
-                self.log_info(f"  crop_{idx}: '{obj_class}' — excluded by category filter")
                 skipped_debug.append({
                     "idx": idx,
                     "class": obj_class,
-                    "caption": metadata.get("caption", ""),
-                    "confidence": metadata.get("confidence"),
                     "reason": "category_filter",
                 })
                 continue
-            if context.input_mesh(f"mesh_{idx}") is not None:
-                self.log_info(f"  crop_{idx}: mesh already cached")
-                continue
 
             depth = self._sample_object_depth(metadata.get("box"), panorama_depth, pano_w, pano_h)
-            if depth is not None and depth < threshold:
-                near_indices.append((idx, depth))
-            else:
-                label = f"{depth:.1f} m" if depth is not None else "unknown depth"
-                self.log_info(f"  crop_{idx}: {label} → billboard")
+            if depth is None or depth >= threshold:
                 billboard_debug.append({
                     "idx": idx,
-                    "class": metadata.get("class"),
+                    "class": obj_class,
                     "depth_m": round(depth, 2) if depth is not None else None,
                     "threshold_m": threshold,
                 })
+                continue
 
-        self._write_debug(skipped_debug, billboard_debug, near_indices)
+            # Keep the closest instance as the category representative.
+            if obj_class not in category_best or depth < category_best[obj_class][1]:
+                category_best[obj_class] = (idx, depth)
 
-        if not near_indices:
+        self._write_debug(skipped_debug, billboard_debug, category_best)
+
+        if not category_best:
             self.log_info("No objects within 3D generation distance")
             return context
 
-        # Second pass: generate meshes for near objects
-        asset_task = self.create_progress(len(near_indices), "Generating 3D assets…")
+        # Second pass: generate one mesh per qualifying category.
+        asset_task = self.create_progress(len(category_best), "Generating 3D assets…")
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
 
         try:
-            for idx, depth in near_indices:
-                self.log_info(f"  crop_{idx}: {depth:.1f} m → 3D mesh")
+            for obj_class, (idx, depth) in category_best.items():
+                mesh_key = f"category_mesh_{obj_class}"
+
+                cached = context.mesh(mesh_key)
+                if cached is not None:
+                    self.log_info(f"  {mesh_key}: cached ({cached.vertex_count}v {cached.face_count}f)")
+                    self.advance_progress(asset_task)
+                    continue
+
+                self.log_info(f"  {mesh_key}: {depth:.1f} m → 3D mesh (crop_{idx})")
                 crop = context.input_image(f"crop_{idx}")
-                temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
+                temp_path = self.temp / mesh_key if self.temp is not None else None
                 super().clean_up()
                 mesh = gen.meshify(crop, temp_path, seed=self.seed)
                 mesh = mesh.repair()
-                context.add_mesh(f"mesh_{idx}", mesh)
-
-                try:
-                    lod = mesh.simplify(max_error_fraction=self.config.lod_max_error_fraction)
-                    if crop is not None:
-                        lod.apply_crop_texture(crop.rgba())
-                    context.add_mesh(f"mesh_lod_{idx}", lod)
-                    self.log_info(f"  crop_{idx}: LOD {mesh.face_count} → {lod.face_count} faces")
-                except Exception as e:
-                    self.log_info(f"  crop_{idx}: LOD generation failed ({e}), skipping")
-
+                mesh.fit_to_box(1.0, 1.0)
+                context.add_mesh(mesh_key, mesh)
+                self.log_info(f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f")
                 self.advance_progress(asset_task)
         finally:
             gen.close()
@@ -154,19 +143,22 @@ class PanoramaAssetGenerationStage(PipelineStage):
         self.finish_progress(asset_task)
         return context
 
-    def _write_debug(self, skipped: list, billboards: list, near: list):
+    def _write_debug(self, skipped: list, billboards: list, category_best: dict):
         if self.output is None:
             return
         payload = {
             "billboard_distance_m": self.config.billboard_distance_m,
             "summary": {
-                "skipped_env_or_indeterminate": len(skipped),
-                "billboard": len(billboards),
-                "mesh_3d": len(near),
+                "skipped_env_or_filtered": len(skipped),
+                "billboard_only": len(billboards),
+                "categories_meshified": len(category_best),
             },
             "skipped": skipped,
             "billboard": billboards,
-            "mesh_3d": [{"idx": idx, "depth_m": round(depth, 2)} for idx, depth in near],
+            "categories": [
+                {"class": cls, "representative_idx": idx, "depth_m": round(depth, 2)}
+                for cls, (idx, depth) in category_best.items()
+            ],
         }
         with open(self.output / "asset_debug.json", "w") as f:
             json.dump(payload, f, indent=2)
@@ -180,7 +172,6 @@ class PanoramaAssetGenerationStage(PipelineStage):
         cx = bx + bw / 2.0
         cy = by + bh / 2.0
 
-        # Scale from panorama pixel space to depth map pixel space
         sx = panorama_depth.width / pano_w
         sy = panorama_depth.height / pano_h
         dx = int(round(cx * sx))
@@ -206,6 +197,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_h = panorama.height if panorama is not None else None
         threshold = self.config.billboard_distance_m
 
+        seen_classes: set[str] = set()
         for idx in range(count):
             metadata = context.object(f"metadata_{idx}")
             if metadata is None:
@@ -219,14 +211,64 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 metadata.get("box"), panorama_depth, pano_w, pano_h
             )
             if depth is not None and depth < threshold:
-                if context.mesh(f"mesh_{idx}") is None:
-                    return False
-                if context.mesh(f"mesh_lod_{idx}") is None:
-                    return False
+                if obj_class not in seen_classes:
+                    seen_classes.add(obj_class)
+                    if context.mesh(f"category_mesh_{obj_class}") is None:
+                        return False
         return True
 
     def model_names(self) -> list[str]:
         return ModelGenerator.model_names(type=self.config.generator_type)
+
+    def contribute_report(self, context: PipelineContext):
+        from pipeline.report.report_section import ReportSection
+        count = context.object(ContextKey.OBJECT_COUNT)
+        if count is None or count == 0:
+            return None
+
+        seen_classes: set[str] = set()
+        images = []
+        total_verts = 0
+        total_faces = 0
+
+        for i in range(count):
+            meta = context.object(f"metadata_{i}") or {}
+            obj_class = meta.get("class", f"Object {i + 1}")
+            mesh_key = f"category_mesh_{obj_class}"
+            mesh = context.mesh(mesh_key)
+            crop = context.image(f"crop_{i}")
+
+            if obj_class not in seen_classes:
+                seen_classes.add(obj_class)
+                if mesh is not None:
+                    total_verts += mesh.vertex_count
+                    total_faces += mesh.face_count
+                if crop is not None and len(images) < 6:
+                    label = obj_class
+                    if mesh is not None:
+                        label += f" ({mesh.vertex_count:,}v)"
+                    images.append((crop.image, label))
+
+        reconstructed = len(seen_classes)
+        stats = {"Categories reconstructed": str(reconstructed)}
+        if reconstructed > 0:
+            stats["Total vertices"] = f"{total_verts:,}"
+            stats["Total triangles"] = f"{total_faces:,}"
+            stats["Generator"] = self.config.generator_type.name
+        return ReportSection(
+            stage_name=self.name,
+            title="3D Object Reconstruction",
+            body=(
+                "One 3D mesh is generated per object category using the closest "
+                f"instance as the representative crop. The {self.config.generator_type.name} "
+                "model reconstructs a textured mesh, which is normalised to a 1 m "
+                "canonical box. At scene placement each instance randomly uses the "
+                "category mesh (with a random rotation) or a billboard drawn from "
+                "the category's crop pool."
+            ),
+            images=images,
+            stats=stats,
+        )
 
     def clean_up(self):
         super().clean_up()
