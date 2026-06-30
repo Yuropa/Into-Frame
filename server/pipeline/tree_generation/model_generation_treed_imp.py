@@ -33,7 +33,7 @@ class TreeDGenerator(RemoteServer):
         image = input["image"] if isinstance(input, dict) else input
         species = input.get("species", "") if isinstance(input, dict) else ""
 
-        rgba_path = temp_path / "rgba.png"
+        rgba_path = (temp_path / "rgba.png").resolve()
         image.save(str(rgba_path))
 
         ckpt_dir = _CHECKPOINTS / "treed"
