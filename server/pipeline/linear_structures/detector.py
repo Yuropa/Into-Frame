@@ -16,6 +16,10 @@ from pipeline.linear_structures.graph import LinearGraph, LinearStructure
 _MIN_PATH_PX = 12
 _PATH_DOWNSAMPLE = 3  # must match the downsample used in _pixel_paths_to_world
 
+_EXTRAP_BOUNDARY_MARGIN = 0.04   # fraction of grid_size — endpoint within this of edge is "already there"
+_EXTRAP_STEP_M          = 1.0    # world-space step size for extrapolation (metres)
+_EXTRAP_TANGENT_PTS     = 6      # number of downsampled path points used to estimate bearing
+
 
 def _neighbour_count_image(skel: np.ndarray) -> np.ndarray:
     kernel = np.ones((3, 3), dtype=np.uint8)
@@ -95,6 +99,87 @@ def _pixel_paths_to_world(
         )
         world_paths.append(np.stack([x, y, z], axis=-1).astype(np.float32))
     return world_paths
+
+
+def _at_grid_boundary(pt: np.ndarray, half: float, margin: float) -> bool:
+    """True when the XZ point is within margin of any grid edge."""
+    return abs(pt[0]) >= half - margin or abs(pt[2]) >= half - margin
+
+
+def _extrapolate_to_boundary(
+    wp: np.ndarray,
+    from_start: bool,
+    hm_arr: np.ndarray,
+    grid_size: float,
+    hm_res: int,
+) -> np.ndarray:
+    """
+    Walk from one endpoint of a world-space path in the direction of its local
+    tangent until the path reaches the grid boundary, sampling terrain height
+    at each step.  Returns the new extension points (not including the anchor).
+
+    from_start=True  → extend backward from wp[0]
+    from_start=False → extend forward  from wp[-1]
+    """
+    half   = grid_size / 2.0
+    margin = grid_size * _EXTRAP_BOUNDARY_MARGIN
+
+    anchor = wp[0] if from_start else wp[-1]
+    if _at_grid_boundary(anchor, half, margin):
+        return np.empty((0, 3), dtype=np.float32)
+
+    n = min(_EXTRAP_TANGENT_PTS, len(wp) - 1)
+    if from_start:
+        far = wp[n]          # point further into path body
+    else:
+        far = wp[-n - 1]
+
+    dir_xz = anchor[[0, 2]] - far[[0, 2]]  # direction pointing away from body
+    norm = float(np.linalg.norm(dir_xz))
+    if norm < 1e-6:
+        return np.empty((0, 3), dtype=np.float32)
+    dir_xz = (dir_xz / norm).astype(np.float64)
+
+    pts: list[np.ndarray] = []
+    pos = anchor[[0, 2]].astype(np.float64)
+    max_steps = int(grid_size * 2 / _EXTRAP_STEP_M) + 10
+
+    for _ in range(max_steps):
+        pos += dir_xz * _EXTRAP_STEP_M
+        x, z = float(pos[0]), float(pos[1])
+
+        out = abs(x) > half or abs(z) > half
+        xc  = float(np.clip(x, -half, half))
+        zc  = float(np.clip(z, -half, half))
+
+        col = int(np.clip((xc + half) / grid_size * (hm_res - 1), 0, hm_res - 1))
+        row = int(np.clip((zc + half) / grid_size * (hm_res - 1), 0, hm_res - 1))
+        y   = float(hm_arr[row, col])
+        pts.append(np.array([xc, y, zc], dtype=np.float32))
+        if out:
+            break
+
+    return np.stack(pts).astype(np.float32) if pts else np.empty((0, 3), dtype=np.float32)
+
+
+def _extend_world_path(
+    wp: np.ndarray,
+    hm_arr: np.ndarray,
+    grid_size: float,
+    hm_res: int,
+) -> np.ndarray:
+    """Extrapolate both endpoints of a world-space path to the grid boundary."""
+    if len(wp) < 2:
+        return wp
+    prefix = _extrapolate_to_boundary(wp, from_start=True,  hm_arr=hm_arr, grid_size=grid_size, hm_res=hm_res)
+    suffix = _extrapolate_to_boundary(wp, from_start=False, hm_arr=hm_arr, grid_size=grid_size, hm_res=hm_res)
+    parts = []
+    if len(prefix):
+        parts.append(prefix[::-1])  # reverse so it flows start → existing path
+    parts.append(wp)
+    if len(suffix):
+        parts.append(suffix)
+    return np.concatenate(parts, axis=0).astype(np.float32)
 
 
 def _sample_widths_from_edt(
@@ -218,6 +303,9 @@ class LinearStructureDetector:
             edt = distance_transform_edt(area_mask) if area_mask is not None and area_mask.any() else None
 
             world_paths = _pixel_paths_to_world(paths, hm_arr, grid_size, hm_res, downsample=_PATH_DOWNSAMPLE)
+            world_paths = [
+                _extend_world_path(wp, hm_arr, grid_size, hm_res) for wp in world_paths
+            ]
             for path, wp in zip(paths, world_paths):
                 if len(wp) < 2:
                     continue
