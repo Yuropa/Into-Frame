@@ -265,8 +265,10 @@ public class SceneParams
 [Serializable]
 public class SplatLayerData
 {
-    public string name;   // region label, e.g. "vegetation", "terrain"
-    public string tile;   // base64-encoded PNG — 1024px tileable texture
+    public string name;        // region label, e.g. "vegetation", "terrain"
+    public string tile;        // base64-encoded PNG — tileable texture
+    public float  tile_factor; // UV repeat count across terrain (0 treated as 1.0)
+    public bool   equirect;    // true → sample with equirectangular world-position UV
 }
 
 [Serializable]
