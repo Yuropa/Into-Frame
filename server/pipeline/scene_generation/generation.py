@@ -100,11 +100,19 @@ class SceneGenerationStage(PipelineStage):
             scene.skybox = panorama_key
 
         if object_count is not None:
+            # Build category → list of crop indices so billboards can be drawn
+            # from the full pool for a category rather than only the per-object crop.
+            class_to_crop_indices: dict[str, list[int]] = {}
+            for idx in range(object_count):
+                meta = context.input_object(f"metadata_{idx}") or {}
+                cls = meta.get("class")
+                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate":
+                    class_to_crop_indices.setdefault(cls, []).append(idx)
+
+            rng = np.random.default_rng(self.seed)
+
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in range(object_count):
-                texture_name = f"crop_{idx}"
-                mesh_name = f"mesh_{idx}"
-
                 metadata = context.input_object(f"metadata_{idx}")
 
                 cls = (metadata or {}).get("class")
@@ -144,31 +152,33 @@ class SceneGenerationStage(PipelineStage):
                     "world_height": float(height),
                 })
 
-                if context.input_mesh(mesh_name) is not None:
-                    updated_mesh = context.input_mesh(mesh_name)
-                    updated_mesh.fit_to_box(width=width, height=height)
-                    context.add_mesh(mesh_name, updated_mesh)
-
-                    self.log_info(f"Creating mesh for {idx}")
-                    mesh_obj = Object3D.mesh(
-                        mesh_name,
-                        x=position[0],
-                        y=place_y,
-                        z=position[2],
-                    )
-                    mesh_obj.name = mesh_name
+                category_mesh = context.input_mesh(f"category_mesh_{cls}")
+                if category_mesh is not None and rng.integers(2) == 0:
+                    # Use the shared category mesh with a random Y rotation.
+                    # The mesh is already normalised to a 1×1 box; scale uniformly
+                    # so it fits the depth-estimated world dimensions.
+                    mesh_scale = float(min(width, height))
+                    mesh_key = f"category_mesh_{cls}"
+                    self.log_info(f"Creating mesh for {idx} ({cls})")
+                    mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=place_y, z=position[2])
+                    mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
+                    mesh_obj.set_scale(mesh_scale, mesh_scale, mesh_scale)
+                    mesh_obj.name = mesh_key
                     scene.add_object(mesh_obj)
                 else:
-                    self.log_info(f"Creating billboard for {idx}")
+                    # Pick a random billboard crop from this category's pool.
+                    crop_pool = class_to_crop_indices.get(cls, [idx])
+                    chosen_idx = int(rng.choice(crop_pool))
+                    self.log_info(f"Creating billboard for {idx} ({cls}) using crop_{chosen_idx}")
                     billboard = Object3D.billboard(
-                        texture_name,
+                        f"crop_{chosen_idx}",
                         width=width,
                         height=height,
                         x=position[0],
                         y=place_y,
                         z=position[2],
                     )
-                    billboard.name = mesh_name
+                    billboard.name = f"billboard_{idx}"
                     scene.add_object(billboard)
                 self.advance_progress(generation_task)
 

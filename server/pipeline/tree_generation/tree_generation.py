@@ -75,20 +75,22 @@ class TreeMeshGenerationStage(PipelineStage):
         super().clean_up()
         gen = ModelGeneratorTreeD(self.preferred_device)
 
-        for idx, obj_class in to_generate:
-            crop = context.input_image(f"crop_{idx}")
-            temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
-            self.log_info(f"  crop_{idx}: '{obj_class}' → Tree-D Fusion")
-            if temp_path is not None:
-                self.log_info(f"  crop_{idx}: Magic123 log → {temp_path / 'magic123.log'}")
-            super().clean_up()
-            mesh = gen.meshify(crop, temp_path, seed=self.seed, species=obj_class)
-            mesh = mesh.repair()
-            context.add_mesh(f"mesh_{idx}", mesh)
-            self.log_info(f"  crop_{idx}: {mesh.vertex_count}v {mesh.face_count}f")
-            self.advance_progress(gen_task)
+        try:
+            for idx, obj_class in to_generate:
+                crop = context.input_image(f"crop_{idx}")
+                temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
+                self.log_info(f"  crop_{idx}: '{obj_class}' → Tree-D Fusion")
+                if temp_path is not None:
+                    self.log_info(f"  crop_{idx}: Magic123 log → {temp_path / 'magic123.log'}")
+                super().clean_up()
+                mesh = gen.meshify(crop, temp_path, seed=self.seed, species=obj_class)
+                mesh = mesh.repair()
+                context.add_mesh(f"mesh_{idx}", mesh)
+                self.log_info(f"  crop_{idx}: {mesh.vertex_count}v {mesh.face_count}f")
+                self.advance_progress(gen_task)
+        finally:
+            gen.close()
 
-        gen.close()
         self.finish_progress(gen_task)
         return context
 

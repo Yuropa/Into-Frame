@@ -468,9 +468,11 @@ class Pipeline:
 
                 context.push_stage(stage.name)
                 if force or not stage.has_expected_output(context):
-                    context = stage.run(context)
-                    stage.log_memory_usage()
-                    stage.clean_up()
+                    try:
+                        context = stage.run(context)
+                        stage.log_memory_usage()
+                    finally:
+                        stage.clean_up()
                     ran = True
                 else:
                     self.log_info(f"Skipping cached stage {stage.name}")

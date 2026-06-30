@@ -30,13 +30,19 @@ class ModelGenerationConfiguration(PipelineStageConfiguration):
 
 class ModelGenerationStage(PipelineStage):
     """
-    Generates a 3D mesh for each segmented object crop using a reconstruction model.
+    Generates one 3D mesh per object category using a reconstruction model.
+
+    For each distinct category present in the scene, one representative crop is
+    chosen and meshified. The result is stored as category_mesh_{class} and
+    normalised to a 1×1 canonical box so SceneGenerationStage can scale each
+    instance independently.
 
     Reads dynamic context keys per object (index i):
-      crop_{i}   → Image  (textured object crop from SegmentationStage)
+      crop_{i}      → Image  (textured object crop from SegmentationStage)
+      metadata_{i}  → object ({"class": str, ...})
 
-    Writes dynamic context keys per object (index i):
-      mesh_{i}   → Mesh   (generated GLB mesh)
+    Writes one key per category:
+      category_mesh_{class} → Mesh
 
     Also reads: count (object) → number of crops to process
     """
@@ -52,38 +58,46 @@ class ModelGenerationStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         count = context.input_object("count")
 
-        gen_type = getattr(self.config, "generator_type", ModelGeneratorType.default())
-        super().clean_up()
-        gen = ModelGenerator(self.preferred_device, type=gen_type)
-        generation_task = self.create_progress(count, "Meshifying…")
+        # Group object indices by category, respecting the category filter.
+        category_to_indices: dict[str, list[int]] = {}
         for idx in range(count):
-            mesh_name = f"mesh_{idx}"
-            image_name = f"crop_{idx}"
-
             metadata = context.input_object(f"metadata_{idx}") or {}
             obj_class = metadata.get("class", "")
             if not self.config.category_filter.allows(obj_class):
-                self.log_info(f"  {image_name}: '{obj_class}' — excluded by category filter")
-                self.advance_progress(generation_task)
                 continue
+            category_to_indices.setdefault(obj_class, []).append(idx)
 
-            cached_mesh = context.mesh(mesh_name)
-            if cached_mesh is not None:
-                self.log_info(f"  {image_name}: cached ({cached_mesh.vertex_count}v {cached_mesh.face_count}f)")
+        gen_type = getattr(self.config, "generator_type", ModelGeneratorType.default())
+        super().clean_up()
+        gen = ModelGenerator(self.preferred_device, type=gen_type)
+        generation_task = self.create_progress(len(category_to_indices), "Meshifying…")
+
+        try:
+            for obj_class, indices in category_to_indices.items():
+                mesh_key = f"category_mesh_{obj_class}"
+
+                cached_mesh = context.mesh(mesh_key)
+                if cached_mesh is not None:
+                    self.log_info(f"  {mesh_key}: cached ({cached_mesh.vertex_count}v {cached_mesh.face_count}f)")
+                    self.advance_progress(generation_task)
+                    continue
+
+                representative_idx = indices[0]
+                image_name = f"crop_{representative_idx}"
+
+                super().clean_up()
+                input_image = context.input_image(image_name)
+                self.log_info(f"  {mesh_key}: generating mesh from {image_name}…")
+                mesh = gen.meshify(input_image, self.temp / mesh_key, seed=self.seed)
+                mesh = mesh.repair()
+                mesh.fit_to_box(1.0, 1.0)
+
+                context.add_mesh(mesh_key, mesh)
                 self.advance_progress(generation_task)
-                continue
+                self.log_info(f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f")
+        finally:
+            gen.close()
 
-            super().clean_up()
-            input_image = context.input_image(image_name)
-            self.log_info(f"  {image_name}: generating mesh…")
-            mesh = gen.meshify(input_image, self.temp / image_name, seed=self.seed)
-            mesh = mesh.repair()
-
-            self.advance_progress(generation_task)
-            context.add_mesh(mesh_name, mesh)
-            self.log_info(f"  {image_name}: {mesh.vertex_count}v {mesh.face_count}f")
-
-        gen.close()
         self.finish_progress(generation_task)
 
         return context
@@ -92,13 +106,16 @@ class ModelGenerationStage(PipelineStage):
         count = context.input_object("count")
         if count is None:
             return False
+        seen_classes: set[str] = set()
         for idx in range(count):
             metadata = context.object(f"metadata_{idx}")
             obj_class = (metadata or {}).get("class", "")
             if not self.config.category_filter.allows(obj_class):
                 continue
-            if context.mesh(f"mesh_{idx}") is None:
-                return False
+            if obj_class not in seen_classes:
+                seen_classes.add(obj_class)
+                if context.mesh(f"category_mesh_{obj_class}") is None:
+                    return False
         return True
 
     def model_names(self) -> list[str]:
@@ -109,40 +126,48 @@ class ModelGenerationStage(PipelineStage):
         count = context.object("count")
         if count is None or count == 0:
             return None
+
+        # Collect one representative crop per category for display.
+        seen_classes: set[str] = set()
         images = []
         total_verts = 0
         total_faces = 0
-        reconstructed = 0
+
         for i in range(count):
-            mesh = context.mesh(f"mesh_{i}")
-            crop = context.image(f"crop_{i}")
             meta = context.object(f"metadata_{i}") or {}
             obj_class = meta.get("class", f"Object {i + 1}")
-            if mesh is not None:
-                total_verts += mesh.vertex_count
-                total_faces += mesh.face_count
-                reconstructed += 1
-            if crop is not None and len(images) < 6:
-                label = obj_class
+            mesh_key = f"category_mesh_{obj_class}"
+            mesh = context.mesh(mesh_key)
+            crop = context.image(f"crop_{i}")
+
+            if obj_class not in seen_classes:
+                seen_classes.add(obj_class)
                 if mesh is not None:
-                    label += f" ({mesh.vertex_count:,}v)"
-                images.append((crop.image, label))
-        stats = {"Objects reconstructed": str(reconstructed)}
+                    total_verts += mesh.vertex_count
+                    total_faces += mesh.face_count
+                if crop is not None and len(images) < 6:
+                    label = obj_class
+                    if mesh is not None:
+                        label += f" ({mesh.vertex_count:,}v)"
+                    images.append((crop.image, label))
+
+        reconstructed = len(seen_classes)
+        stats = {"Categories reconstructed": str(reconstructed)}
         if reconstructed > 0:
             stats["Total vertices"] = f"{total_verts:,}"
             stats["Total triangles"] = f"{total_faces:,}"
-            stats["Avg vertices / object"] = f"{total_verts // reconstructed:,}"
             stats["Generator"] = self.config.generator_type.name
         return ReportSection(
             stage_name=self.name,
             title="3D Object Reconstruction",
             body=(
-                "Each segmented foreground object was individually reconstructed as a "
-                "textured 3D mesh using a single-image 3D reconstruction model. The "
-                f"{self.config.generator_type.name} model lifts each 2D crop into a "
-                "full 3D asset with UV-mapped texture, then applies mesh repair to "
-                "produce watertight geometry suitable for real-time rendering. Meshes "
-                "are placed in the scene using depth-derived position estimates."
+                "One 3D mesh is generated per object category using a single-image "
+                "reconstruction model. The "
+                f"{self.config.generator_type.name} model lifts a representative 2D "
+                "crop into a full 3D asset with UV-mapped texture, then applies mesh "
+                "repair and normalises to a canonical 1 m box. At scene placement each "
+                "instance randomly uses the category mesh (with a random rotation) or "
+                "a billboard drawn from the category's crop pool."
             ),
             images=images,
             stats=stats,

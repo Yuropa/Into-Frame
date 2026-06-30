@@ -128,27 +128,29 @@ class PanoramaAssetGenerationStage(PipelineStage):
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
 
-        for idx, depth in near_indices:
-            self.log_info(f"  crop_{idx}: {depth:.1f} m → 3D mesh")
-            crop = context.input_image(f"crop_{idx}")
-            temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
-            super().clean_up()
-            mesh = gen.meshify(crop, temp_path, seed=self.seed)
-            mesh = mesh.repair()
-            context.add_mesh(f"mesh_{idx}", mesh)
+        try:
+            for idx, depth in near_indices:
+                self.log_info(f"  crop_{idx}: {depth:.1f} m → 3D mesh")
+                crop = context.input_image(f"crop_{idx}")
+                temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
+                super().clean_up()
+                mesh = gen.meshify(crop, temp_path, seed=self.seed)
+                mesh = mesh.repair()
+                context.add_mesh(f"mesh_{idx}", mesh)
 
-            try:
-                lod = mesh.simplify(max_error_fraction=self.config.lod_max_error_fraction)
-                if crop is not None:
-                    lod.apply_crop_texture(crop.rgba())
-                context.add_mesh(f"mesh_lod_{idx}", lod)
-                self.log_info(f"  crop_{idx}: LOD {mesh.face_count} → {lod.face_count} faces")
-            except Exception as e:
-                self.log_info(f"  crop_{idx}: LOD generation failed ({e}), skipping")
+                try:
+                    lod = mesh.simplify(max_error_fraction=self.config.lod_max_error_fraction)
+                    if crop is not None:
+                        lod.apply_crop_texture(crop.rgba())
+                    context.add_mesh(f"mesh_lod_{idx}", lod)
+                    self.log_info(f"  crop_{idx}: LOD {mesh.face_count} → {lod.face_count} faces")
+                except Exception as e:
+                    self.log_info(f"  crop_{idx}: LOD generation failed ({e}), skipping")
 
-            self.advance_progress(asset_task)
+                self.advance_progress(asset_task)
+        finally:
+            gen.close()
 
-        gen.close()
         self.finish_progress(asset_task)
         return context
 
