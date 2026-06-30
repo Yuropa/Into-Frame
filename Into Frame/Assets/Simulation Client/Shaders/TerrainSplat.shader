@@ -16,15 +16,18 @@ Shader "IntoFrame/TerrainSplat"
         _Layer6Tile ("Layer 6 Tile", 2D) = "white" {}
         _Layer7Tile ("Layer 7 Tile", 2D) = "white" {}
 
-        // Per-layer tile repeat factors (how many times the tile repeats across the terrain)
+        // Per-layer tile repeat factors (how many times the tile repeats across the terrain).
+        // Layer 0 is the panorama layer (equirect, always 1.0); layers 1-7 are synthetic
+        // region tiles set at runtime via MaterialPropertyBlock from tile_factor on the server.
+        // Default 50.0 = 4 m/tile over a 200 m grid (~0.4 cm/texel at 1024 px).
         _Layer0TileRepeat ("Layer 0 Tile Repeat", Float) = 1.0
-        _Layer1TileRepeat ("Layer 1 Tile Repeat", Float) = 8.0
-        _Layer2TileRepeat ("Layer 2 Tile Repeat", Float) = 8.0
-        _Layer3TileRepeat ("Layer 3 Tile Repeat", Float) = 8.0
-        _Layer4TileRepeat ("Layer 4 Tile Repeat", Float) = 8.0
-        _Layer5TileRepeat ("Layer 5 Tile Repeat", Float) = 8.0
-        _Layer6TileRepeat ("Layer 6 Tile Repeat", Float) = 8.0
-        _Layer7TileRepeat ("Layer 7 Tile Repeat", Float) = 8.0
+        _Layer1TileRepeat ("Layer 1 Tile Repeat", Float) = 50.0
+        _Layer2TileRepeat ("Layer 2 Tile Repeat", Float) = 50.0
+        _Layer3TileRepeat ("Layer 3 Tile Repeat", Float) = 50.0
+        _Layer4TileRepeat ("Layer 4 Tile Repeat", Float) = 50.0
+        _Layer5TileRepeat ("Layer 5 Tile Repeat", Float) = 50.0
+        _Layer6TileRepeat ("Layer 6 Tile Repeat", Float) = 50.0
+        _Layer7TileRepeat ("Layer 7 Tile Repeat", Float) = 50.0
 
         // Bitmask: bit i set means layer i uses equirectangular UV from world position
         // rather than planar tiled UV. Used for the panorama layer (typically layer 0).

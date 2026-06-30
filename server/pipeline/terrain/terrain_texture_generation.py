@@ -27,19 +27,49 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 })
 
 _BASE_PROMPTS: dict[RegionType, str] = {
-    RegionType.GROUND:      "close-up macro photo of natural soil and earth, dirt and small pebbles, flat ground material",
-    RegionType.TERRAIN:     "close-up macro photo of rough stone and gravel, rocky surface, natural rock fragments and rubble",
-    RegionType.VEGETATION:  "close-up macro photo of lush green grass and small plants, dense ground cover, wildflowers",
-    RegionType.WATER:       "close-up macro photo of shallow clear water surface with gentle ripples, wet sandy lake bed",
-    RegionType.ROAD:        "close-up macro photo of asphalt road surface, weathered grey pavement, tarmac texture",
-    RegionType.TRAIL:       "close-up macro photo of packed dirt hiking trail, compressed earth and fine gravel",
-    RegionType.BUILT:       "close-up macro photo of concrete and stone pavement tiles, urban ground surface, cobblestones",
+    RegionType.GROUND: (
+        "close-up macro top-down photo of natural bare earth and soil, "
+        "loose dirt with fine grit and small pebbles, subtle mineral color variation, "
+        "scattered organic fragments and root fibers, weathered natural ground surface"
+    ),
+    RegionType.TERRAIN: (
+        "close-up macro top-down photo of mountain rock and gravel surface, "
+        "fractured stone pieces in varied sizes from pebble to fist-sized, "
+        "mineral color variation from grey to rust-brown, lichen patches, rough weathered rock"
+    ),
+    RegionType.VEGETATION: (
+        "close-up macro top-down photo of dense mixed grass ground cover, "
+        "intertwined grass blades of varying length and shade of green, "
+        "tiny wildflowers and clover scattered throughout, rich lush natural vegetation"
+    ),
+    RegionType.WATER: (
+        "close-up macro top-down photo of calm water surface viewed from directly above, "
+        "subtle concentric ripple patterns, clear translucent water with pale blue-green tint, "
+        "gentle surface undulation, fine caustic light patterns on the bottom"
+    ),
+    RegionType.ROAD: (
+        "close-up macro top-down photo of weathered asphalt road surface, "
+        "grey tarmac with exposed stone aggregate and tar binder, "
+        "fine hairline cracks, age patina and wear, rough granular road texture"
+    ),
+    RegionType.TRAIL: (
+        "close-up macro top-down photo of compacted dirt hiking trail, "
+        "hard-packed earth with fine gravel, small embedded stones and exposed roots, "
+        "subtle bootprint impressions and erosion channels, natural trail surface"
+    ),
+    RegionType.BUILT: (
+        "close-up macro top-down photo of weathered stone cobblestone paving, "
+        "rectangular stones with mortar joints, varied grey and brown stone colors, "
+        "worn rounded edges and minor surface chips, aged urban ground surface"
+    ),
 }
 
 _TILE_SUFFIX = (
-    ", flat lay overhead photography, filling the entire frame, seamless repeating surface material, "
-    "photorealistic PBR texture, no horizon, no sky, no background, no depth of field, "
-    "uniform diffuse lighting, high detail surface"
+    ", viewed from directly above at 30 centimetres, flat lay macro photography, "
+    "filling the entire frame edge to edge, seamless tileable surface material, "
+    "photorealistic PBR diffuse albedo texture, no directional shadows, "
+    "soft overcast flat lighting, no depth of field, no horizon, no sky, no background, "
+    "ultra-sharp high-frequency surface detail, extreme micro-texture visible, 8K quality"
 )
 
 
@@ -63,7 +93,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         seam_dilation_px: int = 8,
         use_panorama_layer: bool = True,
         panorama_blend_power: float = 2.0,
-        synthetic_tile_factor: float = 8.0,
+        # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
+        synthetic_tile_factor: float = 50.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -75,16 +106,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.guidance_scale = guidance_scale
         self.seam_width_fraction = seam_width_fraction
         self.seam_dilation_px = seam_dilation_px
-        # Whether to add a panorama-projection layer baked from PANORAMA_TERRAIN.
-        # Its blend weight is sin(depression_angle)^panorama_blend_power, favouring
-        # areas viewed steeply from the camera over grazing-angle / horizon regions.
         self.use_panorama_layer = use_panorama_layer
-        # Exponent applied to sin(depression): higher = panorama fades out sooner
-        # as view angle approaches horizontal (2.0 gives a smooth quadratic rolloff).
         self.panorama_blend_power = panorama_blend_power
-        # UV tiling factor for synthetic region tiles. The panorama layer always uses
-        # tile_factor=1.0 (one tile covers the full terrain); synthetic tiles repeat
-        # this many times so they stay at fine texel density.
+        # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
+        # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
 
 

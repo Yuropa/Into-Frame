@@ -153,6 +153,9 @@ stages:
     guidance_scale: 30.0
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 8         # dilation applied to seam mask before inpainting
+    # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
+    # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
+    synthetic_tile_factor: 50.0
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
