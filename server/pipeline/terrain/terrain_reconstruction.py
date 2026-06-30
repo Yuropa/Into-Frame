@@ -49,7 +49,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         solve_resolution: int = 512,
         confidence_threshold: float = 0.3,
         ridge_min_anchor_distance: float = 0.5,
-        ridge_profile_sigma_m: float = 20.0,
+        ridge_max_slope_angle_deg: float = 38.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         lake_y_range_threshold: float = 0.3,
@@ -60,7 +60,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.solve_resolution = solve_resolution
         self.confidence_threshold = confidence_threshold
         self.ridge_min_anchor_distance = ridge_min_anchor_distance
-        self.ridge_profile_sigma_m = ridge_profile_sigma_m
+        self.ridge_max_slope_angle_deg = ridge_max_slope_angle_deg
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.lake_y_range_threshold = lake_y_range_threshold
@@ -163,12 +163,19 @@ class TerrainReconstructionStage(PipelineStage):
             f"{n_skipped} foreground skipped"
         )
 
-        # ── Gaussian mountain profile halo ────────────────────────────────────
-        # The harmonic solve with only crest nodes produces a linear ramp from
-        # flat terrain to peak. Adding a Gaussian skirt of fixed nodes gives the
-        # solver the slope shape: steep near the top, tapering at the base.
-        if cfg.ridge_profile_sigma_m > 0.0 and n_anchored > 0:
-            sigma_px = cfg.ridge_profile_sigma_m / cell_size_m
+        # ── Critical-slope envelope ───────────────────────────────────────────
+        # The harmonic solve with only crest nodes produces a smooth ramp whose
+        # shape depends on whatever other fixed nodes surround it. Pinning slope
+        # nodes under a physical maximum-slope constraint gives the solver the
+        # correct gradient: we know the crest elevation exactly, and the steepest
+        # a natural mountain can sustain is roughly the angle of repose for the
+        # dominant material (~35° loose talus, ~38–45° consolidated rock).
+        # From each crest pixel, elevation must drop by at least tan(θ) metres per
+        # horizontal metre — this is the tightest envelope consistent with the
+        # observed crest heights without assuming any particular cross-sectional
+        # shape (Gaussian, parabola, etc.).
+        if cfg.ridge_max_slope_angle_deg > 0.0 and n_anchored > 0:
+            max_slope_tan = np.tan(np.radians(cfg.ridge_max_slope_angle_deg))
             profile_best = np.full((H_s, W_s), -np.inf)
 
             for raw_chain in ridge_chains:
@@ -188,18 +195,25 @@ class TerrainReconstructionStage(PipelineStage):
 
                 dist_px, src = distance_transform_edt(~crest_mask, return_indices=True)
                 nearest_elev = crest_elev_map[src[0], src[1]]
-                profile = nearest_elev * np.exp(-0.5 * (dist_px / sigma_px) ** 2)
+                dist_m = dist_px * cell_size_m
+                # Linear cone: elevation drops at max_slope_tan m/m from the crest.
+                profile = nearest_elev - dist_m * max_slope_tan
                 profile_best = np.maximum(profile_best, profile)
 
-            # Pin slope nodes that aren't already fixed by high-confidence observations.
+            # Pin slope nodes that the envelope places notably above observed terrain.
+            # No absolute elevation threshold: the envelope is relative to each crest.
             apply = (
                 ~fixed_mask
                 & (profile_best > fixed_elev + 0.1)
-                & (profile_best > 0.5)
+                & np.isfinite(profile_best)
             )
             fixed_mask[apply] = True
             fixed_elev[apply] = profile_best[apply]
-            self.log_info(f"Ridge profile halo: {int(apply.sum())} slope nodes pinned (σ={cfg.ridge_profile_sigma_m:.0f} m)")
+            self.log_info(
+                f"Ridge slope envelope: {int(apply.sum())} slope nodes pinned "
+                f"(max_slope={cfg.ridge_max_slope_angle_deg:.0f}°, "
+                f"tan={max_slope_tan:.3f} m/m)"
+            )
 
         self.advance_progress(task)
 

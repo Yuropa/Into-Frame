@@ -67,6 +67,15 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         peak_sharpness_max: float = 2.5,
         peak_sharpness_window_m: float = 20.0,
         peak_sharpness_spread_m: float = 15.0,
+        # Hydrological erosion (stream power incision).
+        # Derives the complete drainage network from terrain topology — including
+        # mountain channels not observed in the water chains — then carves valleys
+        # proportional to drainage area × slope.
+        hydro_enabled: bool = True,
+        hydro_erodibility: float = 1e-5,   # K_sp stream power erodibility (m^(1-2m)/yr)
+        hydro_dt: float = 1000.0,          # timestep per erosion step (conceptual years)
+        hydro_n_steps: int = 10,           # number of erosion steps
+        hydro_resolution: int = 256,       # downsample to this for flow routing (speed)
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.road_blend_weight = road_blend_weight
@@ -83,6 +92,11 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.peak_sharpness_max = peak_sharpness_max
         self.peak_sharpness_window_m = peak_sharpness_window_m
         self.peak_sharpness_spread_m = peak_sharpness_spread_m
+        self.hydro_enabled = hydro_enabled
+        self.hydro_erodibility = hydro_erodibility
+        self.hydro_dt = hydro_dt
+        self.hydro_n_steps = hydro_n_steps
+        self.hydro_resolution = hydro_resolution
 
 
 class TerrainNoiseRefinementStage(PipelineStage):
@@ -191,6 +205,34 @@ class TerrainNoiseRefinementStage(PipelineStage):
         if hi > lo:
             t = ((terrain - lo) / (hi - lo)).clip(0.0, 1.0)
             terrain = lo + (hi - lo) * np.power(t, sharpness_map)
+
+        # ── Pass 5: Hydrological Erosion ─────────────────────────────────────
+        # Derives the complete drainage network from terrain topology via flow
+        # routing — capturing mountain channels that are absent from water_chains
+        # (anything beyond camera range won't have been segmented). FastscapeEroder
+        # then carves channels proportional to drainage_area^m × slope^n, giving
+        # realistic valley incision at all scales: deep trunk valleys where many
+        # headwaters merge, shallow rills near divides.
+        if cfg.hydro_enabled and cfg.hydro_n_steps > 0:
+            solve_res = min(cfg.hydro_resolution, H, W)
+            if solve_res < H:
+                t_small = nd_zoom(terrain, solve_res / H, order=1)
+                cell_size_m = grid_size / solve_res
+                t_small = TerrainNoiseRefinementStage._hydro_erode(
+                    t_small, cell_size_m,
+                    cfg.hydro_erodibility, cfg.hydro_dt, cfg.hydro_n_steps,
+                )
+                terrain = nd_zoom(t_small, H / solve_res, order=3)
+            else:
+                cell_size_m = grid_size / H
+                terrain = TerrainNoiseRefinementStage._hydro_erode(
+                    terrain, cell_size_m,
+                    cfg.hydro_erodibility, cfg.hydro_dt, cfg.hydro_n_steps,
+                )
+            self.log_info(
+                f"Terrain noise refinement: hydrological erosion "
+                f"(K={cfg.hydro_erodibility:.1e}, dt={cfg.hydro_dt:.0f}×{cfg.hydro_n_steps})"
+            )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))
 
@@ -391,6 +433,49 @@ class TerrainNoiseRefinementStage(PipelineStage):
         if hi > lo:
             noise = 2.0 * (noise - lo) / (hi - lo) - 1.0
         return noise
+
+    @staticmethod
+    def _hydro_erode(
+        terrain: np.ndarray,
+        cell_size_m: float,
+        K_sp: float,
+        dt: float,
+        n_steps: int,
+    ) -> np.ndarray:
+        """
+        Carve fluvial channels into the terrain via stream power erosion.
+
+        Fills closed depressions so flow can route freely, then runs
+        FlowAccumulator + FastscapeEroder for n_steps × dt. Flow routing derives
+        the complete drainage network from terrain topology — including mountain
+        headwater streams that are absent from observed water chains. Erosion
+        depth scales with drainage_area^0.5 × slope, so high-order trunk valleys
+        cut deep while headwater rills remain subtle.
+        """
+        from landlab import RasterModelGrid
+        from landlab.components import SinkFillerBarnes, FlowAccumulator, FastscapeEroder
+
+        H, W = terrain.shape
+        mg = RasterModelGrid((H, W), xy_spacing=cell_size_m)
+        # All four edges are open outlets so the drainage network can exit the grid.
+        mg.set_closed_boundaries_at_grid_edges(
+            right_is_closed=False, top_is_closed=False,
+            left_is_closed=False, bottom_is_closed=False,
+        )
+        mg.add_field("topographic__elevation", terrain.ravel().copy(), at="node")
+
+        # Fill closed sinks once so every interior cell can route to an outlet.
+        # Re-filling each step would be correct but prohibitively slow.
+        sf = SinkFillerBarnes(mg, method="Steepest", fill_flat=False)
+        sf.run_one_step()
+
+        fa = FlowAccumulator(mg, flow_director="FlowDirectorSteepest")
+        fsc = FastscapeEroder(mg, K_sp=K_sp, m_sp=0.5, n_sp=1.0)
+        for _ in range(n_steps):
+            fa.run_one_step()
+            fsc.run_one_step(dt)
+
+        return mg.at_node["topographic__elevation"].reshape(H, W).astype(np.float64)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.has_stage_output(ContextKey.HEIGHT_MAP)
