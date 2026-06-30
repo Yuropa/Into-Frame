@@ -91,7 +91,9 @@ class SceneGenerationStage(PipelineStage):
 
         scene = Scene()
         scene.extrinsics = extrinsics
-        scene.camera_height = float((height_map_params or {}).get("camera_height_meters", 0.0))
+        # camera_height = world Y of the camera = terrain_y_at_nadir + camera_height_meters.
+        # Using the extrinsics translation directly is equivalent and simpler.
+        scene.camera_height = float(extrinsics.translation[1]) if extrinsics is not None else 0.0
 
         # Rotate the skybox to align the panorama center with the camera's forward direction.
         # The panorama center (theta=0) = +Z in camera space; the extrinsics rotation tells

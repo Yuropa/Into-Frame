@@ -205,7 +205,7 @@ class SimulationServer():
             # Local mode: serve from the pre-loaded context without running the pipeline.
             if self._context is not None:
                 self.scene = self._context.scene(ContextKey.SCENE)
-                self._splat_material = self._context.input_object(ContextKey.TERRAIN_MATERIAL)
+                self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
                 self.log.info("Serving pre-loaded scene")
                 await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
             else:
@@ -240,7 +240,7 @@ class SimulationServer():
         try:
             context_result = await asyncio.get_running_loop().run_in_executor(None, run_pipeline)
             self.scene = context_result.scene(ContextKey.SCENE)
-            self._splat_material = context_result.input_object(ContextKey.TERRAIN_MATERIAL)
+            self._splat_material = context_result.splat_material(ContextKey.TERRAIN_MATERIAL)
             self._context = context_result
         except asyncio.CancelledError:
             progress_queue.put(None)   # unblock drain
