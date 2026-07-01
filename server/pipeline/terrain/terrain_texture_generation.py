@@ -11,8 +11,9 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
+from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
-from util.image_utils import Image
+from util.image_utils import Image, lab_color_transfer
 from util.device_utils import DeviceStrategy, preferred_device
 
 
@@ -28,41 +29,45 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 
 _BASE_PROMPTS: dict[RegionType, str] = {
     RegionType.GROUND: (
-        "close-up macro top-down photo of natural bare earth and soil, "
-        "loose ochre-brown dirt with fine grit and small pebbles, subtle mineral color variation, "
-        "scattered organic fragments and root fibers, weathered natural ground surface"
+        "RAW unedited photograph of loose crumbly garden soil, "
+        "dark chocolate-brown and rust-red clay clumps with visible air pockets, "
+        "scattered tiny pebbles and dry leaf litter, freshly-turned uncompacted earth, "
+        "irregular crumb texture"
     ),
     RegionType.TERRAIN: (
-        "close-up macro top-down photo of mountain rock and gravel surface, "
-        "fractured grey and rust-brown stone pieces in varied sizes, "
-        "mineral color variation, olive lichen patches, sharp edges, rough weathered rock"
+        "RAW unedited photograph of fractured mountain scree and broken slate rock, "
+        "cold slate-grey and steel-blue angular stone fragments, sharp jagged edges, "
+        "patches of black and pale-green lichen, high-contrast mineral texture, "
+        "alpine rockfall surface"
     ),
     RegionType.VEGETATION: (
-        "close-up macro top-down photo of dense mixed grass ground cover, "
-        "vibrant emerald and olive green grass blades of varying length, "
-        "tiny yellow wildflowers and white clover scattered throughout, "
-        "rich lush natural vegetation carpet, varied green hues"
+        "RAW unedited photograph of dense overlapping grass blades viewed from directly above, "
+        "saturated kelly-green and yellow-green blades radiating in all directions, "
+        "tiny white clover flowers scattered between blades, dew droplets on leaf tips, "
+        "dense lawn understory"
     ),
     RegionType.WATER: (
-        "close-up macro top-down photo of lake water surface viewed from directly above, "
-        "deep blue-teal water with clear overlapping ripple and wave patterns, "
-        "subtle shimmer, transparent water showing sandy bottom texture, "
-        "rich saturated cobalt and turquoise blue color, water texture"
+        "RAW unedited photograph of still lake water surface, "
+        "deep sapphire-teal color with fine concentric ripple rings, "
+        "bright specular highlight glints, faint pale sandy lakebed visible beneath, "
+        "glassy reflective water skin"
     ),
     RegionType.ROAD: (
-        "close-up macro top-down photo of weathered dark asphalt road surface, "
-        "dark charcoal-grey tarmac with exposed stone aggregate and tar binder, "
-        "fine hairline cracks, age patina and wear, rough granular road texture"
+        "RAW unedited photograph of worn asphalt pavement, "
+        "near-black tarmac speckled with light-grey and white stone aggregate, "
+        "fine spiderweb cracks, faded tar sealant patches, "
+        "uniform compacted road surface"
     ),
     RegionType.TRAIL: (
-        "close-up macro top-down photo of compacted dirt hiking trail, "
-        "hard-packed warm tan earth with fine gravel, small embedded stones and exposed roots, "
-        "subtle bootprint impressions and erosion channels, natural trail surface"
+        "RAW unedited photograph of hard-packed hiking trail dirt, "
+        "pale tan and buff-colored compacted earth, faint parallel footprint and tire "
+        "compaction lines, small embedded pebbles, dry dusty trail surface"
     ),
     RegionType.BUILT: (
-        "close-up macro top-down photo of weathered granite cobblestone paving, "
-        "rectangular stone blocks with mortar joints, varied grey and brown stone colors, "
-        "worn rounded edges and minor surface chips, aged urban ground surface"
+        "RAW unedited photograph of old granite cobblestone pavement, "
+        "rectangular grey stone blocks separated by dark mortar grid lines, "
+        "worn rounded stone edges, subtle color variation between blocks, "
+        "structured urban paving pattern"
     ),
 }
 
@@ -109,6 +114,14 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         panorama_blend_power: float = 2.0,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
+        use_photo_reference: bool = True,
+        # Low-ish on purpose: the crop is a color/lighting hint, not a target to
+        # reproduce — the prompt should still drive most of the generated detail.
+        reference_strength: float = 0.45,
+        reference_tex_size: int = 2048,
+        reference_min_certainty: float = 0.15,
+        # Post-process LAB colour nudge toward the reference crop's stats.
+        color_transfer_strength: float = 0.35,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -125,6 +138,11 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
+        self.use_photo_reference = use_photo_reference
+        self.reference_strength = reference_strength
+        self.reference_tex_size = reference_tex_size
+        self.reference_min_certainty = reference_min_certainty
+        self.color_transfer_strength = color_transfer_strength
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -132,16 +150,26 @@ class TerrainTextureGenerationStage(PipelineStage):
     Generates high-quality tileable region textures and packages them as a SplatMaterial.
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
-      1. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
-         full-mask generation → circular-shift seam inpainting).
+      1. If a real photo is available (PANORAMA_TERRAIN + HEIGHT_MAP), bake it
+         top-down and crop the patch centred on that region's footprint. This
+         crop seeds generation as a *weak* img2img reference (low `strength`,
+         full mask) — it nudges colour/lighting toward the real scene without
+         overriding the text prompt, which still drives most of the content.
+         Low-certainty crops (nadir dead-zone, unobserved cells) are discarded
+         and fall back to plain text generation.
+      2. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
+         reference-seeded/full-mask generation → circular-shift seam inpainting).
 
     SplatMaterial.from_region_map handles weight computation, normalisation, and
     RGBA blend map packing.  The first layer tile is also written to TERRAIN_TEXTURE
     so the terrain mesh can embed a preview in the GLB.
 
     Reads:
-      ContextKey.REGION_MAP     — top-down region type grid (optional)
-      ContextKey.INPUT_CAPTION  — scene caption for prompt context (optional)
+      ContextKey.REGION_MAP           — top-down region type grid (optional)
+      ContextKey.PANORAMA_TERRAIN     — real photo, for the weak img2img reference (optional)
+      ContextKey.HEIGHT_MAP           — for top-down baking alignment (optional)
+      ContextKey.HEIGHT_MAP_CERTAINTY — certainty mask for the bake (optional)
+      ContextKey.INPUT_CAPTION        — scene caption for prompt context (optional)
 
     Writes:
       ContextKey.TERRAIN_MATERIAL — SplatMaterial (tiles + blend maps)
@@ -172,12 +200,23 @@ class TerrainTextureGenerationStage(PipelineStage):
         inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
         self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
 
+        reference = self._bake_reference(context, cfg) if cfg.use_photo_reference else None
+
         tiles: dict[str, PIL.Image.Image] = {}
         try:
             for idx, rt in enumerate(present_types):
                 prompt = self._build_prompt(rt, caption)
-                tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
-                self.log_info(f"Generated {rt.label} tile ({cfg.tile_size}px, seamless)")
+                reference_image = (
+                    self._region_reference_crop(*reference, rt, cfg.tile_size, cfg.reference_min_certainty)
+                    if reference is not None else None
+                )
+                tiles[rt.label] = self._generate_tileable_tile(
+                    prompt, cfg, seed_offset=idx, reference_image=reference_image,
+                )
+                self.log_info(
+                    f"Generated {rt.label} tile ({cfg.tile_size}px, seamless"
+                    f"{', photo-referenced' if reference_image is not None else ''})"
+                )
                 self.advance_progress(task)
                 self.advance_progress(task)
         finally:
@@ -362,6 +401,83 @@ class TerrainTextureGenerationStage(PipelineStage):
         weight   = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
         return weight ** blend_power
 
+    # ── Photo reference (weak img2img seed) ─────────────────────────────────────
+
+    def _bake_reference(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Bake the real photo top-down, aligned to REGION_MAP, for use as a weak
+        img2img seed per region tile. Returns (baked_rgb, region_ids, certainty),
+        all at cfg.reference_tex_size, or None if the source imagery is missing.
+        """
+        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        region_map_depth = context.input_depth(ContextKey.REGION_MAP)
+        if panorama_terrain is None or height_map_depth is None or region_map_depth is None:
+            return None
+
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+        half = grid_size / 2.0
+
+        height_certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
+        baked_img, bake_certainty = TerrainMeshGenerator.bake_topdown_texture_with_certainty(
+            panorama_terrain,
+            height_map_depth.depth,
+            half, half,
+            tex_size=cfg.reference_tex_size,
+            height_certainty=height_certainty_depth.depth if height_certainty_depth is not None else None,
+        )
+        baked_rgb = np.array(baked_img, dtype=np.uint8)
+
+        rm = region_map_depth.depth
+        region_ids = zoom(
+            rm.astype(np.float32),
+            (cfg.reference_tex_size / rm.shape[0], cfg.reference_tex_size / rm.shape[1]),
+            order=0,
+        ).astype(np.int32)
+
+        return baked_rgb, region_ids, bake_certainty
+
+    @staticmethod
+    def _region_reference_crop(
+        baked_rgb: np.ndarray,
+        region_ids: np.ndarray,
+        certainty: np.ndarray,
+        rt: RegionType,
+        tile_size: int,
+        min_certainty: float,
+    ) -> Optional[PIL.Image.Image]:
+        """
+        Crop a tile_size x tile_size window from the baked photo, centred on
+        the footprint of region type rt. Returns None if the region isn't
+        present or the crop is too low-certainty (nadir dead-zone, unobserved
+        heightmap cells) to be a trustworthy reference.
+        """
+        mask = region_ids == int(rt)
+        if not mask.any():
+            return None
+
+        ys, xs = np.nonzero(mask)
+        cy, cx = int(ys.mean()), int(xs.mean())
+        h, w = baked_rgb.shape[:2]
+        half = tile_size // 2
+        y0 = int(np.clip(cy - half, 0, max(0, h - tile_size)))
+        x0 = int(np.clip(cx - half, 0, max(0, w - tile_size)))
+        y1, x1 = y0 + tile_size, x0 + tile_size
+
+        crop_certainty = certainty[y0:y1, x0:x1]
+        if crop_certainty.size == 0 or crop_certainty.mean() < min_certainty:
+            return None
+
+        crop = baked_rgb[y0:y1, x0:x1]
+        if crop.shape[0] != tile_size or crop.shape[1] != tile_size:
+            crop = np.array(PIL.Image.fromarray(crop).resize((tile_size, tile_size), PIL.Image.LANCZOS))
+        return PIL.Image.fromarray(crop)
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     def _present_region_types(
@@ -391,20 +507,33 @@ class TerrainTextureGenerationStage(PipelineStage):
         prompt: str,
         cfg: TerrainTextureGenerationConfiguration,
         seed_offset: int,
+        reference_image: Optional[PIL.Image.Image] = None,
     ) -> PIL.Image.Image:
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
 
-        # Pass 1: pure generation via 100%-masked neutral image
-        gray = PIL.Image.new("RGB", (T, T), (128, 128, 128))
+        # Pass 1: full-mask generation. When a real photo crop is available it
+        # seeds the image at low `strength` (weak img2img) so it only nudges
+        # colour/lighting — the prompt still drives the generated content.
+        # Otherwise fall back to a neutral grey canvas (pure text-to-image).
+        if reference_image is not None:
+            base_image = reference_image.convert("RGB")
+            if base_image.size != (T, T):
+                base_image = base_image.resize((T, T), PIL.Image.LANCZOS)
+            strength = cfg.reference_strength
+        else:
+            base_image = PIL.Image.new("RGB", (T, T), (128, 128, 128))
+            strength = 1.0
+
         full_mask = PIL.Image.new("L", (T, T), 255)
         generated = self._inpainter.inpaint(
-            input_image=gray,
+            input_image=base_image,
             mask_image=full_mask,
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=cfg.num_inference_steps,
             guidance_scale=cfg.guidance_scale,
+            strength=strength,
             seed=seed,
         )
 
@@ -435,7 +564,16 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         result = np.array(fixed.convert("RGB"), dtype=np.uint8)
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
-        return PIL.Image.fromarray(result)
+        result_img = PIL.Image.fromarray(result)
+
+        # Nudge final colour statistics toward the real photo crop, on top of
+        # the (already weak) img2img seeding above.
+        if reference_image is not None and cfg.color_transfer_strength > 0.0:
+            result_img = lab_color_transfer(
+                source=base_image, target=result_img, strength=cfg.color_transfer_strength,
+            )
+
+        return result_img
 
     # ── Debug output ─────────────────────────────────────────────────────────
 

@@ -50,6 +50,53 @@ def make_context_composite(
     composite.paste(crop_panel, (0, half))
     return composite
 
+def lab_color_transfer(
+    source: PIL.Image.Image,
+    target: PIL.Image.Image,
+    strength: float = 0.35,
+    mask: PIL.Image.Image | None = None,
+) -> PIL.Image.Image:
+    """Nudge target's per-channel LAB colour statistics toward source's.
+
+    Matches mean/std of each LAB channel (source stats onto target), then
+    blends the result back with the original target by `strength` (or a
+    per-pixel strength from `mask`, in [0, 255]) so structure/detail from
+    target is preserved while only the colour cast shifts toward source.
+    """
+    if strength <= 0.0:
+        return target
+
+    def to_lab(img: PIL.Image.Image) -> np.ndarray:
+        rgb = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
+        return cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB)
+
+    src = to_lab(source)
+    tgt = to_lab(target)
+
+    transferred = tgt.copy()
+    for ch in range(3):
+        tgt_mean = tgt[..., ch].mean()
+        tgt_std = tgt[..., ch].std() + 1e-6
+        src_mean = src[..., ch].mean()
+        src_std = src[..., ch].std() + 1e-6
+        transferred[..., ch] = (tgt[..., ch] - tgt_mean) / tgt_std * src_std + src_mean
+
+    if mask is not None:
+        mask_resized = mask.convert("L").resize((target.width, target.height), PIL.Image.BILINEAR)
+        pixel_strength = np.array(mask_resized, dtype=np.float32)[..., None] / 255.0 * strength
+    else:
+        pixel_strength = strength
+
+    blended = tgt + pixel_strength * (transferred - tgt)
+
+    blended[..., 0] = np.clip(blended[..., 0], 0.0, 100.0)
+    blended[..., 1] = np.clip(blended[..., 1], -127.0, 127.0)
+    blended[..., 2] = np.clip(blended[..., 2], -127.0, 127.0)
+
+    rgb = cv2.cvtColor(blended, cv2.COLOR_LAB2RGB)
+    return PIL.Image.fromarray(np.clip(rgb * 255.0, 0, 255).astype(np.uint8))
+
+
 class Image:
     image: PIL.Image.Image
 
