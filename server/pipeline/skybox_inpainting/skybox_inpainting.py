@@ -4,7 +4,10 @@ from scipy.ndimage import (
     gaussian_filter,
     binary_dilation,
     binary_erosion,
+    binary_opening,
+    binary_fill_holes,
     distance_transform_edt,
+    label as ndi_label,
 )
 
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
@@ -14,6 +17,43 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
+
+
+def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.ndarray:
+    """
+    Remove segmentation noise from the raw sky mask before it drives the fill
+    boundary.  ADE20K segmentation blurs mountain ridgelines and backlit tree
+    silhouettes into the sky class near the horizon, letting real landscape
+    pixels leak into what should be a clean sky region.
+
+      1. Fill small enclosed non-sky islands within the sky region (isolated
+         misclassified pixels inside an otherwise clean sky).
+      2. Morphological opening strips thin tendrils — branch- or
+         ridgeline-width protrusions where the sky class bleeds down into
+         terrain/vegetation at the horizon — while leaving the bulk sky area
+         intact.
+      3. Discard any surviving component not connected to the top of the
+         panorama: real sky is always contiguous with the zenith, so anything
+         else is spurious.
+    """
+    h, w = sky_mask.shape
+    if not sky_mask.any():
+        return sky_mask
+
+    filled = binary_fill_holes(sky_mask)
+
+    radius = max(2, min(h, w) // 300)
+    opened = binary_opening(filled, iterations=radius)
+
+    labeled, n = ndi_label(opened)
+    if n == 0:
+        return opened
+
+    top_band = max(1, int(h * top_rows_frac))
+    top_labels = set(np.unique(labeled[:top_band, :])) - {0}
+    if not top_labels:
+        return opened
+    return np.isin(labeled, list(top_labels))
 
 
 def _sun_from_lighting(ldr: PILImage.Image, panorama_h: int, panorama_w: int) -> tuple[int, int]:
@@ -187,7 +227,12 @@ class SkyboxInpaintingStage(PipelineStage):
         source_arr = np.array(source_pil)
 
         type_arr = type_map.depth.astype(np.uint8)
-        sky_mask = (type_arr == int(RegionType.SKY))
+        raw_sky_mask = (type_arr == int(RegionType.SKY))
+        sky_mask = _clean_sky_mask(raw_sky_mask)
+
+        if self.output is not None:
+            raw_mask_pil = PILImage.fromarray((raw_sky_mask * 255).astype(np.uint8), mode="L")
+            raw_mask_pil.save(self.output / "panorama_sky_mask_raw.png")
 
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))

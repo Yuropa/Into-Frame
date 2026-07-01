@@ -21,7 +21,7 @@ from util.image_utils import Image
 # reported as an individual region entry.
 _MIN_REGION_FRACTION = 0.005
 
-_MODEL_ID = "nvidia/segformer-b0-finetuned-ade-512-512"
+_MODEL_ID = "nvidia/segformer-b5-finetuned-ade-640-640"
 
 
 class PanoramaSegmentationClient(RemoteClient):
