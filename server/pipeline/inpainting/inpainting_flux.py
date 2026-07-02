@@ -5,19 +5,30 @@ from PIL import Image as PILImage
 from diffusers import FluxFillPipeline
 from util.image_utils import Image
 from util.device_utils import offload_pipeline
+from pipeline.path_utils import checkpoints_path
+from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_dir, lora_weight_name
 
 class InPaintingFlux:
-    def __init__(self, device, torch_dtype):
+    def __init__(self, device, torch_dtype, lora_type: PanoramaLoraType | None = None, lora_scale: float = 1.0):
         self.device = device
         self.torch_dtype = torch_dtype
         # FLUX models are heavy; 'dev' is high quality, 'schnell' is faster
         self.model_id = "black-forest-labs/FLUX.1-Fill-dev"
 
         self.pipeline = FluxFillPipeline.from_pretrained(
-            self.model_id, 
+            self.model_id,
             torch_dtype=torch_dtype
         )
-        
+
+        if lora_type is not None:
+            self.pipeline.load_lora_weights(
+                str(checkpoints_path() / lora_checkpoint_dir(lora_type)),
+                weight_name=lora_weight_name(lora_type),
+                adapter_name="pano",
+                prefix=None,
+            )
+            self.pipeline.set_adapters(["pano"], adapter_weights=[lora_scale])
+
         offload_pipeline(device, self.pipeline)
         self.pipeline.enable_vae_tiling()
         self.pipeline.set_progress_bar_config(disable=True)

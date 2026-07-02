@@ -2,6 +2,7 @@ import torch
 from PIL import Image as PILImage
 from pipeline.inpainting.inpainting_flux import InPaintingFlux
 from pipeline.inpainting.inpainting_lama import InPaintingLama
+from pipeline.panorama.panorama_lora import PanoramaLoraType
 from enum import Enum
 from pathlib import Path
 
@@ -14,12 +15,21 @@ class InPaintingType(Enum):
         return cls.FLUX
 
 class InPainting:
-    def __init__(self, device, torch_dtype, type: InPaintingType = InPaintingType.default()):
+    def __init__(
+        self,
+        device,
+        torch_dtype,
+        type: InPaintingType = InPaintingType.default(),
+        lora_type: PanoramaLoraType | None = None,
+        lora_scale: float = 1.0,
+    ):
         match type:
             case InPaintingType.FLUX:
                 self.generator = InPaintingFlux(
                     device=device,
-                    torch_dtype=torch_dtype
+                    torch_dtype=torch_dtype,
+                    lora_type=lora_type,
+                    lora_scale=lora_scale,
                 )
             case InPaintingType.LAMA:
                 self.generator = InPaintingLama(

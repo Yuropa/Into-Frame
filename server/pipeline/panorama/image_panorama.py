@@ -6,6 +6,7 @@ from pipeline.panorama.image_panorama_dreamcube import ImagePanoramaDreamCube
 from pipeline.panorama.image_panorama_flux import ImagePanoramaFlux
 from pipeline.panorama.image_panorama_worldgen import ImagePanoramaWorldGen
 from pipeline.panorama.panorama_output import PanoramaOutput
+from pipeline.panorama.panorama_lora import PanoramaLoraType
 from enum import Enum
 
 class PanoramaGeneratorType(Enum):
@@ -19,7 +20,12 @@ class PanoramaGeneratorType(Enum):
         return cls.WORLDGEN
 
 class ImagePanorama:
-    def __init__(self, device: torch.device, type: PanoramaGeneratorType = PanoramaGeneratorType.default()) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        type: PanoramaGeneratorType = PanoramaGeneratorType.default(),
+        lora_type: PanoramaLoraType = PanoramaLoraType.default(),
+    ) -> None:
         match type:
             case PanoramaGeneratorType.CUBEDIFF:
                 self.generator = ImagePanoramaCubeDiff(
@@ -31,7 +37,8 @@ class ImagePanorama:
                 )
             case PanoramaGeneratorType.FLUX:
                 self.generator = ImagePanoramaFlux(
-                    device=device
+                    device=device,
+                    lora_type=lora_type,
                 )
             case PanoramaGeneratorType.WORLDGEN:
                 self.generator = ImagePanoramaWorldGen(device=device)

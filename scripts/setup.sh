@@ -860,7 +860,7 @@ run_step "Installing LaMa" \
     setup_lama
 
 ## ============
-## LayerPano3D
+## LayerPano3D (default panorama LoRA)
 ## ============
 
 download_layer_pano_3d() {
@@ -869,6 +869,17 @@ download_layer_pano_3d() {
 
 run_step "Downloading Layer Pano 3D" \
     download_layer_pano_3d
+
+## ============
+## Panorama LoRA v2 (FLUX, used for sky inpainting)
+## ============
+
+download_panorama_lora() {
+    download_checkpoint "https://huggingface.co/jbilcke-hf/flux-dev-panorama-lora-2/resolve/main/flux_train_replicate.safetensors?download=true" "flux_panorama_lora"
+}
+
+run_step "Downloading Panorama LoRA v2" \
+    download_panorama_lora
 
 ## ======================
 ## Depth Any Panoramas

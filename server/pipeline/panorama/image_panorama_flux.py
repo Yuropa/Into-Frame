@@ -6,15 +6,17 @@ from util.cubemap_utils import CubeMap
 from remote_connection.remote_client import RemoteClient 
 from pipeline.model_generation.model_generation_base import ModelGeneratorBase
 from pipeline.panorama.panorama_output import PanoramaOutput
+from pipeline.panorama.panorama_lora import PanoramaLoraType
 
 class ImagePanoramaFlux(RemoteClient):
-    def __init__(self, device: torch.device) -> None:
+    def __init__(self, device: torch.device, lora_type: PanoramaLoraType = PanoramaLoraType.default()) -> None:
         script_path = Path(__file__).parent / "image_panorama_flux_imp.py"
 
         super().__init__(
-            device=device, 
-            conda_env="dreamcube", 
-            script_path=script_path
+            device=device,
+            conda_env="dreamcube",
+            script_path=script_path,
+            env_options={"PANORAMA_LORA_WEIGHTS": lora_type.name},
         )
 
     @classmethod

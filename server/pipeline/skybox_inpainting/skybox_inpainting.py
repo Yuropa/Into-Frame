@@ -11,6 +11,7 @@ from scipy.ndimage import (
 )
 
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
+from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -180,8 +181,9 @@ class SkyboxInpaintingStage(PipelineStage):
          position estimated from the LuxDiT lighting output (or sky luminance
          peak as fallback).  Gives the correct time-of-day structure.
 
-      2. FLUX inpainting on top of the gradient to add cloud and atmospheric
-         detail, prompted with the time-of-day derived from sun elevation.
+      2. FLUX inpainting (with the FLUX_DEV_PANORAMA_LORA_2 LoRA) on top of the
+         gradient to add cloud and atmospheric detail, prompted with the
+         time-of-day derived from sun elevation.
 
       3. Blended result: gradient at the sky boundary (smooth seam), FLUX
          weighted up by distance from the boundary into the fill region.
@@ -311,11 +313,23 @@ class SkyboxInpaintingStage(PipelineStage):
         flux_mask_arr = binary_dilation(fill_mask, iterations=shroud_radius)
         fill_mask_pil = PILImage.fromarray((flux_mask_arr * 255).astype(np.uint8), mode="L")
 
-        prompt = _sky_prompt(time_label)
+        # Even with the dilated shroud, dark tree/ridge silhouettes just past its edge can
+        # still leak enough contrast into the FLUX context image to get reinterpreted as
+        # objects. Flatten a band around the sky boundary (by distance, not a fixed row
+        # cutoff, so it holds regardless of where the horizon actually falls) into a neutral
+        # haze color so FLUX has nothing but sky tones to build clouds from.
+        boundary_band_px = shroud_radius * 4
+        haze_zone = flux_mask_arr & (dist_out < boundary_band_px)
+        haze_color = np.array([215, 230, 245], dtype=np.uint8)  # bright sky-haze color
+        sanitized_gradient = np.where(haze_zone[:, :, None], haze_color, gradient_composite)
+
+        # Lead with the FLUX_DEV_PANORAMA_LORA_2 trigger sequence so the LoRA activates its
+        # spherical/HDRI generation mode instead of its base perspective-photo bias.
+        prompt = lora_prompt_prefix(PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2) + _sky_prompt(time_label)
         self.log_info(f"FLUX prompt: {prompt!r}")
 
         flux_max = 1536
-        gradient_pil = PILImage.fromarray(gradient_composite)
+        gradient_pil = PILImage.fromarray(sanitized_gradient)
         if w > flux_max or h > flux_max:
             scale = flux_max / max(w, h)
             fw = max(16, (int(w * scale) // 16) * 16)
@@ -327,7 +341,15 @@ class SkyboxInpaintingStage(PipelineStage):
             fw, fh = w, h
 
         self.log_info(f"FLUX: {fw}×{fh}px")
-        flux = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX)
+        flux = InPainting(
+            self.preferred_device,
+            self.torch_dtype,
+            InPaintingType.FLUX,
+            lora_type=PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2,
+            # Lower than full strength (1.0) so the LoRA's geometric/structural bias wins
+            # without stamping out FLUX's own cloud/atmosphere texture detail.
+            lora_scale=0.85,
+        )
         flux_pil = flux.inpaint(
             flux_input,
             flux_mask,

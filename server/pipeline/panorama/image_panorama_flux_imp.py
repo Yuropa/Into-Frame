@@ -1,6 +1,7 @@
 from path_utils import add_project_paths, add_system_path, lib_path, checkpoints_path
 add_project_paths()
 
+import os
 from pathlib import Path
 from typing import Any
 import numpy as np
@@ -14,6 +15,7 @@ from remote_connection.remote_server import RemoteServer
 from diffusers import FluxInpaintPipeline
 from util.device_utils import offload_pipeline
 from transformers import CLIPVisionModelWithProjection
+from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_dir, lora_weight_name, lora_prompt_prefix
 
 import torch.nn as nn
 import torchvision.transforms as T
@@ -254,6 +256,8 @@ def _lab_color_transfer(
 class PanoGenerator(RemoteServer):
 
     def setup(self):
+        self.lora_type = PanoramaLoraType[os.environ.get("PANORAMA_LORA_WEIGHTS", PanoramaLoraType.default().name)]
+
         self.style_transfer = NeuralStyleTransfer(device=self.device)
 
         image_encoder = CLIPVisionModelWithProjection.from_pretrained(
@@ -268,8 +272,8 @@ class PanoGenerator(RemoteServer):
         )
 
         self.base_pipeline.load_lora_weights(
-            str(checkpoints_path() / "layer_pano_3d"),
-            weight_name="pano_lora_720*1440_v1.safetensors",
+            str(checkpoints_path() / lora_checkpoint_dir(self.lora_type)),
+            weight_name=lora_weight_name(self.lora_type),
             adapter_name="pano",
             prefix=None,
         )
@@ -316,8 +320,8 @@ class PanoGenerator(RemoteServer):
 
         equi_size = (2048, 1024)
         prompt = (
-            f"{caption}, 360 degree equirectangular panorama, seamless wrap, "
-            "hyper-detailed, sharp focus, 8k resolution"
+            f"{lora_prompt_prefix(self.lora_type)}{caption}, 360 degree equirectangular panorama, "
+            "seamless wrap, hyper-detailed, sharp focus, 8k resolution"
         ).strip(", ")
 
         # --- Pass 0 — Encode text prompt ---
