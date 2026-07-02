@@ -302,9 +302,14 @@ class SkyboxInpaintingStage(PipelineStage):
         self.advance_progress(task)
 
         # --- Pass 2: FLUX detail on the non-sky region ---
-        # Mask is the non-sky area (where gradient filled in)
+        # Dilate the fill mask into the sky region to obliterate the mountain silhouette 
+        # contour line, preventing FLUX from reading the jagged horizon shape.
         fill_mask = ~sky_mask
-        fill_mask_pil = PILImage.fromarray((fill_mask * 255).astype(np.uint8), mode="L")
+        
+        # Dilate the fill area by roughly 3-5% of image height to bury the ridge silhouettes
+        shroud_radius = max(4, h // 25)
+        flux_mask_arr = binary_dilation(fill_mask, iterations=shroud_radius)
+        fill_mask_pil = PILImage.fromarray((flux_mask_arr * 255).astype(np.uint8), mode="L")
 
         prompt = _sky_prompt(time_label)
         self.log_info(f"FLUX prompt: {prompt!r}")
@@ -329,7 +334,7 @@ class SkyboxInpaintingStage(PipelineStage):
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=50,
-            guidance_scale=30.0,
+            guidance_scale=4.0,
             seed=self.seed,
         )
         flux.close()
