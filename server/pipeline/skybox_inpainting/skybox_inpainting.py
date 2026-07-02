@@ -406,7 +406,7 @@ class SkyboxInpaintingStage(PipelineStage):
         )
 
     def model_names(self) -> list[str]:
-        return InPainting.model_names(InPaintingType.FLUX)
+        return InPainting.model_names(InPaintingType.FLUX, lora_type=PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2)
 
     def clean_up(self):
         super().clean_up()

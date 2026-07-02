@@ -38,10 +38,14 @@ class InPainting:
                 )
 
     @classmethod
-    def model_names(cls, type: InPaintingType = InPaintingType.default()) -> list[str]:
+    def model_names(
+        cls,
+        type: InPaintingType = InPaintingType.default(),
+        lora_type: PanoramaLoraType | None = None,
+    ) -> list[str]:
         match type:
             case InPaintingType.FLUX:
-                return InPaintingFlux.model_names()
+                return InPaintingFlux.model_names(lora_type)
             case InPaintingType.LAMA:
                 return InPaintingLama.model_names()
 

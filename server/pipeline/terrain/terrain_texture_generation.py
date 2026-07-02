@@ -772,7 +772,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         return context.has_stage_output(ContextKey.TERRAIN_MATERIAL)
 
     def model_names(self) -> list[str]:
-        return InPainting.model_names(self.config.inpainting_type)
+        return InPainting.model_names(
+            self.config.inpainting_type, lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
+        )
 
     def clean_up(self):
         if self._inpainter is not None:

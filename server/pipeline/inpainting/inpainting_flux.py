@@ -2,20 +2,28 @@ import torch
 import numpy as np
 from pathlib import Path
 from PIL import Image as PILImage
-from diffusers import FluxFillPipeline
+from diffusers import FluxFillPipeline, FluxInpaintPipeline
 from util.image_utils import Image
 from util.device_utils import offload_pipeline
 from pipeline.path_utils import checkpoints_path
-from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_dir, lora_weight_name
+from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_dir, lora_weight_name, lora_base_model
+
+# No LoRA requested → plain masked inpainting with FLUX's dedicated Fill checkpoint (proper
+# mask/masked-image conditioning). When a LoRA is requested, we instead load the base model
+# it was actually trained on (see lora_base_model) via FluxInpaintPipeline, since all of the
+# LoRAs currently registered in panorama_lora.py were trained on plain FLUX.1-dev rather than
+# FLUX.1-Fill-dev.
+FILL_MODEL_ID = "black-forest-labs/FLUX.1-Fill-dev"
 
 class InPaintingFlux:
     def __init__(self, device, torch_dtype, lora_type: PanoramaLoraType | None = None, lora_scale: float = 1.0):
         self.device = device
         self.torch_dtype = torch_dtype
-        # FLUX models are heavy; 'dev' is high quality, 'schnell' is faster
-        self.model_id = "black-forest-labs/FLUX.1-Fill-dev"
 
-        self.pipeline = FluxFillPipeline.from_pretrained(
+        self.model_id = lora_base_model(lora_type) if lora_type is not None else FILL_MODEL_ID
+        pipeline_cls = FluxFillPipeline if self.model_id == FILL_MODEL_ID else FluxInpaintPipeline
+
+        self.pipeline = pipeline_cls.from_pretrained(
             self.model_id,
             torch_dtype=torch_dtype
         )
@@ -34,8 +42,8 @@ class InPaintingFlux:
         self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod
-    def model_names(cls) -> list[str]:
-        return ["black-forest-labs/FLUX.1-Fill-dev"]
+    def model_names(cls, lora_type: PanoramaLoraType | None = None) -> list[str]:
+        return [lora_base_model(lora_type) if lora_type is not None else FILL_MODEL_ID]
 
     def inpaint(
         self,
