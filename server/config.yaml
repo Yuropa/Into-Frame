@@ -156,6 +156,15 @@ stages:
     # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
     # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
     synthetic_tile_factor: 50.0
+    # Panorama layer coverage: viewing-latitude ramp (camera at world origin) that keeps
+    # the real photo dominant across almost the whole terrain. Synthetic tiles only fill
+    # the narrow nadir hole under the camera and a thin band right at the horizon, where
+    # distant flat ground is compressed into just a few panorama pixel rows.
+    use_panorama_layer: true
+    panorama_blend_power: 1.0   # exponent on the latitude ramp; higher sharpens the fades
+    nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
+    nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
+    horizon_fade_deg: 1.5       # ramp width below the horizon
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.

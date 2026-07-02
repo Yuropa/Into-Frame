@@ -88,7 +88,16 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         seam_width_fraction: float = 0.08,
         seam_dilation_px: int = 4,
         use_panorama_layer: bool = True,
-        panorama_blend_power: float = 2.0,
+        # Exponent applied to the latitude-ramp visibility weight below. 1.0 = the
+        # plain ramp; higher sharpens the transition into the nadir/horizon fades.
+        panorama_blend_power: float = 1.0,
+        # Viewing-latitude cutoffs for the panorama layer's coverage (see
+        # _panorama_visibility_weight). Wide by design: the real photo should
+        # dominate almost the whole terrain, with synthetic tiles only filling the
+        # narrow nadir hole under the camera and a thin band right at the horizon.
+        nadir_cutoff_deg: float = -85.0,
+        nadir_fade_deg: float = 4.0,
+        horizon_fade_deg: float = 1.5,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
@@ -119,6 +128,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.seam_dilation_px = seam_dilation_px
         self.use_panorama_layer = use_panorama_layer
         self.panorama_blend_power = panorama_blend_power
+        self.nadir_cutoff_deg = nadir_cutoff_deg
+        self.nadir_fade_deg = nadir_fade_deg
+        self.horizon_fade_deg = horizon_fade_deg
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
@@ -265,11 +277,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         Assemble the SplatMaterial with an optional panorama layer prepended.
 
         When PANORAMA_TERRAIN and HEIGHT_MAP are both available and
-        use_panorama_layer is True, the panorama-baked texture is inserted as
-        layer 0 with a facing-based visibility blend weight (surface normal
-        vs. direction to camera, see _panorama_visibility_weight). The
-        synthetic region layer weights are scaled by (1 − panorama_weight) so
-        all weights sum to 1 everywhere.
+        use_panorama_layer is True, the real (unbaked, equirect) panorama is
+        inserted as layer 0 with a viewing-latitude visibility blend weight
+        (see _panorama_visibility_weight) that keeps it dominant across
+        almost the whole terrain. The synthetic region layer weights are
+        scaled by (1 − panorama_weight) so all weights sum to 1 everywhere.
         """
         # ── Compute raw synthetic region weights ──────────────────────────────
         sigma_px = max(4.0, cfg.blend_sigma * cfg.blend_map_size)
@@ -308,7 +320,10 @@ class TerrainTextureGenerationStage(PipelineStage):
 
             pano_tile = self._panorama_tile(panorama_terrain, cfg.tile_size)
             pano_weight = self._panorama_visibility_weight(
-                height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power
+                height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
+                nadir_cutoff_deg=cfg.nadir_cutoff_deg,
+                nadir_fade_deg=cfg.nadir_fade_deg,
+                horizon_fade_deg=cfg.horizon_fade_deg,
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -372,24 +387,25 @@ class TerrainTextureGenerationStage(PipelineStage):
         half: float,
         blend_map_size: int,
         blend_power: float,
-        nadir_cutoff_deg: float = -80.0,
-        nadir_fade_deg: float = 5.0,
+        nadir_cutoff_deg: float = -85.0,
+        nadir_fade_deg: float = 4.0,
+        horizon_fade_deg: float = 1.5,
     ) -> np.ndarray:
         """
-        Per-texel visibility weight for the panorama layer, based on how
-        directly each terrain face is oriented toward the camera (at the
-        world origin) rather than on depression angle alone.
+        Per-texel visibility weight for the panorama layer, based on the
+        viewing latitude from the camera (at the world origin).
 
-        The surface normal is derived from the height-map gradient and
-        dotted with the direction back to the camera: a face pointing at the
-        camera — e.g. a distant mountain slope viewed head-on, even though
-        it sits near the horizon — gets high weight and keeps the real
-        panorama photo. A face that's near edge-on to the view ray (steep or
-        perpendicular, regardless of distance) fades toward the generated
-        layer instead, since an equirectangular sample of it is stretched
-        and unreliable. A narrow nadir dead-zone directly under the camera
-        is excluded separately — that's an equirectangular pole singularity,
-        not a facing problem, so it isn't captured by the normal dot product.
+        An earlier version weighted by surface-normal facing instead, but for
+        typical rolling/flat terrain viewed from a ~1-2 m camera height, the
+        facing dot product collapses to near-zero within a few metres of the
+        camera (it decays as camera_height / distance) — so nearly the whole
+        terrain fell back to synthetic FLUX tiles instead of the real photo.
+        Latitude-based weighting (matching bake_topdown_texture_with_certainty's
+        certainty ramp) keeps the real panorama dominant across the terrain:
+        it only fades out in a narrow nadir dead-zone directly under the
+        camera (an equirectangular pole singularity) and a thin band right at
+        the horizon, where distant flat ground is compressed into just a few
+        panorama pixel rows and starts to look blocky when magnified.
 
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
@@ -406,28 +422,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         ).reshape(blend_map_size, blend_map_size).astype(np.float32)
         Y = np.nan_to_num(Y, nan=0.0)
 
-        # Surface normal from the height-field gradient, in world-unit spacing.
-        texel_size = (2.0 * half) / max(blend_map_size - 1, 1)
-        dY_dX = np.gradient(Y, texel_size, axis=1)
-        dY_dZ = np.gradient(Y, texel_size, axis=0)
-        normal = np.stack([-dY_dX, np.ones_like(Y), -dY_dZ], axis=-1)
-        normal /= np.linalg.norm(normal, axis=-1, keepdims=True).clip(1e-6)
-
-        # Direction from each terrain point back to the camera at the origin.
-        point = np.stack([X, Y, Z], axis=-1).astype(np.float64)
-        dist = np.linalg.norm(point, axis=-1).clip(1e-6)
-        to_camera = (-point / dist[..., None]).astype(np.float32)
-
-        facing = np.einsum("...c,...c->...", normal, to_camera).clip(0.0, 1.0)
-
         r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
-        lat = np.arctan2(Y.astype(np.float64), r_xz)
-        min_lat = np.radians(nadir_cutoff_deg)
-        nadir_fade = (
-            (lat - min_lat) / max(np.radians(nadir_fade_deg), 1e-6)
-        ).clip(0.0, 1.0).astype(np.float32)
+        lat = np.arctan2(Y.astype(np.float64), r_xz)  # negative = below horizon (camera at origin)
 
-        weight = facing * nadir_fade
+        min_lat_rad    = np.radians(nadir_cutoff_deg)
+        nadir_fade_rad = np.radians(nadir_fade_deg)
+        horiz_fade_rad = np.radians(horizon_fade_deg)
+
+        fade_in  = ((lat - min_lat_rad) / nadir_fade_rad).clip(0.0, 1.0)
+        fade_out = ((-lat) / horiz_fade_rad).clip(0.0, 1.0)
+        valid    = (lat < 0.0) & (lat >= min_lat_rad)
+        weight   = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
+
         return (weight ** blend_power).astype(np.float32)
 
     # ── Photo reference (weak img2img seed) ─────────────────────────────────────
