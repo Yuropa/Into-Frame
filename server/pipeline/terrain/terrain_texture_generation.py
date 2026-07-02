@@ -4,7 +4,7 @@ from logging import Logger
 import numpy as np
 import PIL.Image
 import torch
-from scipy.ndimage import binary_dilation, gaussian_filter, zoom
+from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter, zoom
 from scipy.ndimage import map_coordinates
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -27,48 +27,19 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
     RegionType.BUILT,
 })
 
+# Short on purpose: at FLUX Fill's guidance_scale (30, see TerrainTextureGenerationConfiguration)
+# the text prompt strongly dominates the img2img seed, so an elaborate, hyper-specific
+# description would fight the actual photo reference instead of following it. These name
+# the material and its 1-2 defining traits only — the reference crop (_region_reference_crop)
+# and per-region LAB colour transfer (Pass 3, _generate_tileable_tile) carry the rest.
 _BASE_PROMPTS: dict[RegionType, str] = {
-    RegionType.GROUND: (
-        "RAW unedited photograph of loose crumbly garden soil, "
-        "dark chocolate-brown and rust-red clay clumps with visible air pockets, "
-        "scattered tiny pebbles and dry leaf litter, freshly-turned uncompacted earth, "
-        "irregular crumb texture"
-    ),
-    RegionType.TERRAIN: (
-        "RAW unedited photograph of fractured mountain scree and broken slate rock, "
-        "cold slate-grey and steel-blue angular stone fragments, sharp jagged edges, "
-        "patches of black and pale-green lichen, high-contrast mineral texture, "
-        "alpine rockfall surface"
-    ),
-    RegionType.VEGETATION: (
-        "RAW unedited photograph of dense overlapping grass blades viewed from directly above, "
-        "saturated kelly-green and yellow-green blades radiating in all directions, "
-        "tiny white clover flowers scattered between blades, dew droplets on leaf tips, "
-        "dense lawn understory"
-    ),
-    RegionType.WATER: (
-        "RAW unedited photograph of still lake water surface, "
-        "deep sapphire-teal color with fine concentric ripple rings, "
-        "bright specular highlight glints, faint pale sandy lakebed visible beneath, "
-        "glassy reflective water skin"
-    ),
-    RegionType.ROAD: (
-        "RAW unedited photograph of worn asphalt pavement, "
-        "near-black tarmac speckled with light-grey and white stone aggregate, "
-        "fine spiderweb cracks, faded tar sealant patches, "
-        "uniform compacted road surface"
-    ),
-    RegionType.TRAIL: (
-        "RAW unedited photograph of hard-packed hiking trail dirt, "
-        "pale tan and buff-colored compacted earth, faint parallel footprint and tire "
-        "compaction lines, small embedded pebbles, dry dusty trail surface"
-    ),
-    RegionType.BUILT: (
-        "RAW unedited photograph of old granite cobblestone pavement, "
-        "rectangular grey stone blocks separated by dark mortar grid lines, "
-        "worn rounded stone edges, subtle color variation between blocks, "
-        "structured urban paving pattern"
-    ),
+    RegionType.GROUND: "RAW unedited photograph of crumbly brown garden soil, loose earthy clumps",
+    RegionType.TERRAIN: "RAW unedited photograph of fractured grey mountain scree, jagged broken rock with lichen patches",
+    RegionType.VEGETATION: "RAW unedited photograph of dense green grass viewed from directly above, overlapping blades",
+    RegionType.WATER: "RAW unedited photograph of still lake water, rippling reflective surface",
+    RegionType.ROAD: "RAW unedited photograph of worn dark asphalt pavement, fine cracks and stone aggregate",
+    RegionType.TRAIL: "RAW unedited photograph of hard-packed dirt hiking trail, pale compacted earth",
+    RegionType.BUILT: "RAW unedited photograph of old granite cobblestone pavement, mortared stone blocks",
 }
 
 # PBR smoothness per region: 0 = perfectly rough/matte, 1 = mirror-smooth.
@@ -115,9 +86,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
-        # Low-ish on purpose: the crop is a color/lighting hint, not a target to
-        # reproduce — the prompt should still drive most of the generated detail.
-        reference_strength: float = 0.45,
+        # Diffusers `strength` semantics: 1.0 = maximum added noise = ignores `image`
+        # entirely; lower = stays closer to the reference. Lowered from 0.45 now that
+        # _BASE_PROMPTS are short material-identity phrases rather than elaborate
+        # descriptions, so the reference crop carries more of the content and FLUX
+        # mainly adds sharpness/micro-detail on top rather than reinventing the scene.
+        reference_strength: float = 0.3,
         reference_tex_size: int = 2048,
         reference_min_certainty: float = 0.15,
         # Post-process LAB colour nudge toward the reference crop's stats.
@@ -151,12 +125,16 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
       1. If a real photo is available (PANORAMA_TERRAIN + HEIGHT_MAP), bake it
-         top-down and crop the patch centred on that region's footprint. This
-         crop seeds generation as a *weak* img2img reference (low `strength`,
-         full mask) — it nudges colour/lighting toward the real scene without
-         overriding the text prompt, which still drives most of the content.
-         Low-certainty crops (nadir dead-zone, unobserved cells) are discarded
-         and fall back to plain text generation.
+         top-down and crop the patch centred on that region's footprint. Pixels
+         in the crop that belong to a different region (bounding-box spillover)
+         or are too low-certainty (nadir dead-zone, unobserved cells) are
+         replaced with the nearest same-region pixel's colour, so the crop
+         never leaks a neighbouring material's texture into the seed. This
+         crop drives generation as a low-`strength` img2img reference — the
+         short, material-identity-only text prompt (_BASE_PROMPTS) mainly adds
+         sharpness/micro-detail on top rather than overriding what the photo
+         shows. A region with no trustworthy pixels at all falls back to
+         plain text generation.
       2. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
          reference-seeded/full-mask generation → circular-shift seam inpainting).
 
@@ -184,6 +162,12 @@ class TerrainTextureGenerationStage(PipelineStage):
         super().__init__(config)
         self._inpainter: Optional[InPainting] = None
 
+    def _init_inpainter(self) -> None:
+        if self._inpainter is None:
+            cfg: TerrainTextureGenerationConfiguration = self.config
+            inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
+            self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
+
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
         caption = context.input_object(ContextKey.INPUT_CAPTION)
@@ -197,8 +181,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         task = self.create_progress(len(present_types) * 2 + 1, "Terrain Texture Generation…")
 
-        inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
-        self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
+        self._init_inpainter()
 
         reference = self._bake_reference(context, cfg) if cfg.use_photo_reference else None
 
@@ -258,7 +241,8 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         When PANORAMA_TERRAIN and HEIGHT_MAP are both available and
         use_panorama_layer is True, the panorama-baked texture is inserted as
-        layer 0 with a view-angle blend weight (sin(depression)^power). The
+        layer 0 with a facing-based visibility blend weight (surface normal
+        vs. direction to camera, see _panorama_visibility_weight). The
         synthetic region layer weights are scaled by (1 − panorama_weight) so
         all weights sum to 1 everywhere.
         """
@@ -298,7 +282,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             half = grid_size / 2.0
 
             pano_tile = self._panorama_tile(panorama_terrain, cfg.tile_size)
-            pano_weight = self._view_angle_weight(
+            pano_weight = self._panorama_visibility_weight(
                 height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power
             )
             self.log_info(
@@ -358,25 +342,31 @@ class TerrainTextureGenerationStage(PipelineStage):
         )
 
     @staticmethod
-    def _view_angle_weight(
+    def _panorama_visibility_weight(
         height_map: np.ndarray,
         half: float,
         blend_map_size: int,
         blend_power: float,
-        nadir_cutoff_deg: float = -35.0,
-        nadir_fade_deg: float = 10.0,
-        horizon_fade_deg: float = 5.0,
+        nadir_cutoff_deg: float = -80.0,
+        nadir_fade_deg: float = 5.0,
     ) -> np.ndarray:
         """
-        Per-texel view-angle quality weight for the panorama layer.
+        Per-texel visibility weight for the panorama layer, based on how
+        directly each terrain face is oriented toward the camera (at the
+        world origin) rather than on depression angle alone.
 
-        Computed purely from height-map geometry — no panorama sampling needed.
+        The surface normal is derived from the height-map gradient and
+        dotted with the direction back to the camera: a face pointing at the
+        camera — e.g. a distant mountain slope viewed head-on, even though
+        it sits near the horizon — gets high weight and keeps the real
+        panorama photo. A face that's near edge-on to the view ray (steep or
+        perpendicular, regardless of distance) fades toward the generated
+        layer instead, since an equirectangular sample of it is stretched
+        and unreliable. A narrow nadir dead-zone directly under the camera
+        is excluded separately — that's an equirectangular pole singularity,
+        not a facing problem, so it isn't captured by the normal dot product.
+
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
-
-        Weight is high when the camera looks steeply down at the terrain point
-        (reliable, low-distortion equirectangular sample) and fades to 0 at:
-          • grazing / near-horizon angles (equirect pixels are stretched thin)
-          • the nadir dead-zone directly below the camera (high distortion)
         """
         us = np.linspace(0.0, 1.0, blend_map_size, dtype=np.float32)
         ug, vg = np.meshgrid(us, us)
@@ -391,15 +381,29 @@ class TerrainTextureGenerationStage(PipelineStage):
         ).reshape(blend_map_size, blend_map_size).astype(np.float32)
         Y = np.nan_to_num(Y, nan=0.0)
 
-        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6).astype(np.float32)
-        lat = np.arctan2(Y.astype(np.float64), r_xz.astype(np.float64)).astype(np.float32)
+        # Surface normal from the height-field gradient, in world-unit spacing.
+        texel_size = (2.0 * half) / max(blend_map_size - 1, 1)
+        dY_dX = np.gradient(Y, texel_size, axis=1)
+        dY_dZ = np.gradient(Y, texel_size, axis=0)
+        normal = np.stack([-dY_dX, np.ones_like(Y), -dY_dZ], axis=-1)
+        normal /= np.linalg.norm(normal, axis=-1, keepdims=True).clip(1e-6)
 
+        # Direction from each terrain point back to the camera at the origin.
+        point = np.stack([X, Y, Z], axis=-1).astype(np.float64)
+        dist = np.linalg.norm(point, axis=-1).clip(1e-6)
+        to_camera = (-point / dist[..., None]).astype(np.float32)
+
+        facing = np.einsum("...c,...c->...", normal, to_camera).clip(0.0, 1.0)
+
+        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
+        lat = np.arctan2(Y.astype(np.float64), r_xz)
         min_lat = np.radians(nadir_cutoff_deg)
-        fade_in  = ((lat - min_lat) / max(np.radians(nadir_fade_deg), 1e-6)).clip(0.0, 1.0)
-        fade_out = ((-lat)          / max(np.radians(horizon_fade_deg), 1e-6)).clip(0.0, 1.0)
-        valid    = (lat < 0.0) & (lat >= min_lat)
-        weight   = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
-        return weight ** blend_power
+        nadir_fade = (
+            (lat - min_lat) / max(np.radians(nadir_fade_deg), 1e-6)
+        ).clip(0.0, 1.0).astype(np.float32)
+
+        weight = facing * nadir_fade
+        return (weight ** blend_power).astype(np.float32)
 
     # ── Photo reference (weak img2img seed) ─────────────────────────────────────
 
@@ -453,9 +457,15 @@ class TerrainTextureGenerationStage(PipelineStage):
     ) -> Optional[PIL.Image.Image]:
         """
         Crop a tile_size x tile_size window from the baked photo, centred on
-        the footprint of region type rt. Returns None if the region isn't
-        present or the crop is too low-certainty (nadir dead-zone, unobserved
-        heightmap cells) to be a trustworthy reference.
+        the footprint of region type rt, containing *only* colour sampled
+        from that region type at trustworthy certainty. Pixels that belong to
+        a different region (bounding-box spillover around an irregular
+        footprint) or are too low-certainty (nadir dead-zone, unobserved
+        heightmap cells) are replaced with the nearest same-region pixel's
+        colour — this keeps real local colour/texture variation (instead of
+        flattening to one mean swatch) while guaranteeing the reference never
+        leaks a neighbouring material into the seed. Returns None only when
+        the region has no trustworthy pixels at all in the crop.
         """
         mask = region_ids == int(rt)
         if not mask.any():
@@ -469,14 +479,23 @@ class TerrainTextureGenerationStage(PipelineStage):
         x0 = int(np.clip(cx - half, 0, max(0, w - tile_size)))
         y1, x1 = y0 + tile_size, x0 + tile_size
 
+        crop = baked_rgb[y0:y1, x0:x1]
+        crop_mask = mask[y0:y1, x0:x1]
         crop_certainty = certainty[y0:y1, x0:x1]
-        if crop_certainty.size == 0 or crop_certainty.mean() < min_certainty:
+        valid = crop_mask & (crop_certainty >= min_certainty)
+
+        if not np.any(valid):
             return None
 
-        crop = baked_rgb[y0:y1, x0:x1]
-        if crop.shape[0] != tile_size or crop.shape[1] != tile_size:
-            crop = np.array(PIL.Image.fromarray(crop).resize((tile_size, tile_size), PIL.Image.LANCZOS))
-        return PIL.Image.fromarray(crop)
+        if np.all(valid):
+            filled = crop
+        else:
+            nearest = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+            filled = crop[tuple(nearest)]
+
+        if filled.shape[0] != tile_size or filled.shape[1] != tile_size:
+            filled = np.array(PIL.Image.fromarray(filled).resize((tile_size, tile_size), PIL.Image.LANCZOS))
+        return PIL.Image.fromarray(filled)
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -513,8 +532,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         seed = cfg.seed + seed_offset
 
         # Pass 1: full-mask generation. When a real photo crop is available it
-        # seeds the image at low `strength` (weak img2img) so it only nudges
-        # colour/lighting — the prompt still drives the generated content.
+        # seeds the image at low `strength` (mostly-preserved img2img) so the
+        # reference's actual content drives generation, with the short
+        # material-identity prompt and FLUX mainly adding sharpness/detail.
         # Otherwise fall back to a neutral grey canvas (pure text-to-image).
         if reference_image is not None:
             base_image = reference_image.convert("RGB")
@@ -566,8 +586,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
         result_img = PIL.Image.fromarray(result)
 
-        # Nudge final colour statistics toward the real photo crop, on top of
-        # the (already weak) img2img seeding above.
+        # Pass 3: nudge final colour statistics toward the real photo crop, on
+        # top of the (already weak) img2img seeding above.
         if reference_image is not None and cfg.color_transfer_strength > 0.0:
             result_img = lab_color_transfer(
                 source=base_image, target=result_img, strength=cfg.color_transfer_strength,
