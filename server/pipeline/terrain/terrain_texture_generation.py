@@ -137,10 +137,15 @@ class TerrainTextureGenerationStage(PipelineStage):
          plain text generation.
       2. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
          reference-seeded/full-mask generation → circular-shift seam inpainting).
+         A local micro-height map derived from the tile's own high-frequency detail
+         is packed into its alpha channel (_pack_local_height_channel) so the terrain
+         shader can do height-biased blending between layers instead of a flat
+         linear cross-fade.
 
     SplatMaterial.from_region_map handles weight computation, normalisation, and
     RGBA blend map packing.  The first layer tile is also written to TERRAIN_TEXTURE
-    so the terrain mesh can embed a preview in the GLB.
+    so the terrain mesh can embed a preview in the GLB (with alpha stripped —
+    see TerrainMeshGenerator.generate — since that channel holds height, not opacity).
 
     Reads:
       ContextKey.REGION_MAP           — top-down region type grid (optional)
@@ -593,7 +598,32 @@ class TerrainTextureGenerationStage(PipelineStage):
                 source=base_image, target=result_img, strength=cfg.color_transfer_strength,
             )
 
-        return result_img
+        return self._pack_local_height_channel(result_img)
+
+    @staticmethod
+    def _pack_local_height_channel(rgb_img: PIL.Image.Image) -> PIL.Image.Image:
+        """
+        Derive a seamless local micro-height/displacement map from the tile's
+        own illumination detail and pack it into the alpha channel, so the
+        terrain shader can do height-biased blending between layers (e.g.
+        grass poking through the cracks between dirt clumps) instead of a
+        flat linear cross-fade. A high-pass filter isolates local structural
+        bumps (rocks, blades, grain) while removing the broad lighting
+        gradient, since the tile is meant to be lit flat/overcast already.
+        """
+        gray = np.array(rgb_img.convert("L"), dtype=np.float32)
+        high_freq = gray - gaussian_filter(gray, sigma=8.0)
+
+        h_min, h_max = high_freq.min(), high_freq.max()
+        if h_max - h_min > 1e-5:
+            height = (high_freq - h_min) / (h_max - h_min) * 255.0
+        else:
+            height = np.full_like(gray, 128.0)
+        # Smooth slightly to avoid single-pixel flicker in the shader's blend weights.
+        height = gaussian_filter(height, sigma=1.0).clip(0, 255).astype(np.uint8)
+
+        rgba = np.dstack([np.array(rgb_img.convert("RGB"), dtype=np.uint8), height])
+        return PIL.Image.fromarray(rgba, "RGBA")
 
     # ── Debug output ─────────────────────────────────────────────────────────
 

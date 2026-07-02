@@ -43,6 +43,14 @@ Shader "IntoFrame/TerrainSplat"
         // Bitmask: bit i set means layer i uses equirectangular UV from world position
         // rather than planar tiled UV. Used for the panorama layer (typically layer 0).
         _EquirectLayers ("Equirect Layers Bitmask", Int) = 0
+
+        // Height-biased blending: each layer tile's alpha channel carries a local
+        // micro-height map (see terrain_texture_generation.py). Blend-map weights are
+        // biased by that local height before normalising, so e.g. grass pokes through
+        // the cracks between dirt clumps instead of a flat linear cross-fade.
+        // 0 = disabled (identical to the old plain-weighted blend); higher = crisper,
+        // more height-driven transitions.
+        _HeightBlendSharpness ("Height Blend Sharpness", Range(0, 16)) = 4.0
     }
 
     SubShader
@@ -121,6 +129,7 @@ Shader "IntoFrame/TerrainSplat"
                 float  _Layer6Smoothness;
                 float  _Layer7Smoothness;
                 int    _EquirectLayers;
+                float  _HeightBlendSharpness;
             CBUFFER_END
 
             // ── Structs ────────────────────────────────────────────────────
@@ -209,27 +218,48 @@ Shader "IntoFrame/TerrainSplat"
                 float2 uv6 = LayerUV(uv, IN.positionWS, _Layer6TileRepeat, (_EquirectLayers >> 6) & 1);
                 float2 uv7 = LayerUV(uv, IN.positionWS, _Layer7TileRepeat, (_EquirectLayers >> 7) & 1);
 
-                // Layer tiles
-                half3 col0 = SAMPLE_TEXTURE2D(_Layer0Tile, sampler_Layer0Tile, uv0).rgb;
-                half3 col1 = SAMPLE_TEXTURE2D(_Layer1Tile, sampler_Layer1Tile, uv1).rgb;
-                half3 col2 = SAMPLE_TEXTURE2D(_Layer2Tile, sampler_Layer2Tile, uv2).rgb;
-                half3 col3 = SAMPLE_TEXTURE2D(_Layer3Tile, sampler_Layer3Tile, uv3).rgb;
-                half3 col4 = SAMPLE_TEXTURE2D(_Layer4Tile, sampler_Layer4Tile, uv4).rgb;
-                half3 col5 = SAMPLE_TEXTURE2D(_Layer5Tile, sampler_Layer5Tile, uv5).rgb;
-                half3 col6 = SAMPLE_TEXTURE2D(_Layer6Tile, sampler_Layer6Tile, uv6).rgb;
-                half3 col7 = SAMPLE_TEXTURE2D(_Layer7Tile, sampler_Layer7Tile, uv7).rgb;
+                // Layer tiles — alpha carries a local micro-height map (server-baked from
+                // the tile's own high-frequency detail) used for height-biased blending below.
+                half4 tex0 = SAMPLE_TEXTURE2D(_Layer0Tile, sampler_Layer0Tile, uv0);
+                half4 tex1 = SAMPLE_TEXTURE2D(_Layer1Tile, sampler_Layer1Tile, uv1);
+                half4 tex2 = SAMPLE_TEXTURE2D(_Layer2Tile, sampler_Layer2Tile, uv2);
+                half4 tex3 = SAMPLE_TEXTURE2D(_Layer3Tile, sampler_Layer3Tile, uv3);
+                half4 tex4 = SAMPLE_TEXTURE2D(_Layer4Tile, sampler_Layer4Tile, uv4);
+                half4 tex5 = SAMPLE_TEXTURE2D(_Layer5Tile, sampler_Layer5Tile, uv5);
+                half4 tex6 = SAMPLE_TEXTURE2D(_Layer6Tile, sampler_Layer6Tile, uv6);
+                half4 tex7 = SAMPLE_TEXTURE2D(_Layer7Tile, sampler_Layer7Tile, uv7);
 
-                // Weighted blend — weights pre-normalised by server, no normalisation needed
+                // Height-biased blend weights: each layer's server-normalised blend-map
+                // weight is biased by its own local micro-height before renormalising, so
+                // e.g. gravel pokes through soil where the gravel tile's local height is
+                // highest rather than fading in as a flat, uniform cross-blend. Layers with
+                // no alpha data (the panorama layer, or unused slots) decode to alpha = 1
+                // and are left unbiased. At _HeightBlendSharpness = 0, pow(x, 0) = 1 for all
+                // layers and this reduces exactly to the original flat weighted blend.
+                half eps = 1e-4h;
+                half w0 = blend0.r * pow(tex0.a + eps, _HeightBlendSharpness);
+                half w1 = blend0.g * pow(tex1.a + eps, _HeightBlendSharpness);
+                half w2 = blend0.b * pow(tex2.a + eps, _HeightBlendSharpness);
+                half w3 = blend0.a * pow(tex3.a + eps, _HeightBlendSharpness);
+                half w4 = blend1.r * pow(tex4.a + eps, _HeightBlendSharpness);
+                half w5 = blend1.g * pow(tex5.a + eps, _HeightBlendSharpness);
+                half w6 = blend1.b * pow(tex6.a + eps, _HeightBlendSharpness);
+                half w7 = blend1.a * pow(tex7.a + eps, _HeightBlendSharpness);
+
+                half invWSum = rcp(w0 + w1 + w2 + w3 + w4 + w5 + w6 + w7 + eps);
+                w0 *= invWSum; w1 *= invWSum; w2 *= invWSum; w3 *= invWSum;
+                w4 *= invWSum; w5 *= invWSum; w6 *= invWSum; w7 *= invWSum;
+
                 half3 albedo =
-                    col0 * blend0.r + col1 * blend0.g + col2 * blend0.b + col3 * blend0.a +
-                    col4 * blend1.r + col5 * blend1.g + col6 * blend1.b + col7 * blend1.a;
+                    tex0.rgb * w0 + tex1.rgb * w1 + tex2.rgb * w2 + tex3.rgb * w3 +
+                    tex4.rgb * w4 + tex5.rgb * w5 + tex6.rgb * w6 + tex7.rgb * w7;
 
-                // Blend per-layer smoothness with the same weights
+                // Blend per-layer smoothness with the same height-biased weights
                 half smoothness =
-                    _Layer0Smoothness * blend0.r + _Layer1Smoothness * blend0.g +
-                    _Layer2Smoothness * blend0.b + _Layer3Smoothness * blend0.a +
-                    _Layer4Smoothness * blend1.r + _Layer5Smoothness * blend1.g +
-                    _Layer6Smoothness * blend1.b + _Layer7Smoothness * blend1.a;
+                    _Layer0Smoothness * w0 + _Layer1Smoothness * w1 +
+                    _Layer2Smoothness * w2 + _Layer3Smoothness * w3 +
+                    _Layer4Smoothness * w4 + _Layer5Smoothness * w5 +
+                    _Layer6Smoothness * w6 + _Layer7Smoothness * w7;
 
                 // URP PBR lighting
                 InputData inputData = (InputData)0;

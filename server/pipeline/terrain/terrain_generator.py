@@ -99,7 +99,10 @@ class TerrainMeshGenerator:
             v = ((Z_pos + z_far)  / (2.0 * z_far)  * texture_tile_factor).astype(np.float32)
             uv = np.stack([u, v], axis=-1)
             material = trimesh.visual.material.PBRMaterial(
-                baseColorTexture=baked_tex,
+                # Splat layer tiles may carry a local micro-height channel packed into
+                # alpha for shader blending (see terrain_texture_generation.py); strip it
+                # here so the GLB preview material doesn't render as partially transparent.
+                baseColorTexture=baked_tex.convert("RGB"),
                 baseColorFactor=[1.0, 1.0, 1.0, 1.0],
             )
             visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
