@@ -38,7 +38,9 @@ class InPaintingFlux:
             self.pipeline.set_adapters(["pano"], adapter_weights=[lora_scale])
 
         offload_pipeline(device, self.pipeline)
-        self.pipeline.enable_vae_tiling()
+        # FluxFillPipeline exposes enable_vae_tiling() directly; FluxInpaintPipeline
+        # doesn't, so tile on the vae component itself — works for both.
+        self.pipeline.vae.enable_tiling()
         self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod
