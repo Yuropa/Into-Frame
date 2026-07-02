@@ -145,14 +145,14 @@ stages:
   - name: Terrain Texture Generation
     stage: TerrainTextureGenerationStage
     tile_size: 1024             # px per seamless region tile (FLUX generates at this size)
-    blend_map_size: 1024        # px for the blend maps
+    blend_map_size: 512         # px for the blend maps
     blend_sigma: 0.05           # gaussian blend width at region boundaries (fraction of blend_map_size)
     min_region_fraction: 0.02   # regions smaller than this fraction are skipped
     inpainting_type: FLUX
-    num_inference_steps: 28
-    guidance_scale: 30.0
+    num_inference_steps: 35
+    guidance_scale: 3.5
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
-    seam_dilation_px: 8         # dilation applied to seam mask before inpainting
+    seam_dilation_px: 4         # dilation applied to seam mask before inpainting
     # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
     # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
     synthetic_tile_factor: 50.0

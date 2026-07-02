@@ -881,6 +881,17 @@ download_panorama_lora() {
 run_step "Downloading Panorama LoRA v2" \
     download_panorama_lora
 
+## ============
+## Seamless Texture LoRA (FLUX, used for terrain texture generation)
+## ============
+
+download_seamless_texture_lora() {
+    download_checkpoint "https://huggingface.co/gokaygokay/Flux-Seamless-Texture-LoRA/resolve/main/seamless_texture.safetensors?download=true" "flux_seamless_texture"
+}
+
+run_step "Downloading Seamless Texture LoRA" \
+    download_seamless_texture_lora
+
 ## ======================
 ## Depth Any Panoramas
 ## ======================

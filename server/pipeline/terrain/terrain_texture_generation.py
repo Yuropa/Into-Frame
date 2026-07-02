@@ -12,6 +12,7 @@ from scipy.ndimage import map_coordinates
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
+from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
@@ -23,37 +24,40 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
     RegionType.GROUND,
     RegionType.TERRAIN,
     RegionType.VEGETATION,
-    RegionType.WATER,
     RegionType.ROAD,
-    RegionType.TRAIL,
-    RegionType.BUILT,
 })
 
-# Short on purpose: at FLUX Fill's guidance_scale (30, see TerrainTextureGenerationConfiguration)
+# Short on purpose: at FLUX Fill's guidance_scale (see TerrainTextureGenerationConfiguration)
 # the text prompt strongly dominates the img2img seed, so an elaborate, hyper-specific
 # description would fight the actual photo/collage reference instead of following it. These
 # name the material and its 1-2 defining traits only — the scattered-patch collage seed
 # (_generate_scattered_texture_base) and per-region LAB colour transfer carry the rest.
 _BASE_PROMPTS: dict[RegionType, str] = {
-    RegionType.GROUND: "Ultra-detailed close-up photograph of loose soil, crisp dirt grains, small sharp broken stones and pebbles embedded in ground, high-contrast micro-shadows, hyper-realistic, game engine asset",
-    RegionType.TERRAIN: "RAW unedited photograph of fractured grey mountain scree, jagged broken rock with lichen patches",
-    RegionType.VEGETATION: "Ultra-detailed macro overhead photograph of dense wild ground foliage, crisp individual blades of grass, sharp moss structures, small clover patches, high-frequency natural details",
-    RegionType.WATER: "RAW unedited photograph of still lake water, rippling reflective surface",
-    RegionType.ROAD: "RAW unedited photograph of worn dark asphalt pavement, fine cracks and stone aggregate",
-    RegionType.TRAIL: "RAW unedited photograph of hard-packed dirt hiking trail, pale compacted earth",
-    RegionType.BUILT: "RAW unedited photograph of old granite cobblestone pavement, mortared stone blocks",
+    RegionType.GROUND: (
+        "macro close-up photograph of loose soil grit, tiny sharp gravel stones, "
+        "cracked dry mud crumbs, fine earthen detail grains"
+    ),
+    RegionType.TERRAIN: (
+        "macro close-up photograph of sharp jagged broken rocks, angular stone fragments, "
+        "slate striations and granite micro-crevices"
+    ),
+    RegionType.VEGETATION: (
+        "overhead macro photograph of dense wild grass blades, green clover leaves, "
+        "tangled lawn moss filaments, individual pine needles"
+    ),
+    RegionType.ROAD: (
+        "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
+        "granite grit pebbles, sharp porous tarmac texture"
+    ),
 }
 
 # PBR smoothness per region: 0 = perfectly rough/matte, 1 = mirror-smooth.
-# Water is high (reflective surface); soil/grass/gravel are near-zero (diffuse).
+# Soil/grass/gravel are all near-zero (diffuse).
 _LAYER_SMOOTHNESS: dict[RegionType, float] = {
     RegionType.GROUND:      0.05,
     RegionType.TERRAIN:     0.08,
     RegionType.VEGETATION:  0.04,
-    RegionType.WATER:       0.88,
     RegionType.ROAD:        0.18,
-    RegionType.TRAIL:       0.05,
-    RegionType.BUILT:       0.28,
 }
 
 _TILE_SUFFIX = (
@@ -73,16 +77,16 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         torch_dtype: Any,
         log: Logger,
         keys=None,
-        seed: int = 0,
+        seed: int = 42,
         tile_size: int = 1024,
-        blend_map_size: int = 1024,
+        blend_map_size: int = 512,
         blend_sigma: float = 0.05,
         min_region_fraction: float = 0.02,
         inpainting_type: str = "FLUX",
-        num_inference_steps: int = 28,
-        guidance_scale: float = 30.0,
+        num_inference_steps: int = 35,  # Higher headroom to resolve fine grains
+        guidance_scale: float = 3.5,
         seam_width_fraction: float = 0.08,
-        seam_dilation_px: int = 8,
+        seam_dilation_px: int = 4,
         use_panorama_layer: bool = True,
         panorama_blend_power: float = 2.0,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
@@ -95,9 +99,13 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # (_generate_scattered_texture_base) is already packed with sharp, genuine
         # same-region detail — FLUX mainly needs to unify lighting/seams and follow
         # the text prompt rather than invent texture from scratch.
-        collage_strength: float = 0.65,
+        collage_strength: float = 0.60,
         # Post-process LAB colour nudge toward the collage seed's stats.
-        color_transfer_strength: float = 0.35,
+        color_transfer_strength: float = 0.60,
+        # FLUX_SEAMLESS_TEXTURE LoRA strength. Lower than full (1.0) so its seamless-tiling
+        # bias steers generation without overpowering the per-region material prompt or the
+        # collage seed's genuine detail.
+        lora_scale: float = 0.8,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -118,6 +126,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.reference_tex_size = reference_tex_size
         self.collage_strength = collage_strength
         self.color_transfer_strength = color_transfer_strength
+        self.lora_scale = lora_scale
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -136,9 +145,10 @@ class TerrainTextureGenerationStage(PipelineStage):
          material-identity-only text prompt (_BASE_PROMPTS) mainly unifies
          lighting and fixes seams rather than reinventing the scene. A region
          with no trustworthy pixels at all falls back to plain text generation.
-      2. Generate a photorealistic seamlessly tileable tile with FLUX (two-pass:
-         collage-seeded/full-mask generation → circular-shift seam inpainting),
-         then sharpen/contrast-boost to recover detail softened by inpainting
+      2. Generate a photorealistic seamlessly tileable tile with FLUX (with the
+         FLUX_SEAMLESS_TEXTURE LoRA, two-pass: collage-seeded/full-mask generation
+         → circular-shift seam inpainting), then sharpen/contrast-boost to recover
+         detail softened by inpainting
          and nudge colour statistics back toward the collage seed. A local
          micro-height map derived from the tile's own high-frequency detail
          is packed into its alpha channel (_pack_local_height_channel) so the terrain
@@ -174,7 +184,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._inpainter is None:
             cfg: TerrainTextureGenerationConfiguration = self.config
             inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
-            self._inpainter = InPainting(inpaint_device, inpaint_dtype, cfg.inpainting_type)
+            self._inpainter = InPainting(
+                inpaint_device, inpaint_dtype, cfg.inpainting_type,
+                lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
+                lora_scale=cfg.lora_scale,
+            )
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
@@ -479,7 +493,8 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _build_prompt(self, rt: RegionType, caption: Any) -> str:
         base = _BASE_PROMPTS.get(rt, "close-up macro photo of natural outdoor ground surface material")
-        return f"{base}{_TILE_SUFFIX}"
+        lora = PanoramaLoraType.FLUX_SEAMLESS_TEXTURE
+        return f"{lora_prompt_prefix(lora)}{base}{_TILE_SUFFIX}{lora_prompt_suffix(lora)}"
 
     def _generate_tileable_tile(
         self,
