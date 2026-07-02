@@ -6,6 +6,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(CMAKE_BUILD_TYPE Release)
 
+# The interactive `pattern_synthesis` GUI target pulls in Polyscope, which needs
+# GLFW/OpenGL. Headless build hosts (e.g. the inference server, which only needs
+# pcf_cli/synthesize_cli) won't have those — set -DPATTERN_SYNTHESIS_BUILD_GUI=OFF
+# there to skip fetching/configuring Polyscope entirely.
+option(PATTERN_SYNTHESIS_BUILD_GUI "Build the interactive pattern_synthesis (Polyscope) target" ON)
+
 include(FetchContent)
 set(FETCHCONTENT_QUIET OFF)
 
@@ -20,25 +26,27 @@ set(LIBIGL_OPENGL OFF)
 set(LIBIGL_USE_STATIC_LIBRARY ON)
 FetchContent_MakeAvailable(libigl)
 
-# Polyscope
-FetchContent_Declare(
-  polyscope
-  GIT_REPOSITORY https://github.com/nmwsharp/polyscope.git
-  GIT_TAG v2.2.1
-)
-set(POLYSCOPE_BACKEND_OPENGL3_GLFW ON)
-set(POLYSCOPE_BACKEND_OPENGL3_EGL OFF)
-set(POLYSCOPE_BACKEND_OPENGL3_WGL OFF)
-FetchContent_MakeAvailable(polyscope)
+if(PATTERN_SYNTHESIS_BUILD_GUI)
+  # Polyscope
+  FetchContent_Declare(
+    polyscope
+    GIT_REPOSITORY https://github.com/nmwsharp/polyscope.git
+    GIT_TAG v2.2.1
+  )
+  set(POLYSCOPE_BACKEND_OPENGL3_GLFW ON)
+  set(POLYSCOPE_BACKEND_OPENGL3_EGL OFF)
+  set(POLYSCOPE_BACKEND_OPENGL3_WGL OFF)
+  FetchContent_MakeAvailable(polyscope)
 
-add_executable(pattern_synthesis
-  src/main.cpp
-  src/sampling.cpp
-  src/parameterization.cpp
-  src/lloyd_relaxation.cpp
-  src/interaction.cpp
-  src/voronoi-pcf.cpp
-)
+  add_executable(pattern_synthesis
+    src/main.cpp
+    src/sampling.cpp
+    src/parameterization.cpp
+    src/lloyd_relaxation.cpp
+    src/interaction.cpp
+    src/voronoi-pcf.cpp
+  )
+endif()
 
 add_executable(pcf_cli
   src/pcf_cli.cpp
@@ -82,8 +90,10 @@ endif()
 
 find_package(OpenMP REQUIRED)
 
-target_link_libraries(pattern_synthesis PRIVATE igl::core polyscope CGAL::CGAL)
-target_link_libraries(pattern_synthesis PRIVATE OpenMP::OpenMP_CXX)
+if(PATTERN_SYNTHESIS_BUILD_GUI)
+  target_link_libraries(pattern_synthesis PRIVATE igl::core polyscope CGAL::CGAL)
+  target_link_libraries(pattern_synthesis PRIVATE OpenMP::OpenMP_CXX)
+endif()
 message(STATUS "OpenMP enabled")
 
 target_link_libraries(pcf_cli PRIVATE igl::core CGAL::CGAL)

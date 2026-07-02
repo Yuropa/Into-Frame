@@ -455,6 +455,18 @@ build_pattern_synthesis() {
         pip install --no-build-isolation \
         --config-settings="cmake.define.PATTERN_SYNTHESIS_SRC_DIR=$PS_SRC" \
         "$PROJECT_DIR/pattern-synthesis/python_lib"
+
+    # Build the pcf_cli / synthesize_cli binaries that ObjectDistributionStage and
+    # DistributionSynthesisStage shell out to at runtime. GUI target (Polyscope) is
+    # skipped since this is a headless build host.
+    local PS_DIR="$PROJECT_DIR/pattern-synthesis"
+    local PS_BUILD_DIR="$PS_DIR/build"
+    cmake -S "$PS_DIR" -B "$PS_BUILD_DIR" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DPATTERN_SYNTHESIS_BUILD_GUI=OFF \
+        || { error "cmake configure failed for pattern-synthesis CLIs"; exit 1; }
+    cmake --build "$PS_BUILD_DIR" --target pcf_cli synthesize_cli -j \
+        || { error "cmake build failed for pattern-synthesis CLIs"; exit 1; }
 }
 
 run_step "Building Pattern Synthesis Library" \
