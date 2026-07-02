@@ -12,6 +12,13 @@ class TypeDistribution:
     bin_count: int
     hist: list[int] = field(default_factory=list)
     pair_count: int = 0
+    # Raw exemplar data backing this distribution, in world-space XZ meters — the
+    # points DistributionSynthesisStage feeds to synthesize_pattern as the exemplar
+    # set, and the (width, height) footprints it samples from for synthesized points.
+    # synthesize_pattern re-derives its own PCF from these directly; `hist` above is
+    # for inspection/reporting only.
+    points: list[tuple[float, float]] = field(default_factory=list)
+    sizes: list[tuple[float, float]] = field(default_factory=list)
 
     def encode(self) -> dict:
         return {
@@ -21,6 +28,8 @@ class TypeDistribution:
             "bin_count": self.bin_count,
             "hist": self.hist,
             "pair_count": self.pair_count,
+            "points": [list(p) for p in self.points],
+            "sizes": [list(s) for s in self.sizes],
         }
 
     @classmethod
@@ -33,6 +42,8 @@ class TypeDistribution:
             pair_count=data.get("pair_count", 0),
         )
         obj.hist = data.get("hist", [])
+        obj.points = [tuple(p) for p in data.get("points", [])]
+        obj.sizes = [tuple(s) for s in data.get("sizes", [])]
         return obj
 
 
@@ -42,8 +53,8 @@ class ObjectDistributionResult:
     Per-region, per-type Voronoi PCF histograms produced by ObjectDistributionStage.
 
     distributions[region_type][object_type] gives the TypeDistribution for that
-    combination. Combinations with fewer than two instances are absent. When no
-    panorama region data is available all objects are grouped under "global".
+    combination, where region_type is a top-down REGION_MAP label (e.g.
+    "vegetation", "ground"). Combinations with fewer than two instances are absent.
     """
 
     distributions: dict[str, dict[str, TypeDistribution]] = field(default_factory=dict)

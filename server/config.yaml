@@ -192,6 +192,15 @@ stages:
     bin_count: 48
     # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
 
+  - name: Distribution Synthesis
+    stage: DistributionSynthesisStage
+    min_blob_area_cells: 64
+    max_candidates_per_tile: 2000
+    max_iters: 400
+    size_jitter: 0.15
+    input_boundary_pad_factor: 1.5
+    # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
+
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
     billboard_distance_m: 30.0

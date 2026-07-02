@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import subprocess
 from pathlib import Path
@@ -14,12 +13,12 @@ from pipeline.object_distribution.object_distribution_result import (
     ObjectDistributionResult,
     TypeDistribution,
 )
-from pipeline.panorama_segmentation.panorama_region_result import PanoramaRegionResult
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.object_typing.categories import UNIQUE_CATEGORIES
+from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
 
 _MIN_POINTS = 2
 _DEFAULT_BIN_COUNT = 48
-_GLOBAL_REGION = "global"
 
 _HERE = Path(__file__).resolve().parent
 
@@ -41,38 +40,17 @@ def _find_pcf_cli(configured_path: str | None) -> Path | None:
     return None
 
 
-def _project_center_to_pano(
-    box: list[float],
-    intrinsics,
-    pano_w: int,
-    pano_h: int,
-) -> tuple[float, float] | None:
-    """Project the center of a perspective bounding box onto the equirectangular panorama."""
-    x, y, w, h = box
-    px = x + w / 2.0
-    py = y + h / 2.0
-
-    scale_x = intrinsics.color_width / intrinsics.width if intrinsics.width else 1.0
-    scale_y = intrinsics.color_height / intrinsics.height if intrinsics.height else 1.0
-    fx = intrinsics.fx * scale_x
-    fy = intrinsics.fy * scale_y
-    cx = intrinsics.px * scale_x
-    cy = intrinsics.py * scale_y
-
-    x_cam = (px - cx) / fx
-    y_cam = -((py - cy) / fy)
-    z_cam = 1.0
-    n = math.sqrt(x_cam ** 2 + y_cam ** 2 + z_cam ** 2)
-    x_cam /= n
-    y_cam /= n
-    z_cam /= n
-
-    lon = math.atan2(x_cam, z_cam)
-    lat = math.atan2(y_cam, math.sqrt(x_cam ** 2 + z_cam ** 2))
-
-    u = lon / (2.0 * math.pi) + 0.5
-    v = 0.5 - lat / math.pi
-    return u, v
+def _region_type_at(x: float, z: float, region_map, grid_size_meters: float) -> str:
+    """Look up the top-down REGION_MAP label at world-space (x, z)."""
+    h, w = region_map.shape
+    half = grid_size_meters / 2.0
+    col = int((x + half) / grid_size_meters * w)
+    row = int((z + half) / grid_size_meters * h)
+    if 0 <= row < h and 0 <= col < w:
+        type_idx = int(round(float(region_map[row, col])))
+        if 0 <= type_idx < len(RegionType):
+            return RegionType(type_idx).label
+    return RegionType.OTHER.label
 
 
 def _run_pcf_cli(
@@ -101,37 +79,6 @@ def _run_pcf_cli(
         return None
 
 
-def _region_type_for_point(
-    u: float,
-    v: float,
-    pano_w: int,
-    pano_h: int,
-    regions: PanoramaRegionResult,
-) -> str:
-    """Return the coarse region type that contains panorama UV point (u, v)."""
-    px = u * pano_w
-    py = v * pano_h
-
-    # Collect all regions whose bbox contains this point.
-    containing = []
-    for region in regions.regions:
-        rx, ry, rw, rh = region.bbox
-        if rx <= px <= rx + rw and ry <= py <= ry + rh:
-            containing.append(region)
-
-    if containing:
-        # If multiple regions overlap this point, prefer the largest by area.
-        return max(containing, key=lambda r: r.area_fraction).region_type
-
-    # Fall back to nearest centroid.
-    best = min(
-        regions.regions,
-        key=lambda r: (r.centroid[0] - px) ** 2 + (r.centroid[1] - py) ** 2,
-        default=None,
-    )
-    return best.region_type if best is not None else _GLOBAL_REGION
-
-
 class ObjectDistributionStageConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -153,16 +100,20 @@ class ObjectDistributionStage(PipelineStage):
     """
     Computes per-region Voronoi PCF histograms for each distributable object type.
 
-    Projects each object's bounding-box centre onto the equirectangular panorama,
-    assigns it to a coarse region type from PanoramaRegionResult, then calls the
-    `pcf_cli` binary from pattern-synthesis on each (object type, region type) group.
-    Groups with two or more instances get a full PCF histogram; groups with a single
-    instance are recorded as singletons (n_points=1, empty hist) so the presence of
-    the object is preserved. Falls back to a synthetic "global" region when
-    PANORAMA_REGIONS is not in context.
+    Unprojects each object's bounding box to a world-space position (same helper
+    SceneGenerationStage uses to place real objects), looks up its region type from
+    the top-down REGION_MAP at that (x, z), then calls the `pcf_cli` binary from
+    pattern-synthesis on each (object type, region type) group. Groups with two or
+    more instances get a full PCF histogram; groups with a single instance are
+    recorded as singletons (n_points=1, empty hist) so the presence of the object is
+    preserved. Each TypeDistribution also carries its raw exemplar points and
+    footprint sizes (world-space), which DistributionSynthesisStage uses to paint
+    the pattern across the rest of that region type.
 
-    Reads:  ContextKey.OBJECT_CORRELATION, ContextKey.INTRINSICS, ContextKey.PANORAMA,
-            ContextKey.PANORAMA_REGIONS (optional)
+    Reads:  ContextKey.OBJECT_CORRELATION, ContextKey.REGION_MAP,
+            ContextKey.HEIGHT_MAP_PARAMS, ContextKey.INTRINSICS, ContextKey.EXTRINSICS,
+            ContextKey.DEPTH, ContextKey.INPUT, ContextKey.PANORAMA,
+            ContextKey.PANORAMA_DEPTH (optional)
     Writes: ContextKey.OBJECT_DISTRIBUTION (ObjectDistributionResult)
     Config: pcf_cli_path (str, optional) — override binary location
             bin_count    (int, default 48)
@@ -192,16 +143,21 @@ class ObjectDistributionStage(PipelineStage):
             )
             return context
 
-        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
-        panorama = context.input_panorama(ContextKey.PANORAMA)
-        if intrinsics is None or panorama is None:
-            self.log_info("Intrinsics or panorama missing, skipping")
+        region_map_depth = context.input_depth(ContextKey.REGION_MAP)
+        if region_map_depth is None:
+            self.log_info("No region map, skipping")
             return context
+        region_map = region_map_depth.depth
+        grid_size_meters = (context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}).get(
+            "grid_size_meters", 100.0
+        )
 
-        pano_w, pano_h = panorama.size
-        regions = context.input_panorama_regions(ContextKey.PANORAMA_REGIONS)
-        if regions is None:
-            self.log_info("No panorama regions — grouping all objects under 'global'")
+        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        extrinsics = context.input_extrinsics(ContextKey.EXTRINSICS)
+        depth = context.input_depth(ContextKey.DEPTH)
+        input_image = context.input_image(ContextKey.INPUT)
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
 
         distributable_types = [
             obj_type
@@ -215,8 +171,9 @@ class ObjectDistributionStage(PipelineStage):
             context.add_object_distribution(ContextKey.OBJECT_DISTRIBUTION, result)
             return context
 
-        # Collect points per (obj_type, region_type).
+        # Collect points + footprint sizes per (obj_type, region_type), in world XZ meters.
         points_by_group: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        sizes_by_group: dict[tuple[str, str], list[tuple[float, float]]] = {}
         for obj_type in distributable_types:
             grp = correlation.groups[obj_type]
             for idx in grp.indices:
@@ -224,19 +181,32 @@ class ObjectDistributionStage(PipelineStage):
                 box = metadata.get("box")
                 if not box:
                     continue
-                projected = _project_center_to_pano(box, intrinsics, pano_w, pano_h)
-                if projected is None:
+
+                # Same branch selection SceneGenerationStage uses to place real objects.
+                if panorama_depth is not None and panorama is not None:
+                    unprojected = unproject_bbox_equirect(
+                        box, panorama.width, panorama.height,
+                        pano_depth=panorama_depth, extrinsics=extrinsics,
+                    )
+                elif depth is not None and input_image is not None and intrinsics is not None:
+                    unprojected = unproject_bbox(
+                        box, input_image.width, input_image.height,
+                        depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics,
+                    )
+                else:
+                    unprojected = None
+                if unprojected is None:
                     continue
-                u, v = projected
-                region_type = (
-                    _region_type_for_point(u, v, pano_w, pano_h, regions)
-                    if regions is not None
-                    else _GLOBAL_REGION
-                )
-                points_by_group.setdefault((obj_type, region_type), []).append(projected)
+
+                position, width, height = unprojected
+                x, z = float(position[0]), float(position[2])
+                region_type = _region_type_at(x, z, region_map, grid_size_meters)
+                key = (obj_type, region_type)
+                points_by_group.setdefault(key, []).append((x, z))
+                sizes_by_group.setdefault(key, []).append((float(width), float(height)))
 
         if not points_by_group:
-            self.log_info("No objects could be projected onto the panorama")
+            self.log_info("No objects could be unprojected to world space")
             result = ObjectDistributionResult()
             context.add_object_distribution(ContextKey.OBJECT_DISTRIBUTION, result)
             return context
@@ -245,6 +215,7 @@ class ObjectDistributionStage(PipelineStage):
         result = ObjectDistributionResult()
 
         for (obj_type, region_type), points in points_by_group.items():
+            sizes = sizes_by_group[(obj_type, region_type)]
             if len(points) >= _MIN_POINTS:
                 pcf_data = _run_pcf_cli(pcf_cli, points, self._bin_count)
                 if pcf_data is None:
@@ -258,6 +229,8 @@ class ObjectDistributionStage(PipelineStage):
                     bin_count=pcf_data.get("bin_count", self._bin_count),
                     hist=pcf_data.get("hist", []),
                     pair_count=pcf_data.get("pair_count", 0),
+                    points=points,
+                    sizes=sizes,
                 )
                 self.log_info(
                     f"  {obj_type} [{region_type}]: {dist.n_points} points, "
@@ -272,6 +245,8 @@ class ObjectDistributionStage(PipelineStage):
                     bin_count=self._bin_count,
                     hist=[],
                     pair_count=0,
+                    points=points,
+                    sizes=sizes,
                 )
                 self.log_info(f"  {obj_type} [{region_type}]: 1 instance (singleton)")
 

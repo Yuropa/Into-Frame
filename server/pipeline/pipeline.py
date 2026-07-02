@@ -38,6 +38,7 @@ from pipeline.recognize.recognize import RecognizeAnythingStage
 from pipeline.object_correlation.object_correlation import ObjectCorrelationStage
 from pipeline.object_detection.object_detection import ObjectDetectionStage
 from pipeline.object_distribution.object_distribution import ObjectDistributionStage
+from pipeline.distribution_synthesis.distribution_synthesis import DistributionSynthesisStage
 from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
 from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguration
 from pipeline.region_map.region_map_refinement import RegionMapRefinementStage, RegionMapRefinementConfiguration
@@ -325,6 +326,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectCorrelationStage": ObjectCorrelationStage,
     "ObjectDetectionStage": ObjectDetectionStage,
     "ObjectDistributionStage": ObjectDistributionStage,
+    "DistributionSynthesisStage": DistributionSynthesisStage,
     "LinearStructureStage": LinearStructureStage,
     "TerrainReconstructionStage": TerrainReconstructionStage,
     "TerrainNoiseRefinementStage": TerrainNoiseRefinementStage,

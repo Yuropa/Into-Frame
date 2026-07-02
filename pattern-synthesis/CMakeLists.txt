@@ -46,6 +46,16 @@ add_executable(pcf_cli
   src/sampling.cpp
 )
 
+add_executable(synthesize_cli
+  src/synthesize_cli.cpp
+  src/lloyd_relaxation.cpp
+  src/sampling.cpp
+  python_lib/synthesis_core.cpp
+)
+# synthesis_core.h (python_lib/) includes lloyd_relaxation.h (src/) — both dirs
+# must be on the include path, same as python_lib/CMakeLists.txt's pybind target.
+target_include_directories(synthesize_cli PRIVATE src python_lib)
+
 find_package(CGAL REQUIRED)
 
 # Apple Clang often needs explicit libomp hints.
@@ -79,4 +89,9 @@ message(STATUS "OpenMP enabled")
 target_link_libraries(pcf_cli PRIVATE igl::core CGAL::CGAL)
 if(OpenMP_CXX_FOUND)
   target_link_libraries(pcf_cli PRIVATE OpenMP::OpenMP_CXX)
+endif()
+
+target_link_libraries(synthesize_cli PRIVATE igl::core CGAL::CGAL)
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(synthesize_cli PRIVATE OpenMP::OpenMP_CXX)
 endif()
