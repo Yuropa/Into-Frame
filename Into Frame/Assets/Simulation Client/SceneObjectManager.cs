@@ -203,11 +203,17 @@ public class SceneObjectManager : MonoBehaviour
             return;
         }
 
-        var go = Instantiate(billboardPrefab, ToVec3(data.position), ToQuat(data.rotation));
+        var go = Instantiate(billboardPrefab);
         go.name = $"[billboard] {data.id[..6]}";
-        go.transform.localScale = ToVec3(data.scale);
+        // Positions from the server are relative to sceneRoot (which the client may
+        // shift vertically to place the whole scene) — parent first, worldPositionStays:
+        // false, then set local transform directly so we don't depend on sceneRoot's
+        // current offset at spawn time.
         if (sceneRoot != null)
-            go.transform.SetParent(sceneRoot.transform, worldPositionStays: true);
+            go.transform.SetParent(sceneRoot.transform, worldPositionStays: false);
+        go.transform.localPosition = ToVec3(data.position);
+        go.transform.localRotation = ToQuat(data.rotation);
+        go.transform.localScale    = ToVec3(data.scale);
         go.AddComponent<ServerObjectTag>().serverId = data.id;
 
         _tracked[data.id] = new TrackedObject
@@ -225,11 +231,15 @@ public class SceneObjectManager : MonoBehaviour
     private void SpawnMeshImmediate(SceneObject data)
     {
         var container = new GameObject($"[mesh] {data.id[..6]} ({data.name})");
-        container.transform.position   = ToVec3(data.position);
-        container.transform.rotation   = ToQuat(data.rotation);
-        container.transform.localScale = ToVec3(data.scale);
+        // Positions from the server are relative to sceneRoot (which the client may
+        // shift vertically to place the whole scene) — parent first, worldPositionStays:
+        // false, then set local transform directly so we don't depend on sceneRoot's
+        // current offset at spawn time.
         if (sceneRoot != null)
-            container.transform.SetParent(sceneRoot.transform, worldPositionStays: true);
+            container.transform.SetParent(sceneRoot.transform, worldPositionStays: false);
+        container.transform.localPosition = ToVec3(data.position);
+        container.transform.localRotation = ToQuat(data.rotation);
+        container.transform.localScale    = ToVec3(data.scale);
         container.AddComponent<ServerObjectTag>().serverId = data.id;
 
         _tracked[data.id] = new TrackedObject

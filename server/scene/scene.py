@@ -11,6 +11,8 @@ class Scene:
         self.far_clip_plane = 100.0
         self.skybox_rotation = 0.0
         self.camera_height = 0.0  # eye height above ground in metres; 0 = not set
+        self.eye_height_meters = 1.8  # target world-space depth of the terrain center below the viewer
+        self.terrain_center_y = 0.0   # world-space Y of the terrain surface directly below the capture point
         self.extrinsics = CameraExtrinsics.identity()
         self.objects = []
         self.skybox = ""
@@ -31,6 +33,8 @@ class Scene:
             "skybox":         self.skybox,
             "skyboxRotation": self.skybox_rotation,
             "cameraHeight":   self.camera_height,
+            "eyeHeightMeters": self.eye_height_meters,
+            "terrainCenterY":  self.terrain_center_y,
             "lighting":       self.lighting.encode() if self.lighting is not None else None,
         }
 
@@ -48,6 +52,8 @@ class Scene:
         obj.skybox          = data["skybox"]
         obj.skybox_rotation = data.get("skyboxRotation", 0.0)
         obj.camera_height   = data.get("cameraHeight", 0.0)
+        obj.eye_height_meters = data.get("eyeHeightMeters", 1.8)
+        obj.terrain_center_y  = data.get("terrainCenterY", 0.0)
         lighting_data       = data.get("lighting")
         obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
         return obj

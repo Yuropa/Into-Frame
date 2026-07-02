@@ -1,3 +1,8 @@
+from typing import Any
+from logging import Logger
+
+import torch
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
@@ -6,6 +11,23 @@ from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 import numpy as np
+
+
+class SceneGenerationConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        eye_height_meters: float = 1.8,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Sent to the client as the target world-space depth of the terrain
+        # center below the viewer; the client pushes the whole scene down to match.
+        self.eye_height_meters = eye_height_meters
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -49,9 +71,13 @@ class SceneGenerationStage(PipelineStage):
     Output key (SemanticKey.OUTPUT) → ContextKey.SCENE (Scene)
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    def __init__(self, config: SceneGenerationConfiguration) -> None:
         super().__init__(config)
         self._gen = None
+
+    @classmethod
+    def config_class(cls) -> type[SceneGenerationConfiguration]:
+        return SceneGenerationConfiguration
 
     def _resolved_keys(self):
         return self.keys({
@@ -81,6 +107,11 @@ class SceneGenerationStage(PipelineStage):
         # camera_height = world Y of the camera = terrain_y_at_nadir + camera_height_meters.
         # Using the extrinsics translation directly is equivalent and simpler.
         scene.camera_height = float(extrinsics.translation[1]) if extrinsics is not None else 0.0
+
+        scene.eye_height_meters = self.config.eye_height_meters
+        if terrain_mesh is not None:
+            terrain_center_y = _mesh_y_at(0.0, 0.0, terrain_mesh)
+            scene.terrain_center_y = float(terrain_center_y) if terrain_center_y is not None else 0.0
 
         # Rotate the skybox to align the panorama center with the camera's forward direction.
         # The panorama center (theta=0) = +Z in camera space; the extrinsics rotation tells
@@ -138,12 +169,17 @@ class SceneGenerationStage(PipelineStage):
                     self.advance_progress(generation_task)
                     continue
 
-                # Snap the object's base to the terrain surface.
-                place_y = position[1]
+                # Snap the object's base to the terrain surface. The Y offset that
+                # lands the *bottom* of the object on the terrain depends on the
+                # object's actual placed vertical extent, which differs between the
+                # billboard (scaled exactly to `height`) and category-mesh (scaled
+                # uniformly to `mesh_scale`) branches below — so it's resolved per
+                # branch rather than once here.
+                terrain_y = None
                 if terrain_mesh is not None:
                     terrain_y = _mesh_y_at(position[0], position[2], terrain_mesh)
-                    if terrain_y is not None:
-                        place_y = terrain_y + height / 2.0
+
+                place_y = terrain_y + height / 2.0 if terrain_y is not None else position[1]
 
                 context.add_object(f"metadata_{idx}", {
                     **(metadata or {}),
@@ -158,9 +194,10 @@ class SceneGenerationStage(PipelineStage):
                     # The mesh is already normalised to a 1×1 box; scale uniformly
                     # so it fits the depth-estimated world dimensions.
                     mesh_scale = float(min(width, height))
+                    mesh_place_y = terrain_y + mesh_scale / 2.0 if terrain_y is not None else position[1]
                     mesh_key = f"category_mesh_{cls}"
                     self.log_info(f"Creating mesh for {idx} ({cls})")
-                    mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=place_y, z=position[2])
+                    mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
                     mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(mesh_scale, mesh_scale, mesh_scale)
                     mesh_obj.name = mesh_key

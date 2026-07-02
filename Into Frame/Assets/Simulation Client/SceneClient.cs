@@ -256,6 +256,8 @@ public class SceneParams
     public string skybox;
     public float  skyboxRotation;
     public float  cameraHeight;
+    public float  eyeHeightMeters;
+    public float  terrainCenterY;
 
     public SceneObject[]    objects;
     public ExtrinsicsParams extrinsics;

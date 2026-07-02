@@ -3421,7 +3421,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::SceneParamManager
   directionalLight: {fileID: 1815318736}
   camera: {fileID: 877652245}
-  xrOrigin: {fileID: 1765174497}
+  sceneRoot: {fileID: 484500748}
   skybox: {fileID: 341509118}
   environmentLighting: {fileID: 1862969864}
 --- !u!114 &1862969861

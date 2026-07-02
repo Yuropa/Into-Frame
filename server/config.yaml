@@ -211,6 +211,8 @@ stages:
     stage: SceneGenerationStage
     keys:
       panorama: panorama_sky
+    eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
+                              # sent to the client, which pushes the whole scene down to match
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting
