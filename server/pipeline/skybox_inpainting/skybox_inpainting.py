@@ -98,10 +98,10 @@ def _time_of_day_label(sun_el_deg: float) -> str:
 
 def _sky_prompt(time_label: str) -> str:
     return (
-        f"photorealistic equirectangular 360-degree sky panorama, {time_label}, "
-        "seamless sky with natural clouds and atmospheric haze, only sky and clouds, "
-        "no ground, no horizon line, no terrain, no landscape, no objects, "
-        "consistent natural lighting, ultra detailed, high quality"
+        f"A photorealistic equirectangular 360-degree view of the upper atmosphere, {time_label}. "
+        "Looking straight up into a seamless daytime sky filled with soft, natural clouds "
+        "and realistic atmospheric haze. Clean blue sky expanse, cirrus and cumulus cloud textures, "
+        "uniform lighting, ultra-detailed, high quality, panoramic backdrop."
     )
 
 
