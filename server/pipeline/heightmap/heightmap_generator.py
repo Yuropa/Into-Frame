@@ -2,9 +2,8 @@ import json
 import warnings
 import numpy as np
 import PIL.Image
-from collections import deque
 from pathlib import Path
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -284,11 +283,22 @@ class HeightMapGenerator:
         max_step: float,
     ) -> np.ndarray:
         """
-        BFS from the grid centre outward; returns a bool mask of accepted cells.
+        Connected-component ground mask, seeded from the grid centre.
 
-        A neighbour is accepted if it has data AND its height does not differ from
-        the current cell by more than max_step.  Empty cells (NaN) act as barriers
-        — sky-masked regions near the horizon naturally stop the fill.
+        A cell is walkable if it has data and its 3x3 neighbourhood height range
+        (max - min) does not exceed max_step -- i.e. no discontinuity passes
+        through it. Empty cells (NaN) can never bridge a gap, so they are excluded
+        from both the max and min before the range is taken (sky-masked regions
+        near the horizon naturally stop the fill, as before). The accepted region
+        is then the walkable component connected to the seed.
+
+        Uses 8-connectivity rather than a 4-connected BFS: 4-connectivity measures
+        reachability in Manhattan distance, which grows a diamond/star from the
+        seed regardless of the actual terrain -- purely a grid-connectivity
+        artifact, which is why it showed up in every heightmap_observed_mask.png.
+        8-connectivity approximates a circular ball much more closely, and
+        scipy.ndimage's compiled filters replace an O(H*W) pure-Python BFS with a
+        handful of vectorised passes.
         """
         grid_h, grid_w = height_map.shape
         has_data = ~np.isnan(height_map)
@@ -304,26 +314,19 @@ class HeightMapGenerator:
             best = int(np.argmin(dist))
             start_r, start_c = int(ys[best]), int(xs[best])
 
-        accepted = np.zeros((grid_h, grid_w), dtype=bool)
-        visited  = np.zeros((grid_h, grid_w), dtype=bool)
-        queue = deque()
-        queue.append((start_r, start_c))
-        visited[start_r, start_c] = True
-        accepted[start_r, start_c] = True
+        # -inf/+inf for missing cells so they never win the max/min at a boundary.
+        local_max = maximum_filter(np.where(has_data, height_map, -np.inf), size=3)
+        local_min = minimum_filter(np.where(has_data, height_map,  np.inf), size=3)
+        walkable = has_data & (local_max - local_min <= max_step)
+        walkable[start_r, start_c] = True  # the seed is always accepted
 
-        while queue:
-            r, c = queue.popleft()
-            cur_h = height_map[r, c]
+        structure = generate_binary_structure(2, 2)  # 8-connectivity
+        labels, _ = label(walkable, structure=structure)
+        seed_label = labels[start_r, start_c]
+        if seed_label == 0:
+            return np.zeros((grid_h, grid_w), dtype=bool)
 
-            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < grid_h and 0 <= nc < grid_w and not visited[nr, nc]:
-                    visited[nr, nc] = True
-                    if has_data[nr, nc] and abs(height_map[nr, nc] - cur_h) <= max_step:
-                        accepted[nr, nc] = True
-                        queue.append((nr, nc))
-
-        return accepted
+        return labels == seed_label
 
     @staticmethod
     def _fill_from_panorama_depth(
