@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 
 def colorize_depth(depth_obj: "Depth") -> "PILImage.Image":
-    """Convert a Depth object to a colourised PIL image (inferno colormap, near=bright)."""
+    """Convert a Depth object to a colourised PIL image (viridis colormap, near=bright)."""
     from PIL import Image as PILImage
 
     return PILImage.fromarray(depth_obj.color(), mode="RGB")

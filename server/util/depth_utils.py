@@ -76,7 +76,7 @@ class Depth:
         else:
             depth = np.zeros_like(depth)
 
-        rgba = cm.inferno(depth)
+        rgba = cm.viridis(depth)
         self._color = (rgba[:, :, :3] * 255).astype(np.uint8)  # (H, W, 3)
         return self._color
 
