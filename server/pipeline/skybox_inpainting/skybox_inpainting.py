@@ -1,3 +1,6 @@
+from typing import Any
+from logging import Logger
+import torch
 import numpy as np
 from PIL import Image as PILImage
 from scipy.ndimage import (
@@ -18,6 +21,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
+from util.seam_repair import heal_seam
 
 
 def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.ndarray:
@@ -173,20 +177,41 @@ def _build_gradient_sky(
     return bin_colors[bin_idx].astype(np.uint8)
 
 
+class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        seam_heal_width_px: int = 40,
+        seam_heal_method: str = "telea",
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.seam_heal_width_px = seam_heal_width_px
+        self.seam_heal_method = seam_heal_method
+
+
 class SkyboxInpaintingStage(PipelineStage):
     """
-    Fills non-sky regions of the panorama with a two-pass sky:
+    Fills non-sky regions of the panorama with a three-pass sky:
 
       1. Procedural solar gradient derived from the real sky pixels and sun
          position estimated from the LuxDiT lighting output (or sky luminance
-         peak as fallback).  Gives the correct time-of-day structure.
+         peak as fallback).  Gives the correct time-of-day structure. Used only
+         as the conditioning image for pass 2, not part of the final output.
 
       2. FLUX inpainting (with the FLUX_DEV_PANORAMA_LORA_2 LoRA) on top of the
          gradient to add cloud and atmospheric detail, prompted with the
-         time-of-day derived from sun elevation.
+         time-of-day derived from sun elevation. This is the final result —
+         no further blending is applied.
 
-      3. Blended result: gradient at the sky boundary (smooth seam), FLUX
-         weighted up by distance from the boundary into the fill region.
+      3. Seam healing (util.seam_repair.heal_seam): a `seam_heal_width_px`-wide
+         band straddling the sky/terrain boundary is content-aware inpainted
+         (Photoshop Spot Healing Brush-style) to smooth over any residual
+         exposure or texture mismatch at the join.
 
     Reads:
       ContextKey.PANORAMA                — equirectangular source panorama
@@ -199,7 +224,11 @@ class SkyboxInpaintingStage(PipelineStage):
       ContextKey.PANORAMA_SKY      — sky-complete equirectangular panorama (Panorama)
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls) -> type[SkyboxInpaintingConfiguration]:
+        return SkyboxInpaintingConfiguration
+
+    def __init__(self, config: SkyboxInpaintingConfiguration) -> None:
         super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
@@ -232,9 +261,9 @@ class SkyboxInpaintingStage(PipelineStage):
         raw_sky_mask = (type_arr == int(RegionType.SKY))
         sky_mask = _clean_sky_mask(raw_sky_mask)
 
-        if self.output is not None:
+        if self.temp is not None:
             raw_mask_pil = PILImage.fromarray((raw_sky_mask * 255).astype(np.uint8), mode="L")
-            raw_mask_pil.save(self.output / "panorama_sky_mask_raw.png")
+            raw_mask_pil.save(self.temp / "panorama_sky_mask_raw.png")
 
         sky_mask_pil = PILImage.fromarray((sky_mask * 255).astype(np.uint8), mode="L")
         context.add_image(ContextKey.PANORAMA_SKY_MASK, Image(sky_mask_pil))
@@ -298,8 +327,8 @@ class SkyboxInpaintingStage(PipelineStage):
             + (1.0 - sky_alpha3) * gradient.astype(np.float32)
         ).clip(0, 255).astype(np.uint8)
 
-        if self.output is not None:
-            PILImage.fromarray(gradient_composite).save(self.output / "gradient.png")
+        if self.temp is not None:
+            PILImage.fromarray(gradient_composite).save(self.temp / "gradient.png")
 
         self.advance_progress(task)
 
@@ -364,31 +393,29 @@ class SkyboxInpaintingStage(PipelineStage):
         if fw != w or fh != h:
             flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
 
-        if self.output is not None:
-            flux_pil.save(self.output / "flux.png")
+        if self.temp is not None:
+            flux_pil.save(self.temp / "flux.png")
 
         self.advance_progress(task)
 
-        # --- Pass 3: blend gradient and FLUX ---
-        # At the sky boundary: pure gradient (smooth seam).
-        # Into the fill region: ramp up to FLUX weight (capped at 0.85 so
-        # gradient structure always underlies the FLUX texture).
-        max_blend_dist = max(w, h) * 0.15
-        flux_weight = np.clip(dist_out / max_blend_dist, 0.0, 0.85).astype(np.float32)
-        # Zero weight inside real sky
-        flux_weight[sky_mask] = 0.0
+        # FLUX inpainting result is the final output directly — no further
+        # blending against the gradient (it only muddied the result with the
+        # gradient's coarse angular-bin banding without adding anything FLUX
+        # hadn't already accounted for).
+        result_pil = flux_pil
 
-        flux_arr = np.array(flux_pil).astype(np.float32)
-        grad_arr = gradient_composite.astype(np.float32)
-
-        w3 = flux_weight[:, :, None]
-        result_fill = (w3 * flux_arr + (1.0 - w3) * grad_arr).clip(0, 255).astype(np.uint8)
-
-        # Restore original sky pixels on top
-        result_arr = result_fill.copy()
-        result_arr[sky_mask] = source_arr[sky_mask]
-
-        result_pil = PILImage.fromarray(result_arr)
+        # --- Pass 3: heal the sky/terrain seam ---
+        # FLUX is conditioned on the real sky right up to its boundary, but its
+        # own exposure/colour grading rarely matches exactly, leaving a visible
+        # ring at the join. Content-aware inpaint a band straddling that edge
+        # (equirect-wrap aware) to blend it away.
+        result_pil = heal_seam(
+            result_pil,
+            sky_mask,
+            band_width_px=self.config.seam_heal_width_px,
+            wrap_horizontal=True,
+            method=self.config.seam_heal_method,
+        )
 
         if self.output is not None:
             result_pil.save(self.output / "panorama_sky.png")
