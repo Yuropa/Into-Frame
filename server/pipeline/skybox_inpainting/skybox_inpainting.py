@@ -409,9 +409,16 @@ class SkyboxInpaintingStage(PipelineStage):
         # own exposure/colour grading rarely matches exactly, leaving a visible
         # ring at the join. Content-aware inpaint a band straddling that edge
         # (equirect-wrap aware) to blend it away.
+        #
+        # Heal around flux_mask_arr's boundary, not sky_mask's: the shroud
+        # dilation above (~shroud_radius px) pushed the actual FLUX paint
+        # boundary that far into the sky, so healing around the original
+        # sky_mask edge misses the real seam entirely once shroud_radius
+        # exceeds half the heal band width (true on any panorama taller than
+        # ~500px at the default band_width_px=40).
         result_pil = heal_seam(
             result_pil,
-            sky_mask,
+            ~flux_mask_arr,
             band_width_px=self.config.seam_heal_width_px,
             wrap_horizontal=True,
             method=self.config.seam_heal_method,
