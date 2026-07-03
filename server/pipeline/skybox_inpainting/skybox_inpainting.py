@@ -21,7 +21,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from util.seam_repair import heal_seam
+from util.seam_repair import heal_seam, heal_wrap_seam
 
 
 def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.ndarray:
@@ -388,7 +388,6 @@ class SkyboxInpaintingStage(PipelineStage):
             guidance_scale=4.0,
             seed=self.seed,
         )
-        flux.close()
 
         if fw != w or fh != h:
             flux_pil = flux_pil.resize((w, h), PILImage.LANCZOS)
@@ -403,6 +402,44 @@ class SkyboxInpaintingStage(PipelineStage):
         # gradient's coarse angular-bin banding without adding anything FLUX
         # hadn't already accounted for).
         result_pil = flux_pil
+
+        # --- Pass 2.5: heal the panorama's own left/right wrap seam ---
+        # FLUX generated the cloud/atmosphere fill across the whole canvas in
+        # one shot, with no explicit awareness that column 0 and column W-1
+        # are the same seam in the final 360° view — so they can disagree.
+        # Roll the seam to the center of the frame, inpaint across it there,
+        # then roll back. Restricted to flux_mask_arr so only the region we
+        # just generated is touched; real photographed sky pixels near the
+        # column-0 border are left alone. Runs base FLUX (no LoRA) for this
+        # touch-up — the panorama LoRA's geometric bias is for the main
+        # generation, not a small seam patch.
+        flux.set_lora_enabled(False)
+
+        def _sky_seam_inpaint(rolled_img: PILImage.Image, mask_img: PILImage.Image) -> PILImage.Image:
+            return flux.inpaint(
+                rolled_img,
+                mask_img,
+                temp_path=self.temp,
+                prompt=prompt,
+                num_inference_steps=30,
+                guidance_scale=4.0,
+                strength=0.7,
+                seed=self.seed + 1,
+            )
+
+        result_pil = heal_wrap_seam(
+            result_pil,
+            inpaint_fn=_sky_seam_inpaint,
+            seam_width_px=96,
+            feather_px=12,
+            eligible_mask=flux_mask_arr,
+            debug_dir=self.temp,
+            debug_prefix="sky_wrap_seam",
+        )
+        flux.close()
+
+        if self.temp is not None:
+            result_pil.save(self.temp / "sky_wrap_seam_fixed.png")
 
         # --- Pass 3: heal the sky/terrain seam ---
         # FLUX is conditioned on the real sky right up to its boundary, but its

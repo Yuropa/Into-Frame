@@ -14,6 +14,7 @@ import torch
 from remote_connection.remote_server import RemoteServer
 from diffusers import FluxInpaintPipeline
 from util.device_utils import offload_pipeline
+from util.seam_repair import heal_wrap_seam
 from transformers import CLIPVisionModelWithProjection
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_dir, lora_weight_name, lora_prompt_prefix
 
@@ -172,15 +173,6 @@ def _make_canvas(
     return canvas, mask
 
 
-def _make_seam_mask(equi_size: tuple, seam_width: int = 96) -> Image.Image:
-    w, h = equi_size
-    mask = Image.new("L", equi_size, 0)
-    seam_box = Image.new("L", (seam_width, h), 255)
-    mask.paste(seam_box, ((w - seam_width) // 2, 0))
-    mask = mask.filter(ImageFilter.GaussianBlur(radius=12))
-    return mask
-
-
 def _enforce_wrap_continuity(img: Image.Image, blend_px: int = 48) -> Image.Image:
     """Cross-fade the left/right boundary columns so the panorama wraps with zero discontinuity."""
     arr = np.array(img).astype(np.float32)
@@ -200,13 +192,6 @@ def _enforce_wrap_continuity(img: Image.Image, blend_px: int = 48) -> Image.Imag
     arr[:, w - blend_px:]  = right_strip * (1 - t[:, ::-1]) + avg[:, ::-1] * t[:, ::-1]
 
     return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
-
-
-def _shift_horizon(img: Image.Image, pct: float = 0.5) -> Image.Image:
-    arr = np.array(img)
-    shift_amt = int(arr.shape[1] * pct)
-    shifted = np.roll(arr, shift_amt, axis=1)
-    return Image.fromarray(shifted)
 
 
 def _lab_color_transfer(
@@ -357,29 +342,44 @@ class PanoGenerator(RemoteServer):
         pass1.save(str(temp_path / "02_pass1_initial.png"))
 
         # --- Pass 2 — Seam Stitch Fix ---
+        # Roll the seam (column 0 / column W-1) to the center of the frame and
+        # inpaint across it there — see util.seam_repair.heal_wrap_seam. Runs
+        # plain base FLUX (LoRA disabled) for this touch-up: the panorama
+        # LoRA's structural bias is for the main generation in Pass 1, not a
+        # small seam patch, and fighting it here just makes the patch fight
+        # the very seam it's supposed to blend away.
         self.report_progress(0.60, "Fixing panorama edge seams…")
-        
-        shifted_pass1 = _shift_horizon(pass1, pct=0.5)
-        seam_mask = _make_seam_mask(equi_size, seam_width=96) # Kept tighter to preserve clarity
-        
-        with torch.inference_mode():
-            fixed_shifted: Image.Image = self.base_pipeline(
-                prompt_embeds=prompt_embeds,
-                pooled_prompt_embeds=pooled_prompt_embeds,
-                ip_adapter_image=input_image,
-                image=shifted_pass1,
-                mask_image=seam_mask,
-                strength=0.70,  # Lower strength protects details from blurring
-                height=equi_size[1],
-                width=equi_size[0],
-                guidance_scale=3.5,
-                num_inference_steps=25,
-                output_type="pil",
-                generator=generator,
-            ).images[0]
 
-        pass2 = _shift_horizon(fixed_shifted, pct=-0.5)
+        self.base_pipeline.set_adapters(["pano"], adapter_weights=[0.0])
+
+        def _seam_inpaint(rolled_img: Image.Image, mask_img: Image.Image) -> Image.Image:
+            with torch.inference_mode():
+                return self.base_pipeline(
+                    prompt_embeds=prompt_embeds,
+                    pooled_prompt_embeds=pooled_prompt_embeds,
+                    ip_adapter_image=input_image,
+                    image=rolled_img,
+                    mask_image=mask_img,
+                    strength=0.70,  # Lower strength protects details from blurring
+                    height=equi_size[1],
+                    width=equi_size[0],
+                    guidance_scale=3.5,
+                    num_inference_steps=25,
+                    output_type="pil",
+                    generator=generator,
+                ).images[0]
+
+        pass2 = heal_wrap_seam(
+            pass1,
+            inpaint_fn=_seam_inpaint,
+            seam_width_px=96,  # Kept tighter to preserve clarity
+            feather_px=12,
+            debug_dir=temp_path,
+            debug_prefix="03_seam",
+        )
         pass2.save(str(temp_path / "04_seams_fixed.png"))
+
+        self.base_pipeline.set_adapters(["pano"], adapter_weights=[1.0])
 
         # Offload pipeline out of CUDA
         self.base_pipeline.transformer.to("cpu")

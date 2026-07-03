@@ -28,6 +28,8 @@ class InPaintingFlux:
             torch_dtype=torch_dtype
         )
 
+        self.lora_scale = lora_scale
+        self._has_lora = lora_type is not None
         if lora_type is not None:
             self.pipeline.load_lora_weights(
                 str(checkpoints_path() / lora_checkpoint_dir(lora_type)),
@@ -46,6 +48,17 @@ class InPaintingFlux:
     @classmethod
     def model_names(cls, lora_type: PanoramaLoraType | None = None) -> list[str]:
         return [lora_base_model(lora_type) if lora_type is not None else FILL_MODEL_ID]
+
+    def set_lora_enabled(self, enabled: bool) -> None:
+        """Toggle the loaded LoRA on/off without reloading the pipeline.
+
+        No-op when this instance has no LoRA loaded (plain FluxFillPipeline).
+        Used to run a plain-base-model pass (e.g. seam repair) on a pipeline
+        that otherwise generates with a panorama/style LoRA active.
+        """
+        if not self._has_lora:
+            return
+        self.pipeline.set_adapters(["pano"], adapter_weights=[self.lora_scale if enabled else 0.0])
 
     def inpaint(
         self,

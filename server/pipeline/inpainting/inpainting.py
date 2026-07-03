@@ -71,5 +71,11 @@ class InPainting:
             seed=seed,
         )
     
+    def set_lora_enabled(self, enabled: bool) -> None:
+        """Toggle a loaded LoRA on/off (FLUX only; no-op for LaMa or a LoRA-less FLUX)."""
+        set_fn = getattr(self.generator, "set_lora_enabled", None)
+        if set_fn is not None:
+            set_fn(enabled)
+
     def close(self):
         self.generator.close()
