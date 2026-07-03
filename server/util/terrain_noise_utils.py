@@ -20,7 +20,7 @@ constraint, converted from PyTorch to NumPy, adapted API to match this project.
 """
 
 import numpy as np
-from scipy.ndimage import zoom
+from scipy.ndimage import gaussian_filter, zoom
 
 
 def diffuse_heightmap(
@@ -166,3 +166,86 @@ def inpaint_noise_multiscale(
 
     # Restore known values exactly — diffusion must not drift them.
     return np.where(known_mask, heightmap, ZI).astype(np.float32)
+
+
+def ridge_chain_jaggedness_map(
+    chains: list,
+    H: int,
+    W: int,
+    grid_size_meters: float,
+    window_m: float = 20.0,
+    spread_sigma_m: float = 15.0,
+    ref_low: float = 0.05,
+    ref_high: float = 0.20,
+) -> np.ndarray:
+    """
+    Build a (H, W) float32 [0, 1] map of local ridge-chain jaggedness, diffused
+    away from each chain's silhouette. 0 = no chain coverage or a smooth profile,
+    1 = maximally jagged.
+
+    For distant mountains beyond direct depth range, the ridge silhouette's own
+    up/down variation is the only available steepness signal — there's no
+    per-pixel ground observation to measure a slope from, unlike terrain close
+    to the camera. This is shared between TerrainNoiseRefinementStage's peak
+    sharpening and TerrainReconstructionStage's cliff-strength mask, since both
+    need the same "how jagged is this stretch of ridgeline" score.
+
+    For each chain:
+      1. Arc-length-parameterise the XZ path and resample Y to 1-sample/metre.
+      2. Slide a window of width window_m metres along the resampled Y profile;
+         at each step score local jaggedness as std(diff(Y_win)) / range(Y_win).
+      3. Project each sample point (X, Z) to its heightmap pixel and splat the
+         jaggedness score there weighted by 1.
+
+    All splatted values are then Gaussian-spread by spread_sigma_m metres so
+    the influence diffuses smoothly away from the ridgeline. Pixels with no
+    chain coverage are 0.
+    """
+    half = grid_size_meters / 2.0
+    score_acc  = np.zeros((H, W), dtype=np.float64)
+    weight_acc = np.zeros((H, W), dtype=np.float64)
+
+    for chain in chains:
+        if len(chain) < 4:
+            continue
+        pts = np.asarray(chain, dtype=np.float64)
+        X_c, Y_c, Z_c = pts[:, 0], pts[:, 1], pts[:, 2]
+
+        dxz   = np.sqrt(np.diff(X_c) ** 2 + np.diff(Z_c) ** 2)
+        arc   = np.concatenate([[0.0], np.cumsum(dxz)])
+        total = arc[-1]
+        if total < 1e-6:
+            continue
+
+        n_samples = max(4, int(total))
+        s_uni     = np.linspace(0.0, total, n_samples)
+        Y_uni     = np.interp(s_uni, arc, Y_c)
+        X_uni     = np.interp(s_uni, arc, X_c)
+        Z_uni     = np.interp(s_uni, arc, Z_c)
+
+        half_w = max(2, int(window_m / 2))
+        local_scores = np.empty(n_samples)
+        for i in range(n_samples):
+            lo_i, hi_i = max(0, i - half_w), min(n_samples, i + half_w + 1)
+            Y_win = Y_uni[lo_i:hi_i]
+            y_rng = Y_win.max() - Y_win.min()
+            local_scores[i] = (
+                float(np.std(np.diff(Y_win)) / y_rng)
+                if y_rng > 1e-6 and len(Y_win) >= 3
+                else 0.0
+            )
+
+        t_scores = np.clip((local_scores - ref_low) / (ref_high - ref_low), 0.0, 1.0)
+
+        cols = ((X_uni + half) / grid_size_meters * W).clip(0, W - 1).astype(int)
+        rows = ((Z_uni + half) / grid_size_meters * H).clip(0, H - 1).astype(int)
+        np.add.at(score_acc,  (rows, cols), t_scores)
+        np.add.at(weight_acc, (rows, cols), 1.0)
+
+    spread_px   = max(1.0, spread_sigma_m / grid_size_meters * max(H, W))
+    score_blur  = gaussian_filter(score_acc,  sigma=spread_px)
+    weight_blur = gaussian_filter(weight_acc, sigma=spread_px)
+
+    covered = weight_blur > 1e-6
+    jaggedness = np.where(covered, (score_blur / weight_blur.clip(1e-9)).clip(0.0, 1.0), 0.0)
+    return jaggedness.astype(np.float32)

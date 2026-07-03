@@ -35,6 +35,7 @@ from scipy.sparse.linalg import spsolve
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
+from util.terrain_noise_utils import ridge_chain_jaggedness_map
 
 
 class TerrainReconstructionConfiguration(PipelineStageConfiguration):
@@ -55,6 +56,16 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         lake_y_range_threshold: float = 0.3,
         upsample_noise_amplitude: float = 0.02,
         upsample_noise_octaves: int = 3,
+        # Cliff handling: cliff strength is a [0,1] map combining (a) measured
+        # slope on directly-observed, high-certainty terrain — trustworthy ground
+        # truth, strongest close to the camera — and (b) distant ridge-chain
+        # silhouette jaggedness, the only steepness signal available beyond depth
+        # range. It relaxes the max-slope envelope locally and restores measured
+        # detail the coarse solve would otherwise smooth away.
+        cliff_certainty_threshold: float = 0.35,
+        cliff_slope_angle_low_deg: float = 50.0,
+        cliff_slope_angle_high_deg: float = 75.0,
+        cliff_max_slope_angle_deg: float = 82.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -66,6 +77,10 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.lake_y_range_threshold = lake_y_range_threshold
         self.upsample_noise_amplitude = upsample_noise_amplitude
         self.upsample_noise_octaves = upsample_noise_octaves
+        self.cliff_certainty_threshold = cliff_certainty_threshold
+        self.cliff_slope_angle_low_deg = cliff_slope_angle_low_deg
+        self.cliff_slope_angle_high_deg = cliff_slope_angle_high_deg
+        self.cliff_max_slope_angle_deg = cliff_max_slope_angle_deg
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -108,6 +123,33 @@ class TerrainReconstructionStage(PipelineStage):
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
+        ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
+
+        # ── Cliff mask ───────────────────────────────────────────────────────
+        # measured_cliff: from directly-observed, high-certainty terrain — real
+        # steep gradient in the height map itself is trustworthy ground truth,
+        # and is the dominant signal close to the camera where depth is best.
+        # distant_cliff: ridge-chain silhouette jaggedness, the only steepness
+        # signal available for mountains beyond depth range (no ground samples
+        # to measure a slope from out there).
+        measured_cliff = TerrainReconstructionStage._measured_slope_cliff_strength(
+            heightmap, confidence, grid_size / H,
+            certainty_threshold=cfg.cliff_certainty_threshold,
+            angle_low_deg=cfg.cliff_slope_angle_low_deg,
+            angle_high_deg=cfg.cliff_slope_angle_high_deg,
+        )
+        distant_cliff = ridge_chain_jaggedness_map(ridge_chains, H, W, grid_size)
+        cliff_mask = np.maximum(measured_cliff, distant_cliff).astype(np.float32)
+        context.add_depth(ContextKey.CLIFF_MASK, Depth(cliff_mask))
+        self.log_info(
+            f"Cliff mask: measured {int((measured_cliff > 0.1).sum())} px, "
+            f"distant {int((distant_cliff > 0.1).sum())} px "
+            f"(certainty ≥ {cfg.cliff_certainty_threshold}, "
+            f"{cfg.cliff_slope_angle_low_deg:.0f}–{cfg.cliff_slope_angle_high_deg:.0f}°)"
+        )
+        if self.temp is not None:
+            Depth(cliff_mask).save_debug_image(self.temp / "cliff_mask.png")
+
         # ── Downsample to solve_resolution ────────────────────────────────────
         solve_res = min(cfg.solve_resolution, H, W)
         if solve_res < H:
@@ -141,7 +183,10 @@ class TerrainReconstructionStage(PipelineStage):
         # Foreground chains (close to camera) are already captured by the high-
         # confidence observed terrain; anchoring them would conflict with the
         # rising slope toward the mountains.
-        ridge_chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
+        cliff_mask_s = (
+            nd_zoom(cliff_mask, (H_s / H, W_s / W), order=1) if (H_s, W_s) != (H, W)
+            else cliff_mask
+        ).astype(np.float64)
         min_anchor_m = cfg.ridge_min_anchor_distance * z_half
         n_anchored, n_skipped = 0, 0
 
@@ -175,7 +220,13 @@ class TerrainReconstructionStage(PipelineStage):
         # observed crest heights without assuming any particular cross-sectional
         # shape (Gaussian, parabola, etc.).
         if cfg.ridge_max_slope_angle_deg > 0.0 and n_anchored > 0:
-            max_slope_tan = np.tan(np.radians(cfg.ridge_max_slope_angle_deg))
+            # Spatially-varying envelope angle: talus angle everywhere, ramped up
+            # to cliff_max_slope_angle_deg wherever the cliff mask says this patch
+            # of ridgeline is a steep face rather than a scree slope.
+            envelope_angle = cfg.ridge_max_slope_angle_deg + (
+                cfg.cliff_max_slope_angle_deg - cfg.ridge_max_slope_angle_deg
+            ) * cliff_mask_s
+            max_slope_tan_map = np.tan(np.radians(envelope_angle))
             profile_best = np.full((H_s, W_s), -np.inf)
 
             for raw_chain in ridge_chains:
@@ -197,7 +248,10 @@ class TerrainReconstructionStage(PipelineStage):
                 nearest_elev = crest_elev_map[src[0], src[1]]
                 dist_m = dist_px * cell_size_m
                 # Linear cone: elevation drops at max_slope_tan m/m from the crest.
-                profile = nearest_elev - dist_m * max_slope_tan
+                # The tangent is taken at each destination cell (not the crest), so
+                # steep-marked terrain below/beside the crest still gets the relaxed
+                # cap even though the crest pixel itself may be tame.
+                profile = nearest_elev - dist_m * max_slope_tan_map
                 profile_best = np.maximum(profile_best, profile)
 
             # Pin slope nodes that the envelope places notably above observed terrain.
@@ -211,8 +265,8 @@ class TerrainReconstructionStage(PipelineStage):
             fixed_elev[apply] = profile_best[apply]
             self.log_info(
                 f"Ridge slope envelope: {int(apply.sum())} slope nodes pinned "
-                f"(max_slope={cfg.ridge_max_slope_angle_deg:.0f}°, "
-                f"tan={max_slope_tan:.3f} m/m)"
+                f"(talus={cfg.ridge_max_slope_angle_deg:.0f}°, "
+                f"cliff={cfg.cliff_max_slope_angle_deg:.0f}° where cliff_mask > 0)"
             )
 
         self.advance_progress(task)
@@ -266,6 +320,24 @@ class TerrainReconstructionStage(PipelineStage):
         else:
             new_hm = new_hm_s.astype(np.float32)
 
+        # ── Restore measured cliff detail ──────────────────────────────────────
+        # The solve_resolution downsample + bicubic upsample above smooths away
+        # any steep gradient narrower than a few solve-grid cells, regardless of
+        # how well it was actually observed. Where measured_cliff says a cell is
+        # both directly observed (real depth, not interpolated fill) and genuinely
+        # steep, splice the original native-resolution height back in — that's
+        # real geometry, not something the harmonic solve should be allowed to
+        # flatten. Distant/inferred cliff cells are excluded here since there's
+        # no per-pixel measured value to restore for them.
+        if measured_cliff.any():
+            new_hm = (
+                new_hm * (1.0 - measured_cliff) + heightmap.astype(np.float32) * measured_cliff
+            ).astype(np.float32)
+            self.log_info(
+                f"Cliff restoration: {int((measured_cliff > 0.1).sum())} px reverted "
+                f"to measured elevation"
+            )
+
         # ── Fine-grain noise on the upsampled grid ────────────────────────────
         if cfg.upsample_noise_amplitude > 0.0:
             rng = np.random.default_rng(cfg.seed)
@@ -303,6 +375,42 @@ class TerrainReconstructionStage(PipelineStage):
 
         self.finish_progress(task)
         return context
+
+    @staticmethod
+    def _measured_slope_cliff_strength(
+        heightmap: np.ndarray,
+        confidence: np.ndarray,
+        cell_size_m: float,
+        certainty_threshold: float = 0.35,
+        angle_low_deg: float = 50.0,
+        angle_high_deg: float = 75.0,
+    ) -> np.ndarray:
+        """
+        Depth-measured cliff strength: (H, W) float32 in [0, 1].
+
+        Wherever the observed height map itself carries a genuinely steep local
+        gradient AND that cell was directly observed (certainty above threshold,
+        not solver/interpolation fill), treat the steepness as ground truth —
+        no semantic label needed, and strongest exactly where depth is most
+        reliable: terrain close to the camera.
+
+        angle_low_deg/angle_high_deg define the ramp from "not a cliff" to
+        "fully a cliff"; certainty_threshold gates out cells whose elevation
+        came from interpolation rather than a real depth sample (a sharp edge
+        in inpainted noise is not evidence of a cliff).
+        """
+        gy, gx = np.gradient(heightmap.astype(np.float64), cell_size_m)
+        slope_deg = np.degrees(np.arctan(np.hypot(gx, gy)))
+        strength = np.clip(
+            (slope_deg - angle_low_deg) / max(angle_high_deg - angle_low_deg, 1e-6),
+            0.0, 1.0,
+        )
+        # Soften the certainty gate itself so restoration doesn't leave a hard
+        # seam exactly at the observed/interpolated boundary.
+        observed = gaussian_filter(
+            (confidence >= certainty_threshold).astype(np.float64), sigma=1.0
+        )
+        return (strength * observed).astype(np.float32)
 
     @staticmethod
     def _landlab_harmonic_solve(

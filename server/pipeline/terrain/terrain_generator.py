@@ -22,6 +22,7 @@ class TerrainMeshGenerator:
         n_boundary: int = 12,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
+        noise_blend_floor: float = 0.15,
         noise_seed: int = 42,
         panorama: Optional[Panorama] = None,
         texture: Optional[PIL.Image.Image] = None,
@@ -78,8 +79,12 @@ class TerrainMeshGenerator:
         nc = (col_coords / (w_hm - 1) * 255).clip(0, 255)
         noise_vals = map_coordinates(noise_tex, [nr, nc], order=1, mode="wrap").astype(np.float32)
 
+        # blend ramps from noise_blend_floor at the origin (camera position) up to
+        # 1.0 at the domain corner. A floor of 0 would leave the ground directly
+        # under the user perfectly noise-free, which reads as an artificially flat
+        # disc even where the reconstructed height map itself has real relief.
         r_end = np.hypot(x_half, z_far)
-        blend = (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
+        blend = noise_blend_floor + (1.0 - noise_blend_floor) * (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
         Y_pos += noise_vals * noise_amplitude * blend
 
         # ── Vertex array ──────────────────────────────────────────────────

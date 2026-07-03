@@ -36,6 +36,7 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
+from util.terrain_noise_utils import ridge_chain_jaggedness_map
 
 
 class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
@@ -76,6 +77,10 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         hydro_dt: float = 1000.0,          # timestep per erosion step (conceptual years)
         hydro_n_steps: int = 10,           # number of erosion steps
         hydro_resolution: int = 256,       # downsample to this for flow routing (speed)
+        # Cliff protection: CLIFF_MASK cells (from TerrainReconstructionStage) are
+        # excluded from hillslope diffusion and hydro erosion, and get suppressed
+        # fBm noise, so measured/inferred steep faces survive this stage's smoothing.
+        cliff_noise_suppression: float = 0.85,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.road_blend_weight = road_blend_weight
@@ -97,6 +102,7 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.hydro_dt = hydro_dt
         self.hydro_n_steps = hydro_n_steps
         self.hydro_resolution = hydro_resolution
+        self.cliff_noise_suppression = cliff_noise_suppression
 
 
 class TerrainNoiseRefinementStage(PipelineStage):
@@ -128,6 +134,19 @@ class TerrainNoiseRefinementStage(PipelineStage):
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
+        # Cliff mask (from TerrainReconstructionStage): [0,1] strength combining
+        # measured near-field slope and inferred distant ridge-chain jaggedness.
+        # Cells with non-zero strength are protected from this stage's smoothing
+        # passes — diffusion and erosion are built to round terrain, which is
+        # exactly wrong for a cliff face.
+        cliff_depth = context.input_depth(ContextKey.CLIFF_MASK)
+        cliff_mask = (
+            gaussian_filter(cliff_depth.depth.astype(np.float64), sigma=2.0)
+            if cliff_depth is not None and cliff_depth.depth.shape == (H, W)
+            else np.zeros((H, W), dtype=np.float64)
+        )
+        has_cliffs = bool(cliff_mask.any())
+
         # ── Pass 1: Road Grading ──────────────────────────────────────────────
         road_depth = context.input_depth(ContextKey.ROAD_SKELETON)
         if road_depth is not None:
@@ -155,8 +174,12 @@ class TerrainNoiseRefinementStage(PipelineStage):
         self.advance_progress(task)
 
         # ── Pass 2: fBm Noise ─────────────────────────────────────────────────
+        # Rolling-hill noise looks wrong splattered across a rock face, so it's
+        # suppressed (not zeroed — a little texture keeps cliff faces from
+        # looking perfectly planar) in proportion to cliff strength.
         noise_layer = self._make_noise(H, W, cfg.noise_scale, cfg.noise_octaves, cfg.seed)
-        terrain += noise_layer * cfg.noise_amplitude
+        noise_gate = (1.0 - cfg.cliff_noise_suppression * cliff_mask) if has_cliffs else 1.0
+        terrain += noise_layer * cfg.noise_amplitude * noise_gate
         self.advance_progress(task)
 
         # ── Pass 3: Landlab Hillslope Diffusion ───────────────────────────────
@@ -164,6 +187,7 @@ class TerrainNoiseRefinementStage(PipelineStage):
         # speed, then bicubic-upsample the result back to original size.
         # Edge nodes are held at FIXED_VALUE so ridge/boundary heights are
         # preserved; only interior (CORE) nodes are shaped by diffusion.
+        pre_diffusion = terrain.copy()
         solve_res = min(cfg.landlab_resolution, H, W)
         if solve_res < H:
             terrain_small = nd_zoom(terrain, solve_res / H, order=1)
@@ -179,6 +203,12 @@ class TerrainNoiseRefinementStage(PipelineStage):
                 terrain, cell_size_m,
                 cfg.linear_diffusivity, cfg.diffusion_dt,
             )
+
+        # Hillslope creep is a rounding process — undo it on cliff cells by
+        # restoring their pre-diffusion elevation, feathered by cliff strength
+        # so the cliff base blends into the diffused terrain around it.
+        if has_cliffs:
+            terrain = terrain * (1.0 - cliff_mask) + pre_diffusion * cliff_mask
 
         # ── Pass 4: Peak Sharpening ───────────────────────────────────────────────
         # Normalise to [0,1], apply h^sharpness_map element-wise, rescale back.
@@ -214,6 +244,7 @@ class TerrainNoiseRefinementStage(PipelineStage):
         # realistic valley incision at all scales: deep trunk valleys where many
         # headwaters merge, shallow rills near divides.
         if cfg.hydro_enabled and cfg.hydro_n_steps > 0:
+            pre_erosion = terrain.copy()
             solve_res = min(cfg.hydro_resolution, H, W)
             if solve_res < H:
                 t_small = nd_zoom(terrain, solve_res / H, order=1)
@@ -229,6 +260,10 @@ class TerrainNoiseRefinementStage(PipelineStage):
                     terrain, cell_size_m,
                     cfg.hydro_erodibility, cfg.hydro_dt, cfg.hydro_n_steps,
                 )
+            # Stream-power erosion carves V-shaped valleys — the wrong shape for
+            # a cliff face. Restore pre-erosion elevation on cliff cells.
+            if has_cliffs:
+                terrain = terrain * (1.0 - cliff_mask) + pre_erosion * cliff_mask
             self.log_info(
                 f"Terrain noise refinement: hydrological erosion "
                 f"(K={cfg.hydro_erodibility:.1e}, dt={cfg.hydro_dt:.0f}×{cfg.hydro_n_steps})"
@@ -283,64 +318,12 @@ class TerrainNoiseRefinementStage(PipelineStage):
           ref_low  → sharpness_min (smooth/rounded)
           ref_high → sharpness_max (sharp alpine)
         """
-        half = grid_size_meters / 2.0
-        score_acc  = np.zeros((H, W), dtype=np.float64)
-        weight_acc = np.zeros((H, W), dtype=np.float64)
-
-        for chain in chains:
-            if len(chain) < 4:
-                continue
-            pts = np.asarray(chain, dtype=np.float64)
-            X_c, Y_c, Z_c = pts[:, 0], pts[:, 1], pts[:, 2]
-
-            # Arc-length parameterisation in XZ.
-            dxz    = np.sqrt(np.diff(X_c) ** 2 + np.diff(Z_c) ** 2)
-            arc    = np.concatenate([[0.0], np.cumsum(dxz)])
-            total  = arc[-1]
-            if total < 1e-6:
-                continue
-
-            # Resample to ~1 sample/metre for uniform derivative computation.
-            n_samples  = max(4, int(total))
-            s_uni      = np.linspace(0.0, total, n_samples)
-            Y_uni      = np.interp(s_uni, arc, Y_c)
-            X_uni      = np.interp(s_uni, arc, X_c)
-            Z_uni      = np.interp(s_uni, arc, Z_c)
-
-            half_w = max(2, int(window_m / 2))
-            local_scores = np.empty(n_samples)
-            for i in range(n_samples):
-                lo_i, hi_i = max(0, i - half_w), min(n_samples, i + half_w + 1)
-                Y_win  = Y_uni[lo_i:hi_i]
-                y_rng  = Y_win.max() - Y_win.min()
-                local_scores[i] = (
-                    float(np.std(np.diff(Y_win)) / y_rng)
-                    if y_rng > 1e-6 and len(Y_win) >= 3
-                    else 0.0
-                )
-
-            # Map jaggedness → sharpness.
-            t_scores  = np.clip((local_scores - ref_low) / (ref_high - ref_low), 0.0, 1.0)
-            sharpness = sharpness_min + (sharpness_max - sharpness_min) * t_scores
-
-            # Project to heightmap pixels and accumulate.
-            cols = ((X_uni + half) / grid_size_meters * W).clip(0, W - 1).astype(int)
-            rows = ((Z_uni + half) / grid_size_meters * H).clip(0, H - 1).astype(int)
-            np.add.at(score_acc,  (rows, cols), sharpness)
-            np.add.at(weight_acc, (rows, cols), 1.0)
-
-        # Gaussian spread so influence diffuses smoothly away from ridgelines.
-        spread_px   = max(1.0, spread_sigma_m / grid_size_meters * max(H, W))
-        score_blur  = gaussian_filter(score_acc,  sigma=spread_px)
-        weight_blur = gaussian_filter(weight_acc, sigma=spread_px)
-
-        covered      = weight_blur > 1e-6
-        sharpness_map = np.where(
-            covered,
-            (score_blur / weight_blur.clip(1e-9)).clip(sharpness_min, sharpness_max),
-            sharpness_min,
+        jaggedness = ridge_chain_jaggedness_map(
+            chains, H, W, grid_size_meters,
+            window_m=window_m, spread_sigma_m=spread_sigma_m,
+            ref_low=ref_low, ref_high=ref_high,
         )
-        return sharpness_map.astype(np.float32)
+        return (sharpness_min + (sharpness_max - sharpness_min) * jaggedness).astype(np.float32)
 
     @staticmethod
     def _landlab_diffuse(

@@ -57,6 +57,7 @@ class ContextKey:
     TERRAIN_TEXTURE_TILES = "terrain_texture_tiles"
     TERRAIN_TEXTURE_TILE_FACTOR = "terrain_texture_tile_factor"
     TERRAIN_MATERIAL = "terrain_material"
+    CLIFF_MASK = "cliff_mask"
     Type = Literal[
         "input",
         "depth",
@@ -98,6 +99,7 @@ class ContextKey:
         "terrain_texture_tiles",
         "terrain_texture_tile_factor",
         "terrain_material",
+        "cliff_mask",
     ]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str

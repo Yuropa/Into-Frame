@@ -22,6 +22,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         n_boundary: int = 12,
         z_far: Optional[float] = None,
         noise_amplitude: float = 0.05,
+        noise_blend_floor: float = 0.15,
         texture_tile_factor: float = 8.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -30,6 +31,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.n_boundary = n_boundary
         self.z_far = z_far
         self.noise_amplitude = noise_amplitude
+        self.noise_blend_floor = noise_blend_floor
         self.texture_tile_factor = texture_tile_factor
 
 
@@ -135,6 +137,7 @@ class TerrainMeshStage(PipelineStage):
             n_boundary=cfg.n_boundary,
             z_far=grid_size / 2.0,
             noise_amplitude=cfg.noise_amplitude,
+            noise_blend_floor=cfg.noise_blend_floor,
             noise_seed=cfg.seed,
             panorama=panorama_tex,
             texture=pinhole_texture,
