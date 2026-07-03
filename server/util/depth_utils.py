@@ -27,6 +27,7 @@ class Depth:
             self.depth = self.depth.squeeze(0)
 
         self._gray = None
+        self._color = None
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -60,6 +61,25 @@ class Depth:
         self._gray = (depth * 255).astype(np.uint8)  # (H, W), grayscale
         return self._gray
 
+    def color(self):
+        if self._color is not None:
+            return self._color
+
+        import matplotlib.cm as cm
+
+        depth = self.depth.copy()
+        depth = np.nan_to_num(depth, nan=0.0, posinf=0.0, neginf=0.0)
+
+        dmin, dmax = depth.min(), depth.max()
+        if dmax > dmin:
+            depth = 1.0 - (depth - dmin) / (dmax - dmin)  # invert so near=bright
+        else:
+            depth = np.zeros_like(depth)
+
+        rgba = cm.inferno(depth)
+        self._color = (rgba[:, :, :3] * 255).astype(np.uint8)  # (H, W, 3)
+        return self._color
+
     def copy(self) -> Depth:
         return Depth(self.depth.copy())
     
@@ -70,7 +90,7 @@ class Depth:
         np.save(path, self.depth)
 
     def save_debug_image(self, path: Path):
-        PIL.Image.fromarray(self.gray(), mode="L").save(path)
+        PIL.Image.fromarray(self.color(), mode="RGB").save(path)
 
     def min(self):
         return self.depth.min()
