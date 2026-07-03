@@ -46,9 +46,18 @@ class HeightMapGenerator:
         """
         Project ground points from a depth map onto a top-down height grid.
 
-        Returns (height_array, certainty_array), both (grid_resolution, grid_resolution)
-        float32.  certainty is in [0, 1]: sin²(depression_angle) for cells with any
-        direct observation (primary or panorama depth), 0 for pure interpolation.
+        Returns (height_array, certainty_array, cell_relief_array), all
+        (grid_resolution, grid_resolution) float32.  certainty is in [0, 1]:
+        sin²(depression_angle) for cells with any direct observation (primary or
+        panorama depth), 0 for pure interpolation.  cell_relief is the raw Y range
+        (max - min, in metres) among all depth samples that landed in that one grid
+        cell before being collapsed to their mean -- evidence of real vertical
+        structure (e.g. a cliff face narrower than one grid cell) that survives only
+        here, since it is destroyed by the very next step (averaging) and therefore
+        invisible to any gradient computed on the output height map. Only populated
+        in pinhole mode, where many depth pixels legitimately land in one cell;
+        equirectangular mode takes a single inverse-mapped sample per cell, so
+        there's no intra-cell distribution to measure and this is all zeros.
 
         camera_height_meters: assumed height of the camera above the ground plane
                               (used to derive the Y floor filter and flood-fill seed).
@@ -115,10 +124,12 @@ class HeightMapGenerator:
 
             if not np.any(valid):
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy()
+                return zeros, zeros.copy(), zeros.copy()
 
             height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
             height_map[valid] = Y_grid[valid]
+            # Single inverse-mapped sample per cell -- no intra-cell distribution to measure.
+            cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
         else:
             if sky_mask is not None and sky_mask.shape == d.shape:
@@ -146,7 +157,7 @@ class HeightMapGenerator:
             Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
             if len(Xg) == 0:
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy()
+                return zeros, zeros.copy(), zeros.copy()
 
             x_edges = np.linspace(-half, half, grid_resolution + 1)
             z_edges = np.linspace(-half, half, grid_resolution + 1)
@@ -167,6 +178,20 @@ class HeightMapGenerator:
             has_data = height_cnt > 0
             height_map[has_data] = (height_sum[has_data] / height_cnt[has_data]).astype(np.float32)
 
+            # Intra-cell relief: the Y range spanned by every sample that landed in
+            # this cell, captured *before* they get collapsed to the mean above. A
+            # near-vertical face narrower than one grid cell puts many samples in
+            # the same (x, z) column spanning a large Y range; averaging smears
+            # that into one flat point, and no gradient computed on height_map
+            # downstream can ever recover it. Cells with only one sample get 0
+            # (nothing to measure a range from), same as truly flat ground.
+            height_max = np.full((grid_resolution, grid_resolution), -np.inf, dtype=np.float64)
+            height_min = np.full((grid_resolution, grid_resolution),  np.inf, dtype=np.float64)
+            np.maximum.at(height_max, (zi, xi), Yg)
+            np.minimum.at(height_min, (zi, xi), Yg)
+            cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+            cell_relief[has_data] = (height_max[has_data] - height_min[has_data]).astype(np.float32)
+
         # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
         # the starting point with small height steps are kept; everything else is set to
         # NaN and filled by nearest-neighbour extrapolation from the flood-fill boundary.
@@ -175,6 +200,7 @@ class HeightMapGenerator:
                 height_map, camera_height_meters, flood_fill_max_step
             )
             height_map[~accepted] = np.nan
+            cell_relief[~accepted] = 0.0
 
         # Fill remaining NaN cells from the panorama depth (360° coverage) before
         # falling back to pure interpolation. Only cells that are still empty after
@@ -208,6 +234,9 @@ class HeightMapGenerator:
         if nadir_exclusion_radius > 0:
             flat_prior_mask = _r_cell <= nadir_exclusion_radius
             height_map[flat_prior_mask] = -camera_height_meters
+            # Any measured relief here belonged to a height value we just discarded
+            # in favour of the flat prior -- it's no longer evidence of anything.
+            cell_relief[flat_prior_mask] = 0.0
 
         # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
         # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
@@ -234,6 +263,10 @@ class HeightMapGenerator:
             Depth(certainty.copy()).normalize().save_debug_image(
                 debug_dir / "heightmap_certainty.png"
             )
+            if cell_relief.any():
+                Depth(cell_relief.copy()).normalize().save_debug_image(
+                    debug_dir / "heightmap_cell_relief.png"
+                )
 
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
@@ -244,7 +277,7 @@ class HeightMapGenerator:
                 result, certainty, grid_size_meters, debug_dir / "heightmap_radial_profile.json"
             )
 
-        return result, certainty
+        return result, certainty, cell_relief
 
     @staticmethod
     def _build_certainty(

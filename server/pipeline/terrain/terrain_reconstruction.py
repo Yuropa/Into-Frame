@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
-from typing import Any
+from typing import Any, Optional
 from logging import Logger
 from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt
 from scipy.sparse import csr_matrix
@@ -58,10 +58,12 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         upsample_noise_octaves: int = 3,
         # Cliff handling: cliff strength is a [0,1] map combining (a) measured
         # slope on directly-observed, high-certainty terrain — trustworthy ground
-        # truth, strongest close to the camera — and (b) distant ridge-chain
-        # silhouette jaggedness, the only steepness signal available beyond depth
-        # range. It relaxes the max-slope envelope locally and restores measured
-        # detail the coarse solve would otherwise smooth away.
+        # truth, strongest close to the camera, taken as the stronger of the
+        # inter-cell gradient and the intra-cell relief measured before
+        # HeightMapGenerator's binning step averaged it away — and (b) distant
+        # ridge-chain silhouette jaggedness, the only steepness signal available
+        # beyond depth range. It relaxes the max-slope envelope locally and
+        # restores measured detail the coarse solve would otherwise smooth away.
         cliff_certainty_threshold: float = 0.35,
         cliff_slope_angle_low_deg: float = 50.0,
         cliff_slope_angle_high_deg: float = 75.0,
@@ -120,6 +122,12 @@ class TerrainReconstructionStage(PipelineStage):
             else np.ones((H, W), dtype=np.float32)
         )
 
+        relief_depth = context.input_depth(ContextKey.HEIGHT_MAP_CELL_RELIEF)
+        cell_relief = (
+            relief_depth.depth if relief_depth is not None and relief_depth.depth.shape == (H, W)
+            else None
+        )
+
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
@@ -137,12 +145,14 @@ class TerrainReconstructionStage(PipelineStage):
             certainty_threshold=cfg.cliff_certainty_threshold,
             angle_low_deg=cfg.cliff_slope_angle_low_deg,
             angle_high_deg=cfg.cliff_slope_angle_high_deg,
+            cell_relief=cell_relief,
         )
         distant_cliff = ridge_chain_jaggedness_map(ridge_chains, H, W, grid_size)
         cliff_mask = np.maximum(measured_cliff, distant_cliff).astype(np.float32)
         context.add_depth(ContextKey.CLIFF_MASK, Depth(cliff_mask))
         self.log_info(
-            f"Cliff mask: measured {int((measured_cliff > 0.1).sum())} px, "
+            f"Cliff mask: measured {int((measured_cliff > 0.1).sum())} px "
+            f"(incl. intra-cell relief: {'yes' if cell_relief is not None else 'no'}), "
             f"distant {int((distant_cliff > 0.1).sum())} px "
             f"(certainty ≥ {cfg.cliff_certainty_threshold}, "
             f"{cfg.cliff_slope_angle_low_deg:.0f}–{cfg.cliff_slope_angle_high_deg:.0f}°)"
@@ -384,6 +394,7 @@ class TerrainReconstructionStage(PipelineStage):
         certainty_threshold: float = 0.35,
         angle_low_deg: float = 50.0,
         angle_high_deg: float = 75.0,
+        cell_relief: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Depth-measured cliff strength: (H, W) float32 in [0, 1].
@@ -394,6 +405,16 @@ class TerrainReconstructionStage(PipelineStage):
         no semantic label needed, and strongest exactly where depth is most
         reliable: terrain close to the camera.
 
+        cell_relief (optional): HEIGHT_MAP_CELL_RELIEF, the raw Y range spanned by
+        every raw depth sample that landed in each cell before HeightMapGenerator
+        collapsed them to their mean. A cliff face narrower than one grid cell
+        leaves no trace in the inter-cell gradient above — every neighbouring
+        cell's mean already absorbed it — so it's converted to its own effective
+        slope angle (arctan(relief / cell_size)) and combined via max() with the
+        inter-cell gradient. This is a second, independent measurement of the same
+        underlying thing (real steepness in the raw samples), not a fallback, so
+        the stronger of the two always wins rather than one overriding the other.
+
         angle_low_deg/angle_high_deg define the ramp from "not a cliff" to
         "fully a cliff"; certainty_threshold gates out cells whose elevation
         came from interpolation rather than a real depth sample (a sharp edge
@@ -401,6 +422,11 @@ class TerrainReconstructionStage(PipelineStage):
         """
         gy, gx = np.gradient(heightmap.astype(np.float64), cell_size_m)
         slope_deg = np.degrees(np.arctan(np.hypot(gx, gy)))
+
+        if cell_relief is not None:
+            relief_slope_deg = np.degrees(np.arctan(cell_relief.astype(np.float64) / cell_size_m))
+            slope_deg = np.maximum(slope_deg, relief_slope_deg)
+
         strength = np.clip(
             (slope_deg - angle_low_deg) / max(angle_high_deg - angle_low_deg, 1e-6),
             0.0, 1.0,

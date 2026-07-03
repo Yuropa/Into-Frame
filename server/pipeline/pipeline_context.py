@@ -51,6 +51,7 @@ class ContextKey:
     ROAD_SKELETON = "road_skeleton"
     TRAIL_SKELETON = "trail_skeleton"
     HEIGHT_MAP_CERTAINTY = "height_map_certainty"
+    HEIGHT_MAP_CELL_RELIEF = "height_map_cell_relief"
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
@@ -93,6 +94,7 @@ class ContextKey:
         "road_skeleton",
         "trail_skeleton",
         "height_map_certainty",
+        "height_map_cell_relief",
         "region_map_certainty",
         "terrain_texture",
         "terrain_texture_certainty",

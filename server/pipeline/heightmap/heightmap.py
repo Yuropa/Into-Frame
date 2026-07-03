@@ -127,7 +127,7 @@ class HeightMapStage(PipelineStage):
         if region_type_mask is not None:
             self.log_info("Region type map available — restricting height to water/terrain/ground")
 
-        height_array, certainty_array = HeightMapGenerator.generate(
+        height_array, certainty_array, cell_relief_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -151,6 +151,7 @@ class HeightMapStage(PipelineStage):
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
+        context.add_depth(ContextKey.HEIGHT_MAP_CELL_RELIEF, Depth(cell_relief_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters":    cfg.grid_size_meters,
@@ -162,11 +163,16 @@ class HeightMapStage(PipelineStage):
         if self.temp is not None:
             height_map.save_debug_image(self.temp / "heightmap.png")
             Depth(certainty_array).save_debug_image(self.temp / "heightmap_certainty.png")
+            if cell_relief_array.any():
+                Depth(cell_relief_array).save_debug_image(self.temp / "heightmap_cell_relief.png")
 
+        n_relief = int((cell_relief_array > 0).sum())
         self.log_info(
             f"Height map {height_array.shape}, "
             f"Y range {height_array.min():.2f} → {height_array.max():.2f} m, "
-            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}"
+            f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}, "
+            f"{n_relief} cell(s) with measured intra-cell relief "
+            f"(max {cell_relief_array.max():.2f} m)"
         )
 
         self.finish_progress(task)
