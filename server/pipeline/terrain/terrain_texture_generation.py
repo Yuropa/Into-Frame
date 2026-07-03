@@ -400,12 +400,21 @@ class TerrainTextureGenerationStage(PipelineStage):
         facing dot product collapses to near-zero within a few metres of the
         camera (it decays as camera_height / distance) — so nearly the whole
         terrain fell back to synthetic FLUX tiles instead of the real photo.
+
         Latitude-based weighting (matching bake_topdown_texture_with_certainty's
-        certainty ramp) keeps the real panorama dominant across the terrain:
-        it only fades out in a narrow nadir dead-zone directly under the
-        camera (an equirectangular pole singularity) and a thin band right at
-        the horizon, where distant flat ground is compressed into just a few
-        panorama pixel rows and starts to look blocky when magnified.
+        certainty ramp) keeps the real panorama dominant across the terrain.
+        It gates on the *magnitude* of the elevation angle from the camera to
+        each ground point, not its sign: a point sitting above the camera's
+        own height is exactly as visible in the source panorama as one below
+        it, since both are genuine, photographed ground. The only two
+        equirectangular failure modes are viewing angles near-vertical (the
+        nadir/zenith pole singularity directly under — or, for a tall rise,
+        directly toward — the camera) and near-horizontal (a thin band right
+        at the horizon, where distant ground is compressed into just a few
+        panorama pixel rows and starts to look blocky when magnified).
+        Gating on sign instead of magnitude would zero out real, visible
+        terrain whenever the height map's values don't happen to fall below
+        the camera's zero reference.
 
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
@@ -423,16 +432,14 @@ class TerrainTextureGenerationStage(PipelineStage):
         Y = np.nan_to_num(Y, nan=0.0)
 
         r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
-        lat = np.arctan2(Y.astype(np.float64), r_xz)  # negative = below horizon (camera at origin)
+        lat = np.arctan2(Y.astype(np.float64), r_xz)  # elevation angle, camera at origin
 
-        min_lat_rad    = np.radians(nadir_cutoff_deg)
-        nadir_fade_rad = np.radians(nadir_fade_deg)
-        horiz_fade_rad = np.radians(horizon_fade_deg)
+        abs_lat_deg     = np.degrees(np.abs(lat))
+        pole_cutoff_deg = abs(nadir_cutoff_deg)
 
-        fade_in  = ((lat - min_lat_rad) / nadir_fade_rad).clip(0.0, 1.0)
-        fade_out = ((-lat) / horiz_fade_rad).clip(0.0, 1.0)
-        valid    = (lat < 0.0) & (lat >= min_lat_rad)
-        weight   = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
+        fade_in  = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
+        fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
+        weight   = np.minimum(fade_in, fade_out).astype(np.float32)
 
         return (weight ** blend_power).astype(np.float32)
 

@@ -274,11 +274,22 @@ class TerrainMeshGenerator:
         """
         Bake a top-down panorama texture and a per-texel certainty map.
 
-        Certainty encodes how reliable each texel's colour is:
-          - 0 for the nadir dead-zone (no equirectangular coverage, filled by KNN)
-          - 0 for above-horizon / sky samples
-          - Smooth ramp [0→1] over nadir_fade_deg above the cutoff
-          - Smooth ramp [1→0] over horizon_fade_deg below the horizon
+        Certainty encodes how reliable each texel's colour is, based on the
+        *steepness* of the viewing angle from the camera to that ground point —
+        not its sign. A point sitting slightly above the camera's own height
+        (a rise/hill) is just as visible in the source panorama as one slightly
+        below it; only the two equirectangular projection failure modes matter:
+        the nadir/zenith pole singularity (near-vertical viewing angle) and the
+        horizon band (near-horizontal, where distant rows compress into a
+        handful of panorama pixels). Gating on the sign of the elevation angle
+        instead of its magnitude would zero out real, visible terrain whenever
+        the height map's elevation values don't happen to sit below the
+        camera's zero reference.
+
+          - 0 for the nadir/zenith dead-zone (no reliable equirectangular coverage)
+          - 0 right at the horizon (extreme vertical compression)
+          - Smooth ramp [0→1] over nadir_fade_deg approaching the pole cutoff
+          - Smooth ramp [0→1] over horizon_fade_deg away from the horizon
           - Multiplied by a binary observation mask derived from height_certainty
             (0 for cells that were never directly observed — only interpolated)
 
@@ -302,19 +313,17 @@ class TerrainMeshGenerator:
         rgba = panorama.sample_3d(grid_verts)
         color = PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
 
-        # ── Latitude-based certainty ──────────────────────────────────────────
+        # ── Latitude-based certainty (magnitude of viewing angle, not sign) ──────
         r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
-        lat  = np.arctan2(Y.astype(np.float64), r_xz)  # negative = below horizon
+        lat  = np.arctan2(Y.astype(np.float64), r_xz)  # elevation angle, camera at origin
 
-        min_lat_rad    = np.radians(nadir_cutoff_deg)
-        nadir_fade_rad = np.radians(nadir_fade_deg)
-        horiz_fade_rad = np.radians(horizon_fade_deg)
+        abs_lat_deg     = np.degrees(np.abs(lat))
+        pole_cutoff_deg = abs(nadir_cutoff_deg)
 
-        # Ramp up from nadir cutoff; ramp down toward horizon.
-        fade_in  = ((lat - min_lat_rad) / nadir_fade_rad).clip(0.0, 1.0)
-        fade_out = ((-lat) / horiz_fade_rad).clip(0.0, 1.0)
-        valid    = (lat < 0.0) & (lat >= min_lat_rad)
-        certainty = np.where(valid, np.minimum(fade_in, fade_out), 0.0).astype(np.float32)
+        # Ramp down to 0 near the pole singularity; ramp down to 0 at the horizon.
+        fade_in  = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
+        fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
+        certainty = np.minimum(fade_in, fade_out).astype(np.float32)
 
         # ── Zero out unobserved (interpolated) heightmap cells ────────────────
         if height_certainty is not None:
