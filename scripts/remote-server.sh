@@ -12,6 +12,7 @@ SSH_KEY=""
 DEBUG=""
 CONFIG=""
 OUTPUT="output"
+SEEDS=()
 
 usage() {
   cat <<EOF
@@ -36,6 +37,7 @@ server options:
   --asset-port  Asset server port          (default: ${ASSET_PORT})
   -d, --debug   Save intermediate files    (default: none)
   --config      Remote pipeline config     (default: config.yaml)
+  --seed        Random seed (repeatable)   VALUE or STAGE:VALUE (default: none)
 
 clear options:
   -o, --output  Output directory to clear  (default: ${OUTPUT})
@@ -47,6 +49,8 @@ Examples:
   $(basename "$0")
   $(basename "$0") server --host 192.168.1.10 --user admin
   $(basename "$0") server --port 9090 --asset-port 4000
+  $(basename "$0") server --seed 12345
+  $(basename "$0") server --seed sceneGeneration:1 --seed treeGeneration:2
   $(basename "$0") pull --host 192.168.1.10
   $(basename "$0") clear --host 192.168.1.10
   $(basename "$0") clear --host 192.168.1.10 --output my-output
@@ -72,6 +76,7 @@ while [[ $# -gt 0 ]]; do
     --key)         SSH_KEY="$2";      shift 2 ;;
     -d|--debug)    DEBUG="$2";        shift 2 ;;
     --config)      CONFIG="$2";       shift 2 ;;
+    --seed)        SEEDS+=("$2");     shift 2 ;;
     -o|--output)   OUTPUT="$2";       shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -85,11 +90,17 @@ SSH_OPTS="-t"
 
 case "$ACTION" in
   server)
+    SEED_ARGS=""
+    for s in "${SEEDS[@]}"; do
+      SEED_ARGS="$SEED_ARGS --seed $s"
+    done
+
     REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT}"
     [[ -n "$DEBUG"  ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --debug $DEBUG"
     [[ -n "$CONFIG" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --config $CONFIG"
 
-    REMOTE_CMD="source ~/miniconda3/etc/profile.d/conda.sh && conda activate ${ENV} && cd ${REMOTE_DIR} && python3 main.py ${REMOTE_PY_ARGS}"
+    # --seed is a top-level main.py flag, so it must precede the "server" subcommand
+    REMOTE_CMD="source ~/miniconda3/etc/profile.d/conda.sh && conda activate ${ENV} && cd ${REMOTE_DIR} && python3 main.py${SEED_ARGS} ${REMOTE_PY_ARGS}"
 
     echo "Connecting to ${REMOTE_USER}@${REMOTE_HOST} (forwarding :${PORT} and :${ASSET_PORT})..."
     # shellcheck disable=SC2086
