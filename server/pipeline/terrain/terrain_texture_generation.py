@@ -6,7 +6,7 @@ import PIL.Image
 import PIL.ImageEnhance
 import PIL.ImageFilter
 import torch
-from scipy.ndimage import binary_dilation, gaussian_filter, label as ndi_label, zoom
+from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter, zoom
 from scipy.ndimage import map_coordinates
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -107,6 +107,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # canvas, covering this fraction of the tile's linear size. Comfortably under 1.0 so
         # it never reaches the seam-fix band at the tile edges.
         reference_patch_fraction: float = 0.5,
+        # Bake-certainty threshold below which pixels are excluded when picking the
+        # reference crop (_extract_largest_region_crop) -- keeps it away from the equirect
+        # nadir singularity (bakes as a radial/pinwheel artefact) and other unreliable areas.
+        patch_min_certainty: float = 0.15,
         # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
         # it purely as guidance, not something to hard-preserve.
         #   LAMA (default) -- classical texture-completion inpainting (no prompt, no LoRA,
@@ -162,6 +166,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.use_photo_reference = use_photo_reference
         self.reference_tex_size = reference_tex_size
         self.reference_patch_fraction = reference_patch_fraction
+        self.patch_min_certainty = patch_min_certainty
         self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
@@ -266,12 +271,13 @@ class TerrainTextureGenerationStage(PipelineStage):
             for idx, rt in enumerate(present_types):
                 prompt = self._build_prompt(rt, caption)
                 if reference is not None:
-                    baked_rgb, region_ids, _certainty = reference
+                    baked_rgb, region_ids, certainty = reference
                     tiles[rt.label] = self._generate_tileable_tile_high_fidelity(
                         prompt, cfg, seed_offset=idx,
                         region_map=region_ids,
                         baked_color=PIL.Image.fromarray(baked_rgb),
                         region_val=int(rt),
+                        certainty=certainty,
                         debug_label=rt.label,
                     )
                 else:
@@ -603,6 +609,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         region_map: np.ndarray,
         baked_color: PIL.Image.Image,
         region_val: int,
+        certainty: Optional[np.ndarray] = None,
         inpainter: Optional[InPainting] = None,
         debug_label: str = "tile",
     ) -> PIL.Image.Image:
@@ -620,6 +627,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         push toward genuine tileability and the photorealistic macro finish.
         Falls back to plain text generation if the region has no pixels at all.
 
+        certainty: per-pixel bake certainty from _bake_reference, used to keep
+        the crop away from the equirect nadir singularity (see
+        _extract_largest_region_crop).
         inpainter: override the stage's own self._inpainter for Pass 2. Defaults
         to self._inpainter.
         debug_label: filename prefix for step-by-step debug images (see
@@ -635,6 +645,8 @@ class TerrainTextureGenerationStage(PipelineStage):
             region_map=region_map,
             region_val=region_val,
             patch_size=patch_size,
+            certainty=certainty,
+            min_certainty=cfg.patch_min_certainty,
         )
         if patch is None:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
@@ -840,11 +852,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         region_map: np.ndarray,
         region_val: int,
         patch_size: int,
+        certainty: Optional[np.ndarray] = None,
+        min_certainty: float = 0.15,
     ) -> Optional[PIL.Image.Image]:
         """
-        Crop a single square from the largest connected component of this
-        region in the baked top-down photo, then resize to patch_size. This is
-        a guidance patch pasted into a larger tile canvas (see
+        Crop a single square from the most solid, reliable area of this region
+        in the baked top-down photo, then resize to patch_size. This is a
+        guidance patch pasted into a larger tile canvas (see
         _build_reference_canvas), not necessarily the full tile.
 
         A previous version scattered many small patches from anywhere in the
@@ -859,15 +873,26 @@ class TerrainTextureGenerationStage(PipelineStage):
         of only capturing that one location's appearance rather than
         sampling the region's full variety.
 
-        The crop is centred on the component's bounding box, sized to the
-        larger of its two bbox dimensions (clamped to the image) so resizing
-        to patch_size doesn't distort aspect ratio; pixels within that square
-        outside the component itself are real neighbouring photo content, not
-        masked out, since re-introducing per-pixel masking here would bring
-        back the same patchiness this replaces.
+        A version after that used the connected component's bounding-box
+        centre, which reliably picked the equirect nadir singularity: the
+        single largest "ground" blob is almost always the area immediately
+        around the camera, so its bbox centre sits right on the world origin,
+        where azimuth is undefined and topdown-bakes as a radial/pinwheel
+        artefact. certainty (from _bake_reference, zero in that dead zone,
+        ramping outward) excludes it from consideration entirely; the crop
+        centre is then the point of this region *farthest* from any excluded
+        pixel (nadir dead zone, a different region type, or the image edge)
+        via a distance transform — the most "interior," safest point of the
+        largest solid patch, not just whatever a bounding box happens to
+        centre on. side is set from that same distance so the crop stays
+        within (or very close to) solid, reliable material; pixels within it
+        that are nonetheless from neighbouring content are real photo content,
+        not masked out, since re-introducing per-pixel masking here would
+        bring back the earlier patchiness.
 
-        Returns None if the region has no pixels at all in region_map — the
-        caller then falls back to plain text-to-image generation.
+        Returns None if the region has no pixels at all (after excluding
+        low-certainty pixels) — the caller then falls back to plain
+        text-to-image generation.
         """
         W, H = baked_color.size
         rm_h, rm_w = region_map.shape
@@ -876,20 +901,19 @@ class TerrainTextureGenerationStage(PipelineStage):
             if (rm_h, rm_w) != (H, W) else region_map
         )
 
-        mask = region_map_res == region_val
-        if not mask.any():
+        valid = region_map_res == region_val
+        if certainty is not None:
+            cert_res = (
+                zoom(certainty, (H / certainty.shape[0], W / certainty.shape[1]), order=1)
+                if certainty.shape != (H, W) else certainty
+            )
+            valid &= cert_res > min_certainty
+        if not valid.any():
             return None
 
-        labeled, _ = ndi_label(mask)
-        sizes = np.bincount(labeled.ravel())
-        sizes[0] = 0  # background
-        largest_label = int(sizes.argmax())
-        ys, xs = np.nonzero(labeled == largest_label)
-
-        r0, r1 = int(ys.min()), int(ys.max()) + 1
-        c0, c1 = int(xs.min()), int(xs.max()) + 1
-        cy, cx = (r0 + r1) // 2, (c0 + c1) // 2
-        side = min(max(r1 - r0, c1 - c0), H, W)
+        dist = distance_transform_edt(valid)
+        cy, cx = np.unravel_index(int(np.argmax(dist)), dist.shape)
+        side = min(max(16, int(2 * dist[cy, cx])), H, W)
         half = side // 2
         sr0 = int(np.clip(cy - half, 0, H - side))
         sc0 = int(np.clip(cx - half, 0, W - side))
