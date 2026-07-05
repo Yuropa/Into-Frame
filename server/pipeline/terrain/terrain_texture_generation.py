@@ -6,7 +6,7 @@ import PIL.Image
 import PIL.ImageEnhance
 import PIL.ImageFilter
 import torch
-from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter, zoom
+from scipy.ndimage import binary_dilation, gaussian_filter, label as ndi_label, zoom
 from scipy.ndimage import map_coordinates
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -29,9 +29,9 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 
 # Short on purpose: at FLUX Fill's guidance_scale (see TerrainTextureGenerationConfiguration)
 # the text prompt strongly dominates the img2img seed, so an elaborate, hyper-specific
-# description would fight the actual photo/collage reference instead of following it. These
-# name the material and its 1-2 defining traits only — the scattered-patch collage seed
-# (_generate_scattered_texture_base) and per-region LAB colour transfer carry the rest.
+# description would fight the actual photo reference instead of following it. These name
+# the material and its 1-2 defining traits only — the real reference crop
+# (_extract_largest_region_crop) and per-region LAB colour transfer carry the rest.
 _BASE_PROMPTS: dict[RegionType, str] = {
     RegionType.GROUND: (
         "macro close-up photograph of loose soil grit, tiny sharp gravel stones, "
@@ -103,19 +103,19 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         use_photo_reference: bool = True,
         reference_tex_size: int = 2048,
         # Diffusers `strength` semantics: 1.0 = maximum added noise = ignores `image`
-        # entirely; lower = stays closer to the seed. Higher than a plain photo-crop
-        # reference would use, because the scattered-patch collage seed
-        # (_generate_scattered_texture_base) is already packed with sharp, genuine
-        # same-region detail — FLUX mainly needs to unify lighting/seams and follow
-        # the text prompt rather than invent texture from scratch.
-        collage_strength: float = 0.60,
-        # Post-process LAB colour nudge toward the collage seed's stats.
+        # entirely; lower = stays closer to the seed. The seed is a single crop from the
+        # largest contiguous patch of this region in the baked photo (_extract_largest_region_crop)
+        # -- genuine, coherent same-region detail with consistent lighting/exposure since it's
+        # one real location, not a stitched mosaic -- so FLUX mainly needs to unify lighting
+        # and follow the text prompt rather than invent texture from scratch.
+        reference_strength: float = 0.60,
+        # Post-process LAB colour nudge toward the reference crop's stats.
         color_transfer_strength: float = 0.60,
         # FLUX_SEAMLESS_TEXTURE LoRA strength. Lower than full (1.0) so its seamless-tiling
         # bias steers generation without overpowering the per-region material prompt or the
-        # collage seed's genuine detail.
+        # reference crop's genuine detail.
         lora_scale: float = 0.8,
-        # Debug: regenerate one representative region's tile through the real collage-
+        # Debug: regenerate one representative region's tile through the real reference-
         # seeded high-fidelity path (actual captured photo/region data, not a synthetic
         # test prompt) at several LoRA scales, plus optionally a no-LoRA FluxFillPipeline
         # baseline, so LoRA-configuration questions can be answered against real data
@@ -145,7 +145,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.synthetic_tile_factor = synthetic_tile_factor
         self.use_photo_reference = use_photo_reference
         self.reference_tex_size = reference_tex_size
-        self.collage_strength = collage_strength
+        self.reference_strength = reference_strength
         self.color_transfer_strength = color_transfer_strength
         self.lora_scale = lora_scale
         self.debug_lora_scale_sweep = debug_lora_scale_sweep
@@ -159,21 +159,22 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
       1. If a real photo is available (PANORAMA_TERRAIN + HEIGHT_MAP), bake it
-         top-down and build a high-frequency "collage" seed: dozens of small,
-         feather-edged crisp patches sampled only from that region's own pixels
-         are scattered across a blank canvas (_generate_scattered_texture_base).
-         Because every seed pixel is genuine same-material detail, this avoids
-         both cross-region bleed and the smeared/stretched look of cropping a
-         single (possibly small or irregular) footprint. The collage drives
-         generation as a moderate-`strength` img2img seed — the short,
-         material-identity-only text prompt (_BASE_PROMPTS) mainly unifies
-         lighting and fixes seams rather than reinventing the scene. A region
-         with no trustworthy pixels at all falls back to plain text generation.
+         top-down and crop a single square from the largest connected component
+         of that region in the baked photo (_extract_largest_region_crop). A
+         single real crop is inherently coherent — one location, one lighting/
+         exposure condition, genuine continuous texture — unlike stitching many
+         small patches from potentially very different lighting conditions
+         within the same region label, which produces a hard-seamed, visibly
+         patchy mosaic. The crop drives generation as a moderate-`strength`
+         img2img seed — the short, material-identity-only text prompt
+         (_BASE_PROMPTS) mainly unifies lighting and fixes seams rather than
+         reinventing the scene. A region with no pixels at all falls back to
+         plain text generation.
       2. Generate a photorealistic seamlessly tileable tile with FLUX (with the
-         FLUX_SEAMLESS_TEXTURE LoRA, two-pass: collage-seeded/full-mask generation
+         FLUX_SEAMLESS_TEXTURE LoRA, two-pass: reference-seeded/full-mask generation
          → circular-shift seam inpainting), then sharpen/contrast-boost to recover
          detail softened by inpainting
-         and nudge colour statistics back toward the collage seed. A local
+         and nudge colour statistics back toward the reference crop. A local
          micro-height map derived from the tile's own high-frequency detail
          is packed into its alpha channel (_pack_local_height_channel) so the terrain
          shader can do height-biased blending between layers instead of a flat
@@ -186,7 +187,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     Reads:
       ContextKey.REGION_MAP           — top-down region type grid (optional)
-      ContextKey.PANORAMA_TERRAIN     — real photo, source for the collage seed (optional)
+      ContextKey.PANORAMA_TERRAIN     — real photo, source for the reference crop (optional)
       ContextKey.HEIGHT_MAP           — for top-down baking alignment (optional)
       ContextKey.HEIGHT_MAP_CERTAINTY — certainty mask for the bake (optional)
       ContextKey.INPUT_CAPTION        — scene caption for prompt context (optional)
@@ -247,7 +248,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                     tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
                 self.log_info(
                     f"Generated {rt.label} tile ({cfg.tile_size}px, seamless"
-                    f"{', photo-referenced (collage)' if reference is not None else ''})"
+                    f"{', photo-referenced (largest-region crop)' if reference is not None else ''})"
                 )
                 self.advance_progress(task)
                 self.advance_progress(task)
@@ -290,7 +291,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         """
         Regenerate one representative region's tile at several LoRA scales, plus
         optionally a no-LoRA FluxFillPipeline baseline, through the *exact* same
-        collage-seeded high-fidelity path used for the real output — same photo
+        reference-seeded high-fidelity path used for the real output — same photo
         reference, same region data, same seed, same seam-fix. Only the
         model/LoRA-scale varies, so results are directly comparable and reflect
         real captured data rather than a synthetic prompt-only test.
@@ -633,31 +634,27 @@ class TerrainTextureGenerationStage(PipelineStage):
         inpainter: Optional[InPainting] = None,
     ) -> PIL.Image.Image:
         """
-        Tile generation seeded from a scattered same-region texture collage
-        (_generate_scattered_texture_base) rather than a single stretched
-        reference crop. Because the seed is already packed with sharp,
-        genuine material detail everywhere, FLUX mainly needs to unify
-        lighting and smooth the patch seams rather than invent texture from
-        scratch — hence the higher `collage_strength` compared to a
-        low-strength photo-crop reference. Falls back to plain text
-        generation if the region has no trustworthy pixels at all.
+        Tile generation seeded from a single crop of the largest connected
+        component of this region in the baked photo (_extract_largest_region_crop)
+        — one real location, so it's inherently coherent (consistent lighting/
+        exposure) rather than a mosaic of patches from potentially very
+        different conditions. Falls back to plain text generation if the
+        region has no pixels at all.
 
         inpainter: override the stage's own self._inpainter (used by the debug
         LoRA sweep to run an alternate model/LoRA-scale through the identical
-        code path, against the same real collage seed). Defaults to
+        code path, against the same real reference crop). Defaults to
         self._inpainter.
         """
         inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
-        rng = np.random.default_rng(seed)
 
-        base_image = self._generate_scattered_texture_base(
+        base_image = self._extract_largest_region_crop(
             baked_color=baked_color,
             region_map=region_map,
             region_val=region_val,
             target_size=T,
-            rng=rng,
         )
         if base_image is None:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=inpainter)
@@ -670,19 +667,19 @@ class TerrainTextureGenerationStage(PipelineStage):
             prompt=prompt,
             num_inference_steps=cfg.num_inference_steps,
             guidance_scale=cfg.guidance_scale,
-            strength=cfg.collage_strength,
+            strength=cfg.reference_strength,
             seed=seed,
         )
 
         result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=inpainter)
 
         # Pass 3: detail recovery — the two inpainting passes can soften the
-        # collage's crisp stones/grass structure, so restore local contrast.
+        # reference crop's crisp stones/grass structure, so restore local contrast.
         result_img = result_img.filter(PIL.ImageFilter.UnsharpMask(radius=2, percent=150, threshold=1))
         result_img = PIL.ImageEnhance.Contrast(result_img).enhance(1.15)
         result_img = PIL.ImageEnhance.Sharpness(result_img).enhance(1.20)
 
-        # Pass 4: nudge final colour statistics back toward the collage seed.
+        # Pass 4: nudge final colour statistics back toward the reference crop.
         if cfg.color_transfer_strength > 0.0:
             result_img = lab_color_transfer(
                 source=base_image, target=result_img, strength=cfg.color_transfer_strength,
@@ -728,28 +725,35 @@ class TerrainTextureGenerationStage(PipelineStage):
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
         return PIL.Image.fromarray(result)
 
-    def _generate_scattered_texture_base(
+    def _extract_largest_region_crop(
         self,
         baked_color: PIL.Image.Image,
         region_map: np.ndarray,
         region_val: int,
         target_size: int,
-        rng: np.random.Generator,
-        num_patches: int = 24,
-        patch_sizes: tuple[int, ...] = (128, 256),
-        feather_px: float = 6.0,
     ) -> Optional[PIL.Image.Image]:
         """
-        Build a high-frequency texture "collage" seed for a region by
-        scattering small crisp sub-patches — sampled only from that region's
-        own pixels in the baked top-down photo — across a blank canvas. Each
-        patch's opacity is feathered to zero within feather_px of its own
-        region-mask boundary (or crop edge, if clipped by the source image
-        bounds), so pasted patches blend into the canvas instead of leaving
-        hard rectangular seams. This produces a seed that is uniformly
-        high-frequency and true to the source material everywhere, unlike a
-        single stretched crop of the region's (possibly small or irregular)
-        footprint.
+        Crop a single square from the largest connected component of this
+        region in the baked top-down photo, then resize to target_size.
+
+        A previous version scattered many small patches from anywhere in the
+        region into a collage. That produced a hard-seamed, visibly patchy
+        mosaic whenever the region spanned meaningfully different lighting or
+        exposure (sunlit rock vs. shadow vs. a warm sunset glow, all the same
+        region label) — each patch only feathered against its own mask
+        boundary, never against its neighbours on the canvas, so adjacent
+        patches could clash violently. A single crop from one real, contiguous
+        patch of material is inherently coherent — one location, one
+        lighting/exposure condition, genuine continuous texture — at the cost
+        of only capturing that one location's appearance rather than
+        sampling the region's full variety.
+
+        The crop is centred on the component's bounding box, sized to the
+        larger of its two bbox dimensions (clamped to the image) so resizing
+        to target_size doesn't distort aspect ratio; pixels within that square
+        outside the component itself are real neighbouring photo content, not
+        masked out, since re-introducing per-pixel masking here would bring
+        back the same patchiness this replaces.
 
         Returns None if the region has no pixels at all in region_map — the
         caller then falls back to plain text-to-image generation.
@@ -762,40 +766,26 @@ class TerrainTextureGenerationStage(PipelineStage):
         )
 
         mask = region_map_res == region_val
-        rows, cols = np.nonzero(mask)
-        if rows.size == 0:
+        if not mask.any():
             return None
 
+        labeled, _ = ndi_label(mask)
+        sizes = np.bincount(labeled.ravel())
+        sizes[0] = 0  # background
+        largest_label = int(sizes.argmax())
+        ys, xs = np.nonzero(labeled == largest_label)
+
+        r0, r1 = int(ys.min()), int(ys.max()) + 1
+        c0, c1 = int(xs.min()), int(xs.max()) + 1
+        cy, cx = (r0 + r1) // 2, (c0 + c1) // 2
+        side = min(max(r1 - r0, c1 - c0), H, W)
+        half = side // 2
+        sr0 = int(np.clip(cy - half, 0, H - side))
+        sc0 = int(np.clip(cx - half, 0, W - side))
+
         color_arr = np.array(baked_color.convert("RGB"))
-        mean_color = color_arr[mask].mean(axis=0).astype(np.uint8)
-        canvas = np.tile(mean_color, (target_size, target_size, 1)).astype(np.float32)
-
-        for _ in range(num_patches):
-            p_size = int(rng.choice(patch_sizes))
-            anchor = int(rng.integers(0, rows.size))
-            cr, cc = int(rows[anchor]), int(cols[anchor])
-
-            r0 = max(0, min(cr - p_size // 2, max(0, H - p_size)))
-            c0 = max(0, min(cc - p_size // 2, max(0, W - p_size)))
-            r1, c1 = min(H, r0 + p_size), min(W, c0 + p_size)
-
-            src_patch = color_arr[r0:r1, c0:c1]
-            src_mask = mask[r0:r1, c0:c1]
-            ph, pw = src_patch.shape[:2]
-            if ph == 0 or pw == 0 or not src_mask.any():
-                continue
-
-            max_oy, max_ox = target_size - ph, target_size - pw
-            if max_oy < 0 or max_ox < 0:
-                continue
-            out_y = int(rng.integers(0, max_oy + 1))
-            out_x = int(rng.integers(0, max_ox + 1))
-
-            alpha = np.clip(distance_transform_edt(src_mask) / feather_px, 0.0, 1.0)[..., None]
-            region = canvas[out_y:out_y + ph, out_x:out_x + pw]
-            region[:] = src_patch.astype(np.float32) * alpha + region * (1.0 - alpha)
-
-        return PIL.Image.fromarray(canvas.clip(0, 255).astype(np.uint8))
+        crop = color_arr[sr0:sr0 + side, sc0:sc0 + side]
+        return PIL.Image.fromarray(crop).resize((target_size, target_size), PIL.Image.LANCZOS)
 
     @staticmethod
     def _pack_local_height_channel(rgb_img: PIL.Image.Image) -> PIL.Image.Image:
