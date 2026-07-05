@@ -213,9 +213,14 @@ stages:
     guidance_scale: 3.5
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 4         # dilation applied to seam mask before inpainting
-    # Real reference crop (_extract_largest_region_crop) is pasted centred on the tile
-    # canvas at this fraction of tile_size. 0.5 leaves a comfortable margin before the
-    # seam-fix band (~4-9% of tile_size from each edge) so the two never overlap.
+    # Several real reference crops (_extract_reference_patches), spaced apart on the tile
+    # canvas (_patch_placements), instead of one -- gives Pass 1 more than one real colour/
+    # lighting anchor to match against, since generated fill can drift far from a single one.
+    num_reference_patches: 3
+    # Each patch's size as a fraction of tile_size when there's only one; scaled down by
+    # 1/sqrt(num_reference_patches) so total covered area stays comparable. 0.5 (single-patch
+    # case) leaves a comfortable margin before the seam-fix band (~4-9% of tile_size from
+    # each edge) so the two never overlap.
     reference_patch_fraction: 0.5
     # Bake-certainty threshold below which pixels are excluded when picking the reference
     # crop -- keeps it away from the equirect nadir singularity (the single largest "ground"

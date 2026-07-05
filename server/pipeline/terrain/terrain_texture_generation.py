@@ -1,3 +1,4 @@
+import math
 from typing import Any, Optional
 from logging import Logger
 
@@ -30,8 +31,8 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 # Short on purpose: at FLUX Fill's guidance_scale (see TerrainTextureGenerationConfiguration)
 # the text prompt strongly dominates the img2img seed, so an elaborate, hyper-specific
 # description would fight the actual photo reference instead of following it. These name
-# the material and its 1-2 defining traits only — the real reference crop
-# (_extract_largest_region_crop) and per-region LAB colour transfer carry the rest.
+# the material and its 1-2 defining traits only — the real reference crops
+# (_extract_reference_patches) and per-region LAB colour transfer carry the rest.
 _BASE_PROMPTS: dict[RegionType, str] = {
     RegionType.GROUND: (
         "macro close-up photograph of loose soil grit, tiny sharp gravel stones, "
@@ -102,14 +103,20 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
         reference_tex_size: int = 2048,
-        # The reference crop (_extract_largest_region_crop, a single contiguous, coherently-
-        # lit patch of this region from the baked photo) is pasted centred on the tile
-        # canvas, covering this fraction of the tile's linear size. Comfortably under 1.0 so
-        # it never reaches the seam-fix band at the tile edges.
+        # How many reference crops (_extract_reference_patches) to place on the tile canvas.
+        # Multiple smaller patches, spread out with real gaps between them, give Pass 1 more
+        # than one real colour/lighting anchor to match against instead of extrapolating a
+        # single patch across the whole canvas -- helps with colour drift far from it.
+        num_reference_patches: int = 3,
+        # Each patch (a single contiguous, coherently-lit crop of this region from the baked
+        # photo) covers this fraction of the tile's linear size when there's only one; with
+        # num_reference_patches > 1, each patch is scaled down by 1/sqrt(n) so total covered
+        # area stays comparable. Comfortably under 1.0 so patches never reach the seam-fix
+        # band at the tile edges.
         reference_patch_fraction: float = 0.5,
-        # Bake-certainty threshold below which pixels are excluded when picking the
-        # reference crop (_extract_largest_region_crop) -- keeps it away from the equirect
-        # nadir singularity (bakes as a radial/pinwheel artefact) and other unreliable areas.
+        # Bake-certainty threshold below which pixels are excluded when picking reference
+        # crops (_extract_reference_patches) -- keeps them away from the equirect nadir
+        # singularity (bakes as a radial/pinwheel artefact) and other unreliable areas.
         patch_min_certainty: float = 0.15,
         # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
         # it purely as guidance, not something to hard-preserve.
@@ -165,6 +172,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.synthetic_tile_factor = synthetic_tile_factor
         self.use_photo_reference = use_photo_reference
         self.reference_tex_size = reference_tex_size
+        self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
         self.patch_min_certainty = patch_min_certainty
         self.pass1_inpainting_type = pass1_inpainting_type
@@ -181,23 +189,25 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
       1. If a real photo is available (PANORAMA_TERRAIN + HEIGHT_MAP), bake it
-         top-down and crop a single square from the largest connected component
-         of that region in the baked photo (_extract_largest_region_crop). A
-         single real crop is inherently coherent — one location, one lighting/
-         exposure condition, genuine continuous texture — unlike stitching many
-         small patches from potentially very different lighting conditions
-         within the same region label, which produces a hard-seamed, visibly
-         patchy mosaic.
-      2. Pass 1 (_pass1_extend_patch): paste that crop centred on the tile canvas
-         at reference_patch_fraction of the tile's size and extend it to fill
-         the whole tile using the patch purely as guidance — by default LaMa
-         (classical texture-completion, no prompt/LoRA/hallucination — it
-         propagates the patch's own real texture into the surrounding hole),
-         or plain FLUX img2img with the LoRA disabled. A region with no pixels
-         at all falls back to plain text generation.
+         top-down and crop num_reference_patches squares from the most solid,
+         reliable, mutually distant locations of that region in the baked
+         photo (_extract_reference_patches). Each is one real, contiguous
+         location — coherent lighting/exposure, genuine continuous texture —
+         unlike stitching many small patches from potentially very different
+         lighting conditions within the same region label, which produces a
+         hard-seamed, visibly patchy mosaic; using several well-separated
+         patches instead of just one also gives later steps more than one real
+         colour/lighting anchor to match against.
+      2. Pass 1 (_pass1_extend_patch): paste those crops onto the tile canvas,
+         spaced apart (_patch_placements), and extend them to fill the whole
+         tile using them purely as guidance — by default LaMa (classical
+         texture-completion, no prompt/LoRA/hallucination — it propagates the
+         patches' own real texture into the surrounding holes), or plain FLUX
+         img2img with the LoRA disabled. A region with no pixels at all falls
+         back to plain text generation.
       3. Pass 2: FLUX + FLUX_SEAMLESS_TEXTURE LoRA repaints the *entire* Pass-1
          tile again (full mask, moderate reference_strength) — including the
-         original patch region, not hard-preserved — pushing toward genuine
+         original patch regions, not hard-preserved — pushing toward genuine
          tileability and the photorealistic macro finish, then circular-shift
          seam inpainting for guaranteed wraparound tiling. Sharpen/contrast-
          boost recovers detail softened by inpainting, and colour statistics
@@ -614,22 +624,22 @@ class TerrainTextureGenerationStage(PipelineStage):
         debug_label: str = "tile",
     ) -> PIL.Image.Image:
         """
-        Two-pass tile generation guided by a single crop of the largest
-        connected component of this region in the baked photo
-        (_extract_largest_region_crop) — one real location, so it's inherently
-        coherent (consistent lighting/exposure) rather than a mosaic of
-        patches from potentially very different conditions.
+        Two-pass tile generation guided by a few real crops of this region
+        from the baked photo (_extract_reference_patches) — each a single
+        contiguous, coherently-lit location, spread out with real gaps between
+        them, rather than one patch extrapolated across the whole canvas or a
+        mosaic of small patches stitched edge-to-edge.
 
-        Pass 1 (_pass1_extend_patch) extends that crop to fill the whole tile
-        using it purely as guidance, not something to hard-preserve. Pass 2
+        Pass 1 (_pass1_extend_patch) extends them to fill the whole tile using
+        them purely as guidance, not something to hard-preserve. Pass 2
         (below) then repaints the *entire* Pass-1 tile with FLUX + the
-        FLUX_SEAMLESS_TEXTURE LoRA — including the original patch region — to
+        FLUX_SEAMLESS_TEXTURE LoRA — including the original patch regions — to
         push toward genuine tileability and the photorealistic macro finish.
         Falls back to plain text generation if the region has no pixels at all.
 
         certainty: per-pixel bake certainty from _bake_reference, used to keep
-        the crop away from the equirect nadir singularity (see
-        _extract_largest_region_crop).
+        the crops away from the equirect nadir singularity (see
+        _extract_reference_patches).
         inpainter: override the stage's own self._inpainter for Pass 2. Defaults
         to self._inpainter.
         debug_label: filename prefix for step-by-step debug images (see
@@ -639,20 +649,23 @@ class TerrainTextureGenerationStage(PipelineStage):
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
 
-        patch_size = max(16, int(T * cfg.reference_patch_fraction))
-        patch = self._extract_largest_region_crop(
+        n = max(1, cfg.num_reference_patches)
+        patch_size = max(16, int(T * cfg.reference_patch_fraction / math.sqrt(n)))
+        patches = self._extract_reference_patches(
             baked_color=baked_color,
             region_map=region_map,
             region_val=region_val,
             patch_size=patch_size,
+            num_patches=n,
             certainty=certainty,
             min_certainty=cfg.patch_min_certainty,
         )
-        if patch is None:
+        if not patches:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
-        self._save_debug_step(cfg, debug_label, "01_reference_patch", patch)
+        for i, p in enumerate(patches):
+            self._save_debug_step(cfg, debug_label, f"01_reference_patch_{i}", p)
 
-        pass1_image = self._pass1_extend_patch(patch, prompt, cfg, seed, debug_label)
+        pass1_image = self._pass1_extend_patch(patches, prompt, cfg, seed, debug_label)
         self._save_debug_step(cfg, debug_label, "04_pass1_result", pass1_image)
 
         # Pass 2: FLUX + LoRA repaints the whole tile again, full mask — free to change
@@ -694,20 +707,22 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _pass1_extend_patch(
         self,
-        patch: PIL.Image.Image,
+        patches: list[PIL.Image.Image],
         prompt: str,
         cfg: "TerrainTextureGenerationConfiguration",
         seed: int,
         debug_label: str,
     ) -> PIL.Image.Image:
         """
-        Extend `patch` to fill a whole tile_size canvas, using it purely as
-        guidance (see cfg.pass1_inpainting_type for the LAMA vs FLUX choice).
+        Extend `patches` to fill a whole tile_size canvas, using them purely
+        as guidance (see cfg.pass1_inpainting_type for the LAMA vs FLUX
+        choice).
         """
         T = cfg.tile_size
         use_lama = cfg.pass1_inpainting_type == "LAMA"
+        placements = self._patch_placements(len(patches), T, patches[0].size[0], cfg.seam_width_fraction, cfg.seam_dilation_px)
         canvas, mask = self._build_reference_canvas(
-            patch, T, feather_px=0.0 if use_lama else cfg.mask_feather_px,
+            patches, placements, T, feather_px=0.0 if use_lama else cfg.mask_feather_px,
         )
         self._save_debug_step(cfg, debug_label, "02_pass1_canvas", canvas)
         self._save_debug_step(cfg, debug_label, "03_pass1_mask", mask)
@@ -715,16 +730,25 @@ class TerrainTextureGenerationStage(PipelineStage):
         if use_lama:
             self._init_lama_inpainter()
             result = self._lama_inpainter.inpaint(input_image=canvas, mask_image=mask, temp_path=self.temp)
+            # LaMa has no prompt to anchor colour/exposure and can drift away from its real
+            # anchors, especially over the larger distances between multiple spread-out
+            # patches -- nudge its whole fill back toward the real patches' own colour
+            # statistics before compositing them back over it.
+            if cfg.color_transfer_strength > 0.0:
+                patches_ref = PIL.Image.fromarray(
+                    np.concatenate([np.array(p.convert("RGB")) for p in patches], axis=0)
+                )
+                result = lab_color_transfer(source=patches_ref, target=result, strength=cfg.color_transfer_strength)
             # LaMa is trained to reproduce the unmasked region closely but isn't guaranteed
-            # pixel-exact — composite the real patch back to be sure Pass 2 actually starts
+            # pixel-exact — composite the real patches back to be sure Pass 2 actually starts
             # from genuine material, not a LaMa approximation of it.
-            return self._composite_patch_over(result, patch, mask, T)
+            return self._composite_patches_over(result, patches, placements, mask, T)
 
-        # Plain FLUX img2img with the LoRA disabled: loosely guided by the patch (via
-        # `image` + reference_strength) without hard-preserving it, and no seamless-
+        # Plain FLUX img2img with the LoRA disabled: loosely guided by the patches (via
+        # `image` + reference_strength) without hard-preserving them, and no seamless-
         # texture LoRA bias at this stage. Full mask -- nothing here is meant to be kept
         # verbatim, unlike the LaMa path where the mask is the only way to reference the
-        # patch at all.
+        # patches at all.
         self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[0.0])
         try:
             full_mask = PIL.Image.new("L", (T, T), 255)
@@ -742,38 +766,80 @@ class TerrainTextureGenerationStage(PipelineStage):
             self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[cfg.lora_scale])
 
     @staticmethod
+    def _patch_placements(
+        num_patches: int,
+        tile_size: int,
+        patch_size: int,
+        seam_width_fraction: float,
+        seam_dilation_px: int,
+    ) -> list[tuple[int, int]]:
+        """
+        Centre (row, col) for each of num_patches patches: one at the tile
+        centre, several evenly spaced around a circle sized so neighbouring
+        patches don't touch (patch diameter + a gap) and none reach the
+        seam-fix band at the tile edges (see _seam_fix — that band sits within
+        roughly seam_width_fraction/2 * tile_size + seam_dilation_px of each
+        edge once mapped back through the double-roll).
+        """
+        T = tile_size
+        half_patch = patch_size / 2.0
+        if num_patches <= 1:
+            return [(T // 2, T // 2)]
+
+        seam_margin_px = T * seam_width_fraction / 2.0 + seam_dilation_px + 8
+        max_radius = max(0.0, T / 2.0 - seam_margin_px - half_patch)
+
+        gap_px = half_patch  # gap between neighbouring patches ~= half a patch width
+        angle_step = 2 * math.pi / num_patches
+        chord_needed = patch_size + gap_px
+        chord_radius = (chord_needed / 2.0) / math.sin(angle_step / 2.0)
+        radius = min(max_radius, chord_radius)
+
+        cy = cx = T / 2.0
+        placements = []
+        for i in range(num_patches):
+            angle = angle_step * i
+            r = int(round(cy + radius * math.sin(angle)))
+            c = int(round(cx + radius * math.cos(angle)))
+            placements.append((r, c))
+        return placements
+
+    @staticmethod
     def _build_reference_canvas(
-        patch: PIL.Image.Image,
+        patches: list[PIL.Image.Image],
+        placements: list[tuple[int, int]],
         tile_size: int,
         feather_px: float,
     ) -> tuple[PIL.Image.Image, PIL.Image.Image]:
         """
-        Paste `patch` centred on a tile_size canvas and build the matching
-        partial mask: black (0, keep) over the patch, white (255, generate)
-        everywhere else, boundary Gaussian-feathered (when feather_px > 0) so
-        the transition blends rather than leaving a hard rectangular seam.
-        Used as-is by the LaMa Pass-1 path (real inpainting mask); the FLUX
-        Pass-1 path only uses the canvas and builds its own full-white mask,
-        since it never asks the model to hard-preserve anything.
+        Paste each of `patches` onto a tile_size canvas at its centre in
+        `placements`, and build the matching partial mask: black (0, keep)
+        over each patch, white (255, generate) everywhere else, boundary
+        Gaussian-feathered (when feather_px > 0) so the transition blends
+        rather than leaving a hard rectangular seam. Used as-is by the LaMa
+        Pass-1 path (real inpainting mask); the FLUX Pass-1 path only uses the
+        canvas and builds its own full-white mask, since it never asks the
+        model to hard-preserve anything.
 
-        The canvas background outside the patch is filled with the patch's own
-        mean colour, so it reads as a plausible continuation of the patch
+        The canvas background outside all patches is filled with their
+        combined mean colour, so it reads as a plausible continuation of them
         rather than a contrasting flat colour wherever it does show through.
 
         Returns (canvas RGB, mask L).
         """
         T = tile_size
-        p = patch.size[0]
-        mean_color = tuple(
-            np.array(patch.convert("RGB")).reshape(-1, 3).mean(axis=0).astype(np.uint8).tolist()
-        )
+        all_pixels = np.concatenate([np.array(p.convert("RGB")).reshape(-1, 3) for p in patches], axis=0)
+        mean_color = tuple(all_pixels.mean(axis=0).astype(np.uint8).tolist())
 
         canvas = PIL.Image.new("RGB", (T, T), mean_color)
-        offset = (T - p) // 2
-        canvas.paste(patch, (offset, offset))
-
         mask_arr = np.full((T, T), 255, dtype=np.uint8)
-        mask_arr[offset:offset + p, offset:offset + p] = 0
+        for patch, (cy, cx) in zip(patches, placements):
+            p = patch.size[0]
+            offset_y = int(np.clip(cy - p // 2, 0, T - p))
+            offset_x = int(np.clip(cx - p // 2, 0, T - p))
+            canvas.paste(patch, (offset_x, offset_y))
+            mask_arr[offset_y:offset_y + p, offset_x:offset_x + p] = 0
+
         mask = PIL.Image.fromarray(mask_arr, "L")
         if feather_px > 0:
             mask = mask.filter(PIL.ImageFilter.GaussianBlur(radius=feather_px))
@@ -781,31 +847,33 @@ class TerrainTextureGenerationStage(PipelineStage):
         return canvas, mask
 
     @staticmethod
-    def _composite_patch_over(
+    def _composite_patches_over(
         generated: PIL.Image.Image,
-        patch: PIL.Image.Image,
+        patches: list[PIL.Image.Image],
+        placements: list[tuple[int, int]],
         mask: PIL.Image.Image,
         tile_size: int,
     ) -> PIL.Image.Image:
         """
-        Paste the real reference patch back over the generated tile, at the
-        same centred position and with the same feathered mask used to build
-        the input canvas (_build_reference_canvas) — `1 - mask` is exactly the
+        Paste the real reference patches back over the generated tile, at the
+        same positions and with the same feathered mask used to build the
+        input canvas (_build_reference_canvas) — `1 - mask` is exactly the
         right blend weight, since `mask` is generate(255)/keep(0). This is the
-        actual guarantee that the real patch survives and blends smoothly;
+        actual guarantee that the real patches survive and blend smoothly;
         see the call site for why the model's own mask handling can't be
         trusted to do this itself.
         """
         T = tile_size
-        p = patch.size[0]
-        offset = (T - p) // 2
-
         keep_weight = 1.0 - (np.array(mask, dtype=np.float32) / 255.0)
         gen_arr = np.array(generated.convert("RGB"), dtype=np.float32)
-        patch_placed = np.zeros((T, T, 3), dtype=np.float32)
-        patch_placed[offset:offset + p, offset:offset + p] = np.array(patch.convert("RGB"), dtype=np.float32)
+        patches_placed = np.zeros((T, T, 3), dtype=np.float32)
+        for patch, (cy, cx) in zip(patches, placements):
+            p = patch.size[0]
+            offset_y = int(np.clip(cy - p // 2, 0, T - p))
+            offset_x = int(np.clip(cx - p // 2, 0, T - p))
+            patches_placed[offset_y:offset_y + p, offset_x:offset_x + p] = np.array(patch.convert("RGB"), dtype=np.float32)
 
-        blended = keep_weight[..., None] * patch_placed + (1.0 - keep_weight[..., None]) * gen_arr
+        blended = keep_weight[..., None] * patches_placed + (1.0 - keep_weight[..., None]) * gen_arr
         return PIL.Image.fromarray(blended.clip(0, 255).astype(np.uint8))
 
     def _seam_fix(
@@ -846,20 +914,22 @@ class TerrainTextureGenerationStage(PipelineStage):
         result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
         return PIL.Image.fromarray(result)
 
-    def _extract_largest_region_crop(
+    def _extract_reference_patches(
         self,
         baked_color: PIL.Image.Image,
         region_map: np.ndarray,
         region_val: int,
         patch_size: int,
+        num_patches: int = 1,
         certainty: Optional[np.ndarray] = None,
         min_certainty: float = 0.15,
-    ) -> Optional[PIL.Image.Image]:
+    ) -> list[PIL.Image.Image]:
         """
-        Crop a single square from the most solid, reliable area of this region
-        in the baked top-down photo, then resize to patch_size. This is a
-        guidance patch pasted into a larger tile canvas (see
-        _build_reference_canvas), not necessarily the full tile.
+        Crop up to num_patches squares from the most solid, reliable, and
+        mutually distant areas of this region in the baked top-down photo,
+        each resized to patch_size. These are guidance patches pasted into a
+        larger tile canvas (see _build_reference_canvas), not necessarily the
+        full tile.
 
         A previous version scattered many small patches from anywhere in the
         region into a collage. That produced a hard-seamed, visibly patchy
@@ -867,32 +937,36 @@ class TerrainTextureGenerationStage(PipelineStage):
         exposure (sunlit rock vs. shadow vs. a warm sunset glow, all the same
         region label) — each patch only feathered against its own mask
         boundary, never against its neighbours on the canvas, so adjacent
-        patches could clash violently. A single crop from one real, contiguous
-        patch of material is inherently coherent — one location, one
-        lighting/exposure condition, genuine continuous texture — at the cost
-        of only capturing that one location's appearance rather than
-        sampling the region's full variety.
+        patches could clash violently. A version after that used a single
+        crop from one real, contiguous patch — inherently coherent, but with
+        only one real colour/lighting anchor, generated fill can drift far
+        from it. This version keeps the "one coherent crop per patch"
+        property but samples num_patches of them, each from a distinct,
+        well-separated location, so Pass 1 has more than one real anchor to
+        match against wherever it's generating.
 
-        A version after that used the connected component's bounding-box
+        A version after *that* used the connected component's bounding-box
         centre, which reliably picked the equirect nadir singularity: the
         single largest "ground" blob is almost always the area immediately
         around the camera, so its bbox centre sits right on the world origin,
         where azimuth is undefined and topdown-bakes as a radial/pinwheel
         artefact. certainty (from _bake_reference, zero in that dead zone,
-        ramping outward) excludes it from consideration entirely; the crop
-        centre is then the point of this region *farthest* from any excluded
-        pixel (nadir dead zone, a different region type, or the image edge)
-        via a distance transform — the most "interior," safest point of the
-        largest solid patch, not just whatever a bounding box happens to
-        centre on. side is set from that same distance so the crop stays
-        within (or very close to) solid, reliable material; pixels within it
-        that are nonetheless from neighbouring content are real photo content,
-        not masked out, since re-introducing per-pixel masking here would
-        bring back the earlier patchiness.
+        ramping outward) excludes it from consideration entirely; each patch
+        centre is instead the point of the *remaining* valid area farthest
+        from any excluded pixel (nadir dead zone, a different region type, the
+        image edge, or an already-picked patch) via a distance transform — the
+        most "interior," safest point of whatever solid material is left, not
+        just whatever a bounding box happens to centre on. Each patch's side
+        is set from that same distance so it stays within (or very close to)
+        solid, reliable material, and the area is then excluded before picking
+        the next one so patches don't overlap or crowd each other. Pixels
+        within a patch that are nonetheless from neighbouring content are real
+        photo content, not masked out, since re-introducing per-pixel masking
+        here would bring back the earlier patchiness.
 
-        Returns None if the region has no pixels at all (after excluding
-        low-certainty pixels) — the caller then falls back to plain
-        text-to-image generation.
+        Returns fewer than num_patches (down to an empty list) if there isn't
+        enough distinct reliable material — the caller falls back to plain
+        text-to-image generation if the list ends up empty.
         """
         W, H = baked_color.size
         rm_h, rm_w = region_map.shape
@@ -908,19 +982,33 @@ class TerrainTextureGenerationStage(PipelineStage):
                 if certainty.shape != (H, W) else certainty
             )
             valid &= cert_res > min_certainty
-        if not valid.any():
-            return None
-
-        dist = distance_transform_edt(valid)
-        cy, cx = np.unravel_index(int(np.argmax(dist)), dist.shape)
-        side = min(max(16, int(2 * dist[cy, cx])), H, W)
-        half = side // 2
-        sr0 = int(np.clip(cy - half, 0, H - side))
-        sc0 = int(np.clip(cx - half, 0, W - side))
 
         color_arr = np.array(baked_color.convert("RGB"))
-        crop = color_arr[sr0:sr0 + side, sc0:sc0 + side]
-        return PIL.Image.fromarray(crop).resize((patch_size, patch_size), PIL.Image.LANCZOS)
+        remaining = valid.copy()
+        patches: list[PIL.Image.Image] = []
+
+        for _ in range(max(1, num_patches)):
+            if not remaining.any():
+                break
+            dist = distance_transform_edt(remaining)
+            peak = float(dist.max())
+            if peak < 4.0:   # nothing left big enough to be worth a patch
+                break
+            cy, cx = np.unravel_index(int(np.argmax(dist)), dist.shape)
+            side = min(max(16, int(2 * peak)), H, W)
+            half = side // 2
+            sr0 = int(np.clip(cy - half, 0, H - side))
+            sc0 = int(np.clip(cx - half, 0, W - side))
+
+            crop = color_arr[sr0:sr0 + side, sc0:sc0 + side]
+            patches.append(PIL.Image.fromarray(crop).resize((patch_size, patch_size), PIL.Image.LANCZOS))
+
+            # Exclude this area (out to its own safe radius) so the next pick
+            # lands somewhere distinct rather than immediately adjacent.
+            yy, xx = np.ogrid[:H, :W]
+            remaining &= (yy - cy) ** 2 + (xx - cx) ** 2 > peak ** 2
+
+        return patches
 
     @staticmethod
     def _pack_local_height_channel(rgb_img: PIL.Image.Image) -> PIL.Image.Image:
