@@ -231,7 +231,7 @@ stages:
     # never affects the material actually used. Doubles this stage's runtime (or more, with
     # the fill baseline) since it reruns full generation+seam-fix per scale — leave false for
     # normal runs.
-    debug_lora_scale_sweep: false
+    debug_lora_scale_sweep: true
     debug_lora_scales: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
     debug_lora_sweep_include_fill_baseline: true
 
