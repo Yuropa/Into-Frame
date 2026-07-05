@@ -186,12 +186,18 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        seam_heal_width_px: int = 40,
+        seam_heal_width_px: int = 64,
         seam_heal_method: str = "telea",
+        # Fraction of panorama height the fill mask dilates into the sky before FLUX
+        # generates (see "Pass 2" below) — buries the real jagged horizon/mountain
+        # silhouette so FLUX has no contour to read, at the cost of pushing the
+        # generated/real boundary that much further into the photographed sky.
+        shroud_radius_frac: float = 1 / 15,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.seam_heal_width_px = seam_heal_width_px
         self.seam_heal_method = seam_heal_method
+        self.shroud_radius_frac = shroud_radius_frac
 
 
 class SkyboxInpaintingStage(PipelineStage):
@@ -336,9 +342,9 @@ class SkyboxInpaintingStage(PipelineStage):
         # Dilate the fill mask into the sky region to obliterate the mountain silhouette 
         # contour line, preventing FLUX from reading the jagged horizon shape.
         fill_mask = ~sky_mask
-        
-        # Dilate the fill area by roughly 3-5% of image height to bury the ridge silhouettes
-        shroud_radius = max(4, h // 25)
+
+        # Dilate the fill area by shroud_radius_frac of image height to bury the ridge silhouettes.
+        shroud_radius = max(4, int(h * self.config.shroud_radius_frac))
         flux_mask_arr = binary_dilation(fill_mask, iterations=shroud_radius)
         fill_mask_pil = PILImage.fromarray((flux_mask_arr * 255).astype(np.uint8), mode="L")
 
