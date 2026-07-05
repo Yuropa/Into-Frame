@@ -214,14 +214,19 @@ stages:
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 4         # dilation applied to seam mask before inpainting
     # Real reference crop (_extract_largest_region_crop) is pasted centred on the tile
-    # canvas at this fraction of tile_size and used as genuine partial-inpaint context —
-    # a real partial mask (black=keep the patch, white=generate), not a full-white mask
-    # over a soft img2img seed. 0.5 leaves a comfortable margin before the seam-fix band
-    # (~4-9% of tile_size from each edge) so the two never overlap.
+    # canvas at this fraction of tile_size. 0.5 leaves a comfortable margin before the
+    # seam-fix band (~4-9% of tile_size from each edge) so the two never overlap.
     reference_patch_fraction: 0.5
-    mask_feather_px: 12.0       # gaussian feather on the keep/generate mask boundary
-    reference_strength: 1.0    # full generation in the masked region; the mask (not this)
-                               # is what preserves the real patch
+    # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
+    # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
+    # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked
+    # inputs, observed as the patch being replaced with unrelated content). FLUX = ordinary
+    # img2img with this stage's own LoRA temporarily disabled instead.
+    pass1_inpainting_type: LAMA
+    mask_feather_px: 12.0       # Pass-1 mask feather (FLUX option only; LaMa ignores it)
+    reference_strength: 0.60   # img2img strength for Pass 1 (if FLUX) and Pass 2's full-tile
+                               # LoRA repaint over Pass 1 — the only thing anchoring Pass 2
+                               # to Pass 1's real-texture content rather than inventing anew
     # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
     # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
     synthetic_tile_factor: 50.0
@@ -234,14 +239,10 @@ stages:
     nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
     nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
     horizon_fade_deg: 1.5       # ramp width below the horizon
-    # Debug: set true to also regenerate one region's tile at several FLUX_SEAMLESS_TEXTURE
-    # LoRA scales (debug_lora_scales), through the real reference-crop path against actual
-    # captured data (same FluxInpaintPipeline production uses — scale 0.0 is the valid
-    # "no LoRA effect" reference point). Written to <temp>/lora_sweep/; never affects the
-    # material actually used. Adds one full generation+seam-fix pass per scale to this
-    # stage's runtime — leave false for normal runs.
-    debug_lora_scale_sweep: true
-    debug_lora_scales: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    # Debug: save every intermediate image of the generation process (reference patch,
+    # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
+    # <temp>/texture_generation/, so each step can be inspected.
+    debug_save_steps: true
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.

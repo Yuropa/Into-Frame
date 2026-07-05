@@ -103,37 +103,43 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         use_photo_reference: bool = True,
         reference_tex_size: int = 2048,
         # The reference crop (_extract_largest_region_crop, a single contiguous, coherently-
-        # lit patch of this region from the baked photo) is pasted at native guidance size
-        # onto the tile canvas, centred, covering this fraction of the tile's linear size.
-        # Everything outside it is masked as "generate" -- FLUX extends the real material
-        # outward from genuine context via the pipeline's actual mask/masked-image
-        # conditioning, rather than the whole canvas being a soft img2img seed. Kept well
-        # under 1.0 so the patch has a comfortable margin before the tile edge, which the
-        # seam-fix pass later regenerates anyway.
+        # lit patch of this region from the baked photo) is pasted centred on the tile
+        # canvas, covering this fraction of the tile's linear size. Comfortably under 1.0 so
+        # it never reaches the seam-fix band at the tile edges.
         reference_patch_fraction: float = 0.5,
-        # Gaussian feather radius (px) on the mask boundary around the real patch, so the
-        # generate/keep transition blends rather than leaving a hard rectangular seam.
+        # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
+        # it purely as guidance, not something to hard-preserve.
+        #   LAMA (default) -- classical texture-completion inpainting (no prompt, no LoRA,
+        #     no hallucination): propagates the patch's own real texture into the
+        #     surrounding hole via genuine local image statistics. The patch region is
+        #     masked as "keep" here since LaMa has no img2img/strength concept to loosely
+        #     guide from -- protecting it via mask is the only way to reference it at all.
+        #   FLUX -- ordinary img2img over the same canvas (full mask, reference_strength,
+        #     this stage's own FLUX pipeline with its LoRA temporarily disabled) -- loosely
+        #     guided by the patch without hard-preserving it.
+        # Either way, Pass 2 (FLUX + FLUX_SEAMLESS_TEXTURE LoRA) then repaints the *entire*
+        # tile again -- including the original patch region -- to push toward genuine
+        # tileability and the photorealistic macro finish.
+        pass1_inpainting_type: str = "LAMA",
+        # Gaussian feather radius (px) on the Pass-1 mask boundary (FLUX option only --
+        # LaMa thresholds its own mask internally, so feathering there is a no-op).
         mask_feather_px: float = 12.0,
-        # Diffusers `strength` for the masked ("generate") region. With a proper partial
-        # mask the pipeline's own mask/masked-image conditioning is what preserves the real
-        # patch -- not this value -- so 1.0 (full generation in the masked region) is the
-        # semantically correct default; lower values would also pull noise into the real
-        # patch along the feathered mask boundary.
-        reference_strength: float = 1.0,
-        # Post-process LAB colour nudge toward the reference crop's stats.
+        # Diffusers `strength`: used for Pass 1 when pass1_inpainting_type is FLUX (ordinary
+        # img2img strength), and for Pass 2's FLUX+LoRA repaint over the full Pass-1 tile
+        # (full mask there -- this is the only thing keeping it anchored to Pass 1's real-
+        # texture content rather than inventing something else entirely).
+        reference_strength: float = 0.60,
+        # Post-process LAB colour nudge toward the Pass-1 (real-texture-grounded) tile.
         color_transfer_strength: float = 0.60,
         # FLUX_SEAMLESS_TEXTURE LoRA strength. Lower than full (1.0) so its seamless-tiling
         # bias steers generation without overpowering the per-region material prompt or the
         # reference crop's genuine detail.
         lora_scale: float = 0.8,
-        # Debug: regenerate one representative region's tile through the real reference-
-        # seeded high-fidelity path (actual captured photo/region data, not a synthetic
-        # test prompt) at several LoRA scales, so a reasonable lora_scale can be picked
-        # against real data from a normal pipeline run. Written to self.temp/lora_sweep/;
-        # never affects TERRAIN_MATERIAL or the tiles actually used. No-op unless
+        # Debug: save every intermediate image of the generation process (reference patch,
+        # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
+        # self.temp/texture_generation/, so each step can be inspected. No-op unless
         # self.temp is set.
-        debug_lora_scale_sweep: bool = False,
-        debug_lora_scales: Optional[list[float]] = None,
+        debug_save_steps: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -156,12 +162,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.use_photo_reference = use_photo_reference
         self.reference_tex_size = reference_tex_size
         self.reference_patch_fraction = reference_patch_fraction
+        self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
         self.color_transfer_strength = color_transfer_strength
         self.lora_scale = lora_scale
-        self.debug_lora_scale_sweep = debug_lora_scale_sweep
-        self.debug_lora_scales = debug_lora_scales if debug_lora_scales is not None else [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        self.debug_save_steps = debug_save_steps
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -177,24 +183,24 @@ class TerrainTextureGenerationStage(PipelineStage):
          small patches from potentially very different lighting conditions
          within the same region label, which produces a hard-seamed, visibly
          patchy mosaic.
-      2. Paste that crop centred on the tile canvas at reference_patch_fraction
-         of the tile's size and build a real partial mask: black (keep) over the
-         patch, white (generate) everywhere else, feathered at the boundary
-         (_build_reference_canvas). This is genuine inpainting — FLUX's own
-         mask/masked-image conditioning extends the real material outward from
-         true context, rather than the whole canvas being a soft img2img seed
-         under a meaningless full-white mask. A region with no pixels at all
-         falls back to plain text generation.
-      3. Generate a photorealistic seamlessly tileable tile with FLUX (with the
-         FLUX_SEAMLESS_TEXTURE LoRA, two-pass: reference-guided partial-mask
-         generation → circular-shift seam inpainting — the patch sits with
-         enough margin that the seam-fix band never touches it), then
-         sharpen/contrast-boost to recover detail softened by inpainting and
-         nudge colour statistics back toward the reference crop. A local
-         micro-height map derived from the tile's own high-frequency detail
-         is packed into its alpha channel (_pack_local_height_channel) so the terrain
-         shader can do height-biased blending between layers instead of a flat
-         linear cross-fade.
+      2. Pass 1 (_pass1_extend_patch): paste that crop centred on the tile canvas
+         at reference_patch_fraction of the tile's size and extend it to fill
+         the whole tile using the patch purely as guidance — by default LaMa
+         (classical texture-completion, no prompt/LoRA/hallucination — it
+         propagates the patch's own real texture into the surrounding hole),
+         or plain FLUX img2img with the LoRA disabled. A region with no pixels
+         at all falls back to plain text generation.
+      3. Pass 2: FLUX + FLUX_SEAMLESS_TEXTURE LoRA repaints the *entire* Pass-1
+         tile again (full mask, moderate reference_strength) — including the
+         original patch region, not hard-preserved — pushing toward genuine
+         tileability and the photorealistic macro finish, then circular-shift
+         seam inpainting for guaranteed wraparound tiling. Sharpen/contrast-
+         boost recovers detail softened by inpainting, and colour statistics
+         nudge back toward the Pass-1 tile. A local micro-height map derived
+         from the tile's own high-frequency detail is packed into its alpha
+         channel (_pack_local_height_channel) so the terrain shader can do
+         height-biased blending between layers instead of a flat linear
+         cross-fade.
 
     SplatMaterial.from_region_map handles weight computation, normalisation, and
     RGBA blend map packing.  The first layer tile is also written to TERRAIN_TEXTURE
@@ -220,6 +226,7 @@ class TerrainTextureGenerationStage(PipelineStage):
     def __init__(self, config: TerrainTextureGenerationConfiguration) -> None:
         super().__init__(config)
         self._inpainter: Optional[InPainting] = None
+        self._lama_inpainter: Optional[InPainting] = None
 
     def _init_inpainter(self) -> None:
         if self._inpainter is None:
@@ -230,6 +237,12 @@ class TerrainTextureGenerationStage(PipelineStage):
                 lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
                 lora_scale=cfg.lora_scale,
             )
+
+    def _init_lama_inpainter(self) -> None:
+        """Lazily load LaMa for Pass 1 (real-texture extension) — only if actually used."""
+        if self._lama_inpainter is None:
+            device, dtype = preferred_device(DeviceStrategy.MEMORY)
+            self._lama_inpainter = InPainting(device, dtype, InPaintingType.LAMA)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
@@ -259,21 +272,24 @@ class TerrainTextureGenerationStage(PipelineStage):
                         region_map=region_ids,
                         baked_color=PIL.Image.fromarray(baked_rgb),
                         region_val=int(rt),
+                        debug_label=rt.label,
                     )
                 else:
-                    tiles[rt.label] = self._generate_tileable_tile(prompt, cfg, seed_offset=idx)
+                    tiles[rt.label] = self._generate_tileable_tile(
+                        prompt, cfg, seed_offset=idx, debug_label=rt.label,
+                    )
                 self.log_info(
                     f"Generated {rt.label} tile ({cfg.tile_size}px, seamless"
                     f"{', photo-referenced (largest-region crop)' if reference is not None else ''})"
                 )
                 self.advance_progress(task)
                 self.advance_progress(task)
-
-            if cfg.debug_lora_scale_sweep and self.temp is not None:
-                self._debug_lora_scale_sweep(cfg, reference, present_types, caption)
         finally:
             self._inpainter.close()
             self._inpainter = None
+            if self._lama_inpainter is not None:
+                self._lama_inpainter.close()
+                self._lama_inpainter = None
 
         material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
 
@@ -294,62 +310,6 @@ class TerrainTextureGenerationStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
-
-    # ── Debug: LoRA scale sweep ─────────────────────────────────────────────────
-
-    def _debug_lora_scale_sweep(
-        self,
-        cfg: "TerrainTextureGenerationConfiguration",
-        reference: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
-        present_types: list[RegionType],
-        caption: Any,
-    ) -> None:
-        """
-        Regenerate one representative region's tile at several LoRA scales,
-        through the *exact* same reference-seeded high-fidelity path used for
-        the real output — same photo reference, same region data, same seed,
-        same seam-fix, same FluxInpaintPipeline production actually uses. Only
-        the LoRA scale varies, so results are directly comparable and reflect
-        real captured data rather than a synthetic prompt-only test.
-
-        No Fill-pipeline/no-LoRA baseline here: FluxFillPipeline is built around
-        a *partial* mask that preserves real content outside it via masked-image
-        conditioning. Feeding it the full-white mask this stage uses for whole-
-        tile generation zeroes that conditioning entirely, which produced
-        degenerate output unrelated to any real LoRA-vs-content question — an
-        invalid comparison, not a meaningful baseline. scale 0.0 in the sweep
-        below (LoRA loaded but weighted to zero, still on FluxInpaintPipeline)
-        is the correct "no LoRA effect" reference point.
-
-        Debug-only: writes PNGs to self.temp/lora_sweep/ and never touches
-        TERRAIN_MATERIAL or the tiles used for the actual output. Requires a
-        photo reference (falls back to a log warning otherwise).
-        """
-        if reference is None or not present_types:
-            self.log_warning("LoRA sweep skipped: no photo reference / region available")
-            return
-
-        rt = present_types[0]
-        prompt = self._build_prompt(rt, caption)
-        baked_rgb, region_ids, _certainty = reference
-        baked_color = PIL.Image.fromarray(baked_rgb)
-
-        sweep_dir = self.temp / "lora_sweep"
-        sweep_dir.mkdir(parents=True, exist_ok=True)
-        self.log_info(f"LoRA sweep: region '{rt.label}', writing to {sweep_dir}")
-
-        for scale in cfg.debug_lora_scales:
-            self.log_info(f"LoRA sweep: scale {scale:.2f} (reusing loaded pipeline)")
-            self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[scale])
-            img = self._generate_tileable_tile_high_fidelity(
-                prompt, cfg, seed_offset=0,
-                region_map=region_ids, baked_color=baked_color, region_val=int(rt),
-            )
-            img.convert("RGB").save(sweep_dir / f"inpaint_lora_{scale:.2f}.png")
-
-        # Restore the configured scale in case anything runs after this in the try block.
-        self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[cfg.lora_scale])
-        self.log_info(f"LoRA sweep: done, {len(cfg.debug_lora_scales)} scale(s) + baseline in {sweep_dir}")
 
     # ── Material construction ─────────────────────────────────────────────────
 
@@ -603,15 +563,15 @@ class TerrainTextureGenerationStage(PipelineStage):
         cfg: TerrainTextureGenerationConfiguration,
         seed_offset: int,
         inpainter: Optional[InPainting] = None,
+        debug_label: str = "tile",
     ) -> PIL.Image.Image:
         """
         Pure text-to-image tile generation for regions with no usable photo
         reference at all (either the whole scene has none, or this specific
         region has no trustworthy pixels in the baked photo).
 
-        inpainter: override the stage's own self._inpainter (used by the debug
-        LoRA sweep to run an alternate model/LoRA-scale through the identical
-        code path). Defaults to self._inpainter.
+        inpainter: override the stage's own self._inpainter. Defaults to
+        self._inpainter.
         """
         inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
@@ -629,8 +589,10 @@ class TerrainTextureGenerationStage(PipelineStage):
             strength=1.0,
             seed=seed,
         )
+        self._save_debug_step(cfg, debug_label, "05_pass2_raw", generated)
 
         result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=inpainter)
+        self._save_debug_step(cfg, debug_label, "06_pass2_seamfixed", result_img)
         return self._pack_local_height_channel(result_img)
 
     def _generate_tileable_tile_high_fidelity(
@@ -642,26 +604,28 @@ class TerrainTextureGenerationStage(PipelineStage):
         baked_color: PIL.Image.Image,
         region_val: int,
         inpainter: Optional[InPainting] = None,
+        debug_label: str = "tile",
     ) -> PIL.Image.Image:
         """
-        Tile generation guided by a single crop of the largest connected
-        component of this region in the baked photo (_extract_largest_region_crop)
-        — one real location, so it's inherently coherent (consistent lighting/
-        exposure) rather than a mosaic of patches from potentially very
-        different conditions. The crop is pasted centred on the canvas and used
-        as genuine partial-inpaint context (_build_reference_canvas): FLUX sees
-        it as real, unmasked pixels via the pipeline's own mask/masked-image
-        conditioning and extends the material outward to fill the tile, rather
-        than the whole canvas being a soft img2img seed under a meaningless
-        full-white mask. Falls back to plain text generation if the region has
-        no pixels at all.
+        Two-pass tile generation guided by a single crop of the largest
+        connected component of this region in the baked photo
+        (_extract_largest_region_crop) — one real location, so it's inherently
+        coherent (consistent lighting/exposure) rather than a mosaic of
+        patches from potentially very different conditions.
 
-        inpainter: override the stage's own self._inpainter (used by the debug
-        LoRA sweep to run an alternate model/LoRA-scale through the identical
-        code path, against the same real reference crop). Defaults to
-        self._inpainter.
+        Pass 1 (_pass1_extend_patch) extends that crop to fill the whole tile
+        using it purely as guidance, not something to hard-preserve. Pass 2
+        (below) then repaints the *entire* Pass-1 tile with FLUX + the
+        FLUX_SEAMLESS_TEXTURE LoRA — including the original patch region — to
+        push toward genuine tileability and the photorealistic macro finish.
+        Falls back to plain text generation if the region has no pixels at all.
+
+        inpainter: override the stage's own self._inpainter for Pass 2. Defaults
+        to self._inpainter.
+        debug_label: filename prefix for step-by-step debug images (see
+        _save_debug_step), typically the region label (e.g. "ground").
         """
-        inpainter = inpainter if inpainter is not None else self._inpainter
+        pass2_inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
 
@@ -673,13 +637,20 @@ class TerrainTextureGenerationStage(PipelineStage):
             patch_size=patch_size,
         )
         if patch is None:
-            return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=inpainter)
+            return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
+        self._save_debug_step(cfg, debug_label, "01_reference_patch", patch)
 
-        canvas, mask = self._build_reference_canvas(patch, T, cfg.mask_feather_px)
+        pass1_image = self._pass1_extend_patch(patch, prompt, cfg, seed, debug_label)
+        self._save_debug_step(cfg, debug_label, "04_pass1_result", pass1_image)
 
-        generated = inpainter.inpaint(
-            input_image=canvas,
-            mask_image=mask,
+        # Pass 2: FLUX + LoRA repaints the whole tile again, full mask — free to change
+        # anything, including the original patch region, since Pass 1 already gave the
+        # whole canvas plausible real-texture coverage. reference_strength is the only
+        # thing anchoring this to Pass 1's content rather than inventing something else.
+        full_mask = PIL.Image.new("L", (T, T), 255)
+        generated = pass2_inpainter.inpaint(
+            input_image=pass1_image,
+            mask_image=full_mask,
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=cfg.num_inference_steps,
@@ -687,23 +658,76 @@ class TerrainTextureGenerationStage(PipelineStage):
             strength=cfg.reference_strength,
             seed=seed,
         )
+        self._save_debug_step(cfg, debug_label, "05_pass2_raw", generated)
 
-        result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=inpainter)
+        result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=pass2_inpainter)
+        self._save_debug_step(cfg, debug_label, "06_pass2_seamfixed", result_img)
 
         # Pass 3: detail recovery — the two inpainting passes can soften the
         # reference crop's crisp stones/grass structure, so restore local contrast.
         result_img = result_img.filter(PIL.ImageFilter.UnsharpMask(radius=2, percent=150, threshold=1))
         result_img = PIL.ImageEnhance.Contrast(result_img).enhance(1.15)
         result_img = PIL.ImageEnhance.Sharpness(result_img).enhance(1.20)
+        self._save_debug_step(cfg, debug_label, "07_pass2_sharpened", result_img)
 
-        # Pass 4: nudge final colour statistics back toward the real patch (not the
-        # filled canvas background, which is only a synthetic mean-colour filler).
+        # Pass 4: nudge final colour statistics back toward the Pass-1 (real-texture-
+        # grounded) tile, not just the small patch, since Pass 1 now covers the whole tile.
         if cfg.color_transfer_strength > 0.0:
             result_img = lab_color_transfer(
-                source=patch, target=result_img, strength=cfg.color_transfer_strength,
+                source=pass1_image, target=result_img, strength=cfg.color_transfer_strength,
             )
+        self._save_debug_step(cfg, debug_label, "08_pass2_final", result_img)
 
         return self._pack_local_height_channel(result_img)
+
+    def _pass1_extend_patch(
+        self,
+        patch: PIL.Image.Image,
+        prompt: str,
+        cfg: "TerrainTextureGenerationConfiguration",
+        seed: int,
+        debug_label: str,
+    ) -> PIL.Image.Image:
+        """
+        Extend `patch` to fill a whole tile_size canvas, using it purely as
+        guidance (see cfg.pass1_inpainting_type for the LAMA vs FLUX choice).
+        """
+        T = cfg.tile_size
+        use_lama = cfg.pass1_inpainting_type == "LAMA"
+        canvas, mask = self._build_reference_canvas(
+            patch, T, feather_px=0.0 if use_lama else cfg.mask_feather_px,
+        )
+        self._save_debug_step(cfg, debug_label, "02_pass1_canvas", canvas)
+        self._save_debug_step(cfg, debug_label, "03_pass1_mask", mask)
+
+        if use_lama:
+            self._init_lama_inpainter()
+            result = self._lama_inpainter.inpaint(input_image=canvas, mask_image=mask, temp_path=self.temp)
+            # LaMa is trained to reproduce the unmasked region closely but isn't guaranteed
+            # pixel-exact — composite the real patch back to be sure Pass 2 actually starts
+            # from genuine material, not a LaMa approximation of it.
+            return self._composite_patch_over(result, patch, mask, T)
+
+        # Plain FLUX img2img with the LoRA disabled: loosely guided by the patch (via
+        # `image` + reference_strength) without hard-preserving it, and no seamless-
+        # texture LoRA bias at this stage. Full mask -- nothing here is meant to be kept
+        # verbatim, unlike the LaMa path where the mask is the only way to reference the
+        # patch at all.
+        self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[0.0])
+        try:
+            full_mask = PIL.Image.new("L", (T, T), 255)
+            return self._inpainter.inpaint(
+                input_image=canvas,
+                mask_image=full_mask,
+                temp_path=self.temp,
+                prompt=prompt,
+                num_inference_steps=cfg.num_inference_steps,
+                guidance_scale=cfg.guidance_scale,
+                strength=cfg.reference_strength,
+                seed=seed,
+            )
+        finally:
+            self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[cfg.lora_scale])
 
     @staticmethod
     def _build_reference_canvas(
@@ -713,15 +737,16 @@ class TerrainTextureGenerationStage(PipelineStage):
     ) -> tuple[PIL.Image.Image, PIL.Image.Image]:
         """
         Paste `patch` centred on a tile_size canvas and build the matching
-        partial-inpaint mask: black (0, keep) over the patch, white (255,
-        generate) everywhere else, boundary Gaussian-feathered so the
-        transition blends rather than leaving a hard rectangular seam.
+        partial mask: black (0, keep) over the patch, white (255, generate)
+        everywhere else, boundary Gaussian-feathered (when feather_px > 0) so
+        the transition blends rather than leaving a hard rectangular seam.
+        Used as-is by the LaMa Pass-1 path (real inpainting mask); the FLUX
+        Pass-1 path only uses the canvas and builds its own full-white mask,
+        since it never asks the model to hard-preserve anything.
 
         The canvas background outside the patch is filled with the patch's own
-        mean colour. With strength=1.0 the pipeline fully replaces the
-        "generate" region regardless of what's behind it, so this filler only
-        actually shows through at the feathered boundary — reading as a
-        continuation of the patch there instead of a contrasting flat colour.
+        mean colour, so it reads as a plausible continuation of the patch
+        rather than a contrasting flat colour wherever it does show through.
 
         Returns (canvas RGB, mask L).
         """
@@ -742,6 +767,34 @@ class TerrainTextureGenerationStage(PipelineStage):
             mask = mask.filter(PIL.ImageFilter.GaussianBlur(radius=feather_px))
 
         return canvas, mask
+
+    @staticmethod
+    def _composite_patch_over(
+        generated: PIL.Image.Image,
+        patch: PIL.Image.Image,
+        mask: PIL.Image.Image,
+        tile_size: int,
+    ) -> PIL.Image.Image:
+        """
+        Paste the real reference patch back over the generated tile, at the
+        same centred position and with the same feathered mask used to build
+        the input canvas (_build_reference_canvas) — `1 - mask` is exactly the
+        right blend weight, since `mask` is generate(255)/keep(0). This is the
+        actual guarantee that the real patch survives and blends smoothly;
+        see the call site for why the model's own mask handling can't be
+        trusted to do this itself.
+        """
+        T = tile_size
+        p = patch.size[0]
+        offset = (T - p) // 2
+
+        keep_weight = 1.0 - (np.array(mask, dtype=np.float32) / 255.0)
+        gen_arr = np.array(generated.convert("RGB"), dtype=np.float32)
+        patch_placed = np.zeros((T, T, 3), dtype=np.float32)
+        patch_placed[offset:offset + p, offset:offset + p] = np.array(patch.convert("RGB"), dtype=np.float32)
+
+        blended = keep_weight[..., None] * patch_placed + (1.0 - keep_weight[..., None]) * gen_arr
+        return PIL.Image.fromarray(blended.clip(0, 255).astype(np.uint8))
 
     def _seam_fix(
         self,
@@ -872,6 +925,25 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     # ── Debug output ─────────────────────────────────────────────────────────
 
+    def _save_debug_step(
+        self,
+        cfg: "TerrainTextureGenerationConfiguration",
+        debug_label: str,
+        step_name: str,
+        image: PIL.Image.Image,
+    ) -> None:
+        """
+        Save one intermediate image of the generation process, if debugging is
+        on. No-op unless both cfg.debug_save_steps and self.temp are set, so
+        this is free to call liberally at every step without extra guards at
+        each call site.
+        """
+        if not cfg.debug_save_steps or self.temp is None:
+            return
+        step_dir = self.temp / "texture_generation"
+        step_dir.mkdir(parents=True, exist_ok=True)
+        image.convert("RGB" if image.mode != "L" else "L").save(step_dir / f"{debug_label}_{step_name}.png")
+
     @staticmethod
     def _save_debug(material: SplatMaterial, path: "Path") -> None:
         """Write human-readable debug images alongside the raw splat files."""
@@ -925,14 +997,20 @@ class TerrainTextureGenerationStage(PipelineStage):
         return context.has_stage_output(ContextKey.TERRAIN_MATERIAL)
 
     def model_names(self) -> list[str]:
-        return InPainting.model_names(
+        names = InPainting.model_names(
             self.config.inpainting_type, lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
         )
+        if self.config.pass1_inpainting_type == "LAMA":
+            names = names + InPainting.model_names(InPaintingType.LAMA)
+        return names
 
     def clean_up(self):
         if self._inpainter is not None:
             self._inpainter.close()
             self._inpainter = None
+        if self._lama_inpainter is not None:
+            self._lama_inpainter.close()
+            self._lama_inpainter = None
         super().clean_up()
 
     def contribute_report(self, context: PipelineContext):
