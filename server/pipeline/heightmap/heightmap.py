@@ -30,6 +30,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         nadir_exclusion_radius: float = 1.0,
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
+        certainty_falloff_meters: float = 20.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -56,6 +57,12 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.nadir_exclusion_radius = nadir_exclusion_radius
         self.nadir_ramp_width = nadir_ramp_width
         self.flat_zone_certainty = flat_zone_certainty
+        # Distance (metres) at which observed-ground certainty decays to 0.5. This is a
+        # depth-model-trust radius, independent of camera_height_meters -- it must be
+        # large enough that real mid-range terrain can cross TerrainReconstructionStage's
+        # confidence_threshold, or nothing beyond the nadir ramp ever gets Dirichlet-pinned
+        # and the whole map beyond a few metres is left to pure interpolation/noise.
+        self.certainty_falloff_meters = certainty_falloff_meters
 
 
 class HeightMapStage(PipelineStage):
@@ -144,6 +151,7 @@ class HeightMapStage(PipelineStage):
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
             flat_zone_certainty=cfg.flat_zone_certainty,
+            certainty_falloff_meters=cfg.certainty_falloff_meters,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

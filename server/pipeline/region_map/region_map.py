@@ -30,6 +30,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         camera_height_meters: float = 1.0,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
+        certainty_falloff_meters: float = 20.0,
         water_skeleton_smooth_radius: int = 40,
         road_skeleton_smooth_radius: int = 8,
         trail_skeleton_smooth_radius: int = 4,
@@ -41,6 +42,10 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.camera_height_meters = camera_height_meters
         self.nadir_exclusion_radius = nadir_exclusion_radius
         self.nadir_ramp_width = nadir_ramp_width
+        # Depth-model-trust radius (metres) at which certainty decays to 0.5 — must
+        # match Height Map's value so REGION_MAP_CERTAINTY and HEIGHT_MAP_CERTAINTY
+        # stay on the same scale for downstream thresholds (see HeightMapConfiguration).
+        self.certainty_falloff_meters = certainty_falloff_meters
         self.water_skeleton_smooth_radius = water_skeleton_smooth_radius
         self.road_skeleton_smooth_radius = road_skeleton_smooth_radius
         self.trail_skeleton_smooth_radius = trail_skeleton_smooth_radius
@@ -112,6 +117,7 @@ class RegionMapStage(PipelineStage):
             sky_mask=sky_mask,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
+            certainty_falloff_meters=cfg.certainty_falloff_meters,
         )
         self.advance_progress(task)
 

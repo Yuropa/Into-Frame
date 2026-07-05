@@ -115,6 +115,15 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # bias steers generation without overpowering the per-region material prompt or the
         # collage seed's genuine detail.
         lora_scale: float = 0.8,
+        # Debug: regenerate one representative region's tile through the real collage-
+        # seeded high-fidelity path (actual captured photo/region data, not a synthetic
+        # test prompt) at several LoRA scales, plus optionally a no-LoRA FluxFillPipeline
+        # baseline, so LoRA-configuration questions can be answered against real data
+        # from a normal pipeline run. Written to self.temp/lora_sweep/; never affects
+        # TERRAIN_MATERIAL or the tiles actually used. No-op unless self.temp is set.
+        debug_lora_scale_sweep: bool = False,
+        debug_lora_scales: Optional[list[float]] = None,
+        debug_lora_sweep_include_fill_baseline: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -139,6 +148,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.collage_strength = collage_strength
         self.color_transfer_strength = color_transfer_strength
         self.lora_scale = lora_scale
+        self.debug_lora_scale_sweep = debug_lora_scale_sweep
+        self.debug_lora_scales = debug_lora_scales if debug_lora_scales is not None else [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+        self.debug_lora_sweep_include_fill_baseline = debug_lora_sweep_include_fill_baseline
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -239,6 +251,9 @@ class TerrainTextureGenerationStage(PipelineStage):
                 )
                 self.advance_progress(task)
                 self.advance_progress(task)
+
+            if cfg.debug_lora_scale_sweep and self.temp is not None:
+                self._debug_lora_scale_sweep(cfg, reference, present_types, caption)
         finally:
             self._inpainter.close()
             self._inpainter = None
@@ -262,6 +277,68 @@ class TerrainTextureGenerationStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    # ── Debug: LoRA scale sweep ─────────────────────────────────────────────────
+
+    def _debug_lora_scale_sweep(
+        self,
+        cfg: "TerrainTextureGenerationConfiguration",
+        reference: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]],
+        present_types: list[RegionType],
+        caption: Any,
+    ) -> None:
+        """
+        Regenerate one representative region's tile at several LoRA scales, plus
+        optionally a no-LoRA FluxFillPipeline baseline, through the *exact* same
+        collage-seeded high-fidelity path used for the real output — same photo
+        reference, same region data, same seed, same seam-fix. Only the
+        model/LoRA-scale varies, so results are directly comparable and reflect
+        real captured data rather than a synthetic prompt-only test.
+
+        Debug-only: writes PNGs to self.temp/lora_sweep/ and never touches
+        TERRAIN_MATERIAL or the tiles used for the actual output. Requires a
+        photo reference (falls back to a log warning otherwise, since the
+        no-photo text-only path has no LoRA-vs-content question to compare).
+        """
+        if reference is None or not present_types:
+            self.log_warning("LoRA sweep skipped: no photo reference / region available")
+            return
+
+        rt = present_types[0]
+        prompt = self._build_prompt(rt, caption)
+        baked_rgb, region_ids, _certainty = reference
+        baked_color = PIL.Image.fromarray(baked_rgb)
+
+        sweep_dir = self.temp / "lora_sweep"
+        sweep_dir.mkdir(parents=True, exist_ok=True)
+        self.log_info(f"LoRA sweep: region '{rt.label}', writing to {sweep_dir}")
+
+        if cfg.debug_lora_sweep_include_fill_baseline:
+            self.log_info("LoRA sweep: fill_no_lora baseline (separate model load)")
+            fill_device, fill_dtype = preferred_device(DeviceStrategy.MEMORY)
+            fill_inpainter = InPainting(fill_device, fill_dtype, cfg.inpainting_type, lora_type=None)
+            try:
+                img = self._generate_tileable_tile_high_fidelity(
+                    prompt, cfg, seed_offset=0,
+                    region_map=region_ids, baked_color=baked_color, region_val=int(rt),
+                    inpainter=fill_inpainter,
+                )
+                img.convert("RGB").save(sweep_dir / "fill_no_lora.png")
+            finally:
+                fill_inpainter.close()
+
+        for scale in cfg.debug_lora_scales:
+            self.log_info(f"LoRA sweep: scale {scale:.2f} (reusing loaded pipeline)")
+            self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[scale])
+            img = self._generate_tileable_tile_high_fidelity(
+                prompt, cfg, seed_offset=0,
+                region_map=region_ids, baked_color=baked_color, region_val=int(rt),
+            )
+            img.convert("RGB").save(sweep_dir / f"inpaint_lora_{scale:.2f}.png")
+
+        # Restore the configured scale in case anything runs after this in the try block.
+        self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[cfg.lora_scale])
+        self.log_info(f"LoRA sweep: done, {len(cfg.debug_lora_scales)} scale(s) + baseline in {sweep_dir}")
 
     # ── Material construction ─────────────────────────────────────────────────
 
@@ -514,18 +591,24 @@ class TerrainTextureGenerationStage(PipelineStage):
         prompt: str,
         cfg: TerrainTextureGenerationConfiguration,
         seed_offset: int,
+        inpainter: Optional[InPainting] = None,
     ) -> PIL.Image.Image:
         """
         Pure text-to-image tile generation for regions with no usable photo
         reference at all (either the whole scene has none, or this specific
         region has no trustworthy pixels in the baked photo).
+
+        inpainter: override the stage's own self._inpainter (used by the debug
+        LoRA sweep to run an alternate model/LoRA-scale through the identical
+        code path). Defaults to self._inpainter.
         """
+        inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
 
         base_image = PIL.Image.new("RGB", (T, T), (128, 128, 128))
         full_mask = PIL.Image.new("L", (T, T), 255)
-        generated = self._inpainter.inpaint(
+        generated = inpainter.inpaint(
             input_image=base_image,
             mask_image=full_mask,
             temp_path=self.temp,
@@ -536,7 +619,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             seed=seed,
         )
 
-        result_img = self._seam_fix(generated, cfg, prompt, seed)
+        result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=inpainter)
         return self._pack_local_height_channel(result_img)
 
     def _generate_tileable_tile_high_fidelity(
@@ -547,6 +630,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         region_map: np.ndarray,
         baked_color: PIL.Image.Image,
         region_val: int,
+        inpainter: Optional[InPainting] = None,
     ) -> PIL.Image.Image:
         """
         Tile generation seeded from a scattered same-region texture collage
@@ -557,7 +641,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         scratch — hence the higher `collage_strength` compared to a
         low-strength photo-crop reference. Falls back to plain text
         generation if the region has no trustworthy pixels at all.
+
+        inpainter: override the stage's own self._inpainter (used by the debug
+        LoRA sweep to run an alternate model/LoRA-scale through the identical
+        code path, against the same real collage seed). Defaults to
+        self._inpainter.
         """
+        inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         seed = cfg.seed + seed_offset
         rng = np.random.default_rng(seed)
@@ -570,10 +660,10 @@ class TerrainTextureGenerationStage(PipelineStage):
             rng=rng,
         )
         if base_image is None:
-            return self._generate_tileable_tile(prompt, cfg, seed_offset)
+            return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=inpainter)
 
         full_mask = PIL.Image.new("L", (T, T), 255)
-        generated = self._inpainter.inpaint(
+        generated = inpainter.inpaint(
             input_image=base_image,
             mask_image=full_mask,
             temp_path=self.temp,
@@ -584,7 +674,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             seed=seed,
         )
 
-        result_img = self._seam_fix(generated, cfg, prompt, seed)
+        result_img = self._seam_fix(generated, cfg, prompt, seed, inpainter=inpainter)
 
         # Pass 3: detail recovery — the two inpainting passes can soften the
         # collage's crisp stones/grass structure, so restore local contrast.
@@ -606,8 +696,10 @@ class TerrainTextureGenerationStage(PipelineStage):
         cfg: TerrainTextureGenerationConfiguration,
         prompt: str,
         seed: int,
+        inpainter: Optional[InPainting] = None,
     ) -> PIL.Image.Image:
         """Circular-shift the tile by half its size and inpaint over the new seam, then shift back."""
+        inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         arr = np.array(generated.convert("RGB"), dtype=np.uint8)
         half = T // 2
@@ -622,7 +714,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 binary_dilation(seam_mask, iterations=cfg.seam_dilation_px).astype(np.uint8) * 255
             )
 
-        fixed = self._inpainter.inpaint(
+        fixed = inpainter.inpaint(
             input_image=PIL.Image.fromarray(shifted),
             mask_image=PIL.Image.fromarray(seam_mask, "L"),
             temp_path=self.temp,

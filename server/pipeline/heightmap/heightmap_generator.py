@@ -41,6 +41,7 @@ class HeightMapGenerator:
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
+        certainty_falloff_meters: float = 20.0,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -84,6 +85,12 @@ class HeightMapGenerator:
                                 project directly under the camera and generate a deep
                                 bowl.  The excluded cells are later filled by
                                 interpolation from the surrounding reliable ring.
+        certainty_falloff_meters: distance at which observed-ground certainty decays
+                                  to 0.5 (see util.projection_utils.ground_projection_certainty).
+                                  This is a depth-model-trust radius, not the physical
+                                  camera height — using camera height here (as before)
+                                  collapses certainty within a couple of metres, well
+                                  under any usable confidence_threshold downstream.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -244,7 +251,7 @@ class HeightMapGenerator:
         # Flat-prior cells get a fixed low certainty (flat_zone_certainty).
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
-            observed, grid_size_meters, grid_resolution, camera_height_meters,
+            observed, grid_size_meters, grid_resolution, certainty_falloff_meters,
             nadir_exclusion_radius=nadir_exclusion_radius,
             nadir_ramp_width=nadir_ramp_width,
         )
@@ -284,18 +291,20 @@ class HeightMapGenerator:
         observed: np.ndarray,
         grid_size_meters: float,
         grid_resolution: int,
-        camera_height: float,
+        certainty_falloff_meters: float,
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
     ) -> np.ndarray:
         """
         Build a [0, 1] certainty map over the top-down grid.
 
-        Observed cells are scored by equirectangular projection certainty (see
-        ground_projection_certainty) multiplied by a smooth nadir ramp. The ramp
-        rises from 0 at nadir_exclusion_radius to 1 at nadir_exclusion_radius +
-        nadir_ramp_width (squared so it has zero slope at the start, avoiding a
-        visible ring in the solver output). Unobserved cells get 0.
+        Observed cells are scored by distance-decayed certainty (see
+        ground_projection_certainty; falloff_m=certainty_falloff_meters, a
+        depth-model-trust radius, not physical camera height) multiplied by a
+        smooth nadir ramp. The ramp rises from 0 at nadir_exclusion_radius to 1
+        at nadir_exclusion_radius + nadir_ramp_width (squared so it has zero
+        slope at the start, avoiding a visible ring in the solver output).
+        Unobserved cells get 0.
         """
         half = grid_size_meters / 2.0
         x_centers = np.linspace(-half, half, grid_resolution, endpoint=False, dtype=np.float32) + half / grid_resolution
@@ -306,7 +315,7 @@ class HeightMapGenerator:
             (r_grid - nadir_exclusion_radius) / max(float(nadir_ramp_width), 1e-6),
             0.0, 1.0,
         ).astype(np.float32) ** 2
-        certainty_field = ground_projection_certainty(X_grid, Z_grid, camera_height) * nadir_ramp
+        certainty_field = ground_projection_certainty(X_grid, Z_grid, certainty_falloff_meters) * nadir_ramp
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod

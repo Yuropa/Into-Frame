@@ -341,8 +341,10 @@ class TerrainNoiseRefinementStage(PipelineStage):
         artefacts and creating smooth, geomorphically realistic slopes.
 
         diffusion_length ≈ sqrt(4 * linear_diffusivity * dt). At the default
-        K=1e-3 and dt=200, that's ~0.89 m at 1024-cell resolution — enough to
-        round multi-cell artefacts without blurring large-scale terrain shape.
+        K=1e-3 and dt=2250, that's ~3 m — enough to round the kink where the
+        ridge slope envelope snaps onto the foreground, without blurring
+        large-scale terrain shape. LinearDiffuser's implicit solve has no CFL
+        stability limit, so dt can be raised freely to widen this radius.
         """
         from landlab import RasterModelGrid
         from landlab.components import LinearDiffuser

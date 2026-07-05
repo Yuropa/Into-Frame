@@ -15,26 +15,35 @@ from util.panorama_utils import Panorama
 def ground_projection_certainty(
     X: np.ndarray,
     Z: np.ndarray,
-    camera_height: float,
+    falloff_m: float,
 ) -> np.ndarray:
     """
     Certainty of back-projecting from an equirectangular panorama onto the ground plane.
 
-    For a ground point at horizontal distance r = sqrt(X² + Z²) from the camera at
-    height h, the depression angle is phi = arctan(h / r).  The equirectangular
-    Jacobian (ground area covered per panorama pixel) scales as 1/sin³(phi), so we use
-    sin²(phi) = h² / (r² + h²) as the certainty — it is 1 directly below the camera
-    and falls toward 0 as the point approaches the horizon.
+    Shaped as falloff² / (r² + falloff²), where r = sqrt(X² + Z²) is horizontal
+    distance from the camera: 1 at r=0, 0.5 at r=falloff_m, falling toward 0 at
+    the horizon. This is the same sin²(phi) shape as the equirectangular
+    projection Jacobian (1/sin³(phi) ground-area-per-pixel, phi = depression
+    angle) would give with h = falloff_m, but falloff_m is a tunable "how far
+    out do we still trust this depth model" distance, not the true camera
+    height. Using actual camera_height_meters (~1-2 m) here collapses
+    certainty to a few percent within a couple of metres — far short of
+    any usable confidence_threshold — since real terrain extends tens of
+    metres out and equirectangular angular resolution alone isn't the
+    dominant source of error at that range; depth-model reliability is.
+    Physical camera height is still used elsewhere (Y_grid unprojection,
+    ground_y_min, nadir ramp) — only this confidence heuristic uses the
+    tunable falloff scale.
 
-    This is purely geometric: it captures how much distortion the equirectangular
-    backward-projection introduces at each ground location, independent of whether
-    any observation actually landed there (callers should zero out unobserved cells).
+    This is purely geometric shape, not model-aware: it captures a chosen decay
+    profile, independent of whether any observation actually landed there
+    (callers should zero out unobserved cells).
 
     Returns a float32 array with the same shape as X and Z, values in (0, 1].
     """
     r_sq = np.asarray(X, dtype=np.float64) ** 2 + np.asarray(Z, dtype=np.float64) ** 2
-    h_sq = float(camera_height) ** 2
-    return (h_sq / (r_sq + h_sq)).astype(np.float32)
+    falloff_sq = float(falloff_m) ** 2
+    return (falloff_sq / (r_sq + falloff_sq)).astype(np.float32)
 
 
 def equirectangular_pixels_to_world(

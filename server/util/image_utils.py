@@ -58,10 +58,19 @@ def lab_color_transfer(
 ) -> PIL.Image.Image:
     """Nudge target's per-channel LAB colour statistics toward source's.
 
-    Matches mean/std of each LAB channel (source stats onto target), then
-    blends the result back with the original target by `strength` (or a
+    Matches only the *mean* of each LAB channel (source stats onto target),
+    then blends the result back with the original target by `strength` (or a
     per-pixel strength from `mask`, in [0, 255]) so structure/detail from
     target is preserved while only the colour cast shifts toward source.
+
+    Deliberately mean-only, not mean+std: rescaling by the ratio of standard
+    deviations multiplies every pixel's deviation from the mean by
+    src_std/tgt_std, i.e. it directly attenuates target's local contrast
+    whenever source has lower variance than target — which is exactly the
+    case when source is a blurrier reference (e.g. a low-resolution baked
+    photo collage) and target is a sharp generated image. That silently
+    flattens fine texture detail right after a sharpening pass, contradicting
+    the "structure/detail is preserved" contract of this function.
     """
     if strength <= 0.0:
         return target
@@ -76,10 +85,8 @@ def lab_color_transfer(
     transferred = tgt.copy()
     for ch in range(3):
         tgt_mean = tgt[..., ch].mean()
-        tgt_std = tgt[..., ch].std() + 1e-6
         src_mean = src[..., ch].mean()
-        src_std = src[..., ch].std() + 1e-6
-        transferred[..., ch] = (tgt[..., ch] - tgt_mean) / tgt_std * src_std + src_mean
+        transferred[..., ch] = tgt[..., ch] - tgt_mean + src_mean
 
     if mask is not None:
         mask_resized = mask.convert("L").resize((target.width, target.height), PIL.Image.BILINEAR)

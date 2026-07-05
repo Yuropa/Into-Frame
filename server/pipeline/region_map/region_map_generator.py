@@ -28,6 +28,7 @@ class RegionMapGenerator:
         sky_mask: Optional[np.ndarray] = None,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
+        certainty_falloff_meters: float = 20.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project per-pixel region type labels from an equirectangular panorama onto a
@@ -42,7 +43,9 @@ class RegionMapGenerator:
         Returns (region_map, certainty_map):
           region_map    — (grid_resolution, grid_resolution) uint8 of RegionType indices.
           certainty_map — (grid_resolution, grid_resolution) float32 in [0, 1]:
-                          sin²(depression angle) for directly observed cells, 0 for filled.
+                          distance-decayed certainty (see ground_projection_certainty,
+                          falloff_m=certainty_falloff_meters) for directly observed
+                          cells, 0 for filled.
 
         Grid layout matches the height map: rows = Z near→far, cols = X left→right.
         """
@@ -102,7 +105,7 @@ class RegionMapGenerator:
         ).astype(np.float32) ** 2
         certainty = np.where(
             has_data,
-            ground_projection_certainty(X_grid, Z_grid, camera_height_meters) * nadir_ramp,
+            ground_projection_certainty(X_grid, Z_grid, certainty_falloff_meters) * nadir_ramp,
             0.0,
         ).astype(np.float32)
 

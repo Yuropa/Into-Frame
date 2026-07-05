@@ -79,6 +79,15 @@ stages:
                                  # the user.
     nadir_ramp_width: 3.0       # metres over which certainty ramps from 0 (at exclusion boundary)
                                  # to full geometric certainty; prevents a hard ring artifact.
+    certainty_falloff_meters: 20.0 # distance at which observed-ground certainty decays to 0.5.
+                                 # A depth-model-trust radius, NOT camera_height_meters — using
+                                 # camera height (~1 m) here made certainty collapse to a few
+                                 # percent within 2-3 m, below any usable confidence_threshold in
+                                 # Terrain Reconstruction, so nothing beyond the nadir disc was ever
+                                 # trusted and mid-range terrain was entirely reinvented by the
+                                 # solver/noise. At 20 m, real ground crosses confidence_threshold
+                                 # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
+                                 # cutoff's assumption that near terrain is already observed.
 
   - name: Region Map
     stage: RegionMapStage
@@ -91,6 +100,7 @@ stages:
                                  # of the panorama; filled inward by the flood fill instead.
                                  # Must match Height Map's nadir_exclusion_radius.
     nadir_ramp_width: 3.0       # metres over which flood-fill certainty ramps up from 0.
+    certainty_falloff_meters: 20.0 # must match Height Map's value — see that stage's comment.
 
   - name: Linear Structures
     stage: LinearStructureStage
@@ -107,6 +117,12 @@ stages:
                                      # observations become anchors as soon as they're reasonably
                                      # certain, instead of leaving a large unconstrained disc that
                                      # the harmonic solve can only render maximally smooth.
+                                     # Reachability depends on Height Map's certainty_falloff_meters
+                                     # (currently 20 m): real ground crosses this threshold out to
+                                     # ~43 m from camera. If that falloff value ever changes, sanity
+                                     # check that 0.18 is still crossable — it previously wasn't
+                                     # (certainty maxed at ~0.047 outside the nadir disc when the
+                                     # falloff was tied to camera_height_meters ≈ 1 m).
     ridge_min_anchor_distance: 0.2  # fraction of grid half-radius; chains closer than this are skipped
                                      # (assumed already captured by observed terrain — lowered from
                                      # 0.5 so nearer ridges/hills still anchor the solve instead of
@@ -138,7 +154,12 @@ stages:
     noise_octaves: 4              # fractal octave count
     noise_amplitude: 0.4          # metres of peak noise displacement
     linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
-    diffusion_dt: 200.0           # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt)
+    diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
+                                   # Raised from 200 (≈0.9 m) — that was only rounding multi-cell
+                                   # solver artefacts, too short to smooth the kink where the ridge
+                                   # slope envelope (see Terrain Reconstruction) snaps on against the
+                                   # foreground. LinearDiffuser's implicit solve is unconditionally
+                                   # stable, so raising dt alone (rather than K_d) is safe.
     landlab_resolution: 1024      # downsample to this resolution for Landlab, upsample after
     peak_sharpness: null          # null = auto-derive spatially from silhouette; explicit float = uniform
     peak_sharpness_min: 1.0       # auto range lower bound (flat/rolling hills)
@@ -196,6 +217,15 @@ stages:
     nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
     nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
     horizon_fade_deg: 1.5       # ramp width below the horizon
+    # Debug: set true to also regenerate one region's tile at several FLUX_SEAMLESS_TEXTURE
+    # LoRA scales (debug_lora_scales) plus a no-LoRA FluxFillPipeline baseline, through the
+    # real collage-seeded path against actual captured data. Written to <temp>/lora_sweep/;
+    # never affects the material actually used. Doubles this stage's runtime (or more, with
+    # the fill baseline) since it reruns full generation+seam-fix per scale — leave false for
+    # normal runs.
+    debug_lora_scale_sweep: false
+    debug_lora_scales: [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+    debug_lora_sweep_include_fill_baseline: true
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
