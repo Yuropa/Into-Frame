@@ -100,8 +100,12 @@ class TerrainMeshGenerator:
             # UVs scaled by texture_tile_factor so the tile repeats that many
             # times across the full terrain grid. Values > 1 are valid in glTF
             # (default sampler wrap = REPEAT) and give higher texel density.
+            # trimesh's GLTF exporter unconditionally flips V on export (assumes OBJ-style
+            # V-up input); pre-flip here so the exported glTF V lands at row 0 = image top,
+            # matching how baked_tex/panorama rows are laid out — otherwise the texture
+            # renders upside-down in any spec-conformant glTF viewer (Unity included).
             u = ((X_pos + x_half) / (2.0 * x_half) * texture_tile_factor).astype(np.float32)
-            v = ((Z_pos + z_far)  / (2.0 * z_far)  * texture_tile_factor).astype(np.float32)
+            v = (1.0 - (Z_pos + z_far) / (2.0 * z_far) * texture_tile_factor).astype(np.float32)
             uv = np.stack([u, v], axis=-1)
             material = trimesh.visual.material.PBRMaterial(
                 # Splat layer tiles may carry a local micro-height channel packed into
@@ -348,7 +352,9 @@ class TerrainMeshGenerator:
         cx = X * intrinsics.fx / Z_safe + intrinsics.px
         cy = intrinsics.py - Y * intrinsics.fy / Z_safe
         u  = (cx / intrinsics.width).clip(0.0, 1.0)
-        v  = (cy / intrinsics.height).clip(0.0, 1.0)
+        # Pre-flip V to cancel trimesh's export-time flip — see the comment in generate()
+        # above the baked_tex UV formula for why this is needed.
+        v  = (1.0 - (cy / intrinsics.height).clip(0.0, 1.0))
         return np.stack([u, v], axis=-1).astype(np.float32)
 
     # ── Noise helper ──────────────────────────────────────────────────────────
