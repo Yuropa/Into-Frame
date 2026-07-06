@@ -23,6 +23,7 @@ public class SceneClient : MonoBehaviour
 
     private WebSocket _ws;
     private bool _reconnecting = false;
+    private string _lastSceneId = null;
 
     // ── Unity Lifecycle ────────────────────────────────────────────────────
 
@@ -125,6 +126,15 @@ public class SceneClient : MonoBehaviour
                 string initPayload = ExtractPayload(fullJson);
                 Debug.Log($"[SceneClient] SCENE_INIT payload: {initPayload}");
                 var init = JsonUtility.FromJson<SceneInitPayload>(initPayload);
+
+                if (!string.IsNullOrEmpty(init.scene_id) && init.scene_id == _lastSceneId)
+                {
+                    Debug.Log("[SceneClient] Scene unchanged (same scene_id) — skipping reload");
+                    objectManager.RevealIfHidden();
+                    break;
+                }
+
+                _lastSceneId = init.scene_id;
                 objectManager.ApplySceneInit(init);
                 paramManager.ApplyParams(init.scene);
                 terrainMaterialManager?.Apply(init.terrain_material);
@@ -287,6 +297,7 @@ public class SplatMaterialData
 [Serializable]
 public class SceneInitPayload
 {
-    public SceneParams     scene;
+    public string           scene_id;            // identifies the generated content; unchanged id = no-op reconnect
+    public SceneParams      scene;
     public SplatMaterialData terrain_material;   // null when not generated
 }

@@ -128,6 +128,13 @@ public class SceneObjectManager : MonoBehaviour
         if (changes.scale    != null) tracked.data.scale    = changes.scale;
     }
 
+    /// <summary>Called on a reconnect whose scene_id matches what's already loaded — no rebuild needed.</summary>
+    public void RevealIfHidden()
+    {
+        if (sceneRoot != null && !sceneRoot.activeSelf)
+            sceneRoot.SetActive(true);
+    }
+
     public void Destroy(string id)
     {
         if (!_tracked.TryGetValue(id, out var tracked)) return;

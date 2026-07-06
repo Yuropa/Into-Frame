@@ -54,6 +54,7 @@ class SimulationServer():
 
         self.scene = Scene()
         self._splat_material: Optional[SplatMaterial] = None
+        self._scene_id: Optional[str] = None
 
         self._pipeline_task: asyncio.Task | None = None
         self._client_connected = asyncio.Event()
@@ -145,7 +146,7 @@ class SimulationServer():
         })
 
     def get_snapshot(self) -> dict:
-        snapshot = {"scene": self.scene.encode()}
+        snapshot = {"scene": self.scene.encode(), "scene_id": self._scene_id}
         if self._splat_material is not None:
             snapshot["terrain_material"] = self._splat_material.encode()
         return snapshot
@@ -170,7 +171,12 @@ class SimulationServer():
 
                 if msg_type == ServerMessages.CLIENT_READY:
                     self.log.info(f"{client_id} is ready")
-                    await self._request_pipeline()
+                    if self._scene_id is not None:
+                        # Scene already generated — resend the cached snapshot instead of
+                        # regenerating. The client compares scene_id and skips reload if unchanged.
+                        await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+                    else:
+                        await self._request_pipeline()
 
                 elif msg_type == ServerMessages.OBJECT_EVENT:
                     self.log.info(f"{client_id}: {payload}")
@@ -206,6 +212,7 @@ class SimulationServer():
             if self._context is not None:
                 self.scene = self._context.scene(ContextKey.SCENE)
                 self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
+                self._scene_id = str(uuid.uuid4())
                 self.log.info("Serving pre-loaded scene")
                 await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
             else:
@@ -242,6 +249,7 @@ class SimulationServer():
             self.scene = context_result.scene(ContextKey.SCENE)
             self._splat_material = context_result.splat_material(ContextKey.TERRAIN_MATERIAL)
             self._context = context_result
+            self._scene_id = str(uuid.uuid4())
         except asyncio.CancelledError:
             progress_queue.put(None)   # unblock drain
             await drain_task
