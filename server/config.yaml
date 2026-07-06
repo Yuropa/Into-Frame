@@ -216,12 +216,12 @@ stages:
     # Several real reference crops (_extract_reference_patches), spaced apart on the tile
     # canvas (_patch_placements), instead of one -- gives Pass 1 more than one real colour/
     # lighting anchor to match against, since generated fill can drift far from a single one.
-    num_reference_patches: 3
+    num_reference_patches: 1
     # Each patch's size as a fraction of tile_size when there's only one; scaled down by
-    # 1/sqrt(num_reference_patches) so total covered area stays comparable. 0.5 (single-patch
-    # case) leaves a comfortable margin before the seam-fix band (~4-9% of tile_size from
-    # each edge) so the two never overlap.
-    reference_patch_fraction: 0.5
+    # 1/sqrt(num_reference_patches) so total covered area stays comparable. 0.7 still leaves
+    # a comfortable margin before the seam-fix band (~4-9% of tile_size from each edge) so
+    # the two never overlap.
+    reference_patch_fraction: 0.7
     # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
     # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
     # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked

@@ -12,6 +12,7 @@ from scipy.ndimage import map_coordinates
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.captioning.image_captioning import ImageCaptioning, CaptioningModel
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
@@ -102,6 +103,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
+        # Caption the real reference crop with Florence-2 (_describe_material) and use that
+        # description as the prompt's subject instead of the generic per-region-type phrase
+        # in _BASE_PROMPTS -- e.g. "a close-up of cracked, sun-bleached mud" instead of the
+        # generic "macro close-up photograph of loose soil grit...". Falls back to
+        # _BASE_PROMPTS if there's no reference crop, or captioning fails/yields nothing.
+        describe_material: bool = True,
         # How many reference crops (_extract_reference_patches) to place on the tile canvas.
         # Multiple smaller patches, spread out with real gaps between them, give Pass 1 more
         # than one real colour/lighting anchor to match against instead of extrapolating a
@@ -166,6 +173,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
         self.use_photo_reference = use_photo_reference
+        self.describe_material = describe_material
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
         self.pass1_inpainting_type = pass1_inpainting_type
@@ -240,6 +248,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         super().__init__(config)
         self._inpainter: Optional[InPainting] = None
         self._lama_inpainter: Optional[InPainting] = None
+        self._captioner: Optional[ImageCaptioning] = None
 
     def _init_inpainter(self) -> None:
         if self._inpainter is None:
@@ -256,6 +265,12 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._lama_inpainter is None:
             device, dtype = preferred_device(DeviceStrategy.MEMORY)
             self._lama_inpainter = InPainting(device, dtype, InPaintingType.LAMA)
+
+    def _init_captioner(self) -> None:
+        """Lazily load Florence-2 for material captioning — only if actually used."""
+        if self._captioner is None:
+            device, _ = preferred_device(DeviceStrategy.MEMORY)
+            self._captioner = ImageCaptioning(device, model=CaptioningModel.FLORENCE2)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
@@ -554,8 +569,36 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _build_prompt(self, rt: RegionType, caption: Any) -> str:
         base = _BASE_PROMPTS.get(rt, "close-up macro photo of natural outdoor ground surface material")
+        return self._material_prompt(base)
+
+    @staticmethod
+    def _material_prompt(description: str) -> str:
         lora = PanoramaLoraType.FLUX_SEAMLESS_TEXTURE
-        return f"{lora_prompt_prefix(lora)}{base}{_TILE_SUFFIX}{lora_prompt_suffix(lora)}"
+        return f"{lora_prompt_prefix(lora)}{description}{_TILE_SUFFIX}{lora_prompt_suffix(lora)}"
+
+    def _describe_material(self, patch: PIL.Image.Image) -> Optional[str]:
+        """
+        Caption the real reference crop with Florence-2 to get a concrete
+        material description grounded in what's actually in the photo (e.g.
+        "a close-up of cracked, sun-bleached mud with small pebbles") instead
+        of guessing from the coarse region label alone.
+
+        patch may be RGBA (see _extract_reference_patches): ImageCaptioning's
+        own alpha-aware conversion fills anything outside the region mask
+        with the mean colour of the region itself before captioning, so
+        neighbouring materials at the crop's edges don't leak into the
+        description.
+
+        Returns None (caller falls back to the generic per-region prompt) if
+        there's no usable text or captioning fails outright.
+        """
+        self._init_captioner()
+        try:
+            text = self._captioner.caption(Image(patch)).strip()
+        except Exception as exc:
+            self.log_info(f"Material captioning failed, falling back to generic prompt: {exc}")
+            return None
+        return text.rstrip(". ") or None
 
     def _generate_tileable_tile(
         self,
@@ -613,6 +656,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         real gaps between them, rather than one patch extrapolated across the
         whole canvas or a mosaic of small patches stitched edge-to-edge.
 
+        If cfg.describe_material, the first patch is also captioned
+        (_describe_material) and the prompt's subject is swapped for that
+        description — e.g. "a close-up of cracked, sun-bleached mud with
+        small pebbles" — in place of the generic per-region-type phrase in
+        _BASE_PROMPTS, so generation is grounded in what this specific crop
+        actually shows rather than just its coarse region label.
+
         Pass 1 (_pass1_extend_patch) extends them to fill the whole tile using
         them purely as guidance, not something to hard-preserve. Pass 2
         (below) then repaints the *entire* Pass-1 tile with FLUX + the
@@ -645,6 +695,12 @@ class TerrainTextureGenerationStage(PipelineStage):
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
         for i, p in enumerate(patches):
             self._save_debug_step(cfg, debug_label, f"01_reference_patch_{i}", p)
+
+        if cfg.describe_material:
+            material_description = self._describe_material(patches[0])
+            if material_description:
+                prompt = self._material_prompt(material_description)
+                self.log_info(f"{debug_label}: material caption -> \"{material_description}\"")
 
         pass1_image = self._pass1_extend_patch(patches, prompt, cfg, seed, debug_label)
         self._save_debug_step(cfg, debug_label, "04_pass1_result", pass1_image)
@@ -795,12 +851,14 @@ class TerrainTextureGenerationStage(PipelineStage):
         """
         Paste each of `patches` onto a tile_size canvas at its centre in
         `placements`, and build the matching partial mask: black (0, keep)
-        over each patch, white (255, generate) everywhere else, boundary
-        Gaussian-feathered (when feather_px > 0) so the transition blends
-        rather than leaving a hard rectangular seam. Used as-is by the LaMa
-        Pass-1 path (real inpainting mask); the FLUX Pass-1 path only uses the
-        canvas and builds its own full-white mask, since it never asks the
-        model to hard-preserve anything.
+        over each patch's genuine same-region pixels (from its alpha channel
+        — see _extract_reference_patches), white (255, generate) everywhere
+        else, including any non-region sliver inside a patch's own footprint,
+        boundary Gaussian-feathered (when feather_px > 0) so the transition
+        blends rather than leaving a hard rectangular seam. Used as-is by the
+        LaMa Pass-1 path (real inpainting mask); the FLUX Pass-1 path only
+        uses the canvas and builds its own full-white mask, since it never
+        asks the model to hard-preserve anything.
 
         The canvas background outside all patches is filled with their
         combined mean colour, so it reads as a plausible continuation of them
@@ -818,8 +876,13 @@ class TerrainTextureGenerationStage(PipelineStage):
             p = patch.size[0]
             offset_y = int(np.clip(cy - p // 2, 0, T - p))
             offset_x = int(np.clip(cx - p // 2, 0, T - p))
-            canvas.paste(patch, (offset_x, offset_y))
-            mask_arr[offset_y:offset_y + p, offset_x:offset_x + p] = 0
+            canvas.paste(patch.convert("RGB"), (offset_x, offset_y))
+            keep = (
+                np.array(patch.split()[-1]) > 127
+                if patch.mode == "RGBA" else np.ones((p, p), dtype=bool)
+            )
+            region = mask_arr[offset_y:offset_y + p, offset_x:offset_x + p]
+            region[keep] = 0
 
         mask = PIL.Image.fromarray(mask_arr, "L")
         if feather_px > 0:
@@ -913,6 +976,16 @@ class TerrainTextureGenerationStage(PipelineStage):
         patch_size. These are guidance patches pasted into a larger tile
         canvas (see _build_reference_canvas), not necessarily the full tile.
 
+        A patch's bounding box is picked for being deep inside this region,
+        but a square box isn't guaranteed to be *entirely* this region right
+        up to its edges (e.g. right at a boundary with another material).
+        The same region mask used to find the box is reprojected alongside
+        the colour (via perspective_crop's own `mask` argument) and returned
+        as each patch's alpha channel, so _build_reference_canvas can treat
+        only genuine same-region pixels as "real" and let anything else
+        within the box's own footprint be regenerated instead of hard-
+        preserved.
+
         An earlier version baked the panorama top-down (world-space XZ grid,
         one sample per grid cell) before cropping. That reprojection
         collapses to a radial/pinwheel singularity right around the camera —
@@ -947,7 +1020,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         plain text-to-image generation if the list ends up empty.
         """
         H, W = type_map.shape
-        remaining = type_map == region_val
+        region_mask = (type_map == region_val).astype(np.float32)
+        remaining = region_mask > 0.5
         patches: list[PIL.Image.Image] = []
 
         for _ in range(max(1, num_patches)):
@@ -963,7 +1037,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             sr0 = int(np.clip(cy - half, 0, H - side))
             sc0 = int(np.clip(cx - half, 0, W - side))
 
-            crop = panorama.perspective_crop([sc0, sr0, side, side])
+            crop = panorama.perspective_crop([sc0, sr0, side, side], mask=region_mask)
             patches.append(crop.resize((patch_size, patch_size), PIL.Image.LANCZOS))
 
             # Exclude this area (out to its own safe radius) so the next pick
@@ -1077,6 +1151,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         )
         if self.config.pass1_inpainting_type == "LAMA":
             names = names + InPainting.model_names(InPaintingType.LAMA)
+        if self.config.describe_material and self.config.use_photo_reference:
+            names = names + [CaptioningModel.FLORENCE2.value]
         return names
 
     def clean_up(self):
@@ -1086,6 +1162,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._lama_inpainter is not None:
             self._lama_inpainter.close()
             self._lama_inpainter = None
+        self._captioner = None
         super().clean_up()
 
     def contribute_report(self, context: PipelineContext):
