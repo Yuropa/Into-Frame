@@ -116,7 +116,7 @@ class RegionMapGenerator:
         type_idx_map: np.ndarray,
         panorama_depth: Depth,
         sky_idx: int,
-        terrain_idx: int = -1,
+        water_idx: int = -1,
         grid_size_meters: float = 100.0,
         grid_resolution: int = 4096,
         depth_offset_rows: int = 3,
@@ -129,10 +129,16 @@ class RegionMapGenerator:
         Extract the sky-foreground horizon per column, sample depth just below it,
         and project to a top-down grid using actual XZ positions.
 
-        Any non-sky pixel that sits directly below a sky pixel is treated as part
-        of the ridgeline — this covers bare TERRAIN, forest-covered mountains
+        Any non-sky, non-water pixel that sits directly below a sky pixel is treated
+        as part of the ridgeline — this covers bare TERRAIN, forest-covered mountains
         (VEGETATION), and built structures on hilltops (BUILT), which would all be
-        missed if only the TERRAIN type were accepted.
+        missed if only the TERRAIN type were accepted. WATER pixels touching sky (an
+        open ocean/lake horizon) are excluded so they don't get anchored into the
+        solver as a fake mountain crest — that boundary belongs to extract_water_chains
+        instead. Excluded columns simply contribute no ridge point; the greedy
+        nearest-neighbour chaining below already splits into separate chains wherever
+        the gap between remaining points exceeds connect_radius_px, so a wide water
+        horizon naturally leaves a disjoint gap rather than a chain drawn across it.
 
         For each panorama column, finds the first non-sky row below sky, then
         samples depth depth_offset_rows below that boundary (where depth estimators
@@ -154,11 +160,12 @@ class RegionMapGenerator:
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
+        water_mask = type_idx_map == water_idx
 
         above_is_sky = np.zeros((h, w), dtype=bool)
         above_is_sky[1:, :] = sky_mask[:-1, :]
-        # Any non-sky pixel directly below sky is a ridgeline candidate.
-        silhouette = (~sky_mask) & above_is_sky
+        # Any non-sky, non-water pixel directly below sky is a ridgeline candidate.
+        silhouette = (~sky_mask) & (~water_mask) & above_is_sky
 
         has_silhouette = silhouette.any(axis=0)                      # (W,) bool
         boundary_row = silhouette.argmax(axis=0)                     # (W,) int

@@ -141,6 +141,7 @@ class RegionMapStage(PipelineStage):
         # just below it, and project to actual XZ positions on the top-down grid.
         sky_idx = RegionType.SKY
         terrain_idx = RegionType.TERRAIN
+        water_idx = RegionType.WATER
         sky_px = int((type_idx_map == sky_idx).sum())
         terrain_px = int((type_idx_map == terrain_idx).sum())
         unique_types_pano = [RegionType(i).label for i in np.unique(type_idx_map) if i < len(RegionType)]
@@ -149,7 +150,7 @@ class RegionMapStage(PipelineStage):
             type_idx_map=type_idx_map,
             panorama_depth=panorama_depth,
             sky_idx=sky_idx,
-            terrain_idx=terrain_idx,
+            water_idx=water_idx,
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
         )
