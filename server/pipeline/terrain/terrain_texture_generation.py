@@ -15,10 +15,10 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
 from util.device_utils import DeviceStrategy, preferred_device
+from util.panorama_utils import Panorama
 
 
 _GROUND_TYPES: frozenset[RegionType] = frozenset({
@@ -102,7 +102,6 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
-        reference_tex_size: int = 2048,
         # How many reference crops (_extract_reference_patches) to place on the tile canvas.
         # Multiple smaller patches, spread out with real gaps between them, give Pass 1 more
         # than one real colour/lighting anchor to match against instead of extrapolating a
@@ -114,10 +113,6 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # area stays comparable. Comfortably under 1.0 so patches never reach the seam-fix
         # band at the tile edges.
         reference_patch_fraction: float = 0.5,
-        # Bake-certainty threshold below which pixels are excluded when picking reference
-        # crops (_extract_reference_patches) -- keeps them away from the equirect nadir
-        # singularity (bakes as a radial/pinwheel artefact) and other unreliable areas.
-        patch_min_certainty: float = 0.15,
         # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
         # it purely as guidance, not something to hard-preserve.
         #   LAMA (default) -- classical texture-completion inpainting (no prompt, no LoRA,
@@ -171,10 +166,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
         self.use_photo_reference = use_photo_reference
-        self.reference_tex_size = reference_tex_size
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
-        self.patch_min_certainty = patch_min_certainty
         self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
@@ -188,16 +181,20 @@ class TerrainTextureGenerationStage(PipelineStage):
     Generates high-quality tileable region textures and packages them as a SplatMaterial.
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
-      1. If a real photo is available (PANORAMA_TERRAIN + HEIGHT_MAP), bake it
-         top-down and crop num_reference_patches squares from the most solid,
-         reliable, mutually distant locations of that region in the baked
-         photo (_extract_reference_patches). Each is one real, contiguous
-         location — coherent lighting/exposure, genuine continuous texture —
-         unlike stitching many small patches from potentially very different
-         lighting conditions within the same region label, which produces a
-         hard-seamed, visibly patchy mosaic; using several well-separated
-         patches instead of just one also gives later steps more than one real
-         colour/lighting anchor to match against.
+      1. If a real photo is available (PANORAMA_TERRAIN + PANORAMA_REGION_TYPE_MAP),
+         crop num_reference_patches squares directly from the most solid,
+         mutually distant locations of that region in the panorama's own
+         pixels (_extract_reference_patches), reprojected to a perspective
+         (rectilinear) view via Panorama.perspective_crop to remove
+         equirectangular distortion — no top-down/orthographic reprojection,
+         which produced radial/pinwheel artefacts near the camera. Each patch
+         is one real, contiguous location — coherent lighting/exposure,
+         genuine continuous texture — unlike stitching many small patches
+         from potentially very different lighting conditions within the same
+         region label, which produces a hard-seamed, visibly patchy mosaic;
+         using several well-separated patches instead of just one also gives
+         later steps more than one real colour/lighting anchor to match
+         against.
       2. Pass 1 (_pass1_extend_patch): paste those crops onto the tile canvas,
          spaced apart (_patch_placements), and extend them to fill the whole
          tile using them purely as guidance — by default LaMa (classical
@@ -223,11 +220,12 @@ class TerrainTextureGenerationStage(PipelineStage):
     see TerrainMeshGenerator.generate — since that channel holds height, not opacity).
 
     Reads:
-      ContextKey.REGION_MAP           — top-down region type grid (optional)
-      ContextKey.PANORAMA_TERRAIN     — real photo, source for the reference crop (optional)
-      ContextKey.HEIGHT_MAP           — for top-down baking alignment (optional)
-      ContextKey.HEIGHT_MAP_CERTAINTY — certainty mask for the bake (optional)
-      ContextKey.INPUT_CAPTION        — scene caption for prompt context (optional)
+      ContextKey.REGION_MAP              — top-down region type grid (optional)
+      ContextKey.PANORAMA_TERRAIN        — real photo, source for the reference crop (optional)
+      ContextKey.PANORAMA_REGION_TYPE_MAP — panorama-space per-pixel region type, source for
+                                            picking reference crop locations (optional)
+      ContextKey.HEIGHT_MAP              — for the panorama blend layer's visibility ramp (optional)
+      ContextKey.INPUT_CAPTION           — scene caption for prompt context (optional)
 
     Writes:
       ContextKey.TERRAIN_MATERIAL — SplatMaterial (tiles + blend maps)
@@ -281,13 +279,12 @@ class TerrainTextureGenerationStage(PipelineStage):
             for idx, rt in enumerate(present_types):
                 prompt = self._build_prompt(rt, caption)
                 if reference is not None:
-                    baked_rgb, region_ids, certainty = reference
+                    panorama, type_map = reference
                     tiles[rt.label] = self._generate_tileable_tile_high_fidelity(
                         prompt, cfg, seed_offset=idx,
-                        region_map=region_ids,
-                        baked_color=PIL.Image.fromarray(baked_rgb),
+                        panorama=panorama,
+                        type_map=type_map,
                         region_val=int(rt),
-                        certainty=certainty,
                         debug_label=rt.label,
                     )
                 else:
@@ -513,40 +510,27 @@ class TerrainTextureGenerationStage(PipelineStage):
         self,
         context: PipelineContext,
         cfg: "TerrainTextureGenerationConfiguration",
-    ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    ) -> Optional[tuple[Panorama, np.ndarray]]:
         """
-        Bake the real photo top-down, aligned to REGION_MAP, for use as a weak
-        img2img seed per region tile. Returns (baked_rgb, region_ids, certainty),
-        all at cfg.reference_tex_size, or None if the source imagery is missing.
+        Fetch the real photo and its panorama-space region typing, for use as
+        a weak img2img seed per region tile. Returns (panorama, type_map), or
+        None if the source imagery is missing.
+
+        Deliberately does *not* reproject to a top-down/orthographic grid —
+        that reprojection collapses to a radial/pinwheel singularity right
+        around the camera (the single largest "ground" blob is almost always
+        the area immediately around it) and stretches distant ground into
+        blocky artefacts near the horizon. Reference crops are instead cut
+        straight out of the panorama's own equirectangular pixels
+        (_extract_reference_patches), reprojected per-crop to a perspective
+        view (Panorama.perspective_crop) only to undo the local equirect
+        stretch, never resampled onto a world-space grid.
         """
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
-        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
-        region_map_depth = context.input_depth(ContextKey.REGION_MAP)
-        if panorama_terrain is None or height_map_depth is None or region_map_depth is None:
+        type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        if panorama_terrain is None or type_map_depth is None:
             return None
-
-        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
-        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
-        half = grid_size / 2.0
-
-        height_certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
-        baked_img, bake_certainty = TerrainMeshGenerator.bake_topdown_texture_with_certainty(
-            panorama_terrain,
-            height_map_depth.depth,
-            half, half,
-            tex_size=cfg.reference_tex_size,
-            height_certainty=height_certainty_depth.depth if height_certainty_depth is not None else None,
-        )
-        baked_rgb = np.array(baked_img, dtype=np.uint8)
-
-        rm = region_map_depth.depth
-        region_ids = zoom(
-            rm.astype(np.float32),
-            (cfg.reference_tex_size / rm.shape[0], cfg.reference_tex_size / rm.shape[1]),
-            order=0,
-        ).astype(np.int32)
-
-        return baked_rgb, region_ids, bake_certainty
+        return panorama_terrain, type_map_depth.depth
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -616,19 +600,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         prompt: str,
         cfg: TerrainTextureGenerationConfiguration,
         seed_offset: int,
-        region_map: np.ndarray,
-        baked_color: PIL.Image.Image,
+        panorama: Panorama,
+        type_map: np.ndarray,
         region_val: int,
-        certainty: Optional[np.ndarray] = None,
         inpainter: Optional[InPainting] = None,
         debug_label: str = "tile",
     ) -> PIL.Image.Image:
         """
-        Two-pass tile generation guided by a few real crops of this region
-        from the baked photo (_extract_reference_patches) — each a single
-        contiguous, coherently-lit location, spread out with real gaps between
-        them, rather than one patch extrapolated across the whole canvas or a
-        mosaic of small patches stitched edge-to-edge.
+        Two-pass tile generation guided by a few real crops of this region cut
+        directly from the panorama's own pixels (_extract_reference_patches)
+        — each a single contiguous, coherently-lit location, spread out with
+        real gaps between them, rather than one patch extrapolated across the
+        whole canvas or a mosaic of small patches stitched edge-to-edge.
 
         Pass 1 (_pass1_extend_patch) extends them to fill the whole tile using
         them purely as guidance, not something to hard-preserve. Pass 2
@@ -637,9 +620,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         push toward genuine tileability and the photorealistic macro finish.
         Falls back to plain text generation if the region has no pixels at all.
 
-        certainty: per-pixel bake certainty from _bake_reference, used to keep
-        the crops away from the equirect nadir singularity (see
-        _extract_reference_patches).
+        type_map: panorama-space per-pixel RegionType index array (see
+        ContextKey.PANORAMA_REGION_TYPE_MAP), used to locate crop candidates
+        (see _extract_reference_patches).
         inpainter: override the stage's own self._inpainter for Pass 2. Defaults
         to self._inpainter.
         debug_label: filename prefix for step-by-step debug images (see
@@ -652,13 +635,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         n = max(1, cfg.num_reference_patches)
         patch_size = max(16, int(T * cfg.reference_patch_fraction / math.sqrt(n)))
         patches = self._extract_reference_patches(
-            baked_color=baked_color,
-            region_map=region_map,
+            panorama=panorama,
+            type_map=type_map,
             region_val=region_val,
             patch_size=patch_size,
             num_patches=n,
-            certainty=certainty,
-            min_certainty=cfg.patch_min_certainty,
         )
         if not patches:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
@@ -916,75 +897,57 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _extract_reference_patches(
         self,
-        baked_color: PIL.Image.Image,
-        region_map: np.ndarray,
+        panorama: Panorama,
+        type_map: np.ndarray,
         region_val: int,
         patch_size: int,
         num_patches: int = 1,
-        certainty: Optional[np.ndarray] = None,
-        min_certainty: float = 0.15,
     ) -> list[PIL.Image.Image]:
         """
-        Crop up to num_patches squares from the most solid, reliable, and
-        mutually distant areas of this region in the baked top-down photo,
-        each resized to patch_size. These are guidance patches pasted into a
-        larger tile canvas (see _build_reference_canvas), not necessarily the
-        full tile.
+        Crop up to num_patches squares directly from the most solid, mutually
+        distant areas of this region in the panorama's own equirectangular
+        pixels — no top-down/orthographic reprojection. Each crop is
+        reprojected to a perspective (rectilinear) view via
+        Panorama.perspective_crop, which removes the local equirect stretch
+        without ever resampling onto a world-space grid, then resized to
+        patch_size. These are guidance patches pasted into a larger tile
+        canvas (see _build_reference_canvas), not necessarily the full tile.
 
-        A previous version scattered many small patches from anywhere in the
-        region into a collage. That produced a hard-seamed, visibly patchy
-        mosaic whenever the region spanned meaningfully different lighting or
-        exposure (sunlit rock vs. shadow vs. a warm sunset glow, all the same
-        region label) — each patch only feathered against its own mask
-        boundary, never against its neighbours on the canvas, so adjacent
-        patches could clash violently. A version after that used a single
-        crop from one real, contiguous patch — inherently coherent, but with
-        only one real colour/lighting anchor, generated fill can drift far
-        from it. This version keeps the "one coherent crop per patch"
-        property but samples num_patches of them, each from a distinct,
-        well-separated location, so Pass 1 has more than one real anchor to
-        match against wherever it's generating.
+        An earlier version baked the panorama top-down (world-space XZ grid,
+        one sample per grid cell) before cropping. That reprojection
+        collapses to a radial/pinwheel singularity right around the camera —
+        the single largest "ground" blob is almost always the area
+        immediately around it — and stretches distant ground near the
+        horizon into blocky artefacts. Working directly in the panorama's own
+        pixel space avoids both: nothing is resampled onto a grid at all,
+        only the visible-latitude segmentation is used to find good crop
+        locations, and the panorama's own smooth image sampling is all that
+        touches the actual pixels.
 
-        A version after *that* used the connected component's bounding-box
-        centre, which reliably picked the equirect nadir singularity: the
-        single largest "ground" blob is almost always the area immediately
-        around the camera, so its bbox centre sits right on the world origin,
-        where azimuth is undefined and topdown-bakes as a radial/pinwheel
-        artefact. certainty (from _bake_reference, zero in that dead zone,
-        ramping outward) excludes it from consideration entirely; each patch
-        centre is instead the point of the *remaining* valid area farthest
-        from any excluded pixel (nadir dead zone, a different region type, the
-        image edge, or an already-picked patch) via a distance transform — the
-        most "interior," safest point of whatever solid material is left, not
-        just whatever a bounding box happens to centre on. Each patch's side
-        is set from that same distance so it stays within (or very close to)
-        solid, reliable material, and the area is then excluded before picking
-        the next one so patches don't overlap or crowd each other. Pixels
-        within a patch that are nonetheless from neighbouring content are real
-        photo content, not masked out, since re-introducing per-pixel masking
-        here would bring back the earlier patchiness.
+        A version before that scattered many small patches from anywhere in
+        the region into a collage. That produced a hard-seamed, visibly
+        patchy mosaic whenever the region spanned meaningfully different
+        lighting or exposure (sunlit rock vs. shadow vs. a warm sunset glow,
+        all the same region label) — each patch only feathered against its
+        own mask boundary, never against its neighbours on the canvas, so
+        adjacent patches could clash violently. A version after that used a
+        single crop from one real, contiguous patch — inherently coherent,
+        but with only one real colour/lighting anchor, generated fill can
+        drift far from it. This version keeps the "one coherent crop per
+        patch" property but samples num_patches of them, each from a
+        distinct, well-separated location (via a distance transform over the
+        region's panorama-space mask — the most "interior," safest point of
+        whatever solid material is left, not just a bounding-box centre),
+        so Pass 1 has more than one real anchor to match against wherever
+        it's generating. Each area is excluded before picking the next one so
+        patches don't overlap or crowd each other.
 
         Returns fewer than num_patches (down to an empty list) if there isn't
-        enough distinct reliable material — the caller falls back to plain
-        text-to-image generation if the list ends up empty.
+        enough distinct material of this type — the caller falls back to
+        plain text-to-image generation if the list ends up empty.
         """
-        W, H = baked_color.size
-        rm_h, rm_w = region_map.shape
-        region_map_res = (
-            zoom(region_map, (H / rm_h, W / rm_w), order=0, prefilter=False)
-            if (rm_h, rm_w) != (H, W) else region_map
-        )
-
-        valid = region_map_res == region_val
-        if certainty is not None:
-            cert_res = (
-                zoom(certainty, (H / certainty.shape[0], W / certainty.shape[1]), order=1)
-                if certainty.shape != (H, W) else certainty
-            )
-            valid &= cert_res > min_certainty
-
-        color_arr = np.array(baked_color.convert("RGB"))
-        remaining = valid.copy()
+        H, W = type_map.shape
+        remaining = type_map == region_val
         patches: list[PIL.Image.Image] = []
 
         for _ in range(max(1, num_patches)):
@@ -1000,8 +963,8 @@ class TerrainTextureGenerationStage(PipelineStage):
             sr0 = int(np.clip(cy - half, 0, H - side))
             sc0 = int(np.clip(cx - half, 0, W - side))
 
-            crop = color_arr[sr0:sr0 + side, sc0:sc0 + side]
-            patches.append(PIL.Image.fromarray(crop).resize((patch_size, patch_size), PIL.Image.LANCZOS))
+            crop = panorama.perspective_crop([sc0, sr0, side, side])
+            patches.append(crop.resize((patch_size, patch_size), PIL.Image.LANCZOS))
 
             # Exclude this area (out to its own safe radius) so the next pick
             # lands somewhere distinct rather than immediately adjacent.

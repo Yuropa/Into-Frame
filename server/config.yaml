@@ -222,12 +222,6 @@ stages:
     # case) leaves a comfortable margin before the seam-fix band (~4-9% of tile_size from
     # each edge) so the two never overlap.
     reference_patch_fraction: 0.5
-    # Bake-certainty threshold below which pixels are excluded when picking the reference
-    # crop -- keeps it away from the equirect nadir singularity (the single largest "ground"
-    # blob is almost always right around the camera, whose bbox centre sits on the world
-    # origin, where azimuth is undefined and topdown-bakes as a radial/pinwheel artefact --
-    # this was previously silently selected as "the" reference crop for every region).
-    patch_min_certainty: 0.15
     # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
     # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
     # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked
