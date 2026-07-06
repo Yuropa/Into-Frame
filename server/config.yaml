@@ -35,10 +35,20 @@ stages:
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
+    enabled: false
     full_panorama: true
     use_depth_filter: true
     depth_filter_threshold: 0.05       # Signal 1: slack above row-max baseline (0.0 = strict)
     depth_filter_edge_threshold: 0.005 # Signal 2: min edge depth-pop to keep a mask (lower = less strict)
+
+  - name: Panorama Foreground Inpainting
+    stage: PanoramaForegroundInpaintingStage
+    use_depth_filter: true
+    depth_filter_threshold: 0.05
+    depth_filter_edge_threshold: 0.005
+    mask_dilation_px: 15
+    guidance_scale: 2.5
+    num_inference_steps: 30
 
   - name: Panorama Regions
     stage: PanoramaRegionStage

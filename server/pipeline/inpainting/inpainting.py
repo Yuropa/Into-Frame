@@ -2,6 +2,7 @@ import torch
 from PIL import Image as PILImage
 from pipeline.inpainting.inpainting_flux import InPaintingFlux
 from pipeline.inpainting.inpainting_lama import InPaintingLama
+from pipeline.inpainting.inpainting_objectclear import InPaintingObjectClear
 from pipeline.panorama.panorama_lora import PanoramaLoraType
 from enum import Enum
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 class InPaintingType(Enum):
     FLUX = 1
     LAMA = 2
+    OBJECTCLEAR = 3
 
     @classmethod
     def default(cls):
@@ -36,6 +38,11 @@ class InPainting:
                     device=device,
                     torch_dtype=torch_dtype
                 )
+            case InPaintingType.OBJECTCLEAR:
+                self.generator = InPaintingObjectClear(
+                    device=device,
+                    torch_dtype=torch_dtype
+                )
 
     @classmethod
     def model_names(
@@ -48,6 +55,8 @@ class InPainting:
                 return InPaintingFlux.model_names(lora_type)
             case InPaintingType.LAMA:
                 return InPaintingLama.model_names()
+            case InPaintingType.OBJECTCLEAR:
+                return InPaintingObjectClear.model_names()
 
     def inpaint(
         self,
