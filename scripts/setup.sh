@@ -125,7 +125,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "objectclear")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -947,6 +947,22 @@ setup_worldgen() {
 
 run_step "Installing WorldGen" \
     setup_worldgen
+
+## ============
+##    ObjectClear
+## ============
+
+setup_objectclear() {
+    create_env "objectclear" 3.10
+    clone_if_needed https://github.com/zjx0101/ObjectClear.git "$LIB_DIR/ObjectClear"
+    run_in_env pip install -r "$LIB_DIR/ObjectClear/requirements.txt"
+    ln -sf "$LIB_DIR/ObjectClear" "$PACKAGES_DIR/objectclear"
+
+    stop_env
+}
+
+run_step "Installing ObjectClear" \
+    setup_objectclear
 
 ## ============
 ##    End
