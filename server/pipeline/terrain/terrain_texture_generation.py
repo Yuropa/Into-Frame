@@ -148,6 +148,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # bias steers generation without overpowering the per-region material prompt or the
         # reference crop's genuine detail.
         lora_scale: float = 0.8,
+        # Temporarily disabled -- was producing visible artifacts. When False, all FLUX
+        # calls in this stage (Pass 1 fallback, Pass 2, seam-fix) run on plain
+        # FLUX.1-Fill-dev with no LoRA loaded at all (not just zero-weighted).
+        use_lora: bool = True,
         # Debug: save every intermediate image of the generation process (reference patch,
         # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
         # self.temp/texture_generation/, so each step can be inspected. No-op unless
@@ -181,6 +185,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.reference_strength = reference_strength
         self.color_transfer_strength = color_transfer_strength
         self.lora_scale = lora_scale
+        self.use_lora = use_lora
         self.debug_save_steps = debug_save_steps
 
 
@@ -256,7 +261,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             inpaint_device, inpaint_dtype = preferred_device(DeviceStrategy.MEMORY)
             self._inpainter = InPainting(
                 inpaint_device, inpaint_dtype, cfg.inpainting_type,
-                lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
+                lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE if cfg.use_lora else None,
                 lora_scale=cfg.lora_scale,
             )
 
@@ -571,8 +576,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         base = _BASE_PROMPTS.get(rt, "close-up macro photo of natural outdoor ground surface material")
         return self._material_prompt(base)
 
-    @staticmethod
-    def _material_prompt(description: str) -> str:
+    def _material_prompt(self, description: str) -> str:
+        if not self.config.use_lora:
+            # No LoRA loaded -- its "smlstxtr"/"seamless texture" trigger wording is
+            # meaningless (and potentially confusing) to plain FLUX.1-Fill-dev.
+            return f"{description}{_TILE_SUFFIX}"
         lora = PanoramaLoraType.FLUX_SEAMLESS_TEXTURE
         return f"{lora_prompt_prefix(lora)}{description}{_TILE_SUFFIX}{lora_prompt_suffix(lora)}"
 
@@ -786,7 +794,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         # texture LoRA bias at this stage. Full mask -- nothing here is meant to be kept
         # verbatim, unlike the LaMa path where the mask is the only way to reference the
         # patches at all.
-        self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[0.0])
+        self._inpainter.set_lora_enabled(False)
         try:
             full_mask = PIL.Image.new("L", (T, T), 255)
             return self._inpainter.inpaint(
@@ -800,7 +808,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 seed=seed,
             )
         finally:
-            self._inpainter.generator.pipeline.set_adapters(["pano"], adapter_weights=[cfg.lora_scale])
+            self._inpainter.set_lora_enabled(True)
 
     @staticmethod
     def _patch_placements(
@@ -1147,7 +1155,8 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def model_names(self) -> list[str]:
         names = InPainting.model_names(
-            self.config.inpainting_type, lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE,
+            self.config.inpainting_type,
+            lora_type=PanoramaLoraType.FLUX_SEAMLESS_TEXTURE if self.config.use_lora else None,
         )
         if self.config.pass1_inpainting_type == "LAMA":
             names = names + InPainting.model_names(InPaintingType.LAMA)

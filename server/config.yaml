@@ -228,6 +228,9 @@ stages:
     # inputs, observed as the patch being replaced with unrelated content). FLUX = ordinary
     # img2img with this stage's own LoRA temporarily disabled instead.
     pass1_inpainting_type: LAMA
+    # Temporarily off -- FLUX_SEAMLESS_TEXTURE was producing visible artifacts. Runs plain
+    # FLUX.1-Fill-dev with no LoRA loaded at all until re-enabled.
+    use_lora: false
     mask_feather_px: 12.0       # Pass-1 mask feather (FLUX option only; LaMa ignores it)
     reference_strength: 0.60   # img2img strength for Pass 1 (if FLUX) and Pass 2's full-tile
                                # LoRA repaint over Pass 1 — the only thing anchoring Pass 2
