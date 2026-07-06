@@ -46,14 +46,26 @@ class ImageCaptioning:
 
     @staticmethod
     def _patch_florence2_config_cache() -> None:
-        """Fix the forced_bos_token_id bug in the cached configuration_florence2.py.
+        """Fix known bugs in the cached Florence-2 custom code.
 
-        Two known bugs in cached revision 21a599d4 of the Florence-2 custom code:
+        Three known bugs in cached revision 21a599d4 of the Florence-2 custom code,
+        all pre-existing incompatibilities with newer transformers versions:
           1. configuration_florence2.py: accesses self.forced_bos_token_id before
              super().__init__() sets it — fix: use kwargs.get() instead.
           2. processing_florence2.py: accesses tokenizer.additional_special_tokens
              which doesn't exist on RobertaTokenizer in newer transformers —
              fix: guard with getattr(..., []).
+          3. modeling_florence2.py: Florence2PreTrainedModel declares
+             _supports_flash_attn_2/_supports_sdpa as @property, delegating to
+             self.language_model._supports_flash_attn_2/._supports_sdpa. Newer
+             transformers' PreTrainedModel.__init__ reads self._supports_sdpa (via
+             _check_and_adjust_attn_implementation) before Florence2ForConditionalGeneration
+             has assigned self.language_model, so the property raises AttributeError,
+             which nn.Module.__getattr__ then re-raises as "no attribute
+             '_supports_sdpa'" -- fix: hardcode the same values
+             Florence2LanguagePreTrainedModel itself declares, removing the
+             self.language_model dependency entirely (behaviourally identical once
+             init completes, since that's all the property ever returned).
         After patching files, evict stale sys.modules entries so Python re-loads
         from disk rather than the in-memory cached imports.
         """
@@ -77,6 +89,27 @@ class ImageCaptioning:
                 'getattr(tokenizer, "additional_special_tokens", [])',
             ),
         ]
+        _MODELING_PATCHES = [
+            (
+                '    @property\n'
+                '    def _supports_flash_attn_2(self):\n'
+                '        """\n'
+                '        Retrieve language_model\'s attribute to check whether the model supports\n'
+                '        Flash Attention 2 or not.\n'
+                '        """\n'
+                '        return self.language_model._supports_flash_attn_2\n'
+                '\n'
+                '    @property\n'
+                '    def _supports_sdpa(self):\n'
+                '        """\n'
+                '        Retrieve language_model\'s attribute to check whether the model supports\n'
+                '        SDPA or not.\n'
+                '        """\n'
+                '        return self.language_model._supports_sdpa\n',
+                '    _supports_flash_attn_2 = True\n'
+                '    _supports_sdpa = True\n',
+            ),
+        ]
 
         def _apply(path_glob, patches):
             for fpath in glob.glob(os.path.join(modules_root, "microsoft", "Florence*", "*", path_glob)):
@@ -93,6 +126,7 @@ class ImageCaptioning:
 
         _apply("configuration_florence2.py", _CONFIG_PATCHES)
         _apply("processing_florence2.py", _PROCESSING_PATCHES)
+        _apply("modeling_florence2.py", _MODELING_PATCHES)
 
         for key in list(sys.modules):
             if "transformers_modules" in key:
