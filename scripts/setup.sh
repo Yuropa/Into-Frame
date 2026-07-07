@@ -5,6 +5,7 @@ FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
 MIRROR=false
+MIRROR_URL=""
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
@@ -20,18 +21,18 @@ show_usage() {
     echo -e "  -f    Force clean installation (removes existing libraries and conda environments)"
     echo -e "  -s    Save existing installation logs (default behavior wipes the logs directory)"
     echo -e "  -v    Verbose mode (dumps output to terminal instead of a log file)"
-    echo -e "  -m    Use the Hugging Face mirror (hf-mirror.com) for model downloads (off by default)"
+    echo -e "  -m URL  Use a Hugging Face mirror at URL for model downloads (off by default, e.g. -m https://hf-mirror.com)"
     echo -e "  -h    Show this help message and exit"
     exit 0
 }
 
 # Parse command line flags
-while getopts "fshvm" opt; do
+while getopts "fshvm:" opt; do
   case $opt in
     f) FORCE=true ;;
     s) SAVE_LOGS=true ;;
     v) VERBOSE=true ;;
-    m) MIRROR=true ;;
+    m) MIRROR=true; MIRROR_URL="$OPTARG" ;;
     h) show_usage ;;
     *) echo "Invalid option. Use -h for help." >&2; exit 1 ;;
   esac
@@ -51,7 +52,7 @@ warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
 
 if [ "$MIRROR" = true ]; then
-    configure_hf_mirror
+    configure_hf_mirror "$MIRROR_URL"
 fi
 
 echo ""
