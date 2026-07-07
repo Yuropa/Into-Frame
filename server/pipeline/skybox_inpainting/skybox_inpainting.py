@@ -186,7 +186,7 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        seam_heal_width_px: int = 64,
+        seam_heal_width_px: int = 128,
         seam_heal_method: str = "telea",
         # Fraction of panorama height the fill mask dilates into the sky before FLUX
         # generates (see "Pass 2" below) — buries the real jagged horizon/mountain
@@ -216,8 +216,11 @@ class SkyboxInpaintingStage(PipelineStage):
 
       3. Seam healing (util.seam_repair.heal_seam): a `seam_heal_width_px`-wide
          band straddling the sky/terrain boundary is content-aware inpainted
-         (Photoshop Spot Healing Brush-style) to smooth over any residual
-         exposure or texture mismatch at the join.
+         (Photoshop Spot Healing Brush-style) and faded in with a feathered
+         alpha (rather than swapped in with a hard cutoff) to smooth over any
+         residual exposure or texture mismatch at the join. The feathered
+         blend mask is saved alongside the other stage outputs as
+         `panorama_sky_seam_blend_mask.png`.
 
     Reads:
       ContextKey.PANORAMA                — equirectangular source panorama
@@ -465,6 +468,8 @@ class SkyboxInpaintingStage(PipelineStage):
             band_width_px=self.config.seam_heal_width_px,
             wrap_horizontal=True,
             method=self.config.seam_heal_method,
+            debug_dir=self.output or self.temp,
+            debug_prefix="panorama_sky_seam",
         )
 
         if self.output is not None:
