@@ -35,6 +35,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         certainty_falloff_meters: float = 20.0,
         save_point_cloud: bool = True,
         point_cloud_stride: int = 4,
+        min_forward_samples: int = 4,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -78,6 +79,11 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # write and awkward to load in a mesh viewer; 4 (1/16 of the pixels) keeps the
         # file a manageable size while still far denser than the height-map grid.
         self.point_cloud_stride = point_cloud_stride
+        # Equirectangular mode only: minimum independent forward-projected panorama
+        # pixels that must land in one grid cell before its single inverse-mapped
+        # sample is overridden by real per-cell mean/relief/slope statistics. Below
+        # this, either a plane fit is impossible (<3 points) or too noisy to trust.
+        self.min_forward_samples = min_forward_samples
 
 
 class HeightMapStage(PipelineStage):
@@ -163,7 +169,7 @@ class HeightMapStage(PipelineStage):
                     f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.ply"
                 )
 
-        height_array, certainty_array, cell_relief_array = HeightMapGenerator.generate(
+        height_array, certainty_array, cell_relief_array, cell_slope_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -181,6 +187,7 @@ class HeightMapStage(PipelineStage):
             nadir_ramp_width=cfg.nadir_ramp_width,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
+            min_forward_samples=cfg.min_forward_samples,
             debug_dir=self.temp,
         )
         self.advance_progress(task)
@@ -189,6 +196,7 @@ class HeightMapStage(PipelineStage):
         context.add_depth(output_key, height_map)
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_RELIEF, Depth(cell_relief_array))
+        context.add_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE, Depth(cell_slope_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters":    cfg.grid_size_meters,
@@ -202,14 +210,19 @@ class HeightMapStage(PipelineStage):
             Depth(certainty_array).save_debug_image(self.temp / "heightmap_certainty.png")
             if cell_relief_array.any():
                 Depth(cell_relief_array).save_debug_image(self.temp / "heightmap_cell_relief.png")
+            if cell_slope_array.any():
+                Depth(cell_slope_array).save_debug_image(self.temp / "heightmap_cell_slope.png")
 
         n_relief = int((cell_relief_array > 0).sum())
+        n_slope = int((cell_slope_array > 0).sum())
         self.log_info(
             f"Height map {height_array.shape}, "
             f"Y range {height_array.min():.2f} → {height_array.max():.2f} m, "
             f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}, "
             f"{n_relief} cell(s) with measured intra-cell relief "
-            f"(max {cell_relief_array.max():.2f} m)"
+            f"(max {cell_relief_array.max():.2f} m), "
+            f"{n_slope} cell(s) with measured plane-fit slope "
+            f"(max {cell_slope_array.max():.1f}°)"
         )
 
         self.finish_progress(task)

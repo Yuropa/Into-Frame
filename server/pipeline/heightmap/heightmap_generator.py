@@ -42,23 +42,40 @@ class HeightMapGenerator:
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
+        min_forward_samples: int = 4,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
 
-        Returns (height_array, certainty_array, cell_relief_array), all
-        (grid_resolution, grid_resolution) float32.  certainty is in [0, 1]:
+        Returns (height_array, certainty_array, cell_relief_array, cell_slope_array),
+        all (grid_resolution, grid_resolution) float32.  certainty is in [0, 1]:
         sin²(depression_angle) for cells with any direct observation (primary or
         panorama depth), 0 for pure interpolation.  cell_relief is the raw Y range
         (max - min, in metres) among all depth samples that landed in that one grid
         cell before being collapsed to their mean -- evidence of real vertical
         structure (e.g. a cliff face narrower than one grid cell) that survives only
         here, since it is destroyed by the very next step (averaging) and therefore
-        invisible to any gradient computed on the output height map. Only populated
-        in pinhole mode, where many depth pixels legitimately land in one cell;
-        equirectangular mode takes a single inverse-mapped sample per cell, so
-        there's no intra-cell distribution to measure and this is all zeros.
+        invisible to any gradient computed on the output height map. cell_slope is
+        the surface tilt (degrees from horizontal, 0-90) measured directly from a
+        local least-squares plane fit through the raw points in that cell -- a
+        direct 3-D orientation measurement rather than a proxy inferred from either
+        a 2-D height gradient or the scalar Y range.
+
+        In pinhole mode, every depth pixel is forward-projected and binned, so
+        cell_relief is populated everywhere multiple samples land in one cell;
+        cell_slope is not computed in pinhole mode (out of scope for this change)
+        and is all zeros. In equirectangular mode, the primary projection
+        (inverse_map_panorama_to_grid) takes a single inverse-mapped sample per
+        cell -- necessary far from the camera, where one panorama pixel covers a
+        huge ground area and forward projection would leave most cells empty --
+        so on its own it has no intra-cell distribution to measure. Near the
+        camera the opposite is true: many panorama pixels legitimately land in one
+        fine grid cell. _forward_project_cell_stats recovers that near-field
+        density via true forward projection, and wherever a cell collects
+        min_forward_samples or more independent points its mean/relief/slope
+        override the single-sample result; elsewhere the inverse-mapped value
+        stands as before.
 
         camera_height_meters: assumed height of the camera above the ground plane
                               (used to derive the Y floor filter and flood-fill seed).
@@ -91,6 +108,12 @@ class HeightMapGenerator:
                                   camera height — using camera height here (as before)
                                   collapses certainty within a couple of metres, well
                                   under any usable confidence_threshold downstream.
+        min_forward_samples: equirectangular mode only. Minimum number of independent
+                            forward-projected panorama pixels that must land in a grid
+                            cell before its single inverse-mapped sample is overridden
+                            by real per-cell statistics (mean/relief/slope). Below this,
+                            a plane fit is either impossible (<3 points) or too noisy to
+                            trust over the existing inverse-mapped value.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -131,12 +154,25 @@ class HeightMapGenerator:
 
             if not np.any(valid):
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy(), zeros.copy()
+                return zeros, zeros.copy(), zeros.copy(), zeros.copy()
 
             height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
             height_map[valid] = Y_grid[valid]
-            # Single inverse-mapped sample per cell -- no intra-cell distribution to measure.
+            # Single inverse-mapped sample per cell -- no intra-cell distribution to measure
+            # on its own; overridden below wherever forward projection finds enough real
+            # samples in the same cell.
             cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg = (
+                HeightMapGenerator._forward_project_cell_stats(
+                    d, sky_mask, region_type_mask, grid_size_meters, grid_resolution,
+                    ground_y_max, ground_y_min, nadir_exclusion_radius, min_forward_samples,
+                )
+            )
+            if dense_mask.any():
+                height_map[dense_mask] = fwd_mean_y[dense_mask]
+                cell_relief[dense_mask] = fwd_relief[dense_mask]
+            cell_slope_deg = fwd_slope_deg
 
         else:
             if sky_mask is not None and sky_mask.shape == d.shape:
@@ -164,7 +200,7 @@ class HeightMapGenerator:
             Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
             if len(Xg) == 0:
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy(), zeros.copy()
+                return zeros, zeros.copy(), zeros.copy(), zeros.copy()
 
             x_edges = np.linspace(-half, half, grid_resolution + 1)
             z_edges = np.linspace(-half, half, grid_resolution + 1)
@@ -198,6 +234,8 @@ class HeightMapGenerator:
             np.minimum.at(height_min, (zi, xi), Yg)
             cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
             cell_relief[has_data] = (height_max[has_data] - height_min[has_data]).astype(np.float32)
+            # Plane-fit slope is only computed for the equirectangular path above.
+            cell_slope_deg = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
         # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
         # the starting point with small height steps are kept; everything else is set to
@@ -208,6 +246,7 @@ class HeightMapGenerator:
             )
             height_map[~accepted] = np.nan
             cell_relief[~accepted] = 0.0
+            cell_slope_deg[~accepted] = 0.0
 
         # Fill remaining NaN cells from the panorama depth (360° coverage) before
         # falling back to pure interpolation. Only cells that are still empty after
@@ -241,9 +280,11 @@ class HeightMapGenerator:
         if nadir_exclusion_radius > 0:
             flat_prior_mask = _r_cell <= nadir_exclusion_radius
             height_map[flat_prior_mask] = -camera_height_meters
-            # Any measured relief here belonged to a height value we just discarded
-            # in favour of the flat prior -- it's no longer evidence of anything.
+            # Any measured relief/slope here belonged to a height value we just
+            # discarded in favour of the flat prior -- it's no longer evidence of
+            # anything.
             cell_relief[flat_prior_mask] = 0.0
+            cell_slope_deg[flat_prior_mask] = 0.0
 
         # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
         # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
@@ -274,6 +315,10 @@ class HeightMapGenerator:
                 Depth(cell_relief.copy()).normalize().save_debug_image(
                     debug_dir / "heightmap_cell_relief.png"
                 )
+            if cell_slope_deg.any():
+                Depth(cell_slope_deg.copy()).normalize().save_debug_image(
+                    debug_dir / "heightmap_cell_slope.png"
+                )
 
         result = HeightMapGenerator._interpolate(height_map)
         if smooth_sigma > 0:
@@ -284,7 +329,160 @@ class HeightMapGenerator:
                 result, certainty, grid_size_meters, debug_dir / "heightmap_radial_profile.json"
             )
 
-        return result, certainty, cell_relief
+        return result, certainty, cell_relief, cell_slope_deg
+
+    @staticmethod
+    def _forward_project_cell_stats(
+        d: np.ndarray,
+        sky_mask: Optional[np.ndarray],
+        region_type_mask: Optional[np.ndarray],
+        grid_size_meters: float,
+        grid_resolution: int,
+        ground_y_max: float,
+        ground_y_min: float,
+        nadir_exclusion_radius: float,
+        min_samples: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Forward-project every panorama pixel (rather than one inverse-mapped ray per
+        output cell) and compute real per-cell statistics wherever enough independent
+        samples land in the same cell to support them.
+
+        Near the camera, many panorama pixels legitimately land in one fine grid
+        cell -- that intra-cell distribution is exactly what the single-sample
+        inverse mapping in the equirectangular branch above cannot see. Far from
+        the camera the opposite is true (one pixel covers a huge ground area, most
+        cells stay empty), which is why inverse mapping is used as the primary
+        projection there. This recovers, wherever a cell is dense enough:
+
+          mean_y    -- per-cell mean elevation from multiple real samples, instead
+                       of a single ray sample.
+          relief    -- per-cell Y range (max - min); the same intra-cell-relief
+                       signal the pinhole branch already produces, previously
+                       always zero here.
+          slope_deg -- per-cell surface tilt (0 = flat, 90 = vertical) from the
+                       smallest-eigenvalue eigenvector of the points' 3x3
+                       covariance matrix (a local least-squares plane fit) -- a
+                       direct measurement of true 3-D orientation, not a proxy
+                       inferred from a 2-D gradient or a scalar Y range.
+
+        Grouping is done via a unique-linear-index groupby (np.unique +
+        return_inverse) rather than scattering into full (grid_resolution,
+        grid_resolution) accumulators, so cost and memory scale with the number
+        of valid points / populated cells, not the square of grid_resolution.
+
+        Returns (dense_mask, mean_y, relief, slope_deg), all (grid_resolution,
+        grid_resolution). Only cells with >= min_samples independent forward
+        projections are set in dense_mask; the other three arrays are 0 elsewhere.
+        """
+        empty = (
+            np.zeros((grid_resolution, grid_resolution), dtype=bool),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+        )
+
+        d_masked = d.copy()
+        if sky_mask is not None and sky_mask.shape == d.shape:
+            d_masked[sky_mask] = np.nan
+
+        X, Y, Z = Panorama.equirectangular_unproject(Depth(d_masked))
+
+        half = grid_size_meters / 2.0
+        valid = (
+            np.isfinite(d_masked) & (d_masked > 0)
+            & (Y <= ground_y_max) & (Y >= ground_y_min)
+            & (np.abs(X) <= half) & (np.abs(Z) <= half)
+        )
+        if nadir_exclusion_radius > 0:
+            valid &= np.hypot(X, Z) >= nadir_exclusion_radius
+        if region_type_mask is not None:
+            rm = np.round(region_type_mask).astype(np.int32)
+            if rm.shape != d.shape:
+                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+            valid &= np.isin(rm, _VALID_REGION_INDICES)
+
+        Xg, Yg, Zg = X[valid], Y[valid], Z[valid]
+        if len(Xg) == 0:
+            return empty
+
+        x_edges = np.linspace(-half, half, grid_resolution + 1)
+        z_edges = np.linspace(-half, half, grid_resolution + 1)
+        xi = np.digitize(Xg, x_edges) - 1
+        zi = np.digitize(Zg, z_edges) - 1
+        in_bounds = (xi >= 0) & (xi < grid_resolution) & (zi >= 0) & (zi < grid_resolution)
+        xi, zi = xi[in_bounds], zi[in_bounds]
+        Xg, Yg, Zg = Xg[in_bounds], Yg[in_bounds], Zg[in_bounds]
+        if len(Xg) == 0:
+            return empty
+
+        lin = zi.astype(np.int64) * grid_resolution + xi.astype(np.int64)
+        uniq_lin, inverse, counts = np.unique(lin, return_inverse=True, return_counts=True)
+        n = counts.astype(np.float64)
+
+        def scatter_sum(vals: np.ndarray) -> np.ndarray:
+            out = np.zeros(len(uniq_lin), dtype=np.float64)
+            np.add.at(out, inverse, vals.astype(np.float64))
+            return out
+
+        sum_x, sum_y, sum_z = scatter_sum(Xg), scatter_sum(Yg), scatter_sum(Zg)
+        sum_xx, sum_yy, sum_zz = scatter_sum(Xg * Xg), scatter_sum(Yg * Yg), scatter_sum(Zg * Zg)
+        sum_xy, sum_xz, sum_yz = scatter_sum(Xg * Yg), scatter_sum(Xg * Zg), scatter_sum(Yg * Zg)
+
+        max_y = np.full(len(uniq_lin), -np.inf)
+        min_y = np.full(len(uniq_lin), np.inf)
+        np.maximum.at(max_y, inverse, Yg)
+        np.minimum.at(min_y, inverse, Yg)
+
+        mean_y = sum_y / n
+        relief_1d = (max_y - min_y).astype(np.float64)
+
+        # Need >= 3 points for a well-defined plane; min_samples is expected to
+        # already be at least that (see HeightMapConfiguration), but never trust
+        # a caller-supplied value below the mathematical minimum.
+        dense = counts >= max(3, min_samples)
+        dense_idx = np.nonzero(dense)[0]
+
+        slope_1d = np.zeros(len(uniq_lin), dtype=np.float64)
+        if len(dense_idx) > 0:
+            nd = n[dense_idx]
+            mx = sum_x[dense_idx] / nd
+            my = sum_y[dense_idx] / nd
+            mz = sum_z[dense_idx] / nd
+            cov_xx = sum_xx[dense_idx] / nd - mx * mx
+            cov_yy = sum_yy[dense_idx] / nd - my * my
+            cov_zz = sum_zz[dense_idx] / nd - mz * mz
+            cov_xy = sum_xy[dense_idx] / nd - mx * my
+            cov_xz = sum_xz[dense_idx] / nd - mx * mz
+            cov_yz = sum_yz[dense_idx] / nd - my * mz
+
+            cov = np.zeros((len(dense_idx), 3, 3), dtype=np.float64)
+            cov[:, 0, 0], cov[:, 1, 1], cov[:, 2, 2] = cov_xx, cov_yy, cov_zz
+            cov[:, 0, 1] = cov[:, 1, 0] = cov_xy
+            cov[:, 0, 2] = cov[:, 2, 0] = cov_xz
+            cov[:, 1, 2] = cov[:, 2, 1] = cov_yz
+
+            # Ascending eigenvalues; eigvecs[:, :, 0] is the smallest-eigenvalue
+            # eigenvector for each matrix in the batch -- the local plane normal.
+            _, eigvecs = np.linalg.eigh(cov)
+            normal_y = np.clip(np.abs(eigvecs[:, 1, 0]), 0.0, 1.0)
+            slope_1d[dense_idx] = np.degrees(np.arccos(normal_y))
+
+        dense_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        mean_y_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        relief_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        slope_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        d_lin = uniq_lin[dense_idx]
+        zi_d = (d_lin // grid_resolution).astype(np.int64)
+        xi_d = (d_lin % grid_resolution).astype(np.int64)
+
+        dense_mask[zi_d, xi_d] = True
+        mean_y_grid[zi_d, xi_d] = mean_y[dense_idx].astype(np.float32)
+        relief_grid[zi_d, xi_d] = relief_1d[dense_idx].astype(np.float32)
+        slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
+
+        return dense_mask, mean_y_grid, relief_grid, slope_grid
 
     @staticmethod
     def _build_certainty(

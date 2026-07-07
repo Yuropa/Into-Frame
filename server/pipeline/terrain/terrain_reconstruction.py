@@ -128,6 +128,12 @@ class TerrainReconstructionStage(PipelineStage):
             else None
         )
 
+        slope_depth = context.input_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE)
+        cell_slope_deg = (
+            slope_depth.depth if slope_depth is not None and slope_depth.depth.shape == (H, W)
+            else None
+        )
+
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
@@ -146,13 +152,15 @@ class TerrainReconstructionStage(PipelineStage):
             angle_low_deg=cfg.cliff_slope_angle_low_deg,
             angle_high_deg=cfg.cliff_slope_angle_high_deg,
             cell_relief=cell_relief,
+            cell_slope_deg=cell_slope_deg,
         )
         distant_cliff = ridge_chain_jaggedness_map(ridge_chains, H, W, grid_size)
         cliff_mask = np.maximum(measured_cliff, distant_cliff).astype(np.float32)
         context.add_depth(ContextKey.CLIFF_MASK, Depth(cliff_mask))
         self.log_info(
             f"Cliff mask: measured {int((measured_cliff > 0.1).sum())} px "
-            f"(incl. intra-cell relief: {'yes' if cell_relief is not None else 'no'}), "
+            f"(incl. intra-cell relief: {'yes' if cell_relief is not None else 'no'}, "
+            f"plane-fit slope: {'yes' if cell_slope_deg is not None else 'no'}), "
             f"distant {int((distant_cliff > 0.1).sum())} px "
             f"(certainty ≥ {cfg.cliff_certainty_threshold}, "
             f"{cfg.cliff_slope_angle_low_deg:.0f}–{cfg.cliff_slope_angle_high_deg:.0f}°)"
@@ -395,6 +403,7 @@ class TerrainReconstructionStage(PipelineStage):
         angle_low_deg: float = 50.0,
         angle_high_deg: float = 75.0,
         cell_relief: Optional[np.ndarray] = None,
+        cell_slope_deg: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Depth-measured cliff strength: (H, W) float32 in [0, 1].
@@ -415,6 +424,14 @@ class TerrainReconstructionStage(PipelineStage):
         underlying thing (real steepness in the raw samples), not a fallback, so
         the stronger of the two always wins rather than one overriding the other.
 
+        cell_slope_deg (optional): HEIGHT_MAP_CELL_SLOPE, a per-cell surface tilt
+        already expressed in degrees from a local least-squares plane fit through
+        the raw forward-projected points in that cell (see
+        HeightMapGenerator._forward_project_cell_stats). Unlike cell_relief (a
+        scalar Y range, only a proxy for slope) this is a direct 3-D orientation
+        measurement, so it is combined via max() alongside the other two rather
+        than converted through another arctan.
+
         angle_low_deg/angle_high_deg define the ramp from "not a cliff" to
         "fully a cliff"; certainty_threshold gates out cells whose elevation
         came from interpolation rather than a real depth sample (a sharp edge
@@ -426,6 +443,9 @@ class TerrainReconstructionStage(PipelineStage):
         if cell_relief is not None:
             relief_slope_deg = np.degrees(np.arctan(cell_relief.astype(np.float64) / cell_size_m))
             slope_deg = np.maximum(slope_deg, relief_slope_deg)
+
+        if cell_slope_deg is not None:
+            slope_deg = np.maximum(slope_deg, cell_slope_deg.astype(np.float64))
 
         strength = np.clip(
             (slope_deg - angle_low_deg) / max(angle_high_deg - angle_low_deg, 1e-6),
