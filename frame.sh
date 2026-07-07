@@ -11,9 +11,9 @@ SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 ENV="frame"
 SEED_ARGS=()
 LOG_MODE=""
+MIRROR=false
 
-# Speed up Hugging Face model downloads (Xet high-throughput chunking)
-export HF_XET_HIGH_PERFORMANCE=1
+source "$SCRIPTS_DIR/hf_env.sh"
 
 # --- Shared defaults ---
 PORT="${PORT:-8080}"
@@ -58,6 +58,7 @@ Global options:
   --log-mode MODE    Logging mode: panel (default), plain, verbose
   -v, --verbose      Shorthand for --log-mode verbose (developer debugging)
   --plain            Shorthand for --log-mode plain
+  -m, --mirror       Use the Hugging Face mirror (hf-mirror.com) for model downloads (off by default)
   -h, --help         Show this help message
 
 run options:
@@ -169,6 +170,7 @@ while [[ $# -gt 0 ]]; do
     -v|--verbose)    LOG_MODE="verbose"; shift   ;;
     --plain)         LOG_MODE="plain";   shift   ;;
     --log-mode)      LOG_MODE="$2";      shift 2 ;;
+    -m|--mirror)     MIRROR=true;        shift   ;;
     -h|--help)       usage; exit 0 ;;
     run|server|local|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
@@ -179,6 +181,10 @@ done
 
 if [[ -z "$SUBCOMMAND" ]]; then
   usage; exit 0
+fi
+
+if [[ "$MIRROR" == true ]]; then
+  configure_hf_mirror
 fi
 
 # ---------------------------------------------------------------------------

@@ -1,9 +1,6 @@
 #!/bin/bash
 set -e
 
-# Speed up Hugging Face model downloads (Xet high-throughput chunking)
-export HF_XET_HIGH_PERFORMANCE=1
-
 FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
@@ -13,6 +10,8 @@ MIRROR=false
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_DIR/logs"
+
+source "$SCRIPT_DIR/hf_env.sh"
 
 show_usage() {
     echo -e "Usage: $(basename "$0") [OPTIONS]"
@@ -52,11 +51,7 @@ warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
 
 if [ "$MIRROR" = true ]; then
-    # hf-mirror.com is a read-through mirror of huggingface.co; it doesn't
-    # serve the Xet backend, so Xet must be disabled when using it.
-    export HF_ENDPOINT="https://hf-mirror.com"
-    export HF_HUB_DISABLE_XET=1
-    warn "Using Hugging Face mirror (hf-mirror.com) for model downloads"
+    configure_hf_mirror
 fi
 
 echo ""
