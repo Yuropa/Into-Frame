@@ -29,6 +29,7 @@ class ContextKey:
     PANORAMA_DEPTH = "panorama_depth"
     PANORAMA_OBJECT_DEPTH = "panorama_object_depth"
     PANORAMA_TERRAIN = "panorama_terrain"
+    PANORAMA_FOREGROUND_REMOVED = "panorama_foreground_removed"
     PANORAMA_SKY_MASK = "panorama_sky_mask"
     PANORAMA_SKY = "panorama_sky"
     HEIGHT_MAP = "height_map"

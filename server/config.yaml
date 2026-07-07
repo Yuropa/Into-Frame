@@ -35,14 +35,25 @@ stages:
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
-    enabled: false
+    # TEMPORARY: swapped back on for PanoramaForegroundInpaintingStage (ObjectClear) below
+    # to avoid its model download. Re-disable and flip Panorama Foreground Inpainting back
+    # on once ObjectClear is cached, or once you're done testing without it.
+    enabled: true
     full_panorama: true
     use_depth_filter: true
     depth_filter_threshold: 0.05       # Signal 1: slack above row-max baseline (0.0 = strict)
     depth_filter_edge_threshold: 0.005 # Signal 2: min edge depth-pop to keep a mask (lower = less strict)
+    # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
+    # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
+    # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
+    # PanoramaForegroundInpaintingStage already leaves it untouched today. PANORAMA_TERRAIN
+    # (what Panorama Depth → Height Map actually consumes) is written unconditionally either way.
+    keys:
+      output: panorama_foreground_removed
 
   - name: Panorama Foreground Inpainting
     stage: PanoramaForegroundInpaintingStage
+    enabled: false  # TEMPORARY: disabled to avoid the ObjectClear model download; see above
     use_depth_filter: true
     depth_filter_threshold: 0.05
     depth_filter_edge_threshold: 0.005
