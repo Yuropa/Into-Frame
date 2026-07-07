@@ -478,8 +478,8 @@ class SkyboxInpaintingStage(PipelineStage):
         result_pil = heal_wrap_seam(
             result_pil,
             inpaint_fn=_sky_seam_inpaint,
-            seam_width_px=96,
-            feather_px=12,
+            seam_width_px=128,
+            feather_px=20,
             eligible_mask=flux_mask_arr,
             debug_dir=self.temp,
             debug_prefix="sky_wrap_seam",
