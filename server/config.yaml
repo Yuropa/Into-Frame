@@ -106,6 +106,10 @@ stages:
                                  # solver/noise. At 20 m, real ground crosses confidence_threshold
                                  # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
                                  # cutoff's assumption that near terrain is already observed.
+    save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
+                                 # panorama depth (no ground-plane Y filter, no grid binning),
+                                 # written to <build>/ground_point_cloud.ply
+    point_cloud_stride: 4       # take every Nth panorama pixel per axis before unprojecting
 
   - name: Region Map
     stage: RegionMapStage
