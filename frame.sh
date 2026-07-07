@@ -12,6 +12,9 @@ ENV="frame"
 SEED_ARGS=()
 LOG_MODE=""
 
+# Speed up Hugging Face model downloads (Xet high-throughput chunking)
+export HF_XET_HIGH_PERFORMANCE=1
+
 # --- Shared defaults ---
 PORT="${PORT:-8080}"
 ASSET_PORT="${ASSET_PORT:-3000}"

@@ -1,5 +1,9 @@
 #!/bin/bash
 set -e
+
+# Speed up Hugging Face model downloads (Xet high-throughput chunking)
+export HF_XET_HIGH_PERFORMANCE=1
+
 FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
