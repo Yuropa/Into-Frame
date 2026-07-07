@@ -11,7 +11,7 @@ import shutil
 import queue
 from collections import deque
 from rich.console import Console as RichConsole
-from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn, TextColumn
 from rich.logging import RichHandler
 from rich.live import Live
 from rich.panel import Panel
@@ -418,15 +418,38 @@ class Pipeline:
         return self._run_pipeline(progress_queue)
 
     def download_models(self):
-        all_models = set()
+        all_models = sorted(set(
+            model
+            for stage in self.stages
+            for model in stage.model_names()
+        ))
 
-        for stage in self.stages:
-            for model in stage.model_names():
-                all_models.add(model)
+        if not all_models:
+            return
 
-        for model in all_models:
-            self.log_info(f"Checking for model: {model}")
-            snapshot_download(repo_id=model)
+        # Runs before the Live UI starts, and panel/plain mode suppress HF's own
+        # tqdm bars + drop logging to WARNING (see _suppress_library_noise), so a
+        # slow/first-time download would otherwise show nothing at all. A single
+        # transient spinner line gives visible progress without that per-file
+        # byte-progress spam. Verbose mode already shows HF's raw bars for this,
+        # and a second Live region would fight with them, so skip it there.
+        if self.config.log_mode == "verbose":
+            for model in all_models:
+                self.log_info(f"Checking for model: {model}")
+                snapshot_download(repo_id=model)
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=RichConsole(),
+                transient=True,
+            ) as progress:
+                task = progress.add_task("Checking models…", total=len(all_models))
+                for model in all_models:
+                    progress.update(task, description=f"Checking model: {model}")
+                    self.log_info(f"Checking for model: {model}")
+                    snapshot_download(repo_id=model)
+                    progress.advance(task)
 
         self.log_info("All models present")
 
