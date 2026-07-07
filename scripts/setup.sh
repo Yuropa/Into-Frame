@@ -7,6 +7,7 @@ export HF_XET_HIGH_PERFORMANCE=1
 FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
+MIRROR=false
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
@@ -20,16 +21,18 @@ show_usage() {
     echo -e "  -f    Force clean installation (removes existing libraries and conda environments)"
     echo -e "  -s    Save existing installation logs (default behavior wipes the logs directory)"
     echo -e "  -v    Verbose mode (dumps output to terminal instead of a log file)"
+    echo -e "  -m    Use the Hugging Face mirror (hf-mirror.com) for model downloads (off by default)"
     echo -e "  -h    Show this help message and exit"
     exit 0
 }
 
 # Parse command line flags
-while getopts "fshv" opt; do
+while getopts "fshvm" opt; do
   case $opt in
     f) FORCE=true ;;
     s) SAVE_LOGS=true ;;
     v) VERBOSE=true ;;
+    m) MIRROR=true ;;
     h) show_usage ;;
     *) echo "Invalid option. Use -h for help." >&2; exit 1 ;;
   esac
@@ -47,6 +50,14 @@ info()    { printf "${CYAN}%s${RESET}\n" "$*"; }
 success() { printf "${GREEN}%s${RESET}\n" "$*"; }
 warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
+
+if [ "$MIRROR" = true ]; then
+    # hf-mirror.com is a read-through mirror of huggingface.co; it doesn't
+    # serve the Xet backend, so Xet must be disabled when using it.
+    export HF_ENDPOINT="https://hf-mirror.com"
+    export HF_HUB_DISABLE_XET=1
+    warn "Using Hugging Face mirror (hf-mirror.com) for model downloads"
+fi
 
 echo ""
 
@@ -545,6 +556,7 @@ run_step "Building Flash Attention" \
 
 download_sam3d() {
     if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
+        pip install -q -U "huggingface_hub[cli]" hf_xet
         hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
         mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
         rm -rf "$CHECKPOINT_DIR/hf-download"
@@ -762,7 +774,7 @@ run_step "Installing LuxDiT" \
 # Hugging Face auth for gated checkpoints
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
-conda run --no-capture-output -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
+conda run --no-capture-output -n "$CONDA_NAME" pip install -q -U "huggingface_hub[cli]" hf_xet >>"$LOG_FILE" 2>&1
 load_conda
 conda activate "$CONDA_NAME"
 python -c "from huggingface_hub import interpreter_login; interpreter_login()"
