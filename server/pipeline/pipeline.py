@@ -9,6 +9,7 @@ from typing import Optional
 import logging
 import shutil
 import queue
+import threading
 from collections import deque
 from rich.console import Console as RichConsole
 from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn, TextColumn
@@ -448,7 +449,22 @@ class Pipeline:
                 for model in all_models:
                     progress.update(task, description=f"Checking model: {model}")
                     self.log_info(f"Checking for model: {model}")
-                    snapshot_download(repo_id=model)
+
+                    # Most models are already cached and resolve near-instantly;
+                    # only nudge toward -v once a single model has stalled for a
+                    # while, so the hint doesn't fire on every fast HEAD check.
+                    stall_hint = threading.Timer(
+                        5.0,
+                        lambda m=model: progress.update(
+                            task, description=f"Checking model: {m} (re-run with -v to see download progress)"
+                        ),
+                    )
+                    stall_hint.start()
+                    try:
+                        snapshot_download(repo_id=model)
+                    finally:
+                        stall_hint.cancel()
+
                     progress.advance(task)
 
         self.log_info("All models present")
