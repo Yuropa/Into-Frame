@@ -30,6 +30,7 @@ from pipeline.foreground_inpainting.generation import ForegroundInpainting
 from pipeline.captioning.captioning import CaptioningStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
 from pipeline.panorama_depth.depth import PanoramaDepthStage
+from pipeline.panorama_depth.calibration import PanoramaDepthCalibrationStage
 from pipeline.panorama_inpainting.generation import PanoramaInpaintingStage
 from pipeline.panorama_foreground_inpainting.generation import PanoramaForegroundInpaintingStage
 from pipeline.panorama_object_classification.classification import PanoramaObjectClassificationStage
@@ -310,6 +311,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "PanoramaStage": PanoramaStage,
     "PanoramaToCubemapStage": PanoramaToCubemapStage,
     "PanoramaDepthStage": PanoramaDepthStage,
+    "PanoramaDepthCalibrationStage": PanoramaDepthCalibrationStage,
     "PanoramaLightingStage": PanoramaLightingStage,
     "HeightMapStage": HeightMapStage,
     "TerrainMeshStage": TerrainMeshStage,

@@ -83,6 +83,17 @@ stages:
     keys:
       input: panorama_terrain
 
+  - name: Panorama Depth Calibration
+    stage: PanoramaDepthCalibrationStage
+    # Fits a monotonic curve from DAP's raw 0-1 output to real metric depth using the region
+    # where the original hero photo overlaps the panorama (Depth Anything 3's metric depth,
+    # from the "Depth Generation" stage, is real ground truth there), then applies it to the
+    # whole panorama. Replaces DAP's flat, unverified `pred * 100.0` assumption — see
+    # server/pipeline/panorama_depth/pano_depth_imp.py — which otherwise makes distant terrain
+    # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
+    num_bins: 14
+    min_samples: 300
+
   - name: Height Map
     stage: HeightMapStage
     # Panorama depth is equirectangular (radial distances); use spherical unprojection.
