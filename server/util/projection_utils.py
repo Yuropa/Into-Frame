@@ -116,6 +116,56 @@ def nearest_sample_grid(
     return img[vi, ui]
 
 
+def grid_cell_panorama_uv(
+    grid_size_meters: float,
+    grid_resolution: int,
+    camera_height_meters: float,
+    pano_h: int,
+    pano_w: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Forward-project every top-down grid cell (assuming a flat ground plane
+    camera_height_meters below the camera) onto its equirectangular panorama
+    pixel coordinate.
+
+    This is the same geometry inverse_map_panorama_to_grid uses to pull panorama
+    data IN to build a grid; factored out here so it can also be used to push
+    grid-derived features (region types, ridgelines, skeletons, ...) back OUT
+    onto the panorama, e.g. for debug visualisation of extracted features
+    against the source photo.
+
+    Grid layout: rows index Z (near → far), cols index X (left → right).
+
+    Returns (pano_u, pano_v, X_grid, Z_grid), each (grid_resolution, grid_resolution)
+    float32. pano_u/pano_v are in panorama pixel units (not yet wrapped/clamped —
+    callers indexing into a (pano_h, pano_w) image should wrap u modulo pano_w and
+    clamp v to [0, pano_h - 1]).
+    """
+    half = grid_size_meters / 2.0
+    cell_m = grid_size_meters / grid_resolution
+    x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
+    z_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
+    X_grid, Z_grid = np.meshgrid(x_c, z_c)  # rows = Z, cols = X
+
+    r_safe = np.sqrt(X_grid ** 2 + Z_grid ** 2)
+    np.maximum(r_safe, 1e-6, out=r_safe)
+
+    # Azimuth: 0 at +Z (forward), matches equirectangular_unproject convention.
+    theta = np.arctan2(X_grid, Z_grid)
+    # Depression angle: negative = below horizon, magnitude = atan(h / r).
+    phi = -np.arctan2(camera_height_meters, r_safe)
+
+    pano_u = ((theta / (2.0 * np.pi)) + 0.5) * pano_w  # col in [0, W]
+    pano_v = (0.5 - phi / np.pi) * pano_h               # row in [H/2, H]
+
+    return (
+        pano_u.astype(np.float32),
+        pano_v.astype(np.float32),
+        X_grid.astype(np.float32),
+        Z_grid.astype(np.float32),
+    )
+
+
 def inverse_map_panorama_to_grid(
     panorama_depth: "Depth",
     grid_size_meters: float,
@@ -143,34 +193,14 @@ def inverse_map_panorama_to_grid(
       X_grid        — world X at each cell centre.
       Z_grid        — world Z at each cell centre.
     """
-    half = grid_size_meters / 2.0
-    cell_m = grid_size_meters / grid_resolution
-    x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
-    z_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution)
-    X_grid, Z_grid = np.meshgrid(x_c, z_c)  # rows = Z, cols = X
-
-    r_safe = np.sqrt(X_grid ** 2 + Z_grid ** 2)
-    np.maximum(r_safe, 1e-6, out=r_safe)
-
-    # Azimuth: 0 at +Z (forward), matches equirectangular_unproject convention.
-    theta = np.arctan2(X_grid, Z_grid)
-    # Depression angle: negative = below horizon, magnitude = atan(h / r).
-    phi = -np.arctan2(camera_height_meters, r_safe)
-
     d = panorama_depth.depth.astype(np.float32)
     pano_h, pano_w = d.shape
 
-    pano_u = ((theta / (2.0 * np.pi)) + 0.5) * pano_w  # col in [0, W]
-    pano_v = (0.5 - phi / np.pi) * pano_h               # row in [H/2, H]
-
-    sampled = bilinear_sample_grid(d, pano_u, pano_v)
-    return (
-        sampled.astype(np.float32),
-        pano_u.astype(np.float32),
-        pano_v.astype(np.float32),
-        X_grid.astype(np.float32),
-        Z_grid.astype(np.float32),
+    pano_u, pano_v, X_grid, Z_grid = grid_cell_panorama_uv(
+        grid_size_meters, grid_resolution, camera_height_meters, pano_h, pano_w
     )
+    sampled = bilinear_sample_grid(d, pano_u, pano_v)
+    return sampled.astype(np.float32), pano_u, pano_v, X_grid, Z_grid
 
 
 def project_panorama_to_ground_grid(
