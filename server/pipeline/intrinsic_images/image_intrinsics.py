@@ -22,7 +22,7 @@ class ImageIntrinsics(RemoteClient):
 
     @classmethod
     def model_names(cls) -> list[str]:
-        return ["JundanLuo/IntrinsicDiffusion", "ptx0/pseudo-journey-v2"]
+        return ["ptx0/pseudo-journey-v2"]
 
     def intrinsic_images(
         self,
