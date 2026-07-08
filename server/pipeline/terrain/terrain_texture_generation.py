@@ -14,6 +14,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.captioning.image_captioning import ImageCaptioning, CaptioningModel
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
+from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from scene.splat_material import SplatLayer, SplatMaterial
@@ -89,6 +90,14 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         guidance_scale: float = 3.5,
         seam_width_fraction: float = 0.08,
         seam_dilation_px: int = 4,
+        # Width (as a fraction of tile_size) of a margin around all four tile edges that
+        # Pass 1 treats as "keep" real content (the upscaled reference background — see
+        # _build_reference_canvas) rather than "generate". _patch_placements keeps every
+        # patch away from the edges, which otherwise leaves the outer border as one giant
+        # generate region open straight out to an unconstrained tile boundary — the source
+        # of a visibly soft/artificial ring right at the tile edge. 0 disables it (old
+        # behaviour).
+        border_fill_fraction: float = 0.08,
         use_panorama_layer: bool = True,
         # Exponent applied to the latitude-ramp visibility weight below. 1.0 = the
         # plain ramp; higher sharpens the transition into the nadir/horizon fades.
@@ -120,6 +129,23 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # area stays comparable. Comfortably under 1.0 so patches never reach the seam-fix
         # band at the tile edges.
         reference_patch_fraction: float = 0.5,
+        # Run each real-photo reference patch through IntrinsicDiffusion before it's used
+        # as a Pass 1 guidance seed, and swap its RGB for the model's predicted albedo
+        # (delit, lighting-free reflectance) while keeping the patch's own region-mask
+        # alpha channel untouched. The raw photo patch carries whatever sun/shadow/exposure
+        # the source panorama happened to have, which then gets stamped across the whole
+        # tile at synthetic_tile_factor repeats -- a lighting pattern that doesn't tile and
+        # fights the target tile's own "flat overcast, no directional shadows" prompt.
+        # Falls back to the raw patch if the model errors on a given crop.
+        use_intrinsic_delighting: bool = True,
+        # Working resolution for the delighting pass -- independent of tile_size since
+        # patches are much smaller than a full tile; upsampled internally then resized
+        # back down to the patch's own size.
+        intrinsic_resolution: int = 768,
+        # Samples averaged per delit patch (IntrinsicDiffusion's agg_num). Lower than the
+        # model's own default (4) since this is a guidance seed, not final output -- trades
+        # a bit of denoising quality for roughly proportionally faster inference.
+        intrinsic_agg_num: int = 2,
         # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
         # it purely as guidance, not something to hard-preserve.
         #   LAMA (default) -- classical texture-completion inpainting (no prompt, no LoRA,
@@ -168,6 +194,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.guidance_scale = guidance_scale
         self.seam_width_fraction = seam_width_fraction
         self.seam_dilation_px = seam_dilation_px
+        self.border_fill_fraction = border_fill_fraction
         self.use_panorama_layer = use_panorama_layer
         self.panorama_blend_power = panorama_blend_power
         self.nadir_cutoff_deg = nadir_cutoff_deg
@@ -180,6 +207,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.describe_material = describe_material
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
+        self.use_intrinsic_delighting = use_intrinsic_delighting
+        self.intrinsic_resolution = intrinsic_resolution
+        self.intrinsic_agg_num = intrinsic_agg_num
         self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
@@ -208,6 +238,12 @@ class TerrainTextureGenerationStage(PipelineStage):
          using several well-separated patches instead of just one also gives
          later steps more than one real colour/lighting anchor to match
          against.
+      1b. If use_intrinsic_delighting, each patch is run through
+         IntrinsicDiffusion (_delight_patch) and its RGB swapped for the
+         model's predicted albedo — the raw photo patch's own baked-in sun/
+         shadow/exposure would otherwise get stamped across the whole tile at
+         synthetic_tile_factor repeats, which doesn't tile and fights the
+         target tile's own flat-overcast prompt.
       2. Pass 1 (_pass1_extend_patch): paste those crops onto the tile canvas,
          spaced apart (_patch_placements), and extend them to fill the whole
          tile using them purely as guidance — by default LaMa (classical
@@ -254,6 +290,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         self._inpainter: Optional[InPainting] = None
         self._lama_inpainter: Optional[InPainting] = None
         self._captioner: Optional[ImageCaptioning] = None
+        self._intrinsics: Optional[ImageIntrinsics] = None
 
     def _init_inpainter(self) -> None:
         if self._inpainter is None:
@@ -276,6 +313,12 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._captioner is None:
             device, _ = preferred_device(DeviceStrategy.MEMORY)
             self._captioner = ImageCaptioning(device, model=CaptioningModel.FLORENCE2)
+
+    def _init_intrinsics(self) -> None:
+        """Lazily load IntrinsicDiffusion for reference-patch delighting — only if actually used."""
+        if self._intrinsics is None:
+            device, _ = preferred_device(DeviceStrategy.MEMORY)
+            self._intrinsics = ImageIntrinsics(device)
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
@@ -323,6 +366,9 @@ class TerrainTextureGenerationStage(PipelineStage):
             if self._lama_inpainter is not None:
                 self._lama_inpainter.close()
                 self._lama_inpainter = None
+            if self._intrinsics is not None:
+                self._intrinsics.close()
+                self._intrinsics = None
 
         material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
 
@@ -608,6 +654,35 @@ class TerrainTextureGenerationStage(PipelineStage):
             return None
         return text.rstrip(". ") or None
 
+    def _delight_patch(
+        self,
+        patch: PIL.Image.Image,
+        cfg: "TerrainTextureGenerationConfiguration",
+    ) -> PIL.Image.Image:
+        """
+        Replace `patch`'s RGB with IntrinsicDiffusion's predicted albedo (delit,
+        lighting-free reflectance), keeping its own region-mask alpha channel (see
+        _extract_reference_patches) untouched. Falls back to the raw patch if the
+        model errors on this particular crop.
+        """
+        self._init_intrinsics()
+        try:
+            result = self._intrinsics.intrinsic_images(
+                Image(patch.convert("RGB")),
+                temp_path=self.temp,
+                resolution=cfg.intrinsic_resolution,
+                agg_num=cfg.intrinsic_agg_num,
+            )
+            albedo = result.albedo_image()
+        except Exception as exc:
+            self.log_info(f"IntrinsicDiffusion delighting failed, using raw patch: {exc}")
+            return patch
+
+        if patch.mode == "RGBA":
+            albedo = albedo.convert("RGBA")
+            albedo.putalpha(patch.split()[-1])
+        return albedo
+
     def _generate_tileable_tile(
         self,
         prompt: str,
@@ -704,6 +779,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         for i, p in enumerate(patches):
             self._save_debug_step(cfg, debug_label, f"01_reference_patch_{i}", p)
 
+        if cfg.use_intrinsic_delighting:
+            patches = [self._delight_patch(p, cfg) for p in patches]
+            for i, p in enumerate(patches):
+                self._save_debug_step(cfg, debug_label, f"01b_reference_patch_delit_{i}", p)
+
         if cfg.describe_material:
             material_description = self._describe_material(patches[0])
             if material_description:
@@ -767,7 +847,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         use_lama = cfg.pass1_inpainting_type == "LAMA"
         placements = self._patch_placements(len(patches), T, patches[0].size[0], cfg.seam_width_fraction, cfg.seam_dilation_px)
         canvas, mask = self._build_reference_canvas(
-            patches, placements, T, feather_px=0.0 if use_lama else cfg.mask_feather_px,
+            patches, placements, T,
+            feather_px=0.0 if use_lama else cfg.mask_feather_px,
+            border_fill_px=int(T * cfg.border_fill_fraction),
         )
         self._save_debug_step(cfg, debug_label, "02_pass1_canvas", canvas)
         self._save_debug_step(cfg, debug_label, "03_pass1_mask", mask)
@@ -855,6 +937,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         placements: list[tuple[int, int]],
         tile_size: int,
         feather_px: float,
+        border_fill_px: int = 0,
     ) -> tuple[PIL.Image.Image, PIL.Image.Image]:
         """
         Paste each of `patches` onto a tile_size canvas at its centre in
@@ -868,18 +951,41 @@ class TerrainTextureGenerationStage(PipelineStage):
         uses the canvas and builds its own full-white mask, since it never
         asks the model to hard-preserve anything.
 
-        The canvas background outside all patches is filled with their
-        combined mean colour, so it reads as a plausible continuation of them
-        rather than a contrasting flat colour wherever it does show through.
+        The canvas background outside all patches is the largest patch's own
+        texture, upscaled to cover the full tile — soft from upscaling, but
+        genuine material everywhere, including right up to the tile edges no
+        true-resolution patch ever reaches. A flat mean-colour fill there (the
+        previous behaviour) looked fine on screen, but LaMa's generator zeroes
+        out anything under a "generate" mask pixel before it ever sees it
+        (masked_img = img * (1 - mask)), so what's drawn underneath a
+        "generate" pixel is completely invisible to it — the actual fix has
+        to be a smaller generate region, not just better pixels under it.
+
+        border_fill_px, when > 0, marks a margin this wide around all four
+        tile edges as "keep" too (real, if soft, background content) instead
+        of "generate". _patch_placements deliberately keeps every patch away
+        from the tile edges (so patches never collide with the seam-fix
+        band), which left a "generate" region open on one side, straight out
+        to an unconstrained tile boundary — the single worst-conditioned spot
+        for a hole-fill model, and the source of a visibly soft/artificial
+        ring right at the tile border. Closing that side with a real (if
+        blurry) border turns it back into a normal, bounded-on-both-sides
+        hole to fill.
 
         Returns (canvas RGB, mask L).
         """
         T = tile_size
-        all_pixels = np.concatenate([np.array(p.convert("RGB")).reshape(-1, 3) for p in patches], axis=0)
-        mean_color = tuple(all_pixels.mean(axis=0).astype(np.uint8).tolist())
+        largest = max(patches, key=lambda p: p.size[0])
+        canvas = largest.convert("RGB").resize((T, T), PIL.Image.LANCZOS)
 
-        canvas = PIL.Image.new("RGB", (T, T), mean_color)
         mask_arr = np.full((T, T), 255, dtype=np.uint8)
+        if border_fill_px > 0:
+            b = min(border_fill_px, T // 2)
+            mask_arr[:b, :] = 0
+            mask_arr[T - b:, :] = 0
+            mask_arr[:, :b] = 0
+            mask_arr[:, T - b:] = 0
+
         for patch, (cy, cx) in zip(patches, placements):
             p = patch.size[0]
             offset_y = int(np.clip(cy - p // 2, 0, T - p))
@@ -1162,6 +1268,8 @@ class TerrainTextureGenerationStage(PipelineStage):
             names = names + InPainting.model_names(InPaintingType.LAMA)
         if self.config.describe_material and self.config.use_photo_reference:
             names = names + [CaptioningModel.FLORENCE2.value]
+        if self.config.use_intrinsic_delighting and self.config.use_photo_reference:
+            names = names + ImageIntrinsics.model_names()
         return names
 
     def clean_up(self):
@@ -1171,6 +1279,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._lama_inpainter is not None:
             self._lama_inpainter.close()
             self._lama_inpainter = None
+        if self._intrinsics is not None:
+            self._intrinsics.close()
+            self._intrinsics = None
         self._captioner = None
         super().clean_up()
 

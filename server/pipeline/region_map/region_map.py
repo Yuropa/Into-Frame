@@ -1,9 +1,11 @@
 from typing import Any
 from logging import Logger
 
+import cv2
 import numpy as np
 from PIL import Image as PILImage
 import torch
+from scipy.ndimage import binary_dilation
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
@@ -13,6 +15,8 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     colorize_region_type_map,
 )
 from util.depth_utils import Depth
+from util.panorama_utils import Panorama
+from util.projection_utils import grid_cell_panorama_uv
 
 
 class RegionMapConfiguration(PipelineStageConfiguration):
@@ -66,7 +70,11 @@ class RegionMapStage(PipelineStage):
             ContextKey.PANORAMA_SKY_MASK          (optional bool sky mask)
     Writes: ContextKey.REGION_MAP                (Depth wrapping a float32 type-index
                                                    grid, grid_resolution²)
-    Debug:  self.temp / "region_map.png"         (colorized top-down view)
+    Debug:  self.temp / "region_map.png" etc.    (colorized top-down views of each
+                                                   extracted feature)
+            self.temp / "panorama_debug_*.png"   (each extracted feature projected back
+                                                   onto the source panorama photo in a
+                                                   bold colour, for visual sanity-checking)
     """
 
     @classmethod
@@ -93,6 +101,23 @@ class RegionMapStage(PipelineStage):
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
         if isinstance(sky_mask, list):
             sky_mask = np.array(sky_mask, dtype=bool)
+
+        # Source photo for the panorama-space debug overlays below (see "Debug:
+        # project extracted features back onto the source panorama"). Matches
+        # what panorama_depth was itself computed from (see Panorama Depth's
+        # "panorama_terrain" input key in config.yaml), so features stay
+        # correctly aligned when projected back. The grid→panorama pixel map is
+        # the same for every grid-space feature this stage extracts, so it's
+        # computed once here rather than per debug image.
+        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+        panorama_terrain_rgb = None
+        _grid_pano_u = _grid_pano_v = None
+        if self.temp is not None and panorama_terrain is not None:
+            panorama_terrain_rgb = np.array(panorama_terrain.rgb())
+            _grid_pano_u, _grid_pano_v, _, _ = grid_cell_panorama_uv(
+                cfg.grid_size_meters, cfg.grid_resolution, cfg.camera_height_meters,
+                panorama_terrain_rgb.shape[0], panorama_terrain_rgb.shape[1],
+            )
         self.advance_progress(task)
 
         if panorama_depth is None:
@@ -135,6 +160,12 @@ class RegionMapStage(PipelineStage):
                 self.temp / "region_map.png"
             )
             Depth(certainty_array).save_debug_image(self.temp / "region_map_certainty.png")
+            if panorama_terrain_rgb is not None:
+                overlay = self._panorama_debug_scatter_colors(
+                    panorama_terrain_rgb, colorize_region_type_map(region_map),
+                    _grid_pano_u, _grid_pano_v,
+                )
+                PILImage.fromarray(overlay).save(self.temp / "panorama_debug_regions.png")
         self.advance_progress(task)
 
         # Mountain ridgeline — detect sky-terrain boundary per column, sample depth
@@ -162,6 +193,11 @@ class RegionMapStage(PipelineStage):
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
+            if panorama_terrain_rgb is not None and panorama_terrain is not None:
+                overlay = self._panorama_debug_chains(
+                    panorama_terrain_rgb, ridge_chains, panorama_terrain, color=(255, 0, 0),
+                )
+                PILImage.fromarray(overlay).save(self.temp / "panorama_debug_ridge.png")
         self.advance_progress(task)
 
         # Panorama-space horizon silhouette — sky/terrain boundary in equirectangular
@@ -181,19 +217,17 @@ class RegionMapStage(PipelineStage):
         panorama_img = context.input_image(ContextKey.PANORAMA)
         panorama_rgb = np.array(panorama_img.rgb()) if panorama_img is not None else None
         if self.temp is not None and panorama_rgb is not None:
-            from PIL import Image as _PILImage
-            import cv2 as _cv2
             h_pano, w_pano = panorama_rgb.shape[:2]
             h_seg, w_seg = horizon_mask.shape
             if (h_seg, w_seg) != (h_pano, w_pano):
-                hm_up = _cv2.resize(
-                    horizon_mask, (w_pano, h_pano), interpolation=_cv2.INTER_NEAREST
+                hm_up = cv2.resize(
+                    horizon_mask, (w_pano, h_pano), interpolation=cv2.INTER_NEAREST
                 )
             else:
                 hm_up = horizon_mask
             overlay = panorama_rgb.copy()
             overlay[hm_up > 0] = [255, 60, 60]
-            _PILImage.fromarray(overlay).save(self.temp / "panorama_horizon_overlay.png")
+            PILImage.fromarray(overlay).save(self.temp / "panorama_horizon_overlay.png")
 
         interior_peaks = RegionMapGenerator.extract_interior_peaks(
             type_idx_map=type_idx_map,
@@ -209,6 +243,21 @@ class RegionMapStage(PipelineStage):
         if self.temp is not None:
             peak_img = (interior_peaks * 255).clip(0, 255).astype(np.uint8)
             PILImage.fromarray(peak_img).save(self.temp / "interior_peaks.png")
+            if panorama_terrain_rgb is not None:
+                overlay = self._panorama_debug_scatter(
+                    panorama_terrain_rgb, interior_peaks, _grid_pano_u, _grid_pano_v,
+                    color=(255, 140, 0),
+                )
+                PILImage.fromarray(overlay).save(self.temp / "panorama_debug_peaks.png")
+
+        # Bright, bold debug colours for the panorama-space overlays below --
+        # deliberately different from the top-down debug palette above (e.g.
+        # ROAD's grey (80, 80, 80) would nearly vanish against a real photo).
+        _panorama_debug_colors = {
+            RegionType.WATER: (0, 220, 255),
+            RegionType.ROAD:  (255, 0, 255),
+            RegionType.TRAIL: (255, 255, 0),
+        }
 
         for type_idx, ctx_key, smooth_radius, color, filename in [
             (RegionType.WATER, ContextKey.WATER_SKELETON,  cfg.water_skeleton_smooth_radius, (30, 144, 255),  "water_skeleton.png"),
@@ -226,6 +275,13 @@ class RegionMapStage(PipelineStage):
                 rgb = np.zeros((*skeleton.shape, 3), dtype=np.uint8)
                 rgb[skeleton > 0] = color
                 PILImage.fromarray(rgb).save(self.temp / filename)
+                if panorama_terrain_rgb is not None:
+                    overlay = self._panorama_debug_scatter(
+                        panorama_terrain_rgb, skeleton, _grid_pano_u, _grid_pano_v,
+                        color=_panorama_debug_colors[type_idx],
+                    )
+                    debug_name = "panorama_debug_" + filename.replace(".png", "") + ".png"
+                    PILImage.fromarray(overlay).save(self.temp / debug_name)
 
         water_chains = RegionMapGenerator.extract_water_chains(
             type_idx_map=type_idx_map,
@@ -238,9 +294,139 @@ class RegionMapStage(PipelineStage):
         )
         context.add_object(ContextKey.WATER_CHAINS, water_chains)
         self.log_info(f"Water chains: {len(water_chains)}")
+        if self.temp is not None and panorama_terrain_rgb is not None and panorama_terrain is not None:
+            overlay = self._panorama_debug_chains(
+                panorama_terrain_rgb, water_chains, panorama_terrain, color=(0, 120, 255),
+            )
+            PILImage.fromarray(overlay).save(self.temp / "panorama_debug_water_chains.png")
 
         self.finish_progress(task)
         return context
+
+    # ── Debug: project extracted features back onto the source panorama ────────
+    #
+    # Every debug image here starts from the real panorama photo and paints one
+    # extracted feature over it in a single bold colour, so the feature can be
+    # visually sanity-checked against what's actually in the photo (as opposed
+    # to the top-down grid debug images above, which have no photographic
+    # context at all). Grid-space features (region types, skeletons, peaks) go
+    # through grid_cell_panorama_uv — the same flat-ground-plane forward
+    # projection inverse_map_panorama_to_grid uses in the other direction.
+    # World-space features (ridge/water chains, which carry real elevation) go
+    # through Panorama.uv_for_3d, the shared world-point → panorama-pixel
+    # projection used throughout this codebase (mesh texture baking, reference-
+    # patch cropping, etc).
+
+    def _panorama_debug_scatter(
+        self,
+        panorama_rgb: np.ndarray,
+        grid_mask: np.ndarray,
+        pano_u: np.ndarray,
+        pano_v: np.ndarray,
+        color: tuple[int, int, int],
+        dilate_px: int = 3,
+    ) -> np.ndarray:
+        """
+        Scatter a top-down grid mask (e.g. a skeleton or interior-peaks grid) onto
+        a copy of panorama_rgb in a flat debug colour, using a precomputed
+        grid_cell_panorama_uv map (pano_u, pano_v — same shape as grid_mask).
+        dilate_px thickens the projected points since distant grid cells compress
+        into just a few panorama pixels near the horizon and would otherwise be
+        nearly invisible.
+        """
+        h, w = panorama_rgb.shape[:2]
+        overlay = panorama_rgb.copy()
+        mask = grid_mask > 0
+        if not np.any(mask):
+            return overlay
+
+        ui = np.mod(np.round(pano_u[mask]).astype(np.int64), w)
+        vi = np.clip(np.round(pano_v[mask]).astype(np.int64), 0, h - 1)
+
+        hit = np.zeros((h, w), dtype=bool)
+        hit[vi, ui] = True
+        if dilate_px > 0:
+            hit = binary_dilation(hit, iterations=dilate_px)
+        overlay[hit] = color
+        return overlay
+
+    def _panorama_debug_scatter_colors(
+        self,
+        panorama_rgb: np.ndarray,
+        grid_colors: np.ndarray,
+        pano_u: np.ndarray,
+        pano_v: np.ndarray,
+        alpha: float = 0.6,
+        max_fill_px: int = 3,
+    ) -> np.ndarray:
+        """
+        Like _panorama_debug_scatter, but scatters grid_colors (G, G, 3) — one
+        colour per grid cell, e.g. colorize_region_type_map's output — alpha-
+        blended over the source photo so the underlying photo detail stays
+        visible for comparison. pano_u/pano_v: precomputed grid_cell_panorama_uv
+        map, same shape as grid_colors[..., 0].
+
+        Small gaps (mostly near the nadir, where many grid cells compress into
+        few panorama pixels) are nearest-neighbour filled up to max_fill_px away,
+        rather than a per-channel dilation/max filter, which would fringe
+        different regions' colours together right at their boundaries.
+        """
+        from scipy.ndimage import distance_transform_edt
+
+        h, w = panorama_rgb.shape[:2]
+        ui = np.mod(np.round(pano_u).astype(np.int64), w).ravel()
+        vi = np.clip(np.round(pano_v).astype(np.int64), 0, h - 1).ravel()
+
+        canvas = np.zeros((h, w, 3), dtype=np.uint8)
+        hit = np.zeros((h, w), dtype=bool)
+        canvas[vi, ui] = grid_colors.reshape(-1, 3)
+        hit[vi, ui] = True
+
+        if max_fill_px > 0:
+            dist, (near_v, near_u) = distance_transform_edt(~hit, return_indices=True)
+            fillable = (~hit) & (dist <= max_fill_px)
+            canvas[fillable] = canvas[near_v[fillable], near_u[fillable]]
+            hit |= fillable
+
+        overlay = panorama_rgb.astype(np.float32)
+        blended = overlay.copy()
+        blended[hit] = overlay[hit] * (1.0 - alpha) + canvas[hit].astype(np.float32) * alpha
+        return blended.clip(0, 255).astype(np.uint8)
+
+    def _panorama_debug_chains(
+        self,
+        panorama_rgb: np.ndarray,
+        chains: list[np.ndarray],
+        panorama: Panorama,
+        color: tuple[int, int, int],
+        thickness: int = 4,
+    ) -> np.ndarray:
+        """
+        Draw world-space XYZ polylines (MOUNTAIN_RIDGE_CHAINS, WATER_CHAINS) onto
+        a copy of panorama_rgb via Panorama.uv_for_3d.
+        """
+        overlay = panorama_rgb.copy()
+        w = overlay.shape[1]
+        for chain in chains:
+            if len(chain) < 2:
+                continue
+            pu, pv, valid = panorama.uv_for_3d(chain)
+            for i in range(len(chain) - 1):
+                if not (valid[i] and valid[i + 1]):
+                    continue
+                u0, u1 = float(pu[i]), float(pu[i + 1])
+                if abs(u1 - u0) > w / 2:
+                    # Consecutive chain points straddle the panorama's 360° seam --
+                    # skip the connecting segment rather than draw a false line
+                    # clear across the image.
+                    continue
+                cv2.line(
+                    overlay,
+                    (int(round(u0)), int(round(pv[i]))),
+                    (int(round(u1)), int(round(pv[i + 1]))),
+                    color, thickness, cv2.LINE_AA,
+                )
+        return overlay
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, output_key = self._resolved_keys()

@@ -2,6 +2,7 @@ import json
 import numpy as np
 from util.image_utils import Image
 from util.depth_utils import Depth
+from util.intrinsic_utils import IntrinsicImages
 from util.cubemap_utils import CubeMap
 from util.panorama_utils import Panorama
 from pathlib import Path
@@ -24,6 +25,7 @@ class ValueKeys(StrEnum):
     MESH = "mesh"
     OBJECT = "object"
     DEPTH = "depth"
+    INTRINSIC_IMAGES = "intrinsic_images"
     OBJECT3D = "object_3d"
     SCENE = "scene"
     INTRINSICS = "intrinsics"
@@ -44,6 +46,8 @@ class ValueKeys(StrEnum):
                 return "glb"
             case ValueKeys.DEPTH:
                 return "npy"
+            case ValueKeys.INTRINSIC_IMAGES:
+                return "npz"
             case ValueKeys.OBJECT:
                 return "json"
             case ValueKeys.OBJECT3D:
@@ -110,6 +114,10 @@ class ContextValue():
     def set_depth(self, obj: Any):
         self.type = ValueKeys.DEPTH
         self.value = Depth(obj)
+
+    def set_intrinsic_images(self, obj: Any):
+        self.type = ValueKeys.INTRINSIC_IMAGES
+        self.value = IntrinsicImages(obj)
 
     def set_object3d(self, obj: Object3D):
         self.type = ValueKeys.OBJECT3D
@@ -178,7 +186,13 @@ class ContextValue():
             return self.value
         else:
             return None
-        
+
+    def intrinsic_images(self) -> Optional[IntrinsicImages]:
+        if self.type == ValueKeys.INTRINSIC_IMAGES:
+            return self.value
+        else:
+            return None
+
     def object3d(self) -> Optional[Object3D]:
         if self.type == ValueKeys.OBJECT3D:
             return self.value
@@ -262,6 +276,8 @@ class ContextValue():
             self.set_mesh(Mesh.load(resolved_path))
         elif value_type == ValueKeys.DEPTH:
             self.set_depth(Depth.load(resolved_path))
+        elif value_type == ValueKeys.INTRINSIC_IMAGES:
+            self.set_intrinsic_images(IntrinsicImages.load(resolved_path))
         elif value_type == ValueKeys.OBJECT:
             with open(resolved_path) as f:
                 self.set_object(json.load(f))
@@ -311,6 +327,8 @@ class ContextValue():
                 json.dump(self.object(), f, indent=4, cls=JSONEncoder)
         elif self.type == ValueKeys.DEPTH:
             self.depth().save(path=save_path)
+        elif self.type == ValueKeys.INTRINSIC_IMAGES:
+            self.intrinsic_images().save(path=save_path)
         elif self.type == ValueKeys.OBJECT3D:
             with open(save_path, "w") as f:
                 json.dump(self.object3d().encode(), f, indent=4, cls=JSONEncoder)
@@ -350,6 +368,9 @@ class ContextValue():
         elif self.type == ValueKeys.DEPTH:
             v = self.depth()
             return f"Depth ({v.width}x{v.height}, {v.min():.2f}–{v.max():.2f})"
+        elif self.type == ValueKeys.INTRINSIC_IMAGES:
+            v = self.intrinsic_images()
+            return f"IntrinsicImages ({v.width}x{v.height})"
         elif self.type == ValueKeys.MESH:
             v = self.mesh()
             return f"Mesh ({v.vertex_count} verts, {v.face_count} faces)"
