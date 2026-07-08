@@ -35,7 +35,10 @@ stages:
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
-    enabled: false
+    # TEMPORARY: swapped back on for PanoramaForegroundInpaintingStage (ObjectClear) below
+    # to avoid its model download. Re-disable and flip Panorama Foreground Inpainting back
+    # on once ObjectClear is cached, or once you're done testing without it.
+    enabled: true
     full_panorama: true
     use_depth_filter: true
     depth_filter_threshold: 0.05       # Signal 1: slack above row-max baseline (0.0 = strict)
@@ -50,7 +53,7 @@ stages:
 
   - name: Panorama Foreground Inpainting
     stage: PanoramaForegroundInpaintingStage
-    enabled: true
+    enabled: false  # TEMPORARY: disabled to avoid the ObjectClear model download; see above
     use_depth_filter: true
     depth_filter_threshold: 0.05
     depth_filter_edge_threshold: 0.005
@@ -240,6 +243,13 @@ stages:
     guidance_scale: 3.5
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 4         # dilation applied to seam mask before inpainting
+    # Margin (fraction of tile_size) around all four tile edges that Pass 1 fills with
+    # real (upscaled, if soft) reference content and marks "keep" instead of "generate".
+    # Reference patches are always kept away from the edges (see seam_width_fraction /
+    # seam_dilation_px above), which otherwise left the outer border as one huge unbounded
+    # generate region right at the tile edge -- the least-conditioned spot for a hole-fill
+    # model, and the source of a visibly soft/artificial ring there. 0 disables it.
+    border_fill_fraction: 0.08
     # Several real reference crops (_extract_reference_patches), spaced apart on the tile
     # canvas (_patch_placements), instead of one -- gives Pass 1 more than one real colour/
     # lighting anchor to match against, since generated fill can drift far from a single one.
@@ -249,6 +259,14 @@ stages:
     # a comfortable margin before the seam-fix band (~4-9% of tile_size from each edge) so
     # the two never overlap.
     reference_patch_fraction: 0.7
+    # Delight each reference patch with IntrinsicDiffusion (predicted albedo) before it's
+    # used as a Pass 1 guidance seed, instead of the raw photo pixels -- the raw patch's
+    # baked-in sun/shadow/exposure gets stamped across the whole tile at
+    # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
+    # overcast, no directional shadows" prompt.
+    use_intrinsic_delighting: true
+    intrinsic_resolution: 768   # working resolution for the delighting pass
+    intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
     # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
     # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
     # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked
