@@ -136,5 +136,7 @@ class PanoramaObjectClassificationStage(PipelineStage):
         return ImageCaptioning.model_names()
 
     def clean_up(self):
-        self._captioner = None
-        super().clean_up()
+        if self._captioner is not None:
+            self._captioner.close()
+            self._captioner = None
+        super().clean_up()  # calls torch.cuda.empty_cache() after refs are dropped

@@ -136,6 +136,25 @@ class ImageCaptioning:
     def model_names(cls) -> list[str]:
         return [m.value for m in CaptioningModel]
 
+    def close(self):
+        """
+        Release the captioning model's GPU memory. Unlike the inpainting/
+        intrinsics/supersampling helpers (each a RemoteClient subprocess whose
+        GPU memory is freed the instant the subprocess exits), this model runs
+        in-process -- dropping the reference alone leaves it to Python's GC,
+        which isn't guaranteed to run before the next big model load and has
+        been a contributor to OOMs when several models are cached back-to-back.
+        """
+        import gc
+        if hasattr(self, "net"):
+            del self.net
+        if hasattr(self, "processor"):
+            del self.processor
+        gc.collect()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def _to_rgb(self, image: Image) -> PILImage.Image:
         """Convert to RGB, filling transparent pixels with the mean opaque colour.
 

@@ -95,5 +95,7 @@ class CaptioningStage(PipelineStage):
         )
 
     def clean_up(self):
-        super().clean_up()
-        self._caption = None
+        if self._caption is not None:
+            self._caption.close()
+            self._caption = None
+        super().clean_up()  # calls torch.cuda.empty_cache() after refs are dropped

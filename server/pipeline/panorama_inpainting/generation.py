@@ -715,7 +715,7 @@ class PanoramaInpaintingStage(PipelineStage):
             self._seg = None
         self._classifier = None
         if self._captioner is not None:
-            del self._captioner
+            self._captioner.close()
             self._captioner = None
         if self._samp is not None:
             self._samp.close()
