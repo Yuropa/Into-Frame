@@ -267,6 +267,12 @@ stages:
     use_intrinsic_delighting: true
     intrinsic_resolution: 768   # working resolution for the delighting pass
     intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
+    # Swin2SR 2x each (optionally delit) reference patch, then LANCZOS back down to its own
+    # size, before it's composited onto the Pass 1 canvas -- sharper/denoised source for
+    # both the pasted patch itself and the canvas's own background fill (which stretches a
+    # copy of it up to the full tile), the same "render bigger, downsample for quality"
+    # trick used for Flux fills elsewhere (see supersample_inpaint).
+    use_patch_supersampling: true
     # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
     # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
     # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked
