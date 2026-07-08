@@ -997,20 +997,18 @@ download_intrinsicdiffusion_weights() {
 setup_intrinsicdiffusion() {
     clone_if_needed https://github.com/JundanLuo/IntrinsicDiffusion.git "$INTRINSIC_DIFFUSION_DIR"
 
-    load_conda
-    conda deactivate || true
-    CURRENT_ENV="intrinsicdiffusion"
-
-    # Fully independent env (Python 3.8, torch 2.0.1+cu118, diffusers 0.24.0) —
-    # the repo's README warns other versions may not work properly, so this
-    # doesn't clone from the shared cu130 torch bases used elsewhere.
-    if ! conda env list | grep -qE "^intrinsicdiffusion[[:space:]]"; then
-        conda create -y -q -n intrinsicdiffusion python=3.8
-    fi
-    conda activate intrinsicdiffusion
+    # The repo's README pins Python 3.8 / torch 2.0.1+cu118 / diffusers 0.24.0 and warns
+    # other versions may not work properly, but that torch build predates Blackwell
+    # (sm_120) support entirely — it can't run on newer GPUs at all. Follow the same
+    # pattern as depthpano/worldgen below: clone from the shared cu130 torch base (this
+    # repo's own tested-working modern build) at Python 3.10, install IntrinsicDiffusion's
+    # pinned deps on top, then force torch back to the cu130 build afterward, since its
+    # requirements.txt will otherwise downgrade it to the old cu118 pin again.
+    create_env "intrinsicdiffusion" 3.10
 
     run_in_env pip install -r "$INTRINSIC_DIFFUSION_DIR/requirements.txt" \
         --extra-index-url https://download.pytorch.org/whl/cu118
+    run_in_env pip install --upgrade torch torchvision torchaudio --extra-index-url "$TORCH_URL"
     run_in_env pip install kornia==0.7.0 "kornia[x]==0.7.0"
 
     ln -sf "$INTRINSIC_DIFFUSION_DIR" "$PACKAGES_DIR/intrinsicdiffusion"
