@@ -4,9 +4,9 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `676b00234e31cf048910036c08f768ab6c790eba` |
-| Message | skybox updates |
-| Date set | 2026-07-02 |
+| Commit | `3164f3ce285ccf4332008b6b6756def2849ac213` |
+| Message | Merge branch 'object-clear' |
+| Date set | 2026-07-09 |
 
 ---
 
@@ -29,6 +29,21 @@ git rev-parse HEAD  # copy this hash into the Commit field above
 ---
 
 ## Change Log
+
+### Week ending 2026-07-09
+
+*Baseline `676b002` (2026-07-01) → `3164f3c` (2026-07-09). 71 commits, 65 files changed (+4.8k / -819 lines).*
+
+- **Intrinsic images (new)**: new `intrinsic_images` pipeline stage bridging to IntrinsicDiffusion (Luo et al., SIGGRAPH 2024) in its own conda env, predicting per-pixel albedo and surface-normal maps from a single image — merged in via the `IntrinsicDiffusion` branch. New `intrinsic_utils.py` helper.
+- **Object removal (new)**: new `inpainting_objectclear` stage wrapping the ObjectClear model (jixin0101/ObjectClear) as a remote conda process; object clearing re-enabled in the pipeline after being toggled off/on across several commits.
+- **Panorama depth & seam repair (new)**: new `panorama_depth/calibration.py` stage for calibrating panorama depth, and a new `util/seam_repair.py` module (`heal_seam`) doing inpaint-based seam healing with feathering/band-width controls — several follow-up commits fixing the skybox seam and widening the repair band.
+- **Foreground inpainting (new)**: new `panorama_foreground_inpainting` stage combining SAM segmentation, depth-based object filtering, and inpainting to remove foreground objects from panoramas before sky/scene generation.
+- **Distribution synthesis (new)**: new `distribution_synthesis` module (~390 lines) for synthesizing/painting learned object distributions onto the top-down region map.
+- **Terrain**: large rework of `terrain_texture_generation.py` (+1146/-lines) — texture supersampling, ridge-line and cliff improvements, height-map/relief tuning, color-map updates, point-cloud-based terrain reconstruction, and a second full pass ("terrain generation take 2").
+- **Skybox/panorama**: continued LoRA weight iteration (new weights, sweeps, debug, then disabled again), flood-fill and warp fixes, sky-mask adjustments, and a pipeline inpainting cleanup/switch-back.
+- **Scene generation**: `scene_generation/generation.py` and new `projection.py` reworked for terrain/object placement; UV-flip fix; Unity `SceneClient`/`SceneObjectManager`/`SceneParamManager` and `TerrainSplat` shader updated to match.
+- **Captioning**: switched to Florence captioning with follow-up fixes.
+- **Infra**: new setup script and several build fixes, `pattern-synthesis` CMake/CLI updates, Caffe dependency removed, remote/mirror download and seed-value handling improved, API and server cleanup.
 
 ### Week ending 2026-07-02
 
