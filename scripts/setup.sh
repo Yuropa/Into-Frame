@@ -1,13 +1,18 @@
 #!/bin/bash
 set -e
+
 FORCE=false
 SAVE_LOGS=false
 VERBOSE=false
+MIRROR=false
+MIRROR_URL=""
 
 # Current directory
 SCRIPT_DIR="$(dirname "$(realpath "$0")")"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 LOG_DIR="$PROJECT_DIR/logs"
+
+source "$SCRIPT_DIR/hf_env.sh"
 
 show_usage() {
     echo -e "Usage: $(basename "$0") [OPTIONS]"
@@ -16,16 +21,18 @@ show_usage() {
     echo -e "  -f    Force clean installation (removes existing libraries and conda environments)"
     echo -e "  -s    Save existing installation logs (default behavior wipes the logs directory)"
     echo -e "  -v    Verbose mode (dumps output to terminal instead of a log file)"
+    echo -e "  -m URL  Use a Hugging Face mirror at URL for model downloads (off by default, e.g. -m https://hf-mirror.com)"
     echo -e "  -h    Show this help message and exit"
     exit 0
 }
 
 # Parse command line flags
-while getopts "fshv" opt; do
+while getopts "fshvm:" opt; do
   case $opt in
     f) FORCE=true ;;
     s) SAVE_LOGS=true ;;
     v) VERBOSE=true ;;
+    m) MIRROR=true; MIRROR_URL="$OPTARG" ;;
     h) show_usage ;;
     *) echo "Invalid option. Use -h for help." >&2; exit 1 ;;
   esac
@@ -43,6 +50,10 @@ info()    { printf "${CYAN}%s${RESET}\n" "$*"; }
 success() { printf "${GREEN}%s${RESET}\n" "$*"; }
 warn()    { printf "${YELLOW}%s${RESET}\n" "$*"; }
 error()   { printf "${RED}%s${RESET}\n" "$*"; }
+
+if [ "$MIRROR" = true ]; then
+    configure_hf_mirror "$MIRROR_URL"
+fi
 
 echo ""
 
@@ -125,7 +136,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "objectclear" "intrinsicdiffusion")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -541,6 +552,7 @@ run_step "Building Flash Attention" \
 
 download_sam3d() {
     if [ ! -d "$CHECKPOINT_DIR/hf" ]; then
+        pip install -q -U "huggingface_hub[cli]" hf_xet
         hf download --repo-type model --local-dir "$CHECKPOINT_DIR/hf-download" --max-workers 1  facebook/sam-3d-objects
         mv  "$CHECKPOINT_DIR/hf-download/checkpoints" "$CHECKPOINT_DIR/hf"
         rm -rf "$CHECKPOINT_DIR/hf-download"
@@ -758,7 +770,7 @@ run_step "Installing LuxDiT" \
 # Hugging Face auth for gated checkpoints
 warn ""
 warn "⚠️  Model checkpoints require Hugging Face access."
-conda run --no-capture-output -n "$CONDA_NAME" pip install -q huggingface_hub >>"$LOG_FILE" 2>&1
+conda run --no-capture-output -n "$CONDA_NAME" pip install -q -U "huggingface_hub[cli]" hf_xet >>"$LOG_FILE" 2>&1
 load_conda
 conda activate "$CONDA_NAME"
 python -c "from huggingface_hub import interpreter_login; interpreter_login()"
@@ -947,6 +959,67 @@ setup_worldgen() {
 
 run_step "Installing WorldGen" \
     setup_worldgen
+
+## ============
+##    ObjectClear
+## ============
+
+setup_objectclear() {
+    create_env "objectclear" 3.10
+    clone_if_needed https://github.com/zjx0101/ObjectClear.git "$LIB_DIR/ObjectClear"
+    run_in_env pip install -r "$LIB_DIR/ObjectClear/requirements.txt"
+    ln -sf "$LIB_DIR/ObjectClear" "$PACKAGES_DIR/objectclear"
+
+    stop_env
+}
+
+run_step "Installing ObjectClear" \
+    setup_objectclear
+
+## ==================
+##    IntrinsicDiffusion
+## ==================
+
+INTRINSIC_DIFFUSION_DIR="$LIB_DIR/IntrinsicDiffusion"
+
+download_intrinsicdiffusion_weights() {
+    local ckpt_dir="$CHECKPOINT_DIR/intrinsic_diffusion"
+
+    if [ ! -d "$ckpt_dir" ]; then
+        run_in_env pip install -q gdown
+        run_in_env gdown --folder "https://drive.google.com/drive/folders/14x9zfiTPydC5-Yb25wGq1xBoZNOGty4o" -O "$ckpt_dir"
+    fi
+
+    # The SD base model (ptx0/pseudo-journey-v2) is downloaded automatically from
+    # Hugging Face by the repo's own code on first inference run.
+}
+
+setup_intrinsicdiffusion() {
+    clone_if_needed https://github.com/JundanLuo/IntrinsicDiffusion.git "$INTRINSIC_DIFFUSION_DIR"
+
+    # The repo's README pins Python 3.8 / torch 2.0.1+cu118 / diffusers 0.24.0 and warns
+    # other versions may not work properly, but that torch build predates Blackwell
+    # (sm_120) support entirely — it can't run on newer GPUs at all. Follow the same
+    # pattern as depthpano/worldgen below: clone from the shared cu130 torch base (this
+    # repo's own tested-working modern build) at Python 3.10, install IntrinsicDiffusion's
+    # pinned deps on top, then force torch back to the cu130 build afterward, since its
+    # requirements.txt will otherwise downgrade it to the old cu118 pin again.
+    create_env "intrinsicdiffusion" 3.10
+
+    run_in_env pip install -r "$INTRINSIC_DIFFUSION_DIR/requirements.txt" \
+        --extra-index-url https://download.pytorch.org/whl/cu118
+    run_in_env pip install --upgrade torch torchvision torchaudio --extra-index-url "$TORCH_URL"
+    run_in_env pip install kornia==0.7.0 "kornia[x]==0.7.0"
+
+    ln -sf "$INTRINSIC_DIFFUSION_DIR" "$PACKAGES_DIR/intrinsicdiffusion"
+
+    download_intrinsicdiffusion_weights
+
+    stop_env
+}
+
+run_step "Installing IntrinsicDiffusion" \
+    setup_intrinsicdiffusion
 
 ## ============
 ##    End

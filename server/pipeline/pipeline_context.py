@@ -6,6 +6,7 @@ import logging
 _log = logging.getLogger("pipeline")
 from scene.mesh import Mesh
 from util.depth_utils import Depth
+from util.intrinsic_utils import IntrinsicImages
 from util.image_utils import Image
 from util.cubemap_utils import CubeMap
 from util.panorama_utils import Panorama
@@ -18,6 +19,7 @@ class ContextKey:
     """Well-known string keys for values stored in PipelineContext."""
     INPUT = "input"
     DEPTH = "depth"
+    INTRINSIC_IMAGES = "intrinsic_images"
     SCENE = "scene"
     INTRINSICS = "intrinsics"
     EXTRINSICS = "extrinsics"
@@ -29,6 +31,7 @@ class ContextKey:
     PANORAMA_DEPTH = "panorama_depth"
     PANORAMA_OBJECT_DEPTH = "panorama_object_depth"
     PANORAMA_TERRAIN = "panorama_terrain"
+    PANORAMA_FOREGROUND_REMOVED = "panorama_foreground_removed"
     PANORAMA_SKY_MASK = "panorama_sky_mask"
     PANORAMA_SKY = "panorama_sky"
     HEIGHT_MAP = "height_map"
@@ -52,6 +55,7 @@ class ContextKey:
     TRAIL_SKELETON = "trail_skeleton"
     HEIGHT_MAP_CERTAINTY = "height_map_certainty"
     HEIGHT_MAP_CELL_RELIEF = "height_map_cell_relief"
+    HEIGHT_MAP_CELL_SLOPE = "height_map_cell_slope"
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
@@ -62,6 +66,7 @@ class ContextKey:
     Type = Literal[
         "input",
         "depth",
+        "intrinsic_images",
         "scene",
         "intrinsics",
         "panorama",
@@ -223,7 +228,19 @@ class PipelineContext():
     
     def input_depth(self, name: ContextKeyName) -> Optional[Depth]:
         return self._value(name, self._previous_stage).depth()
-    
+
+    # IntrinsicImages (albedo + normal)
+    def add_intrinsic_images(self, name: ContextKeyName, input: Any):
+        value = ContextValue(name=name)
+        value.set_intrinsic_images(input)
+        self._set_value(name, value)
+
+    def intrinsic_images(self, name: ContextKeyName) -> Optional[IntrinsicImages]:
+        return self._value(name).intrinsic_images()
+
+    def input_intrinsic_images(self, name: ContextKeyName) -> Optional[IntrinsicImages]:
+        return self._value(name, self._previous_stage).intrinsic_images()
+
     # Object3D
     def add_object3d(self, name: ContextKeyName, input: Object3D):
         value = ContextValue(name=name)

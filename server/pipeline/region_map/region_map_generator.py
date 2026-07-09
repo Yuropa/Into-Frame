@@ -124,6 +124,7 @@ class RegionMapGenerator:
         dilation_iters: int = 3,
         connect_radius_px: int = 30,
         chain_smooth_window: int = 15,
+        max_col_gap_frac: float = 0.01,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column, sample depth just below it,
@@ -135,10 +136,18 @@ class RegionMapGenerator:
         missed if only the TERRAIN type were accepted. WATER pixels touching sky (an
         open ocean/lake horizon) are excluded so they don't get anchored into the
         solver as a fake mountain crest — that boundary belongs to extract_water_chains
-        instead. Excluded columns simply contribute no ridge point; the greedy
-        nearest-neighbour chaining below already splits into separate chains wherever
-        the gap between remaining points exceeds connect_radius_px, so a wide water
-        horizon naturally leaves a disjoint gap rather than a chain drawn across it.
+        instead. Excluded columns simply contribute no ridge point.
+
+        The greedy nearest-neighbour chaining below also enforces max_col_gap_frac:
+        candidates are restricted to points whose source panorama column is within
+        max_col_gap_frac * w of the current chain point (circular, wrapping at the
+        360° seam), in addition to the existing connect_radius_px world-space
+        distance check. Without this, a narrow water body (e.g. a lake or river
+        mouth) that excludes a run of columns would still often get bridged — the
+        mountain points on either side of a narrow lake are frequently close
+        together in actual 3D space, well within connect_radius_px, so the chain
+        would silently jump straight across the excluded gap and draw an
+        interpolated ridge segment through the water instead of leaving a break.
 
         For each panorama column, finds the first non-sky row below sky, then
         samples depth depth_offset_rows below that boundary (where depth estimators
@@ -204,6 +213,7 @@ class RegionMapGenerator:
         )
         # Mountains above the horizon have phi > 0, so Ys > 0 (above camera).
         Ys_valid = Ys[in_bounds]
+        cols_valid = cols[in_bounds]
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
 
         if len(Xs) == 0:
@@ -220,10 +230,16 @@ class RegionMapGenerator:
 
         cell_m = grid_size_meters / grid_resolution
         connect_m = connect_radius_px * cell_m
+        max_col_gap = max(1.0, max_col_gap_frac * w)
 
         pts   = np.stack([Xs.astype(np.float64), Zs.astype(np.float64)], axis=-1)
         pts_y = Ys_valid.astype(np.float64)
         tree  = _KDTree(pts)
+
+        def _col_gap(a: int, b: int) -> int:
+            # Circular column distance, wrapping at the panorama's 360° seam.
+            d = abs(int(a) - int(b))
+            return min(d, w - d)
 
         all_chains_data: list[tuple[np.ndarray, np.ndarray]] = []
         remaining = set(range(len(pts)))
@@ -236,7 +252,10 @@ class RegionMapGenerator:
             while True:
                 curr = chain[-1]
                 idxs = tree.query_ball_point(pts[curr], connect_m)
-                candidates = [i for i in idxs if i in remaining]
+                candidates = [
+                    i for i in idxs
+                    if i in remaining and _col_gap(cols_valid[curr], cols_valid[i]) <= max_col_gap
+                ]
                 if not candidates:
                     break
                 dists = np.linalg.norm(pts[candidates] - pts[curr], axis=1)

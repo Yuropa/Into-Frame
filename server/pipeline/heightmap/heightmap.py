@@ -1,4 +1,5 @@
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
 from logging import Logger
 
 import numpy as np
@@ -8,6 +9,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.heightmap.heightmap_generator import HeightMapGenerator
 from util.depth_utils import Depth
+from util.panorama_utils import Panorama
 
 
 class HeightMapConfiguration(PipelineStageConfiguration):
@@ -31,6 +33,9 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
+        save_point_cloud: bool = True,
+        point_cloud_stride: int = 4,
+        min_forward_samples: int = 4,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -63,6 +68,22 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # confidence_threshold, or nothing beyond the nadir ramp ever gets Dirichlet-pinned
         # and the whole map beyond a few metres is left to pure interpolation/noise.
         self.certainty_falloff_meters = certainty_falloff_meters
+        # Debug/inspection artefact: the raw sky-masked panorama depth unprojected to a
+        # dense world-space point cloud (every pixel, no ground-plane Y filter, no grid
+        # binning) — the full-resolution geometry HeightMapGenerator's single-sample-per-
+        # cell grid necessarily throws away. Saved as ground_point_cloud.ply next to the
+        # other debug images when a build/output directory is configured.
+        self.save_point_cloud = save_point_cloud
+        # Take every Nth pixel in each axis before unprojecting (1 = full resolution).
+        # Equirectangular panoramas are large enough that a full dump is both slow to
+        # write and awkward to load in a mesh viewer; 4 (1/16 of the pixels) keeps the
+        # file a manageable size while still far denser than the height-map grid.
+        self.point_cloud_stride = point_cloud_stride
+        # Equirectangular mode only: minimum independent forward-projected panorama
+        # pixels that must land in one grid cell before its single inverse-mapped
+        # sample is overridden by real per-cell mean/relief/slope statistics. Below
+        # this, either a plane fit is impossible (<3 points) or too noisy to trust.
+        self.min_forward_samples = min_forward_samples
 
 
 class HeightMapStage(PipelineStage):
@@ -134,7 +155,21 @@ class HeightMapStage(PipelineStage):
         if region_type_mask is not None:
             self.log_info("Region type map available — restricting height to water/terrain/ground")
 
-        height_array, certainty_array, cell_relief_array = HeightMapGenerator.generate(
+        if cfg.use_equirectangular and cfg.save_point_cloud and self.temp is not None:
+            panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+            colors = (
+                np.array(panorama_terrain.rgb()) if panorama_terrain is not None else None
+            )
+            n_points = self._save_ground_point_cloud(
+                depth, sky_mask, colors, cfg.point_cloud_stride, self.temp / "ground_point_cloud.ply",
+            )
+            if n_points is not None:
+                self.log_info(
+                    f"Ground point cloud: {n_points:,} points "
+                    f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.ply"
+                )
+
+        height_array, certainty_array, cell_relief_array, cell_slope_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -152,6 +187,7 @@ class HeightMapStage(PipelineStage):
             nadir_ramp_width=cfg.nadir_ramp_width,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
+            min_forward_samples=cfg.min_forward_samples,
             debug_dir=self.temp,
         )
         self.advance_progress(task)
@@ -160,6 +196,7 @@ class HeightMapStage(PipelineStage):
         context.add_depth(output_key, height_map)
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_RELIEF, Depth(cell_relief_array))
+        context.add_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE, Depth(cell_slope_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters":    cfg.grid_size_meters,
@@ -173,18 +210,61 @@ class HeightMapStage(PipelineStage):
             Depth(certainty_array).save_debug_image(self.temp / "heightmap_certainty.png")
             if cell_relief_array.any():
                 Depth(cell_relief_array).save_debug_image(self.temp / "heightmap_cell_relief.png")
+            if cell_slope_array.any():
+                Depth(cell_slope_array).save_debug_image(self.temp / "heightmap_cell_slope.png")
 
         n_relief = int((cell_relief_array > 0).sum())
+        n_slope = int((cell_slope_array > 0).sum())
         self.log_info(
             f"Height map {height_array.shape}, "
             f"Y range {height_array.min():.2f} → {height_array.max():.2f} m, "
             f"certainty mean {certainty_array[certainty_array > 0].mean():.2f}, "
             f"{n_relief} cell(s) with measured intra-cell relief "
-            f"(max {cell_relief_array.max():.2f} m)"
+            f"(max {cell_relief_array.max():.2f} m), "
+            f"{n_slope} cell(s) with measured plane-fit slope "
+            f"(max {cell_slope_array.max():.1f}°)"
         )
 
         self.finish_progress(task)
         return context
+
+    @staticmethod
+    def _save_ground_point_cloud(
+        depth: Depth,
+        sky_mask: Optional[np.ndarray],
+        colors: Optional[np.ndarray],
+        stride: int,
+        out_path: Path,
+    ) -> Optional[int]:
+        """
+        Unprojects every (strided) panorama pixel to a world-space XYZ point, masking
+        only the sky, and writes the result as a .ply point cloud. Unlike the height
+        map itself, this applies no ground-plane Y filter and no grid binning — it is
+        the raw scene geometry (cliffs, overhangs, distant peaks included) that the
+        single-sample-per-cell grid lookup in HeightMapGenerator cannot represent.
+        """
+        d = depth.depth.astype(np.float32)
+        if sky_mask is not None and sky_mask.shape == d.shape:
+            d = d.copy()
+            d[sky_mask] = np.nan
+
+        s = max(1, stride)
+        d = d[::s, ::s]
+
+        X, Y, Z = Panorama.equirectangular_unproject(Depth(d))
+        valid = np.isfinite(d) & (d > 0)
+        if not valid.any():
+            return None
+
+        points = np.stack([X[valid], Y[valid], Z[valid]], axis=-1)
+
+        point_colors = None
+        if colors is not None and colors.shape[:2] == depth.depth.shape:
+            point_colors = colors[::s, ::s][valid]
+
+        import trimesh
+        trimesh.PointCloud(points, colors=point_colors).export(str(out_path))
+        return int(points.shape[0])
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, output_key = self._resolved_keys()

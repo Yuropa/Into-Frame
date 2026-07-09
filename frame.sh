@@ -11,6 +11,10 @@ SCRIPTS_DIR="$SCRIPT_DIR/scripts"
 ENV="frame"
 SEED_ARGS=()
 LOG_MODE=""
+MIRROR=false
+MIRROR_URL=""
+
+source "$SCRIPTS_DIR/hf_env.sh"
 
 # --- Shared defaults ---
 PORT="${PORT:-8080}"
@@ -55,6 +59,7 @@ Global options:
   --log-mode MODE    Logging mode: panel (default), plain, verbose
   -v, --verbose      Shorthand for --log-mode verbose (developer debugging)
   --plain            Shorthand for --log-mode plain
+  -m, --mirror URL   Use a Hugging Face mirror at URL for model downloads (off by default, e.g. https://hf-mirror.com)
   -h, --help         Show this help message
 
 run options:
@@ -166,6 +171,7 @@ while [[ $# -gt 0 ]]; do
     -v|--verbose)    LOG_MODE="verbose"; shift   ;;
     --plain)         LOG_MODE="plain";   shift   ;;
     --log-mode)      LOG_MODE="$2";      shift 2 ;;
+    -m|--mirror)     MIRROR=true; MIRROR_URL="$2"; shift 2 ;;
     -h|--help)       usage; exit 0 ;;
     run|server|local|download|remote|setup|clear)
       SUBCOMMAND="$1"; shift; break ;;
@@ -176,6 +182,10 @@ done
 
 if [[ -z "$SUBCOMMAND" ]]; then
   usage; exit 0
+fi
+
+if [[ "$MIRROR" == true ]]; then
+  configure_hf_mirror "$MIRROR_URL"
 fi
 
 # ---------------------------------------------------------------------------

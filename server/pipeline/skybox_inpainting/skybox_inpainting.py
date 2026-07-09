@@ -186,7 +186,8 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        seam_heal_width_px: int = 64,
+        seam_heal_width_px: int = 48,
+        seam_heal_feather_px: int = 48,
         seam_heal_method: str = "telea",
         # Fraction of panorama height the fill mask dilates into the sky before FLUX
         # generates (see "Pass 2" below) — buries the real jagged horizon/mountain
@@ -196,6 +197,7 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.seam_heal_width_px = seam_heal_width_px
+        self.seam_heal_feather_px = seam_heal_feather_px
         self.seam_heal_method = seam_heal_method
         self.shroud_radius_frac = shroud_radius_frac
 
@@ -216,8 +218,11 @@ class SkyboxInpaintingStage(PipelineStage):
 
       3. Seam healing (util.seam_repair.heal_seam): a `seam_heal_width_px`-wide
          band straddling the sky/terrain boundary is content-aware inpainted
-         (Photoshop Spot Healing Brush-style) to smooth over any residual
-         exposure or texture mismatch at the join.
+         (Photoshop Spot Healing Brush-style) and faded in with a feathered
+         alpha (rather than swapped in with a hard cutoff) to smooth over any
+         residual exposure or texture mismatch at the join. The feathered
+         blend mask is saved alongside the other stage outputs as
+         `panorama_sky_seam_blend_mask.png`.
 
     Reads:
       ContextKey.PANORAMA                — equirectangular source panorama
@@ -409,7 +414,42 @@ class SkyboxInpaintingStage(PipelineStage):
         # hadn't already accounted for).
         result_pil = flux_pil
 
-        # --- Pass 2.5: heal the panorama's own left/right wrap seam ---
+        # --- Pass 3: heal the sky/terrain seam ---
+        # FLUX is conditioned on the real sky right up to its boundary, but its
+        # own exposure/colour grading rarely matches exactly, leaving a visible
+        # ring at the join. Content-aware inpaint a narrow band straddling that
+        # edge (equirect-wrap aware) and fade it in with a wide feather to
+        # blend it away.
+        #
+        # band_width_px is kept small on purpose: cv2.inpaint (Telea) fills by
+        # marching inward in concentric layers from the band's edge, and on
+        # smooth, low-texture content like sky that layering shows up directly
+        # as visible rings/banding once the fill depth gets much past ~20-30px.
+        # seam_heal_feather_px does the actual "wide, soft transition" work
+        # instead, fading the narrow inpainted core into the untouched image
+        # over a much larger radius without asking Telea to hallucinate that
+        # whole radius itself.
+        #
+        # Heal around flux_mask_arr's boundary, not sky_mask's: the shroud
+        # dilation above (~shroud_radius px) pushed the actual FLUX paint
+        # boundary that far into the sky, so healing around the original
+        # sky_mask edge misses the real seam entirely once shroud_radius
+        # exceeds half the heal band width.
+        result_pil = heal_seam(
+            result_pil,
+            ~flux_mask_arr,
+            band_width_px=self.config.seam_heal_width_px,
+            wrap_horizontal=True,
+            method=self.config.seam_heal_method,
+            feather_px=self.config.seam_heal_feather_px,
+            debug_dir=self.output or self.temp,
+            debug_prefix="panorama_sky_seam",
+        )
+
+        if self.temp is not None:
+            result_pil.save(self.temp / "sky_seam_fixed.png")
+
+        # --- Pass 4: heal the panorama's own left/right wrap seam ---
         # FLUX generated the cloud/atmosphere fill across the whole canvas in
         # one shot, with no explicit awareness that column 0 and column W-1
         # are the same seam in the final 360° view — so they can disagree.
@@ -418,7 +458,9 @@ class SkyboxInpaintingStage(PipelineStage):
         # just generated is touched; real photographed sky pixels near the
         # column-0 border are left alone. Runs base FLUX (no LoRA) for this
         # touch-up — the panorama LoRA's geometric bias is for the main
-        # generation, not a small seam patch.
+        # generation, not a small seam patch. Runs after the sky/terrain seam
+        # heal so it also cleans up any residual mismatch that pass left
+        # straddling the wrap edge.
         flux.set_lora_enabled(False)
 
         def _sky_seam_inpaint(rolled_img: PILImage.Image, mask_img: PILImage.Image) -> PILImage.Image:
@@ -436,36 +478,13 @@ class SkyboxInpaintingStage(PipelineStage):
         result_pil = heal_wrap_seam(
             result_pil,
             inpaint_fn=_sky_seam_inpaint,
-            seam_width_px=96,
-            feather_px=12,
+            seam_width_px=128,
+            feather_px=20,
             eligible_mask=flux_mask_arr,
             debug_dir=self.temp,
             debug_prefix="sky_wrap_seam",
         )
         flux.close()
-
-        if self.temp is not None:
-            result_pil.save(self.temp / "sky_wrap_seam_fixed.png")
-
-        # --- Pass 3: heal the sky/terrain seam ---
-        # FLUX is conditioned on the real sky right up to its boundary, but its
-        # own exposure/colour grading rarely matches exactly, leaving a visible
-        # ring at the join. Content-aware inpaint a band straddling that edge
-        # (equirect-wrap aware) to blend it away.
-        #
-        # Heal around flux_mask_arr's boundary, not sky_mask's: the shroud
-        # dilation above (~shroud_radius px) pushed the actual FLUX paint
-        # boundary that far into the sky, so healing around the original
-        # sky_mask edge misses the real seam entirely once shroud_radius
-        # exceeds half the heal band width (true on any panorama taller than
-        # ~500px at the default band_width_px=40).
-        result_pil = heal_seam(
-            result_pil,
-            ~flux_mask_arr,
-            band_width_px=self.config.seam_heal_width_px,
-            wrap_horizontal=True,
-            method=self.config.seam_heal_method,
-        )
 
         if self.output is not None:
             result_pil.save(self.output / "panorama_sky.png")

@@ -11,10 +11,13 @@ from scipy.ndimage import binary_dilation, binary_erosion
 def heal_seam(
     image: PIL.Image.Image,
     mask: np.ndarray,
-    band_width_px: int = 40,
+    band_width_px: int = 96,
     wrap_horizontal: bool = False,
     radius: int = 5,
     method: str = "telea",
+    feather_px: int = 16,
+    debug_dir: Path | None = None,
+    debug_prefix: str = "seam",
 ) -> PIL.Image.Image:
     """
     Content-aware repair of a band straddling the boundary of `mask` — the
@@ -24,6 +27,12 @@ def heal_seam(
     from its surroundings via fast-marching inpainting (Telea, 2004) or
     Navier-Stokes diffusion, both of which propagate nearby colour/gradient
     information inward instead of copy-pasting a hard edge.
+
+    The inpainted band is faded in with a feathered alpha rather than swapped
+    in with a hard boolean mask — cv2.inpaint leaves everything outside the
+    band identical to the source, so blending with a soft-edged alpha over
+    the whole image costs nothing where the mask is 0/1 and removes the ring
+    artifact a hard cutoff left at the band's inner/outer edge.
 
     image:           source RGB image.
     mask:            boolean array, same H×W as image, marking one side of the
@@ -36,6 +45,11 @@ def heal_seam(
                       treating it as a hard image border.
     radius:          inpainting neighbourhood radius (cv2.inpaint's inpaintRadius).
     method:          "telea" (fast marching, default) or "ns" (Navier-Stokes).
+    feather_px:      Gaussian blur radius applied to the band mask before
+                      alpha-compositing, so the heal fades in/out smoothly.
+    debug_dir:       when set, the feathered blend mask actually used is
+                      written here for inspection.
+    debug_prefix:    filename prefix for the debug mask.
     """
     if not mask.any() or mask.all():
         return image
@@ -61,9 +75,17 @@ def heal_seam(
     else:
         healed = cv2.inpaint(arr, band_u8, radius, flag)
 
-    result = arr.copy()
-    result[band] = healed[band]
-    return PIL.Image.fromarray(result)
+    blend_mask_pil = PIL.Image.fromarray(band_u8, mode="L")
+    if feather_px > 0:
+        blend_mask_pil = blend_mask_pil.filter(PIL.ImageFilter.GaussianBlur(feather_px))
+
+    if debug_dir is not None:
+        debug_dir = Path(debug_dir)
+        blend_mask_pil.save(debug_dir / f"{debug_prefix}_blend_mask.png")
+
+    alpha = np.asarray(blend_mask_pil, dtype=np.float32)[:, :, None] / 255.0
+    result = arr.astype(np.float32) * (1.0 - alpha) + healed.astype(np.float32) * alpha
+    return PIL.Image.fromarray(result.clip(0, 255).astype(np.uint8))
 
 
 def heal_wrap_seam(

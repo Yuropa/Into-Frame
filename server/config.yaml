@@ -35,10 +35,31 @@ stages:
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
+    # TEMPORARY: swapped back on for PanoramaForegroundInpaintingStage (ObjectClear) below
+    # to avoid its model download. Re-disable and flip Panorama Foreground Inpainting back
+    # on once ObjectClear is cached, or once you're done testing without it.
+    enabled: true
     full_panorama: true
     use_depth_filter: true
     depth_filter_threshold: 0.05       # Signal 1: slack above row-max baseline (0.0 = strict)
     depth_filter_edge_threshold: 0.005 # Signal 2: min edge depth-pop to keep a mask (lower = less strict)
+    # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
+    # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
+    # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
+    # PanoramaForegroundInpaintingStage already leaves it untouched today. PANORAMA_TERRAIN
+    # (what Panorama Depth → Height Map actually consumes) is written unconditionally either way.
+    keys:
+      output: panorama_foreground_removed
+
+  - name: Panorama Foreground Inpainting
+    stage: PanoramaForegroundInpaintingStage
+    enabled: false  # TEMPORARY: disabled to avoid the ObjectClear model download; see above
+    use_depth_filter: true
+    depth_filter_threshold: 0.05
+    depth_filter_edge_threshold: 0.005
+    mask_dilation_px: 15
+    guidance_scale: 2.5
+    num_inference_steps: 30
 
   - name: Panorama Regions
     stage: PanoramaRegionStage
@@ -61,6 +82,17 @@ stages:
     stage: PanoramaDepthStage
     keys:
       input: panorama_terrain
+
+  - name: Panorama Depth Calibration
+    stage: PanoramaDepthCalibrationStage
+    # Fits a monotonic curve from DAP's raw 0-1 output to real metric depth using the region
+    # where the original hero photo overlaps the panorama (Depth Anything 3's metric depth,
+    # from the "Depth Generation" stage, is real ground truth there), then applies it to the
+    # whole panorama. Replaces DAP's flat, unverified `pred * 100.0` assumption — see
+    # server/pipeline/panorama_depth/pano_depth_imp.py — which otherwise makes distant terrain
+    # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
+    num_bins: 14
+    min_samples: 300
 
   - name: Height Map
     stage: HeightMapStage
@@ -96,6 +128,15 @@ stages:
                                  # solver/noise. At 20 m, real ground crosses confidence_threshold
                                  # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
                                  # cutoff's assumption that near terrain is already observed.
+    save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
+                                 # panorama depth (no ground-plane Y filter, no grid binning),
+                                 # written to <build>/ground_point_cloud.ply
+    point_cloud_stride: 4       # take every Nth panorama pixel per axis before unprojecting
+    min_forward_samples: 4      # minimum forward-projected panorama pixels landing in one grid
+                                 # cell before its single inverse-mapped sample is overridden by
+                                 # real per-cell mean/relief/slope statistics (near-field only —
+                                 # far cells rarely collect enough samples and keep using the
+                                 # existing inverse-mapped value)
 
   - name: Region Map
     stage: RegionMapStage
@@ -213,6 +254,13 @@ stages:
     guidance_scale: 3.5
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 4         # dilation applied to seam mask before inpainting
+    # Margin (fraction of tile_size) around all four tile edges that Pass 1 fills with
+    # real (upscaled, if soft) reference content and marks "keep" instead of "generate".
+    # Reference patches are always kept away from the edges (see seam_width_fraction /
+    # seam_dilation_px above), which otherwise left the outer border as one huge unbounded
+    # generate region right at the tile edge -- the least-conditioned spot for a hole-fill
+    # model, and the source of a visibly soft/artificial ring there. 0 disables it.
+    border_fill_fraction: 0.08
     # Several real reference crops (_extract_reference_patches), spaced apart on the tile
     # canvas (_patch_placements), instead of one -- gives Pass 1 more than one real colour/
     # lighting anchor to match against, since generated fill can drift far from a single one.
@@ -222,6 +270,20 @@ stages:
     # a comfortable margin before the seam-fix band (~4-9% of tile_size from each edge) so
     # the two never overlap.
     reference_patch_fraction: 0.7
+    # Delight each reference patch with IntrinsicDiffusion (predicted albedo) before it's
+    # used as a Pass 1 guidance seed, instead of the raw photo pixels -- the raw patch's
+    # baked-in sun/shadow/exposure gets stamped across the whole tile at
+    # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
+    # overcast, no directional shadows" prompt.
+    use_intrinsic_delighting: true
+    intrinsic_resolution: 768   # working resolution for the delighting pass
+    intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
+    # Swin2SR 2x each (optionally delit) reference patch, then LANCZOS back down to its own
+    # size, before it's composited onto the Pass 1 canvas -- sharper/denoised source for
+    # both the pasted patch itself and the canvas's own background fill (which stretches a
+    # copy of it up to the full tile), the same "render bigger, downsample for quality"
+    # trick used for Flux fills elsewhere (see supersample_inpaint).
+    use_patch_supersampling: true
     # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
     # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
     # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked

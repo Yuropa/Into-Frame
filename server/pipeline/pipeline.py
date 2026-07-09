@@ -9,9 +9,10 @@ from typing import Optional
 import logging
 import shutil
 import queue
+import threading
 from collections import deque
 from rich.console import Console as RichConsole
-from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, BarColumn, TimeElapsedColumn, TextColumn
 from rich.logging import RichHandler
 from rich.live import Live
 from rich.panel import Panel
@@ -29,7 +30,9 @@ from pipeline.foreground_inpainting.generation import ForegroundInpainting
 from pipeline.captioning.captioning import CaptioningStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
 from pipeline.panorama_depth.depth import PanoramaDepthStage
+from pipeline.panorama_depth.calibration import PanoramaDepthCalibrationStage
 from pipeline.panorama_inpainting.generation import PanoramaInpaintingStage
+from pipeline.panorama_foreground_inpainting.generation import PanoramaForegroundInpaintingStage
 from pipeline.panorama_object_classification.classification import PanoramaObjectClassificationStage
 from pipeline.object_typing.object_typing import ObjectTypingStage
 from pipeline.panorama_asset_generation.generation import PanoramaAssetGenerationStage, PanoramaAssetGenerationConfiguration
@@ -308,6 +311,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "PanoramaStage": PanoramaStage,
     "PanoramaToCubemapStage": PanoramaToCubemapStage,
     "PanoramaDepthStage": PanoramaDepthStage,
+    "PanoramaDepthCalibrationStage": PanoramaDepthCalibrationStage,
     "PanoramaLightingStage": PanoramaLightingStage,
     "HeightMapStage": HeightMapStage,
     "TerrainMeshStage": TerrainMeshStage,
@@ -319,6 +323,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "SceneGenerationStage": SceneGenerationStage,
     "ForegroundInpainting": ForegroundInpainting,
     "PanoramaInpaintingStage": PanoramaInpaintingStage,
+    "PanoramaForegroundInpaintingStage": PanoramaForegroundInpaintingStage,
     "PanoramaObjectClassificationStage": PanoramaObjectClassificationStage,
     "ObjectTypingStage": ObjectTypingStage,
     "PanoramaAssetGenerationStage": PanoramaAssetGenerationStage,
@@ -416,15 +421,53 @@ class Pipeline:
         return self._run_pipeline(progress_queue)
 
     def download_models(self):
-        all_models = set()
+        all_models = sorted(set(
+            model
+            for stage in self.stages
+            for model in stage.model_names()
+        ))
 
-        for stage in self.stages:
-            for model in stage.model_names():
-                all_models.add(model)
+        if not all_models:
+            return
 
-        for model in all_models:
-            self.log_info(f"Checking for model: {model}")
-            snapshot_download(repo_id=model)
+        # Runs before the Live UI starts, and panel/plain mode suppress HF's own
+        # tqdm bars + drop logging to WARNING (see _suppress_library_noise), so a
+        # slow/first-time download would otherwise show nothing at all. A single
+        # transient spinner line gives visible progress without that per-file
+        # byte-progress spam. Verbose mode already shows HF's raw bars for this,
+        # and a second Live region would fight with them, so skip it there.
+        if self.config.log_mode == "verbose":
+            for model in all_models:
+                self.log_info(f"Checking for model: {model}")
+                snapshot_download(repo_id=model)
+        else:
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=RichConsole(),
+                transient=True,
+            ) as progress:
+                task = progress.add_task("Checking models…", total=len(all_models))
+                for model in all_models:
+                    progress.update(task, description=f"Checking model: {model}")
+                    self.log_info(f"Checking for model: {model}")
+
+                    # Most models are already cached and resolve near-instantly;
+                    # only nudge toward -v once a single model has stalled for a
+                    # while, so the hint doesn't fire on every fast HEAD check.
+                    stall_hint = threading.Timer(
+                        5.0,
+                        lambda m=model: progress.update(
+                            task, description=f"Checking model: {m} (re-run with -v to see download progress)"
+                        ),
+                    )
+                    stall_hint.start()
+                    try:
+                        snapshot_download(repo_id=model)
+                    finally:
+                        stall_hint.cancel()
+
+                    progress.advance(task)
 
         self.log_info("All models present")
 
