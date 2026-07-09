@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from enum import Enum
 import torch
 
@@ -75,9 +77,16 @@ def device_from_id(s: str) -> torch.device:
     if s.startswith("cuda:"):
         target = s.split(":", 1)[1]
 
+        # Single visible GPU: skip UUID matching entirely. Older torch builds (e.g.
+        # the intrinsicdiffusion env's pinned 2.0.1) don't expose
+        # CudaDeviceProperties.uuid at all, which would otherwise crash here even
+        # though there's only one possible device to pick.
+        if torch.cuda.device_count() == 1:
+            return torch.device("cuda:0")
+
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            if str(props.uuid) == target:
+            if str(getattr(props, "uuid", None)) == target:
                 return torch.device(f"cuda:{i}")
 
         raise RuntimeError(f"CUDA device not found for UUID {target}")

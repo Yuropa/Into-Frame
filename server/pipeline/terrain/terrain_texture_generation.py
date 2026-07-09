@@ -15,6 +15,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.captioning.image_captioning import ImageCaptioning, CaptioningModel
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
+from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from scene.splat_material import SplatLayer, SplatMaterial
@@ -146,6 +147,17 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # model's own default (4) since this is a guidance seed, not final output -- trades
         # a bit of denoising quality for roughly proportionally faster inference.
         intrinsic_agg_num: int = 2,
+        # Run each (optionally delit) reference patch through Swin2SR 2x super-resolution,
+        # then LANCZOS back down to patch_size, before it's composited onto the Pass 1
+        # canvas. patch_size is well under tile_size (see reference_patch_fraction), so the
+        # canvas background fill (_build_reference_canvas pastes the largest patch, then
+        # LANCZOS-stretches a copy of it up to the full tile) is normally the single
+        # biggest upscale in this whole stage -- stretching directly from a native
+        # diffusion-resolution patch leaves it visibly soft. Supersampling first means that
+        # stretch (and the patches' own pasted-in detail) comes from a sharper, denoised
+        # source instead, the same "render bigger, downsample for quality" trick already
+        # used for Flux fills elsewhere (see PanoramaInpaintingConfiguration.supersample_inpaint).
+        use_patch_supersampling: bool = True,
         # Pass 1 (_pass1_extend_patch): extend the real patch to fill the whole tile, using
         # it purely as guidance, not something to hard-preserve.
         #   LAMA (default) -- classical texture-completion inpainting (no prompt, no LoRA,
@@ -210,6 +222,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.use_intrinsic_delighting = use_intrinsic_delighting
         self.intrinsic_resolution = intrinsic_resolution
         self.intrinsic_agg_num = intrinsic_agg_num
+        self.use_patch_supersampling = use_patch_supersampling
         self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
@@ -291,6 +304,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         self._lama_inpainter: Optional[InPainting] = None
         self._captioner: Optional[ImageCaptioning] = None
         self._intrinsics: Optional[ImageIntrinsics] = None
+        self._samp: Optional[ImageSupersampling] = None
 
     def _init_inpainter(self) -> None:
         if self._inpainter is None:
@@ -319,6 +333,43 @@ class TerrainTextureGenerationStage(PipelineStage):
         if self._intrinsics is None:
             device, _ = preferred_device(DeviceStrategy.MEMORY)
             self._intrinsics = ImageIntrinsics(device)
+
+    def _init_supersampler(self) -> None:
+        """Lazily load Swin2SR for reference-patch supersampling — only if actually used."""
+        if self._samp is None:
+            device, _ = preferred_device(DeviceStrategy.MEMORY)
+            self._samp = ImageSupersampling(device)
+
+    # Each secondary helper below (LaMa, Florence-2, IntrinsicDiffusion, Swin2SR) is only
+    # needed for one narrow step per region, sequentially -- unlike self._inpainter (the
+    # Pass 2/seam-fix FLUX+LoRA pipeline), which is genuinely needed for every region and
+    # stays loaded for the whole run. Closing each of these the moment its step finishes,
+    # instead of caching it for the rest of the run like self._inpainter, keeps at most one
+    # of them resident in memory alongside the always-loaded FLUX pipeline rather than all
+    # four accumulating on top of it across the region loop -- the latter is what has caused
+    # OOMs in the past. The _init_* methods above make re-creating one on the next region (or
+    # the next call to _generate_tileable_tile_high_fidelity) a no-op cost beyond the reload
+    # itself.
+
+    def _close_lama_inpainter(self) -> None:
+        if self._lama_inpainter is not None:
+            self._lama_inpainter.close()
+            self._lama_inpainter = None
+
+    def _close_captioner(self) -> None:
+        if self._captioner is not None:
+            self._captioner.close()
+            self._captioner = None
+
+    def _close_intrinsics(self) -> None:
+        if self._intrinsics is not None:
+            self._intrinsics.close()
+            self._intrinsics = None
+
+    def _close_supersampler(self) -> None:
+        if self._samp is not None:
+            self._samp.close()
+            self._samp = None
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: TerrainTextureGenerationConfiguration = self.config
@@ -363,12 +414,12 @@ class TerrainTextureGenerationStage(PipelineStage):
         finally:
             self._inpainter.close()
             self._inpainter = None
-            if self._lama_inpainter is not None:
-                self._lama_inpainter.close()
-                self._lama_inpainter = None
-            if self._intrinsics is not None:
-                self._intrinsics.close()
-                self._intrinsics = None
+            # Safety net -- each of these is normally already closed right after its one
+            # narrow use per region (see the _close_* helpers), not held for the whole loop.
+            self._close_lama_inpainter()
+            self._close_intrinsics()
+            self._close_supersampler()
+            self._close_captioner()
 
         material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
 
@@ -683,6 +734,35 @@ class TerrainTextureGenerationStage(PipelineStage):
             albedo.putalpha(patch.split()[-1])
         return albedo
 
+    def _supersample_patch(
+        self,
+        patch: PIL.Image.Image,
+    ) -> PIL.Image.Image:
+        """
+        Swin2SR 2x `patch`'s RGB, then LANCZOS it back down to its own original
+        size -- the same "render bigger, downsample for quality" trick used for
+        Flux fills elsewhere (see _supersample_flux in panorama_inpainting/
+        generation.py). Run right before compositing so the sharper, denoised
+        result -- not the raw (optionally delit) patch -- is what gets pasted
+        into the Pass 1 canvas and what the canvas's own background fill
+        (_build_reference_canvas, which LANCZOS-stretches a copy of one patch up
+        to the full tile) stretches from. Keeps the patch's own alpha (region
+        mask) and size unchanged, so placement/canvas geometry is unaffected.
+        Falls back to the input patch if supersampling errors on this crop.
+        """
+        self._init_supersampler()
+        size = patch.size
+        try:
+            hq = self._samp.supersample(Image(patch.convert("RGB")), self.temp).image
+        except Exception as exc:
+            self.log_info(f"Patch supersampling failed, using un-supersampled patch: {exc}")
+            return patch
+        result = hq.resize(size, PIL.Image.LANCZOS)
+        if patch.mode == "RGBA":
+            result = result.convert("RGBA")
+            result.putalpha(patch.split()[-1])
+        return result
+
     def _generate_tileable_tile(
         self,
         prompt: str,
@@ -783,12 +863,20 @@ class TerrainTextureGenerationStage(PipelineStage):
             patches = [self._delight_patch(p, cfg) for p in patches]
             for i, p in enumerate(patches):
                 self._save_debug_step(cfg, debug_label, f"01b_reference_patch_delit_{i}", p)
+            self._close_intrinsics()
+
+        if cfg.use_patch_supersampling:
+            patches = [self._supersample_patch(p) for p in patches]
+            for i, p in enumerate(patches):
+                self._save_debug_step(cfg, debug_label, f"01c_reference_patch_supersampled_{i}", p)
+            self._close_supersampler()
 
         if cfg.describe_material:
             material_description = self._describe_material(patches[0])
             if material_description:
                 prompt = self._material_prompt(material_description)
                 self.log_info(f"{debug_label}: material caption -> \"{material_description}\"")
+            self._close_captioner()
 
         pass1_image = self._pass1_extend_patch(patches, prompt, cfg, seed, debug_label)
         self._save_debug_step(cfg, debug_label, "04_pass1_result", pass1_image)
@@ -866,6 +954,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                     np.concatenate([np.array(p.convert("RGB")) for p in patches], axis=0)
                 )
                 result = lab_color_transfer(source=patches_ref, target=result, strength=cfg.color_transfer_strength)
+            self._close_lama_inpainter()
             # LaMa is trained to reproduce the unmasked region closely but isn't guaranteed
             # pixel-exact — composite the real patches back to be sure Pass 2 actually starts
             # from genuine material, not a LaMa approximation of it.
@@ -1270,19 +1359,21 @@ class TerrainTextureGenerationStage(PipelineStage):
             names = names + [CaptioningModel.FLORENCE2.value]
         if self.config.use_intrinsic_delighting and self.config.use_photo_reference:
             names = names + ImageIntrinsics.model_names()
+        if self.config.use_patch_supersampling and self.config.use_photo_reference:
+            names = names + ImageSupersampling.model_names()
         return names
 
     def clean_up(self):
         if self._inpainter is not None:
             self._inpainter.close()
             self._inpainter = None
-        if self._lama_inpainter is not None:
-            self._lama_inpainter.close()
-            self._lama_inpainter = None
-        if self._intrinsics is not None:
-            self._intrinsics.close()
-            self._intrinsics = None
-        self._captioner = None
+        # Normally already closed right after their one narrow use per region (see the
+        # _close_* helpers above) -- these remain as a safety net for early-exit/exception
+        # paths that skip past that point.
+        self._close_lama_inpainter()
+        self._close_intrinsics()
+        self._close_supersampler()
+        self._close_captioner()
         super().clean_up()
 
     def contribute_report(self, context: PipelineContext):
