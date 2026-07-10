@@ -56,8 +56,6 @@ class ObjectClearInpainter(RemoteServer):
         guidance_scale: float,
         seed: int,
     ) -> PILImage.Image:
-        orig_w, orig_h = image.size
-
         image_r = _resize_short_side(image.convert("RGB"), 512, PILImage.BICUBIC)
         mask_r = _resize_short_side(mask.convert("L"), 512, PILImage.NEAREST)
         w, h = image_r.size
@@ -78,10 +76,10 @@ class ObjectClearInpainter(RemoteServer):
         )
         self.report_progress(1.0, "Done")
 
-        out = result.images[0]
-        if out.size != (orig_w, orig_h):
-            out = out.resize((orig_w, orig_h), PILImage.LANCZOS)
-        return out.convert("RGB")
+        # Return at native inference resolution (no upscale here) — the caller
+        # supersamples before scaling back up to the source panorama size, which
+        # gives sharper results than a single large LANCZOS stretch would.
+        return result.images[0].convert("RGB")
 
 
 if __name__ == "__main__":

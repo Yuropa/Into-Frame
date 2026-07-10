@@ -981,6 +981,10 @@ setup_objectclear() {
     create_env "objectclear" 3.10
     clone_if_needed https://github.com/zjx0101/ObjectClear.git "$LIB_DIR/ObjectClear"
     run_in_env pip install -r "$LIB_DIR/ObjectClear/requirements.txt"
+    # transformers>=4.57 unconditionally imports torchaudio (for Parakeet/RNNT loss),
+    # which fails to load against this env's torch build: undefined symbol
+    # torch_dtype_float4_e2m1fn_x2.
+    run_in_env pip install "transformers<4.57"
     ln -sf "$LIB_DIR/ObjectClear" "$PACKAGES_DIR/objectclear"
 
     stop_env
