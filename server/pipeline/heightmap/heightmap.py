@@ -71,7 +71,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # Debug/inspection artefact: the raw sky-masked panorama depth unprojected to a
         # dense world-space point cloud (every pixel, no ground-plane Y filter, no grid
         # binning) — the full-resolution geometry HeightMapGenerator's single-sample-per-
-        # cell grid necessarily throws away. Saved as ground_point_cloud.ply next to the
+        # cell grid necessarily throws away. Saved as ground_point_cloud.glb next to the
         # other debug images when a build/output directory is configured.
         self.save_point_cloud = save_point_cloud
         # Take every Nth pixel in each axis before unprojecting (1 = full resolution).
@@ -161,12 +161,12 @@ class HeightMapStage(PipelineStage):
                 np.array(panorama_terrain.rgb()) if panorama_terrain is not None else None
             )
             n_points = self._save_ground_point_cloud(
-                depth, sky_mask, colors, cfg.point_cloud_stride, self.temp / "ground_point_cloud.ply",
+                depth, sky_mask, colors, cfg.point_cloud_stride, self.temp / "ground_point_cloud.glb",
             )
             if n_points is not None:
                 self.log_info(
                     f"Ground point cloud: {n_points:,} points "
-                    f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.ply"
+                    f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.glb"
                 )
 
         height_array, certainty_array, cell_relief_array, cell_slope_array = HeightMapGenerator.generate(
@@ -238,10 +238,12 @@ class HeightMapStage(PipelineStage):
     ) -> Optional[int]:
         """
         Unprojects every (strided) panorama pixel to a world-space XYZ point, masking
-        only the sky, and writes the result as a .ply point cloud. Unlike the height
-        map itself, this applies no ground-plane Y filter and no grid binning — it is
-        the raw scene geometry (cliffs, overhangs, distant peaks included) that the
-        single-sample-per-cell grid lookup in HeightMapGenerator cannot represent.
+        only the sky, and writes the result as a .glb point cloud (a POINTS-mode mesh
+        with per-vertex color, loadable in Blender, macOS Quick Look, online glTF
+        viewers, etc.). Unlike the height map itself, this applies no ground-plane Y
+        filter and no grid binning — it is the raw scene geometry (cliffs, overhangs,
+        distant peaks included) that the single-sample-per-cell grid lookup in
+        HeightMapGenerator cannot represent.
         """
         d = depth.depth.astype(np.float32)
         if sky_mask is not None and sky_mask.shape == d.shape:

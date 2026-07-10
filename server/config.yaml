@@ -127,7 +127,7 @@ stages:
                                  # cutoff's assumption that near terrain is already observed.
     save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
                                  # panorama depth (no ground-plane Y filter, no grid binning),
-                                 # written to <build>/ground_point_cloud.ply
+                                 # written to <build>/ground_point_cloud.glb
     point_cloud_stride: 4       # take every Nth panorama pixel per axis before unprojecting
     min_forward_samples: 4      # minimum forward-projected panorama pixels landing in one grid
                                  # cell before its single inverse-mapped sample is overridden by
