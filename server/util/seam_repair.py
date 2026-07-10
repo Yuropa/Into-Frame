@@ -18,6 +18,7 @@ def heal_seam(
     feather_px: int = 16,
     debug_dir: Path | None = None,
     debug_prefix: str = "seam",
+    log_fn: Callable[[str], None] | None = None,
 ) -> PIL.Image.Image:
     """
     Content-aware repair of a band straddling the boundary of `mask` — the
@@ -50,8 +51,18 @@ def heal_seam(
     debug_dir:       when set, the feathered blend mask actually used is
                       written here for inspection.
     debug_prefix:    filename prefix for the debug mask.
+    log_fn:          optional callback (e.g. a pipeline stage's log_warning)
+                      invoked when the heal is skipped entirely, so a no-op
+                      here shows up somewhere other than a silently
+                      unblended seam in the final image.
     """
     if not mask.any() or mask.all():
+        if log_fn is not None:
+            coverage = mask.mean()
+            log_fn(
+                f"[{debug_prefix}] heal_seam: mask has no boundary to heal "
+                f"(coverage={coverage:.3%}) — skipping, image returned unchanged"
+            )
         return image
 
     half = max(1, band_width_px // 2)
@@ -60,6 +71,11 @@ def heal_seam(
     band = dilated & ~eroded
 
     if not band.any():
+        if log_fn is not None:
+            log_fn(
+                f"[{debug_prefix}] heal_seam: computed band is empty "
+                f"(band_width_px={band_width_px}) — skipping, image returned unchanged"
+            )
         return image
 
     arr = np.array(image.convert("RGB"))
@@ -96,6 +112,7 @@ def heal_wrap_seam(
     eligible_mask: np.ndarray | None = None,
     debug_dir: Path | None = None,
     debug_prefix: str = "wrap_seam",
+    log_fn: Callable[[str], None] | None = None,
 ) -> PIL.Image.Image:
     """
     Repairs the left/right wraparound discontinuity of an equirectangular
@@ -129,6 +146,11 @@ def heal_wrap_seam(
                     inspected step by step.
     debug_prefix:   filename prefix for the debug images, so multiple calls
                     (e.g. one per panorama) don't clobber each other's output.
+    log_fn:         optional callback (e.g. a pipeline stage's log_warning)
+                    invoked when the heal is skipped entirely — e.g. because
+                    eligible_mask doesn't reach the wrap column on this
+                    particular panorama — so the raw unblended seam left
+                    behind isn't a silent failure.
     """
     w, h = image.size
     half = w // 2
@@ -138,12 +160,21 @@ def heal_wrap_seam(
     rolled_pil = PIL.Image.fromarray(rolled)
 
     sw = max(1, seam_width_px // 2)
+    col_lo, col_hi = half - sw, half + sw
     band = np.zeros((h, w), dtype=np.uint8)
-    band[:, half - sw: half + sw] = 255
 
     if eligible_mask is not None:
+        # Restrict to eligible rows, but keep the band a clean solid
+        # rectangle rather than tracing eligible_mask's per-pixel contour —
+        # intersecting pixel-for-pixel lets the ragged shroud/horizon edge
+        # cut straight across the strip, leaving FLUX a thin, jagged sliver
+        # to fill instead of a simple vertical band, which is what was
+        # producing noise instead of coherent cloud continuation.
         rolled_eligible = np.roll(eligible_mask, half, axis=1)
-        band[~rolled_eligible] = 0
+        row_has_eligible = rolled_eligible[:, col_lo:col_hi].any(axis=1)
+        band[row_has_eligible, col_lo:col_hi] = 255
+    else:
+        band[:, col_lo:col_hi] = 255
 
     if debug_dir is not None:
         debug_dir = Path(debug_dir)
@@ -151,6 +182,11 @@ def heal_wrap_seam(
         PIL.Image.fromarray(band, mode="L").save(debug_dir / f"{debug_prefix}_2_mask_raw.png")
 
     if not band.any():
+        if log_fn is not None:
+            reason = "eligible_mask doesn't reach the wrap-seam column" if eligible_mask is not None else "seam_width_px produced an empty band"
+            log_fn(
+                f"[{debug_prefix}] heal_wrap_seam: {reason} — skipping, image returned unchanged"
+            )
         return image
 
     mask_pil = PIL.Image.fromarray(band, mode="L")

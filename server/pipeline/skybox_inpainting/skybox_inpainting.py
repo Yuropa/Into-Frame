@@ -454,6 +454,7 @@ class SkyboxInpaintingStage(PipelineStage):
             feather_px=seam_feather_px,
             debug_dir=self.output or self.temp,
             debug_prefix="panorama_sky_seam",
+            log_fn=self.log_warning,
         )
 
         if self.temp is not None:
@@ -488,11 +489,12 @@ class SkyboxInpaintingStage(PipelineStage):
         result_pil = heal_wrap_seam(
             result_pil,
             inpaint_fn=_sky_seam_inpaint,
-            seam_width_px=128,
-            feather_px=20,
+            seam_width_px=256,
+            feather_px=32,
             eligible_mask=flux_mask_arr,
             debug_dir=self.temp,
             debug_prefix="sky_wrap_seam",
+            log_fn=self.log_warning,
         )
         flux.close()
 
