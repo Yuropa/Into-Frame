@@ -23,6 +23,16 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     depth_filter_threshold / depth_filter_edge_threshold:
         Same semantics as PanoramaInpaintingConfiguration — see that class.
 
+    max_object_area_fraction (float, default 0.15):
+        Same semantics as PanoramaInpaintingConfiguration — any single SAM mask
+        covering more than this fraction of the panorama is dropped before it
+        reaches the union, rather than treated as a removable foreground object.
+        Without this, a SAM mask that captures a whole background plane (sky,
+        open water, sand) can slip past the depth filter — such a mask sits at
+        or near its own row's baseline by construction, so DepthObjectFilter's
+        signal 1 reads it as "at the background" rather than clearly rejecting
+        it — and ObjectClear ends up asked to regenerate most of the panorama.
+
     mask_dilation_px (int, default 15):
         Pixels to dilate the unioned foreground mask before removal, giving
         ObjectClear boundary context to blend cleanly.
@@ -48,6 +58,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         use_depth_filter: bool = True,
         depth_filter_threshold: float = 0.05,
         depth_filter_edge_threshold: float = 0.005,
+        max_object_area_fraction: float = 0.15,
         mask_dilation_px: int = 15,
         guidance_scale: float = 2.5,
         num_inference_steps: int = 30,
@@ -58,6 +69,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         self.use_depth_filter = use_depth_filter
         self.depth_filter_threshold = depth_filter_threshold
         self.depth_filter_edge_threshold = depth_filter_edge_threshold
+        self.max_object_area_fraction = max_object_area_fraction
         self.mask_dilation_px = mask_dilation_px
         self.guidance_scale = guidance_scale
         self.num_inference_steps = num_inference_steps
@@ -142,66 +154,84 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
             self.log_info(f"{result.length} object(s) found")
 
             union_mask = np.zeros((h, w), dtype=np.float32)
+            oversized = 0
             for mask in result.masks:
                 mask_arr = np.asarray(mask, dtype=np.float32)
                 if mask_arr.shape != (h, w):
                     mask_arr = np.array(
                         PILImage.fromarray((mask_arr * 255).astype(np.uint8), mode="L").resize((w, h), PILImage.NEAREST)
                     ).astype(np.float32) / 255.0
+                # A mask this large is a background plane (sky, open water, sand) that SAM
+                # segmented as a coherent region, not a removable foreground object — reject
+                # it here rather than letting it dominate the union (see max_object_area_fraction).
+                area_fraction = float((mask_arr > 0.5).sum()) / (h * w)
+                if area_fraction > self.config.max_object_area_fraction:
+                    oversized += 1
+                    continue
                 union_mask = np.maximum(union_mask, mask_arr)
 
-            dilated_union = (binary_dilation(
-                union_mask > 0.5,
-                iterations=self.config.mask_dilation_px,
-            ).astype(np.uint8)) * 255
-            mask_pil = PILImage.fromarray(dilated_union, mode="L")
+            if oversized:
+                self.log_info(
+                    f"  Area filter: dropped {oversized}/{result.length} mask(s) too large to be "
+                    f"a foreground object (>{self.config.max_object_area_fraction:.0%} of panorama)"
+                )
 
-            if self.temp is not None:
-                mask_pil.save(self.temp / "foreground_mask.png")
+            if not union_mask.any():
+                self.log_info("Nothing left after area filter, skipping removal")
+                terrain_pil = original_pil
+            else:
+                dilated_union = (binary_dilation(
+                    union_mask > 0.5,
+                    iterations=self.config.mask_dilation_px,
+                ).astype(np.uint8)) * 255
+                mask_pil = PILImage.fromarray(dilated_union, mode="L")
 
-            objectclear_pil = self._objectclear.inpaint(
-                original_pil,
-                mask_pil,
-                temp_path=self.temp,
-                guidance_scale=self.config.guidance_scale,
-                num_inference_steps=self.config.num_inference_steps,
-            )
+                if self.temp is not None:
+                    mask_pil.save(self.temp / "foreground_mask.png")
 
-            if self.temp is not None:
-                objectclear_pil.save(self.temp / "panorama_objectclear_raw.png")
+                objectclear_pil = self._objectclear.inpaint(
+                    original_pil,
+                    mask_pil,
+                    temp_path=self.temp,
+                    guidance_scale=self.config.guidance_scale,
+                    num_inference_steps=self.config.num_inference_steps,
+                )
 
-            # ObjectClear returns at its native ~512px-short-side inference resolution.
-            # Supersample before the final upscale to panorama resolution — halves the
-            # LANCZOS stretch ratio (same trick PanoramaInpaintingStage uses for Flux)
-            # so the removed region isn't visibly softer than the rest of the panorama.
-            if objectclear_pil.size != (w, h):
-                if self.config.supersample_result:
-                    if self._samp is None:
-                        self._samp = ImageSupersampling(self.preferred_device)
-                    objectclear_pil = self._samp.supersample(Image(objectclear_pil), self.temp).image
+                if self.temp is not None:
+                    objectclear_pil.save(self.temp / "panorama_objectclear_raw.png")
+
+                # ObjectClear returns at its native ~512px-short-side inference resolution.
+                # Supersample before the final upscale to panorama resolution — halves the
+                # LANCZOS stretch ratio (same trick PanoramaInpaintingStage uses for Flux)
+                # so the removed region isn't visibly softer than the rest of the panorama.
                 if objectclear_pil.size != (w, h):
-                    objectclear_pil = objectclear_pil.resize((w, h), PILImage.LANCZOS)
+                    if self.config.supersample_result:
+                        if self._samp is None:
+                            self._samp = ImageSupersampling(self.preferred_device)
+                        objectclear_pil = self._samp.supersample(Image(objectclear_pil), self.temp).image
+                    if objectclear_pil.size != (w, h):
+                        objectclear_pil = objectclear_pil.resize((w, h), PILImage.LANCZOS)
 
-            if self.temp is not None:
-                objectclear_pil.save(self.temp / "panorama_objectclear_upscaled.png")
+                if self.temp is not None:
+                    objectclear_pil.save(self.temp / "panorama_objectclear_upscaled.png")
 
-            # ObjectClear's own output is a full-panorama resample (it runs inference on
-            # the whole image, not just the masked region), so pixels outside the mask
-            # drift from the source even though nothing there should change. Feather-
-            # composite back onto original_pil, restoring everything but the dilated
-            # foreground region — mirrors PanoramaInpaintingStage's compositing.
-            feather_radius = max(8, min(w, h) // 100)
-            feather_arr = np.array(
-                mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-            ).astype(np.float32)[..., np.newaxis] / 255.0
-            composited = (
-                np.array(original_pil) * (1.0 - feather_arr)
-                + np.array(objectclear_pil) * feather_arr
-            ).astype(np.uint8)
-            terrain_pil = PILImage.fromarray(composited)
+                # ObjectClear's own output is a full-panorama resample (it runs inference on
+                # the whole image, not just the masked region), so pixels outside the mask
+                # drift from the source even though nothing there should change. Feather-
+                # composite back onto original_pil, restoring everything but the dilated
+                # foreground region — mirrors PanoramaInpaintingStage's compositing.
+                feather_radius = max(8, min(w, h) // 100)
+                feather_arr = np.array(
+                    mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
+                ).astype(np.float32)[..., np.newaxis] / 255.0
+                composited = (
+                    np.array(original_pil) * (1.0 - feather_arr)
+                    + np.array(objectclear_pil) * feather_arr
+                ).astype(np.uint8)
+                terrain_pil = PILImage.fromarray(composited)
 
-            if self.temp is not None:
-                terrain_pil.save(self.temp / "panorama_terrain.png")
+                if self.temp is not None:
+                    terrain_pil.save(self.temp / "panorama_terrain.png")
 
         self.finish_progress(remove_task)
 
