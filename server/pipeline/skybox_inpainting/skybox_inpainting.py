@@ -186,8 +186,8 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        seam_heal_width_px: int = 48,
-        seam_heal_feather_px: int = 48,
+        seam_heal_width_px: int = 64,
+        seam_heal_feather_px: int = 96,
         seam_heal_method: str = "telea",
         # Fraction of panorama height the fill mask dilates into the sky before FLUX
         # generates (see "Pass 2" below) — buries the real jagged horizon/mountain
@@ -435,13 +435,23 @@ class SkyboxInpaintingStage(PipelineStage):
         # boundary that far into the sky, so healing around the original
         # sky_mask edge misses the real seam entirely once shroud_radius
         # exceeds half the heal band width.
+        #
+        # feather_px is scaled to shroud_radius rather than left as a fixed
+        # constant: shroud_radius grows with panorama height, so on a tall
+        # panorama a fixed feather only reaches a short way back down from
+        # flux_mask_arr's edge, well short of the true horizon — the healed
+        # band ends up stranded shroud_radius px up into the sky instead of
+        # blending continuously down toward the horizon. band_width_px is
+        # deliberately left alone (not scaled) — it's the Telea fill depth,
+        # and per the note above, growing it risks banding.
+        seam_feather_px = max(self.config.seam_heal_feather_px, shroud_radius)
         result_pil = heal_seam(
             result_pil,
             ~flux_mask_arr,
             band_width_px=self.config.seam_heal_width_px,
             wrap_horizontal=True,
             method=self.config.seam_heal_method,
-            feather_px=self.config.seam_heal_feather_px,
+            feather_px=seam_feather_px,
             debug_dir=self.output or self.temp,
             debug_prefix="panorama_sky_seam",
         )
