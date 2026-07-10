@@ -179,19 +179,28 @@ class PanoramaRegionStage(PipelineStage):
 
         self.advance_progress(task)
         self.finish_progress(task)
-        self._write_debug(result, type_idx_map)
+        self._write_debug(result, type_idx_map, panorama.rgb())
         return context
 
-    def _write_debug(self, result: PanoramaRegionResult, type_idx_map: np.ndarray):
+    def _write_debug(
+        self, result: PanoramaRegionResult, type_idx_map: np.ndarray, panorama_rgb: PILImage.Image, overlay_alpha: float = 0.5
+    ):
         if self.output is None:
             return
 
         with open(self.output / "regions.json", "w") as f:
             json.dump(result.encode(), f, indent=2)
 
-        PILImage.fromarray(colorize_region_type_map(type_idx_map)).save(
-            self.output / "label_overlay.png"
-        )
+        region_rgb = colorize_region_type_map(type_idx_map)
+        PILImage.fromarray(region_rgb).save(self.output / "label_overlay.png")
+
+        # Blend the colorized region map over the source panorama so regions can
+        # be checked against the actual photo content, not just the flat map.
+        pano_arr = np.array(panorama_rgb.convert("RGB").resize(
+            (type_idx_map.shape[1], type_idx_map.shape[0]), PILImage.LANCZOS
+        )).astype(np.float32)
+        blended = (pano_arr * (1.0 - overlay_alpha) + region_rgb.astype(np.float32) * overlay_alpha).clip(0, 255)
+        PILImage.fromarray(blended.astype(np.uint8)).save(self.output / "label_overlay_on_panorama.png")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.panorama_regions(ContextKey.PANORAMA_REGIONS) is not None
