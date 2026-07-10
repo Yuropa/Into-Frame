@@ -24,6 +24,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         noise_amplitude: float = 0.05,
         noise_blend_floor: float = 0.15,
         texture_tile_factor: float = 8.0,
+        water_depression_m: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.inner_min_dist = inner_min_dist
@@ -33,6 +34,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.noise_amplitude = noise_amplitude
         self.noise_blend_floor = noise_blend_floor
         self.texture_tile_factor = texture_tile_factor
+        self.water_depression_m = water_depression_m
 
 
 class TerrainMeshStage(PipelineStage):
@@ -47,10 +49,16 @@ class TerrainMeshStage(PipelineStage):
       4. Original image via pinhole projection.
       5. Geometry-only (no UVs).
 
+    Where ContextKey.REGION_MAP identifies WATER cells, those vertices are
+    depressed water_depression_m below the water surface in the terrain mesh
+    (so an eventually-animated water plane never clips through the lakebed),
+    and a separate flat water Mesh is written to ContextKey.WATER_MESH.
+
     Input key       (SemanticKey.INPUT)      → ContextKey.HEIGHT_MAP
     Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA        (optional)
     Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (optional)
     Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH
+                                              → ContextKey.WATER_MESH     (optional)
     """
 
     @classmethod
@@ -128,8 +136,10 @@ class TerrainMeshStage(PipelineStage):
                     else:
                         self.log_warning("No texture source — geometry-only terrain mesh")
 
+        region_map = context.input_depth(ContextKey.REGION_MAP)
+
         # ── Generate mesh ──────────────────────────────────────────────────────
-        mesh = TerrainMeshGenerator.generate(
+        mesh, water_mesh = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
             inner_min_dist=cfg.inner_min_dist,
@@ -144,6 +154,8 @@ class TerrainMeshStage(PipelineStage):
             intrinsics=intrinsics,
             precomputed_texture=precomputed_image,
             texture_tile_factor=tile_factor,
+            region_map=region_map,
+            water_depression_m=cfg.water_depression_m,
         )
         self.advance_progress(task)
 
@@ -156,6 +168,16 @@ class TerrainMeshStage(PipelineStage):
 
         if self.temp is not None:
             mesh.save(self.temp / "terrain.glb")
+
+        if water_mesh is not None:
+            context.add_mesh(ContextKey.WATER_MESH, water_mesh)
+            self.log_info(
+                f"Water mesh: {water_mesh.vertex_count} vertices, {water_mesh.face_count} triangles"
+            )
+            if self.temp is not None:
+                water_mesh.save(self.temp / "water.glb")
+        elif region_map is None:
+            self.log_info("No region map in context — skipping water mesh")
 
         self.finish_progress(task)
         return context
@@ -187,6 +209,20 @@ class TerrainMeshStage(PipelineStage):
             else "panorama / pinhole / none"
         )
 
+        stats = {
+            "Vertices": f"{mesh.vertex_count:,}",
+            "Triangles": f"{mesh.face_count:,}",
+            "Grid extent": f"{grid_size:.0f} m",
+            "Inner min dist": f"{cfg.inner_min_dist:.1f} m",
+            "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
+            "Texture": texture_desc,
+        }
+
+        water_mesh = context.mesh(ContextKey.WATER_MESH)
+        if water_mesh is not None:
+            stats["Water mesh"] = f"{water_mesh.vertex_count:,} vertices, {water_mesh.face_count:,} triangles"
+            stats["Water depression"] = f"{cfg.water_depression_m:.2f} m"
+
         return ReportSection(
             stage_name=self.name,
             title="Terrain Mesh Generation",
@@ -195,12 +231,5 @@ class TerrainMeshStage(PipelineStage):
                 "Vertex density is highest near the camera using logarithmic spacing. "
                 "Multi-octave smooth noise is blended in with distance."
             ),
-            stats={
-                "Vertices": f"{mesh.vertex_count:,}",
-                "Triangles": f"{mesh.face_count:,}",
-                "Grid extent": f"{grid_size:.0f} m",
-                "Inner min dist": f"{cfg.inner_min_dist:.1f} m",
-                "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
-                "Texture": texture_desc,
-            },
+            stats=stats,
         )

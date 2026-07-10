@@ -10,6 +10,7 @@ from util.depth_utils import Depth
 from util.panorama_utils import Panorama
 from scene.camera import CameraIntrinsics
 from scene.mesh import Mesh
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
 class TerrainMeshGenerator:
@@ -29,7 +30,9 @@ class TerrainMeshGenerator:
         intrinsics: Optional[CameraIntrinsics] = None,
         precomputed_texture: Optional[PIL.Image.Image] = None,
         texture_tile_factor: float = 1.0,
-    ) -> Mesh:
+        region_map: Optional[Depth] = None,
+        water_depression_m: float = 0.5,
+    ) -> tuple[Mesh, Optional[Mesh]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
         disc sampling and Delaunay triangulation.
@@ -41,6 +44,16 @@ class TerrainMeshGenerator:
         panorama  : Panorama for equirectangular vertex-colour baking (full 360° coverage).
         texture   : PIL image for pinhole UV mapping via CameraIntrinsics (FOV-limited).
         intrinsics: required when texture is supplied.
+        region_map: optional top-down RegionType grid (same convention as height_map).
+                    Where present, WATER vertices are depressed below the water
+                    surface (so an animated water plane never clips through the
+                    lakebed) and a separate flat water Mesh is returned, built from
+                    the exact same triangulation so its shoreline matches the
+                    terrain mesh's water hole precisely.
+        water_depression_m: how far below the water surface the lakebed is carved.
+
+        Returns (terrain_mesh, water_mesh). water_mesh is None when region_map is
+        not supplied or the panorama has no detected water.
         """
         z_far  = z_far if z_far is not None else grid_size_meters / 2.0
         x_half = grid_size_meters / 2.0
@@ -73,6 +86,24 @@ class TerrainMeshGenerator:
         ).astype(np.float32)
         Y_pos = np.nan_to_num(Y_pos, nan=0.0)
 
+        # ── Water mask ──────────────────────────────────────────────────────
+        # Sampled from the same reconstructed grid the DEM solve already pinned
+        # flat/sloped at the water surface (see TerrainReconstructionStage's
+        # WATER_CHAINS handling), so Y_pos at water vertices is already the
+        # correct water-surface elevation — captured here, before noise and the
+        # lakebed depression below are applied to the terrain copy.
+        is_water = None
+        water_Y = None
+        if region_map is not None:
+            rm = region_map.depth
+            h_rm, w_rm = rm.shape
+            row_rm = ((Z_pos + z_far)  / (2.0 * z_far)   * (h_rm - 1)).clip(0, h_rm - 1)
+            col_rm = ((X_pos + x_half) / grid_size_meters * (w_rm - 1)).clip(0, w_rm - 1)
+            region_idx = map_coordinates(rm, [row_rm, col_rm], order=0, mode="nearest")
+            is_water = region_idx.astype(np.int16) == int(RegionType.WATER)
+            if is_water.any():
+                water_Y = Y_pos.copy()
+
         # ── Noise, blended in with distance from origin ───────────────────
         noise_tex = TerrainMeshGenerator._smooth_noise((256, 256), seed=noise_seed)
         nr = (row_coords / (h_hm - 1) * 255).clip(0, 255)
@@ -85,7 +116,18 @@ class TerrainMeshGenerator:
         # disc even where the reconstructed height map itself has real relief.
         r_end = np.hypot(x_half, z_far)
         blend = noise_blend_floor + (1.0 - noise_blend_floor) * (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
-        Y_pos += noise_vals * noise_amplitude * blend
+        noise_add = noise_vals * noise_amplitude * blend
+        if is_water is not None:
+            # A lakebed shouldn't get the same surface-relief noise as dry
+            # ground — zero it under water so the depression below stays clean.
+            noise_add = np.where(is_water, 0.0, noise_add)
+        Y_pos += noise_add
+
+        if water_Y is not None:
+            # Carve the lakebed a fixed margin below the (already correct,
+            # noise-free) water surface so an animated water plane's wave
+            # amplitude never exposes the terrain underneath it.
+            Y_pos = np.where(is_water, water_Y - water_depression_m, Y_pos)
 
         # ── Vertex array ──────────────────────────────────────────────────
         vertices = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
@@ -135,7 +177,33 @@ class TerrainMeshGenerator:
         else:
             tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
-        return Mesh(tri_mesh)
+        # ── Separate flat water mesh ─────────────────────────────────────────
+        # Built from the same triangulation as the terrain mesh (faces whose
+        # three vertices are all WATER), so its shoreline lines up exactly with
+        # the depressed lakebed above — no gap, no overlap. Uses the pre-noise,
+        # pre-depression water elevation, so it's flat wherever the DEM solve's
+        # water-chain pinning made it flat.
+        water_mesh: Optional[Mesh] = None
+        if water_Y is not None:
+            water_face_mask = is_water[faces].all(axis=1)
+            if water_face_mask.any():
+                water_vertices = np.stack([X_pos, water_Y, Z_pos], axis=-1).astype(np.float32)
+                water_material = trimesh.visual.material.PBRMaterial(
+                    baseColorFactor=[0.10, 0.30, 0.45, 0.75],
+                    metallicFactor=0.0,
+                    roughnessFactor=0.15,
+                    alphaMode="BLEND",
+                )
+                water_tri_mesh = trimesh.Trimesh(
+                    vertices=water_vertices,
+                    faces=faces[water_face_mask],
+                    visual=trimesh.visual.TextureVisuals(material=water_material),
+                    process=False,
+                )
+                water_tri_mesh.remove_unreferenced_vertices()
+                water_mesh = Mesh(water_tri_mesh)
+
+        return Mesh(tri_mesh), water_mesh
 
     # ── Point generation ──────────────────────────────────────────────────────
 

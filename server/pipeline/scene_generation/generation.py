@@ -234,6 +234,13 @@ class SceneGenerationStage(PipelineStage):
             terrain.name = "terrain"
             scene.add_object(terrain)
 
+        water_mesh = context.input_mesh(ContextKey.WATER_MESH)
+        if water_mesh is not None:
+            self.log_info("Adding water mesh to scene")
+            water = Object3D.mesh(ContextKey.WATER_MESH, x=0.0, y=0.0, z=0.0)
+            water.name = "water"
+            scene.add_object(water)
+
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:
             self.log_info("Adding environment lighting to scene")

@@ -37,6 +37,7 @@ class ContextKey:
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
+    WATER_MESH = "water_mesh"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
     OBJECT_CORRELATION = "object_correlation"
@@ -83,6 +84,7 @@ class ContextKey:
         "height_map",
         "height_map_params",
         "terrain_mesh",
+        "water_mesh",
         "lighting",
         "recognize_tags",
         "object_correlation",

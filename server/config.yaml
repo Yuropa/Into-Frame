@@ -242,6 +242,10 @@ stages:
     noise_blend_floor: 0.15 # minimum noise blend fraction at the camera origin (was 0, which left
                              # the ground directly under the user perfectly noise-free); ramps up
                              # to 1.0 at the domain corner as before
+    water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
+                             # WATER cells), so an eventually-animated water plane's wave amplitude
+                             # never exposes the terrain underneath it. Also emits a separate flat
+                             # water mesh (WATER_MESH) at the un-depressed water surface elevation.
 
   - name: Terrain Texture Generation
     stage: TerrainTextureGenerationStage
