@@ -44,14 +44,21 @@ class HeightMapGenerator:
         certainty_falloff_meters: float = 20.0,
         min_forward_samples: int = 4,
         debug_dir: Optional[Path] = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
 
-        Returns (height_array, certainty_array, cell_relief_array, cell_slope_array),
-        all (grid_resolution, grid_resolution) float32.  certainty is in [0, 1]:
+        Returns (height_array, certainty_array, cell_relief_array, cell_slope_array,
+        true_observed_array). The first four are (grid_resolution, grid_resolution)
+        float32; true_observed_array is bool. certainty is in [0, 1]:
         sin²(depression_angle) for cells with any direct observation (primary or
-        panorama depth), 0 for pure interpolation.  cell_relief is the raw Y range
+        panorama depth), 0 for pure interpolation -- but it decays with distance and
+        is nonzero even on the synthetic flat-ground-prior cells, so it is a "how
+        much do we trust this" signal, not a "is this a real point" signal.
+        true_observed_array is that latter signal: True only for cells with a
+        genuine direct measurement (primary projection, dense forward-projected
+        stats, or panorama fill), independent of distance-based certainty decay and
+        excluding both the flat-ground prior and interpolated fill. cell_relief is the raw Y range
         (max - min, in metres) among all depth samples that landed in that one grid
         cell before being collapsed to their mean -- evidence of real vertical
         structure (e.g. a cliff face narrower than one grid cell) that survives only
@@ -154,7 +161,7 @@ class HeightMapGenerator:
 
             if not np.any(valid):
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy(), zeros.copy(), zeros.copy()
+                return zeros, zeros.copy(), zeros.copy(), zeros.copy(), np.zeros((grid_resolution, grid_resolution), dtype=bool)
 
             height_map = np.full((grid_resolution, grid_resolution), np.nan, dtype=np.float32)
             height_map[valid] = Y_grid[valid]
@@ -200,7 +207,7 @@ class HeightMapGenerator:
             Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
             if len(Xg) == 0:
                 zeros = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
-                return zeros, zeros.copy(), zeros.copy(), zeros.copy()
+                return zeros, zeros.copy(), zeros.copy(), zeros.copy(), np.zeros((grid_resolution, grid_resolution), dtype=bool)
 
             x_edges = np.linspace(-half, half, grid_resolution + 1)
             z_edges = np.linspace(-half, half, grid_resolution + 1)
@@ -265,6 +272,16 @@ class HeightMapGenerator:
                 nadir_exclusion_radius=nadir_exclusion_radius,
             )
 
+        # True observed mask: cells with a genuine direct measurement (primary
+        # projection, dense forward-projected stats, or panorama fill) that survived
+        # flood-fill -- captured before the synthetic flat-ground prior below
+        # overwrites cells with a fabricated value, and before _interpolate fills
+        # remaining gaps, so it never includes anything but real point-cloud data.
+        # Unlike `certainty` (continuous, decays with distance and is nonzero even
+        # on the synthetic flat-prior cells), this is what downstream stages should
+        # use to decide "is this a real point" rather than "how much do we trust it."
+        true_observed = ~np.isnan(height_map)
+
         # Flat ground prior: pin all cells within the nadir exclusion radius to
         # -camera_height_meters. The equirectangular depth model is unreliable near
         # the nadir, and the ground directly under the user is expected to be
@@ -328,8 +345,11 @@ class HeightMapGenerator:
             HeightMapGenerator._save_radial_profile(
                 result, certainty, grid_size_meters, debug_dir / "heightmap_radial_profile.json"
             )
+            PIL.Image.fromarray((true_observed * 255).astype(np.uint8), "L").save(
+                debug_dir / "heightmap_true_observed_mask.png"
+            )
 
-        return result, certainty, cell_relief, cell_slope_deg
+        return result, certainty, cell_relief, cell_slope_deg, true_observed
 
     @staticmethod
     def _forward_project_cell_stats(

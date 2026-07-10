@@ -157,18 +157,12 @@ stages:
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
     solve_resolution: 512           # downsample to this for the harmonic solve, upsample after
-    confidence_threshold: 0.18      # cells above this are held fixed at their observed elevation;
-                                     # kept just above flat_zone_certainty (0.15) so the nadir flat
-                                     # prior stays a soft, solver-overridable guess while real nearby
-                                     # observations become anchors as soon as they're reasonably
-                                     # certain, instead of leaving a large unconstrained disc that
-                                     # the harmonic solve can only render maximally smooth.
-                                     # Reachability depends on Height Map's certainty_falloff_meters
-                                     # (currently 20 m): real ground crosses this threshold out to
-                                     # ~43 m from camera. If that falloff value ever changes, sanity
-                                     # check that 0.18 is still crossable — it previously wasn't
-                                     # (certainty maxed at ~0.047 outside the nadir disc when the
-                                     # falloff was tied to camera_height_meters ≈ 1 m).
+    # Cells are held fixed at their observed elevation based on HEIGHT_MAP_OBSERVED_MASK
+    # (a genuine direct point-cloud measurement), not HEIGHT_MAP_CERTAINTY -- certainty
+    # decays with distance from camera and would leave most real terrain beyond ~43 m
+    # (with the old 0.18 threshold and 20 m certainty_falloff_meters) unpinned, treated
+    # identically to an unobserved gap. The synthetic nadir flat-ground prior is never
+    # part of the observed mask, so it stays a soft, solver-overridable guess as before.
     ridge_min_anchor_distance: 0.2  # fraction of grid half-radius; chains closer than this are skipped
                                      # (assumed already captured by observed terrain — lowered from
                                      # 0.5 so nearer ridges/hills still anchor the solve instead of
@@ -179,13 +173,11 @@ stages:
     river_valley_depth: 0.5         # metres to lower river nodes below observed terrain
     river_drop_per_segment: 0.05    # additional metres drop per ordered river segment
     lake_y_range_threshold: 0.3     # Y-range threshold (m) to distinguish flat lakes from sloped water
-    # Cliff mask: combines (a) measured slope on directly-observed, high-certainty
-    # terrain — real ground truth, strongest close to the camera — with (b) distant
-    # ridge-chain silhouette jaggedness, the only steepness signal available for
-    # mountains beyond depth range. Written to context as CLIFF_MASK for reuse by
-    # Terrain Noise Refinement.
-    cliff_certainty_threshold: 0.35 # HEIGHT_MAP_CERTAINTY must be at least this to count a
-                                     # cell's measured slope as real (not interpolated fill)
+    # Cliff mask: combines (a) measured slope on directly-observed terrain (gated on
+    # HEIGHT_MAP_OBSERVED_MASK, not certainty) — real ground truth, strongest close to
+    # the camera — with (b) distant ridge-chain silhouette jaggedness, the only
+    # steepness signal available for mountains beyond depth range. Written to context
+    # as CLIFF_MASK for reuse by Terrain Noise Refinement.
     cliff_slope_angle_low_deg: 50.0  # measured slope below this → not a cliff (strength 0)
     cliff_slope_angle_high_deg: 75.0 # measured slope at/above this → fully a cliff (strength 1)
     cliff_max_slope_angle_deg: 82.0  # slope envelope cap where cliff_mask > 0, vs. the talus

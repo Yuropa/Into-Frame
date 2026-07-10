@@ -19,6 +19,8 @@ Pipeline position: after TerrainReconstructionStage, before TerrainMeshStage.
 Reads:
   ContextKey.HEIGHT_MAP       (Depth)          — reconstructed DEM
   ContextKey.HEIGHT_MAP_PARAMS (dict, optional) — grid_size_meters
+  ContextKey.HEIGHT_MAP_OBSERVED_MASK (Depth, optional) — true direct-observation
+                                mask; real cells are restored after all passes run
   ContextKey.ROAD_SKELETON    (Depth, optional) — binary road/trail mask
 
 Writes:
@@ -130,6 +132,19 @@ class TerrainNoiseRefinementStage(PipelineStage):
 
         terrain = hm_depth.depth.copy().astype(np.float64)
         H, W = terrain.shape
+
+        # True observed mask: cells with a genuine direct point-cloud measurement
+        # (see HeightMapGenerator.generate docstring / HEIGHT_MAP_OBSERVED_MASK).
+        # By this point TerrainReconstructionStage has already spliced real values
+        # back into `terrain` at every such cell, so this snapshot is exactly what
+        # gets restored at the end of this stage, undoing whatever any of the
+        # passes below did to real data.
+        observed_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+        true_observed = (
+            observed_depth.depth.astype(bool) if observed_depth is not None and observed_depth.depth.shape == (H, W)
+            else np.zeros((H, W), dtype=bool)
+        )
+        original_terrain = terrain.copy()
 
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
@@ -267,6 +282,23 @@ class TerrainNoiseRefinementStage(PipelineStage):
             self.log_info(
                 f"Terrain noise refinement: hydrological erosion "
                 f"(K={cfg.hydro_erodibility:.1e}, dt={cfg.hydro_dt:.0f}×{cfg.hydro_n_steps})"
+            )
+
+        # ── Restore observed data ─────────────────────────────────────────────
+        # A single restore covering every pass above (road grading, fBm noise,
+        # diffusion, peak sharpening, hydro erosion) uniformly, rather than adding
+        # per-pass exclusion logic to each one -- simpler, and avoids a pass like
+        # peak sharpening (a global tone-curve remap) producing local kinks from
+        # mid-algorithm exclusion. Real cells end up with zero net synthetic
+        # influence; CLIFF_MASK protection above (for distant/inferred ridge
+        # cliffs, which have no real data behind them) is unaffected by this and
+        # still applies on top.
+        if true_observed.any():
+            restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0)
+            terrain = terrain * (1.0 - restore_weight) + original_terrain * restore_weight
+            self.log_info(
+                f"Terrain noise refinement: {int(true_observed.sum())} px reverted "
+                f"to measured elevation"
             )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))

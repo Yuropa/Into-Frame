@@ -169,7 +169,7 @@ class HeightMapStage(PipelineStage):
                     f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.glb"
                 )
 
-        height_array, certainty_array, cell_relief_array, cell_slope_array = HeightMapGenerator.generate(
+        height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -197,6 +197,9 @@ class HeightMapStage(PipelineStage):
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_RELIEF, Depth(cell_relief_array))
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE, Depth(cell_slope_array))
+        context.add_depth(
+            ContextKey.HEIGHT_MAP_OBSERVED_MASK, Depth(true_observed_array.astype(np.float32))
+        )
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
             "grid_size_meters":    cfg.grid_size_meters,
