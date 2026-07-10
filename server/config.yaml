@@ -35,10 +35,7 @@ stages:
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
-    # TEMPORARY: swapped back on for PanoramaForegroundInpaintingStage (ObjectClear) below
-    # to avoid its model download. Re-disable and flip Panorama Foreground Inpainting back
-    # on once ObjectClear is cached, or once you're done testing without it.
-    enabled: true
+    enabled: false
     full_panorama: true
     use_depth_filter: true
     depth_filter_threshold: 0.05       # Signal 1: slack above row-max baseline (0.0 = strict)
@@ -53,7 +50,7 @@ stages:
 
   - name: Panorama Foreground Inpainting
     stage: PanoramaForegroundInpaintingStage
-    enabled: false  # TEMPORARY: disabled to avoid the ObjectClear model download; see above
+    enabled: true
     use_depth_filter: true
     depth_filter_threshold: 0.05
     depth_filter_edge_threshold: 0.005
