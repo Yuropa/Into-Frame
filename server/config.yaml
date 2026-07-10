@@ -190,6 +190,17 @@ stages:
     cliff_slope_angle_high_deg: 75.0 # measured slope at/above this → fully a cliff (strength 1)
     cliff_max_slope_angle_deg: 82.0  # slope envelope cap where cliff_mask > 0, vs. the talus
                                       # angle (ridge_max_slope_angle_deg) elsewhere
+    # Cliff-top shelf: a directly-observed cliff face whose top edge borders occluded
+    # terrain (camera saw the face, never the plateau beyond it) would otherwise be
+    # left as free nodes with no local anchor, letting the harmonic solve ramp that
+    # plateau down toward low ground fixed near the cliff's base. This projects a
+    # shallow shelf outward from each cliff blob's crest instead.
+    cliff_shelf_angle_deg: 8.0        # shallow assumed slope (°) projected outward from the
+                                       # crest into occluded terrain beyond it. 0 disables.
+    cliff_shelf_crest_percentile: 85.0 # within each connected measured-cliff blob, cells at/
+                                        # above this elevation percentile count as the crest
+    cliff_shelf_min_blob_cells: 20    # ignore measured-cliff blobs smaller than this (at solve
+                                       # resolution) to avoid anchoring on stray steep-pixel noise
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage

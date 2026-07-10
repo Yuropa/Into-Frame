@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from typing import Any, Optional
 from logging import Logger
-from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt
+from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt, label, binary_dilation
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 
@@ -68,6 +68,17 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         cliff_slope_angle_low_deg: float = 50.0,
         cliff_slope_angle_high_deg: float = 75.0,
         cliff_max_slope_angle_deg: float = 82.0,
+        # Cliff-top shelf: a directly-observed cliff face (measured_cliff) whose top
+        # edge borders occluded terrain (the camera never saw over the edge) would
+        # otherwise leave that plateau as free nodes with no local anchor, letting
+        # the harmonic solve ramp it down toward whatever low ground happens to be
+        # fixed nearby. Instead, project a shallow "shelf" outward from each cliff
+        # blob's crest and pin any free cell the shelf would place above its current
+        # value -- same "push up only" mechanism as the ridge slope envelope above,
+        # just with a near-flat angle instead of a steep talus descent.
+        cliff_shelf_angle_deg: float = 8.0,
+        cliff_shelf_crest_percentile: float = 85.0,
+        cliff_shelf_min_blob_cells: int = 20,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -83,6 +94,9 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.cliff_slope_angle_low_deg = cliff_slope_angle_low_deg
         self.cliff_slope_angle_high_deg = cliff_slope_angle_high_deg
         self.cliff_max_slope_angle_deg = cliff_max_slope_angle_deg
+        self.cliff_shelf_angle_deg = cliff_shelf_angle_deg
+        self.cliff_shelf_crest_percentile = cliff_shelf_crest_percentile
+        self.cliff_shelf_min_blob_cells = cliff_shelf_min_blob_cells
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -205,6 +219,13 @@ class TerrainReconstructionStage(PipelineStage):
             nd_zoom(cliff_mask, (H_s / H, W_s / W), order=1) if (H_s, W_s) != (H, W)
             else cliff_mask
         ).astype(np.float64)
+        # Measured-only (no distant ridge-silhouette jaggedness mixed in), since the
+        # shelf mechanism below needs blobs with real elevation data behind them --
+        # distant_cliff has no ground truth to anchor a crest to.
+        measured_cliff_s = (
+            nd_zoom(measured_cliff, (H_s / H, W_s / W), order=1) if (H_s, W_s) != (H, W)
+            else measured_cliff
+        ).astype(np.float64)
         min_anchor_m = cfg.ridge_min_anchor_distance * z_half
         n_anchored, n_skipped = 0, 0
 
@@ -237,6 +258,15 @@ class TerrainReconstructionStage(PipelineStage):
         # horizontal metre — this is the tightest envelope consistent with the
         # observed crest heights without assuming any particular cross-sectional
         # shape (Gaussian, parabola, etc.).
+        # profile_best is shared by the ridge envelope below and the cliff-shelf
+        # envelope that follows it -- both only ever raise a free cell's floor, so
+        # accumulating into one array before applying means whichever mechanism
+        # implies the higher floor for a given cell wins, regardless of which one
+        # runs first. Applying each separately would let the first mechanism to
+        # touch a cell "claim" it via ~fixed_mask, silently discarding a higher
+        # floor the other mechanism would have proposed for the same cell.
+        profile_best = np.full((H_s, W_s), -np.inf)
+
         if cfg.ridge_max_slope_angle_deg > 0.0 and n_anchored > 0:
             # Spatially-varying envelope angle: talus angle everywhere, ramped up
             # to cliff_max_slope_angle_deg wherever the cliff mask says this patch
@@ -245,7 +275,6 @@ class TerrainReconstructionStage(PipelineStage):
                 cfg.cliff_max_slope_angle_deg - cfg.ridge_max_slope_angle_deg
             ) * cliff_mask_s
             max_slope_tan_map = np.tan(np.radians(envelope_angle))
-            profile_best = np.full((H_s, W_s), -np.inf)
 
             for raw_chain in ridge_chains:
                 chain = np.asarray(raw_chain, dtype=np.float32)
@@ -272,20 +301,76 @@ class TerrainReconstructionStage(PipelineStage):
                 profile = nearest_elev - dist_m * max_slope_tan_map
                 profile_best = np.maximum(profile_best, profile)
 
-            # Pin slope nodes that the envelope places notably above observed terrain.
-            # No absolute elevation threshold: the envelope is relative to each crest.
-            apply = (
-                ~fixed_mask
-                & (profile_best > fixed_elev + 0.1)
-                & np.isfinite(profile_best)
+        # ── Cliff-top shelf ────────────────────────────────────────────────────
+        # A directly-observed cliff face (measured_cliff) whose top edge borders
+        # occluded terrain -- the camera saw the face but never the plateau beyond
+        # its top -- leaves that plateau as free nodes with no local anchor, so the
+        # harmonic solve ramps it down toward whatever low ground happens to be
+        # fixed nearby (usually the base of the cliff). Anchor a shallow shelf
+        # outward from each cliff blob's crest so those cells settle near the
+        # cliff-top elevation instead.
+        if cfg.cliff_shelf_angle_deg > 0.0 and measured_cliff.any():
+            cliff_blobs, n_cliff_blobs = label(
+                measured_cliff_s > 0.5, structure=np.ones((3, 3))
             )
-            fixed_mask[apply] = True
-            fixed_elev[apply] = profile_best[apply]
-            self.log_info(
-                f"Ridge slope envelope: {int(apply.sum())} slope nodes pinned "
-                f"(talus={cfg.ridge_max_slope_angle_deg:.0f}°, "
-                f"cliff={cfg.cliff_max_slope_angle_deg:.0f}° where cliff_mask > 0)"
-            )
+            # Fixed (observed) cells that border free (occluded) territory -- the
+            # true observed/occluded boundary, cheaper and more robust than
+            # computing a per-cell gradient direction.
+            free_adjacent = binary_dilation(~fixed_mask, structure=np.ones((3, 3))) & fixed_mask
+
+            shelf_crest_mask = np.zeros((H_s, W_s), dtype=bool)
+            shelf_crest_elev_map = np.zeros((H_s, W_s), dtype=np.float64)
+            n_shelf_blobs = 0
+
+            for blob_id in range(1, n_cliff_blobs + 1):
+                blob_mask = cliff_blobs == blob_id
+                if int(blob_mask.sum()) < cfg.cliff_shelf_min_blob_cells:
+                    continue
+                elev_cutoff = np.percentile(fixed_elev[blob_mask], cfg.cliff_shelf_crest_percentile)
+                candidate = blob_mask & (fixed_elev >= elev_cutoff) & free_adjacent
+                if not candidate.any():
+                    continue
+                # Collapse to one median elevation per blob rather than trusting
+                # individual pixels: grazing-incidence depth noise is worst right
+                # at a cliff's top edge, exactly the cells being selected here.
+                shelf_crest_mask[candidate] = True
+                shelf_crest_elev_map[candidate] = np.median(fixed_elev[candidate])
+                n_shelf_blobs += 1
+
+            if shelf_crest_mask.any():
+                dist_px, src = distance_transform_edt(~shelf_crest_mask, return_indices=True)
+                nearest_elev = shelf_crest_elev_map[src[0], src[1]]
+                dist_m = dist_px * cell_size_m
+                shelf_profile = nearest_elev - dist_m * np.tan(np.radians(cfg.cliff_shelf_angle_deg))
+                profile_best = np.maximum(profile_best, shelf_profile)
+                self.log_info(
+                    f"Cliff shelf: {n_shelf_blobs} crest blob(s) "
+                    f"(angle={cfg.cliff_shelf_angle_deg:.0f}°, "
+                    f"crest ≥ p{cfg.cliff_shelf_crest_percentile:.0f} of blob)"
+                )
+                if self.temp is not None:
+                    Depth(shelf_crest_mask.astype(np.float32)).save_debug_image(
+                        self.temp / "cliff_shelf_crest.png"
+                    )
+                    Depth(
+                        np.where(np.isfinite(shelf_profile), shelf_profile, 0.0).astype(np.float32)
+                    ).save_debug_image(self.temp / "cliff_shelf_profile.png")
+
+        # Pin free nodes that either envelope places notably above observed terrain.
+        # No absolute elevation threshold: each envelope is relative to its own crest.
+        apply = (
+            ~fixed_mask
+            & (profile_best > fixed_elev + 0.1)
+            & np.isfinite(profile_best)
+        )
+        fixed_mask[apply] = True
+        fixed_elev[apply] = profile_best[apply]
+        self.log_info(
+            f"Slope/shelf envelope: {int(apply.sum())} free nodes pinned "
+            f"(talus={cfg.ridge_max_slope_angle_deg:.0f}°, "
+            f"cliff={cfg.cliff_max_slope_angle_deg:.0f}° where cliff_mask > 0, "
+            f"shelf={cfg.cliff_shelf_angle_deg:.0f}°)"
+        )
 
         self.advance_progress(task)
 
