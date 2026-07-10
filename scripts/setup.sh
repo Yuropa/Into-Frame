@@ -162,6 +162,10 @@ _has_torch() {
     conda run --no-capture-output -n "$1" python -c "import torch" 2>/dev/null
 }
 
+_has_matplotlib() {
+    conda run --no-capture-output -n "$1" python -c "import matplotlib" 2>/dev/null
+}
+
 ensure_torch_base() {
     local version="$1"
     local base
@@ -205,11 +209,20 @@ create_env() {
                 --extra-index-url "$TORCH_URL" \
                 || { error "pip install torch failed in '$name'"; exit 1; }
         fi
-        conda activate "$name"
-        return 0
+    else
+        conda create -y -q --name "$name" --clone "$(_torch_base_name "$version")"
     fi
 
-    conda create -y -q --name "$name" --clone "$(_torch_base_name "$version")"
+    # Every cloned env can be targeted as a RemoteClient subprocess, and
+    # remote_connection/remote_types.py unconditionally imports util.image_utils,
+    # which unconditionally imports matplotlib. Several upstream tool requirements
+    # files don't pull it in (objectclear, depth-anything-3, WorldGen, TRELLIS.2,
+    # stable-point-aware-3d), so ensure it's always present regardless.
+    if ! _has_matplotlib "$name"; then
+        conda run --no-capture-output -n "$name" pip install matplotlib \
+            || { error "pip install matplotlib failed in '$name'"; exit 1; }
+    fi
+
     conda activate "$name"
 }
 
