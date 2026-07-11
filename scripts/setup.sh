@@ -1065,6 +1065,34 @@ setup_ltx2() {
 run_step "Installing LTX-2" \
     setup_ltx2
 
+LTX2_CHECKPOINT_DIR="$CHECKPOINT_DIR/ltx2"
+
+download_ltx2_models() {
+    if [ -d "$LTX2_CHECKPOINT_DIR" ]; then
+        return
+    fi
+
+    pip install -q -U "huggingface_hub[cli]" hf_xet
+
+    mkdir -p "$LTX2_CHECKPOINT_DIR"
+    # Full (non-distilled) checkpoint for stage 1 CFG guidance, plus the distilled LoRA
+    # (stage 2 refinement) and spatial upscaler TI2VidTwoStagesPipeline needs. Gated repo —
+    # requires accepting the model terms on Hugging Face and logging in with a Read token,
+    # already handled by the interpreter_login() call in the "Models Download" step above.
+    hf download Lightricks/LTX-2.3 \
+        ltx-2.3-22b-dev.safetensors \
+        ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+        ltx-2.3-22b-distilled-lora-384-1.1.safetensors \
+        --local-dir "$LTX2_CHECKPOINT_DIR"
+
+    # Gemma-3 text encoder (also gated) — download every file in the repo.
+    hf download google/gemma-3-12b-it-qat-q4_0-unquantized \
+        --local-dir "$LTX2_CHECKPOINT_DIR/gemma-3-12b"
+}
+
+run_step "Downloading LTX-2 Models" \
+    download_ltx2_models
+
 ## ============
 ##    End
 ## ============

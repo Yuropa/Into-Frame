@@ -10,6 +10,7 @@ from util.intrinsic_utils import IntrinsicImages
 from util.image_utils import Image
 from util.cubemap_utils import CubeMap
 from util.panorama_utils import Panorama
+from util.video_utils import Video
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.camera import CameraIntrinsics, CameraExtrinsics
@@ -65,6 +66,7 @@ class ContextKey:
     TERRAIN_TEXTURE_TILE_FACTOR = "terrain_texture_tile_factor"
     TERRAIN_MATERIAL = "terrain_material"
     CLIFF_MASK = "cliff_mask"
+    GENERATED_VIDEO = "generated_video"
     Type = Literal[
         "input",
         "depth",
@@ -111,6 +113,7 @@ class ContextKey:
         "terrain_texture_tile_factor",
         "terrain_material",
         "cliff_mask",
+        "generated_video",
     ]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str
@@ -379,6 +382,18 @@ class PipelineContext():
 
     def input_splat_material(self, name: ContextKeyName) -> Optional["SplatMaterial"]:
         return self._value(name, self._previous_stage).splat_material()
+
+    # Video
+    def add_video(self, name: ContextKeyName, input: Any):
+        value = ContextValue(name=name)
+        value.set_video(input)
+        self._set_value(name, value)
+
+    def video(self, name: ContextKeyName) -> Optional[Video]:
+        return self._value(name).video()
+
+    def input_video(self, name: ContextKeyName) -> Optional[Video]:
+        return self._value(name, self._previous_stage).video()
 
     # Report sections — in-memory only, not persisted
     def add_report_section(self, section) -> None:

@@ -53,6 +53,7 @@ from pipeline.linear_structures.linear_structures import LinearStructureStage, L
 from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, TerrainReconstructionConfiguration
 from pipeline.terrain.terrain_noise_refinement import TerrainNoiseRefinementStage
 from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
+from pipeline.video_generation.video_generation import VideoGenerationStage
 from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
 from pipeline.report.report import ReportGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
@@ -339,6 +340,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "RegionMapStage": RegionMapStage,
     "RegionMapRefinementStage": RegionMapRefinementStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
+    "VideoGenerationStage": VideoGenerationStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
     "ReportGenerationStage": ReportGenerationStage,
 }

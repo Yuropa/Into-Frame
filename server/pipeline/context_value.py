@@ -5,6 +5,7 @@ from util.depth_utils import Depth
 from util.intrinsic_utils import IntrinsicImages
 from util.cubemap_utils import CubeMap
 from util.panorama_utils import Panorama
+from util.video_utils import Video
 from pathlib import Path
 from typing import Optional, Any
 from enum import StrEnum
@@ -37,6 +38,7 @@ class ValueKeys(StrEnum):
     OBJECT_DISTRIBUTION = "object_distribution"
     PANORAMA_REGIONS = "panorama_regions"
     SPLAT_MATERIAL = "splat_material"
+    VIDEO = "video"
 
     def preferred_extension(self) -> "str":
         match self:
@@ -72,6 +74,8 @@ class ValueKeys(StrEnum):
                 return "json"
             case ValueKeys.SPLAT_MATERIAL:
                 return "splat"
+            case ValueKeys.VIDEO:
+                return "mp4"
 
 class JSONEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -162,6 +166,10 @@ class ContextValue():
     def set_splat_material(self, obj: SplatMaterial):
         self.type = ValueKeys.SPLAT_MATERIAL
         self.value = obj
+
+    def set_video(self, obj: Any):
+        self.type = ValueKeys.VIDEO
+        self.value = Video(obj)
 
     def image(self) -> Optional[Image]:
         if self.type == ValueKeys.IMAGE:
@@ -259,6 +267,12 @@ class ContextValue():
         else:
             return None
 
+    def video(self) -> Optional[Video]:
+        if self.type == ValueKeys.VIDEO:
+            return self.value
+        else:
+            return None
+
     def read(self, path: Path):
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
@@ -310,6 +324,8 @@ class ContextValue():
                 self.set_panorama_regions(PanoramaRegionResult.decode(json.load(f)))
         elif value_type == ValueKeys.SPLAT_MATERIAL:
             self.set_splat_material(SplatMaterial.load(resolved_path))
+        elif value_type == ValueKeys.VIDEO:
+            self.set_video(Video.load(resolved_path))
 
     def write(self, path: Path) -> Path:
         meta_path = path / (self.name + ".meta")
@@ -358,6 +374,8 @@ class ContextValue():
                 json.dump(self.panorama_regions().encode(), f, indent=4)
         elif self.type == ValueKeys.SPLAT_MATERIAL:
             self.splat_material().save(save_path)
+        elif self.type == ValueKeys.VIDEO:
+            self.video().save(save_path)
 
         return save_path
     
@@ -394,4 +412,7 @@ class ContextValue():
         elif self.type == ValueKeys.LIGHTING:
             v = self.lighting()
             return f"Lighting ({v.width}x{v.height})"
+        elif self.type == ValueKeys.VIDEO:
+            v = self.video()
+            return f"Video ({v.size_bytes / (1024 * 1024):.1f} MB)"
         return "None"
