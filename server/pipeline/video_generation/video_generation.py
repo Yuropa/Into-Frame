@@ -102,7 +102,11 @@ class VideoGenerationStage(PipelineStage):
     separate manual prompt is needed per run. Camera rigidity is additionally
     reinforced by the Camera-Control-Static LoRA (config.camera_lora_strength).
 
-    Input key   (SemanticKey.INPUT)   → ContextKey.INPUT           (Image)
+    Input key   (SemanticKey.INPUT)   → ContextKey.INPUT           (Image, default)
+                                         or a Panorama at the same key — e.g. point
+                                         it at ContextKey.PANORAMA to animate the
+                                         generated 360° panorama instead of the raw
+                                         input photo (see config_pano_video_generation.yaml).
     Caption key (SemanticKey.CAPTION) → ContextKey.INPUT_CAPTION   (str)
     Output key  (SemanticKey.OUTPUT)  → ContextKey.GENERATED_VIDEO (Video)
 
@@ -139,12 +143,20 @@ class VideoGenerationStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.GENERATED_VIDEO,
         })
 
+    def _resolve_source(self, context: PipelineContext, input_key):
+        """Image and Panorama both expose .width/.height/.rgb(), so either can be
+        the conditioning frame — try Image (the common case) before Panorama."""
+        image = context.input_image(input_key)
+        if image is not None:
+            return image
+        return context.input_panorama(input_key)
+
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, caption_key, output_key = self._resolved_keys()
 
-        input_image = context.input_image(input_key)
+        input_image = self._resolve_source(context, input_key)
         if input_image is None:
-            self.log_info("No input image, skipping")
+            self.log_info("No input image or panorama, skipping")
             return context
 
         caption = context.object(caption_key) or ""

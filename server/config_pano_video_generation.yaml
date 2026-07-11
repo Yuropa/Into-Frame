@@ -1,0 +1,25 @@
+# Panorama video generation pipeline config.
+#
+# Minimal pipeline: input photo → caption → depth → 360° panorama → animate the
+# panorama with LTX-2. The video model runs on the generated panorama rather than
+# the raw input photo, so the whole immersive backdrop gets subtle motion (wind,
+# water, drifting clouds) instead of just the original framed shot.
+#
+# Usage:
+#   python main.py run <image> --config config_pano_video_generation.yaml
+
+stages:
+  - name: Captioning
+    stage: CaptioningStage
+
+  - name: Depth Generation
+    stage: DepthStage
+
+  - name: Panorama
+    stage: PanoramaStage
+    generator_type: WORLDGEN
+
+  - name: Video Generation
+    stage: VideoGenerationStage
+    keys:
+      input: panorama

@@ -1,0 +1,16 @@
+# Photo video generation pipeline config.
+#
+# Simplest pipeline: input photo → caption → animate the photo directly with LTX-2.
+# Companion experiment to config_pano_video_generation.yaml — this one skips depth/
+# panorama synthesis entirely and runs the video model straight on the input photo,
+# so you can compare "animate the raw shot" against "animate the full 360° panorama".
+#
+# Usage:
+#   python main.py run <image> --config config_video_generation.yaml
+
+stages:
+  - name: Captioning
+    stage: CaptioningStage
+
+  - name: Video Generation
+    stage: VideoGenerationStage
