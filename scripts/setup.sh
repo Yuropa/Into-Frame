@@ -136,7 +136,7 @@ DEFAULT_PYTHON="3.12"
 TORCH_BASE_VERSIONS=("3.12" "3.10")
 readonly TORCH_URL="https://download.pytorch.org/whl/cu130"
 
-CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "pano" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "objectclear" "intrinsicdiffusion")
+CONDA_ENVS=("$CONDA_NAME" "stablepoint" "trellis2" "depthanything" "cubediff" "dreamcube" "lama" "depthpano" "sam3d" "recognize" "lux-dit" "worldgen" "objectclear" "intrinsicdiffusion" "ltx2")
 for _v in "${TORCH_BASE_VERSIONS[@]}"; do CONDA_ENVS+=("${BASE_ENV_PREFIX}-${_v//./}"); done
 unset _v
 LIB_DIR="$PROJECT_DIR/lib"
@@ -1033,6 +1033,37 @@ setup_intrinsicdiffusion() {
 
 run_step "Installing IntrinsicDiffusion" \
     setup_intrinsicdiffusion
+
+## ============
+##    LTX-2
+## ============
+
+LTX2_DIR="$LIB_DIR/LTX-2"
+
+setup_ltx2() {
+    clone_if_needed https://github.com/Lightricks/LTX-2.git "$LTX2_DIR"
+
+    create_env "ltx2"
+
+    # Upstream recommends `uv sync` + a manual `pip install torch ...` on top. We skip uv
+    # entirely and install the two inference-relevant workspace packages directly with pip,
+    # in dependency order: ltx-pipelines declares an unpinned "ltx-core" dependency, and
+    # since ltx-core is only published through uv's local workspace resolution (not PyPI),
+    # pip satisfies it from whatever is already installed — so ltx-core must go in first.
+    # ltx-trainer (training-only) and ltx-kernels (opt-in compiled CUDA kernels) are
+    # skipped here — not needed for inference.
+    run_in_env pip install -e "$LTX2_DIR/packages/ltx-core"
+    run_in_env pip install -e "$LTX2_DIR/packages/ltx-pipelines"
+
+    # ltx-core pins torch~=2.7 (satisfied by the shared cu130 base cloned via create_env),
+    # so unlike depthpano/worldgen/intrinsicdiffusion above, no separate torch
+    # install/upgrade is needed to get newer-GPU (Blackwell/cu130) support here.
+
+    stop_env
+}
+
+run_step "Installing LTX-2" \
+    setup_ltx2
 
 ## ============
 ##    End
