@@ -15,13 +15,13 @@ from ltx_pipelines.utils.args import ImageConditioningInput
 from ltx_pipelines.utils.constants import DEFAULT_LORA_STRENGTH, LTX_2_3_PARAMS
 from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.quantization_factory import QuantizationKind
-from ltx_pipelines.utils.types import OffloadMode
 from remote_connection.remote_server import RemoteServer
 
 # Filenames as downloaded by scripts/setup.sh's download_ltx2_models() into checkpoints/ltx2.
 CHECKPOINT_FILE = "ltx-2.3-22b-dev.safetensors"
 DISTILLED_LORA_FILE = "ltx-2.3-22b-distilled-lora-384-1.1.safetensors"
 SPATIAL_UPSAMPLER_FILE = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+CAMERA_CONTROL_STATIC_LORA_FILE = "ltx-2-19b-lora-camera-control-static.safetensors"
 GEMMA_SUBDIR = "gemma-3-12b"
 
 
@@ -30,12 +30,27 @@ class LTX2Server(RemoteServer):
         ckpt_dir = checkpoints_path() / "ltx2"
         checkpoint_path = str(ckpt_dir / CHECKPOINT_FILE)
 
-        offload_mode = OffloadMode(os.environ.get("LTX2_OFFLOAD_MODE", "none"))
         quantization_name = os.environ.get("LTX2_QUANTIZATION")
         quantization = (
             QuantizationKind(quantization_name).to_policy(checkpoint_path=checkpoint_path)
             if quantization_name
             else None
+        )
+
+        # Applied to both stages (unlike distilled_lora, which is stage-2-only) to lock the
+        # camera off, reinforcing VideoGenerationStage's "static camera" prompt instruction.
+        # Strength 0 drops it entirely — set LTX2_CAMERA_LORA_STRENGTH=0 to disable.
+        camera_lora_strength = float(os.environ.get("LTX2_CAMERA_LORA_STRENGTH", DEFAULT_LORA_STRENGTH))
+        loras = (
+            [
+                LoraPathStrengthAndSDOps(
+                    str(ckpt_dir / CAMERA_CONTROL_STATIC_LORA_FILE),
+                    camera_lora_strength,
+                    LTXV_LORA_COMFY_RENAMING_MAP,
+                )
+            ]
+            if camera_lora_strength > 0
+            else []
         )
 
         self.pipeline = TI2VidTwoStagesPipeline(
@@ -49,12 +64,11 @@ class LTX2Server(RemoteServer):
             ],
             spatial_upsampler_path=str(ckpt_dir / SPATIAL_UPSAMPLER_FILE),
             gemma_root=str(ckpt_dir / GEMMA_SUBDIR),
-            loras=[],
+            loras=loras,
             device=self.device,
             quantization=quantization,
-            offload_mode=offload_mode,
         )
-        print(f"LTX-2 pipeline loaded from {ckpt_dir} (offload={offload_mode.value})")
+        print(f"LTX-2 pipeline loaded from {ckpt_dir} (camera_lora={camera_lora_strength})")
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "generate":

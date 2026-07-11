@@ -6,9 +6,14 @@ from remote_connection.remote_client import RemoteClient
 
 
 class LTX2VideoGenerator(RemoteClient):
-    def __init__(self, device: torch.device, offload_mode: str = "none", quantization: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        device: torch.device,
+        quantization: Optional[str] = None,
+        camera_lora_strength: float = 1.0,
+    ) -> None:
         script_path = Path(__file__).parent / "ltx2_client_imp.py"
-        env_options = {"LTX2_OFFLOAD_MODE": offload_mode}
+        env_options = {"LTX2_CAMERA_LORA_STRENGTH": camera_lora_strength}
         if quantization:
             env_options["LTX2_QUANTIZATION"] = quantization
 

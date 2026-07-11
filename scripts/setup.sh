@@ -1088,6 +1088,13 @@ download_ltx2_models() {
     # Gemma-3 text encoder (also gated) — download every file in the repo.
     hf download google/gemma-3-12b-it-qat-q4_0-unquantized \
         --local-dir "$LTX2_CHECKPOINT_DIR/gemma-3-12b"
+
+    # Camera-Control-Static LoRA — applied (in addition to the required distilled LoRA
+    # above) to lock the camera off, reinforcing the "static camera" prompt instruction
+    # VideoGenerationStage always adds. See ltx2_client_imp.py.
+    hf download Lightricks/LTX-2-19b-LoRA-Camera-Control-Static \
+        ltx-2-19b-lora-camera-control-static.safetensors \
+        --local-dir "$LTX2_CHECKPOINT_DIR"
 }
 
 run_step "Downloading LTX-2 Models" \

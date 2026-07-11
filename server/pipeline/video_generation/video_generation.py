@@ -39,8 +39,8 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         num_inference_steps: int = 30,
         motion_prompt: str = DEFAULT_MOTION_PROMPT,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
-        offload_mode: str = "none",
         quantization: Optional[str] = None,
+        camera_lora_strength: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.width = width
@@ -50,8 +50,8 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         self.num_inference_steps = num_inference_steps
         self.motion_prompt = motion_prompt
         self.negative_prompt = negative_prompt
-        self.offload_mode = offload_mode
         self.quantization = quantization
+        self.camera_lora_strength = camera_lora_strength
 
 
 class VideoGenerationStage(PipelineStage):
@@ -63,7 +63,8 @@ class VideoGenerationStage(PipelineStage):
 
     The prompt is the caption produced by CaptioningStage, augmented with a fixed
     "static camera, subtle natural motion" instruction (config.motion_prompt) so no
-    separate manual prompt is needed per run.
+    separate manual prompt is needed per run. Camera rigidity is additionally
+    reinforced by the Camera-Control-Static LoRA (config.camera_lora_strength).
 
     Input key   (SemanticKey.INPUT)   → ContextKey.INPUT           (Image)
     Caption key (SemanticKey.CAPTION) → ContextKey.INPUT_CAPTION   (str)
@@ -74,9 +75,10 @@ class VideoGenerationStage(PipelineStage):
         num_frames must be 8k+1; width/height must be divisible by 64.
       motion_prompt   — appended to the caption to keep the camera static.
       negative_prompt — steers away from camera movement and quality artifacts.
-      offload_mode    — "none" (default, needs ~28GB+ VRAM), "cpu", or "disk" for
-                         smaller GPUs (see LTX-2's OffloadMode docs).
       quantization    — None (default), "fp8-cast", or "fp8-scaled-mm".
+      camera_lora_strength — strength of the Camera-Control-Static LoRA (default 1.0,
+                         full rigidity), applied on top of motion_prompt to lock the
+                         camera off. 0 disables the LoRA entirely.
     """
 
     @classmethod
@@ -111,8 +113,8 @@ class VideoGenerationStage(PipelineStage):
         if self._generator is None:
             self._generator = LTX2VideoGenerator(
                 self.preferred_device,
-                offload_mode=self.config.offload_mode,
                 quantization=self.config.quantization,
+                camera_lora_strength=self.config.camera_lora_strength,
             )
 
         video_path = self._generator.generate(
