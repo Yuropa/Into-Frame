@@ -1,3 +1,4 @@
+import math
 import torch
 from logging import Logger
 from typing import Any, Optional
@@ -22,6 +23,39 @@ DEFAULT_NEGATIVE_PROMPT = (
     "geometry, artifacts, watermark, text overlay"
 )
 
+# LTX-2 two-stage pipelines require height/width divisible by 64 (assert_resolution).
+RESOLUTION_DIVISOR = 64
+
+
+def _round_to_divisor(value: float) -> int:
+    return max(RESOLUTION_DIVISOR, round(value / RESOLUTION_DIVISOR) * RESOLUTION_DIVISOR)
+
+
+def resolve_video_resolution(
+    source_width: int,
+    source_height: int,
+    target_pixels: int,
+    min_side: int,
+    max_side: int,
+) -> tuple[int, int]:
+    """Pick an output width/height close to the source image's own aspect ratio.
+
+    LTX-2's image conditioning resizes-to-fill then center-crops to the exact
+    output resolution, so a fixed 16:9-ish default would silently crop the sides
+    off a portrait photo or the top/bottom off a panorama. Instead, size the
+    output to roughly `target_pixels` total (the model's native/tuned area, ~1.5MP
+    for LTX-2.3) while matching the source aspect ratio, then round each side to
+    the nearest multiple of 64 and clamp into [min_side, max_side] to bound
+    compute/VRAM on extreme aspect ratios (e.g. a 360° equirectangular panorama).
+    """
+    aspect = source_width / source_height
+    height = math.sqrt(target_pixels / aspect)
+    width = height * aspect
+
+    width = min(max(_round_to_divisor(width), min_side), max_side)
+    height = min(max(_round_to_divisor(height), min_side), max_side)
+    return width, height
+
 
 class VideoGenerationConfiguration(PipelineStageConfiguration):
     def __init__(
@@ -32,8 +66,9 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        width: int = 1536,
-        height: int = 1024,
+        target_pixels: int = 1536 * 1024,
+        min_side: int = 512,
+        max_side: int = 2048,
         num_frames: int = 121,
         frame_rate: float = 24.0,
         num_inference_steps: int = 30,
@@ -43,8 +78,9 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         camera_lora_strength: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
-        self.width = width
-        self.height = height
+        self.target_pixels = target_pixels
+        self.min_side = min_side
+        self.max_side = max_side
         self.num_frames = num_frames
         self.frame_rate = frame_rate
         self.num_inference_steps = num_inference_steps
@@ -71,8 +107,13 @@ class VideoGenerationStage(PipelineStage):
     Output key  (SemanticKey.OUTPUT)  → ContextKey.GENERATED_VIDEO (Video)
 
     Config:
-      width, height, num_frames, frame_rate, num_inference_steps — generation params.
-        num_frames must be 8k+1; width/height must be divisible by 64.
+      target_pixels, min_side, max_side — the output resolution isn't fixed; it's derived
+        per-run from the input image's own aspect ratio (see resolve_video_resolution) so
+        portrait/panoramic photos aren't force-cropped to a fixed shape. target_pixels is
+        the target total area (~1.5MP default, LTX-2.3's native scale); min_side/max_side
+        bound each side after rounding to a multiple of 64.
+      num_frames, frame_rate, num_inference_steps — generation params.
+        num_frames must be 8k+1.
       motion_prompt   — appended to the caption to keep the camera static.
       negative_prompt — steers away from camera movement and quality artifacts.
       quantization    — None (default), "fp8-cast", or "fp8-scaled-mm".
@@ -88,6 +129,7 @@ class VideoGenerationStage(PipelineStage):
     def __init__(self, config: VideoGenerationConfiguration) -> None:
         super().__init__(config)
         self._generator = None
+        self._last_resolution: Optional[tuple[int, int]] = None
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
 
     def _resolved_keys(self):
@@ -108,6 +150,16 @@ class VideoGenerationStage(PipelineStage):
         caption = context.object(caption_key) or ""
         prompt = f"{caption} {self.config.motion_prompt}".strip()
 
+        width, height = resolve_video_resolution(
+            source_width=input_image.width,
+            source_height=input_image.height,
+            target_pixels=self.config.target_pixels,
+            min_side=self.config.min_side,
+            max_side=self.config.max_side,
+        )
+        self._last_resolution = (width, height)
+        self.log_info(f"  {input_key}: {input_image.width}x{input_image.height} → {width}x{height}")
+
         gen_task = self.create_progress(1, "Generating video…")
         super().clean_up()
         if self._generator is None:
@@ -123,8 +175,8 @@ class VideoGenerationStage(PipelineStage):
             negative_prompt=self.config.negative_prompt,
             temp_path=self.temp,
             seed=self.seed,
-            width=self.config.width,
-            height=self.config.height,
+            width=width,
+            height=height,
             num_frames=self.config.num_frames,
             frame_rate=self.config.frame_rate,
             num_inference_steps=self.config.num_inference_steps,
@@ -150,6 +202,8 @@ class VideoGenerationStage(PipelineStage):
         if video is None:
             return None
         caption = context.object(caption_key) or ""
+        resolution = f"{self._last_resolution[0]} × {self._last_resolution[1]} px" if self._last_resolution else "n/a"
+        duration_s = self.config.num_frames / self.config.frame_rate
         return ReportSection(
             stage_name=self.name,
             title="Video Generation",
@@ -161,8 +215,8 @@ class VideoGenerationStage(PipelineStage):
             ),
             stats={
                 "Caption": caption,
-                "Resolution": f"{self.config.width} × {self.config.height} px",
-                "Frames": str(self.config.num_frames),
+                "Resolution": resolution,
+                "Frames": f"{self.config.num_frames} ({duration_s:.1f}s @ {self.config.frame_rate:.0f}fps)",
                 "Size": f"{video.size_bytes / (1024 * 1024):.1f} MB",
             },
         )
