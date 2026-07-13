@@ -94,6 +94,16 @@ class JSONEncoder(json.JSONEncoder):
         return super().default(obj)
 
 class ContextValue():
+    """
+    Holds a single named value in the pipeline context.
+
+    A value loaded from a persisted run (via read()) isn't decoded immediately —
+    only the type and on-disk path are recorded. The actual Image.load() /
+    Mesh.load() / json.load() / ... only runs the first time the value is
+    actually asked for (image(), mesh(), object(), ...), so resuming from a
+    large cached run doesn't pay to decode stages nothing downstream touches.
+    """
+
     name: str
     type: ValueKeys
     value: Optional[Any]
@@ -102,6 +112,7 @@ class ContextValue():
         self.type = ValueKeys.NONE
         self.value = None
         self.name = name
+        self._pending_path: Optional[Path] = None
 
     def set_image(self, image: Any):
         self.type = ValueKeys.IMAGE
@@ -171,118 +182,85 @@ class ContextValue():
         self.type = ValueKeys.VIDEO
         self.value = Video(obj)
 
+    def _get(self, expected_type: ValueKeys) -> Optional[Any]:
+        if self.type != expected_type:
+            return None
+        self._ensure_loaded()
+        return self.value
+
     def image(self) -> Optional[Image]:
-        if self.type == ValueKeys.IMAGE:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.IMAGE)
+
     def object(self) -> Optional[Any]:
-        if self.type == ValueKeys.OBJECT:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.OBJECT)
+
     def mesh(self) -> Optional[Mesh]:
-        if self.type == ValueKeys.MESH:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.MESH)
+
     def depth(self) -> Optional[Depth]:
-        if self.type == ValueKeys.DEPTH:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.DEPTH)
 
     def intrinsic_images(self) -> Optional[IntrinsicImages]:
-        if self.type == ValueKeys.INTRINSIC_IMAGES:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.INTRINSIC_IMAGES)
 
     def object3d(self) -> Optional[Object3D]:
-        if self.type == ValueKeys.OBJECT3D:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.OBJECT3D)
+
     def scene(self) -> Optional[Scene]:
-        if self.type == ValueKeys.SCENE:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.SCENE)
+
     def intrinsics(self) -> Optional[CameraIntrinsics]:
-        if self.type == ValueKeys.INTRINSICS:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.INTRINSICS)
+
     def extrinsics(self) -> Optional[CameraExtrinsics]:
-        if self.type == ValueKeys.EXTRINSICS:
-            return self.value
-        else:
-            return None
-        
+        return self._get(ValueKeys.EXTRINSICS)
+
     def cubemap(self) -> Optional[CubeMap]:
-        if self.type == ValueKeys.CUBEMAP:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.CUBEMAP)
 
     def panorama(self) -> Optional[Panorama]:
-        if self.type == ValueKeys.PANORAMA:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.PANORAMA)
 
     def lighting(self) -> Optional[SceneLighting]:
-        if self.type == ValueKeys.LIGHTING:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.LIGHTING)
 
     def object_correlation(self) -> Optional[ObjectCorrelationResult]:
-        if self.type == ValueKeys.OBJECT_CORRELATION:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.OBJECT_CORRELATION)
 
     def object_distribution(self) -> Optional[ObjectDistributionResult]:
-        if self.type == ValueKeys.OBJECT_DISTRIBUTION:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.OBJECT_DISTRIBUTION)
 
     def panorama_regions(self) -> Optional[PanoramaRegionResult]:
-        if self.type == ValueKeys.PANORAMA_REGIONS:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.PANORAMA_REGIONS)
 
     def splat_material(self) -> Optional[SplatMaterial]:
-        if self.type == ValueKeys.SPLAT_MATERIAL:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.SPLAT_MATERIAL)
 
     def video(self) -> Optional[Video]:
-        if self.type == ValueKeys.VIDEO:
-            return self.value
-        else:
-            return None
+        return self._get(ValueKeys.VIDEO)
 
     def read(self, path: Path):
+        """Records type + on-disk path only — see class docstring for why the
+        actual decode is deferred to _ensure_loaded()."""
         meta_path = path / (self.name + ".meta")
         if not meta_path.exists():
             return
-        
+
         with open(meta_path) as f:
             meta = json.load(f)
-        
-        value_type = ValueKeys(meta["type"])
-        resolved_path = path / (self.name + "." + value_type.preferred_extension())
+
+        self.type = ValueKeys(meta["type"])
+        self._pending_path = path / (self.name + "." + self.type.preferred_extension())
+
+    def _ensure_loaded(self):
+        if self._pending_path is None:
+            return
+        resolved_path = self._pending_path
+        self._pending_path = None
+        self._load(resolved_path)
+
+    def _load(self, resolved_path: Path):
+        value_type = self.type
 
         if value_type == ValueKeys.IMAGE:
             self.set_image(Image.load(resolved_path))
@@ -380,6 +358,8 @@ class ContextValue():
         return save_path
     
     def describe(self) -> str:
+        if self._pending_path is not None:
+            return f"{self.type.value} (cached, not loaded)"
         if self.type == ValueKeys.IMAGE:
             v = self.image()
             return f"Image ({v.width}x{v.height})"

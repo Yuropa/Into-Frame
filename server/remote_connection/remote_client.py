@@ -156,8 +156,8 @@ class RemoteClient():
             self.dump_logs()
             raise RuntimeError(f"subprocess exited before running:\n{self._get_stderr()}")
 
-    def _send(self, obj: RemoteObject):
-        encoded = obj.encode()
+    def _send(self, obj: RemoteObject, temp_path: Optional[Path] = None):
+        encoded = obj.encode(temp_path=temp_path)
         self.json_out.write(encoded)
         self.json_out.flush()
 
@@ -175,7 +175,7 @@ class RemoteClient():
             temp_path=temp_path,
             input=input
         )
-        self._send(request)
+        self._send(request, temp_path=temp_path)
         self.dump_logs()
 
         while True:

@@ -6,7 +6,7 @@ import traceback
 from io import BytesIO
 from PIL import Image
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 from util.device_utils import clean_device_cache, device_name, device_from_id
 from util.json_utils import write_json
@@ -37,8 +37,8 @@ class RemoteServer(ABC):
     def setup(self):
         pass
 
-    def _send(self, obj: RemoteObject):
-        encoded = obj.encode()
+    def _send(self, obj: RemoteObject, temp_path: Optional[Path] = None):
+        encoded = obj.encode(temp_path=temp_path)
         print(encoded, file=self.json_out, flush=True)
 
     def report_progress(self, fraction: float, label: str = ""):
@@ -78,14 +78,14 @@ class RemoteServer(ABC):
                         input=request.input
                     )
                     result = RemoteOutput(
-                        action=request.action, 
+                        action=request.action,
                         output=result_object
                     )
-                    self._send(result)
+                    self._send(result, temp_path=temp_path)
                 except Exception as e:
                     stack_text = traceback.format_exc()
                     result = RemoteOutput(action=request.action, output=None, error=str(e), stack=stack_text)
-                    self._send(result)
+                    self._send(result, temp_path=temp_path)
                     return
                 
                 clean_device_cache(self.device)

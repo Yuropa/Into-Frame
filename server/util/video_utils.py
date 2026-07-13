@@ -1,7 +1,8 @@
 from __future__ import annotations
-import shutil
 from pathlib import Path
 from typing import Optional, Self
+
+from util.file_utils import link_or_copy
 
 
 class Video:
@@ -34,7 +35,7 @@ class Video:
     def save(self, path):
         path = Path(path)
         if path.resolve() != self.path.resolve():
-            shutil.copyfile(self.path, path)
+            link_or_copy(self.path, path)
 
     @property
     def size_bytes(self) -> int:

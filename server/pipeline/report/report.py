@@ -4,6 +4,7 @@ from typing import Optional
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.file_utils import link_or_copy
 
 
 class ReportGenerationStage(PipelineStage):
@@ -43,8 +44,7 @@ class ReportGenerationStage(PipelineStage):
             )
             # Also surface it one level up for easy access
             top_level = self.output.parent / "report.pdf"
-            import shutil
-            shutil.copy2(out_path, top_level)
+            link_or_copy(out_path, top_level)
             self.log_info(f"Report written to {top_level}")
         else:
             self.log_warning("No output path set — report not written")
