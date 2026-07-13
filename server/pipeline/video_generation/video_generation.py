@@ -26,6 +26,10 @@ DEFAULT_NEGATIVE_PROMPT = (
 # LTX-2 two-stage pipelines require height/width divisible by 64 (assert_resolution).
 RESOLUTION_DIVISOR = 64
 
+# The unquantized ~22B checkpoint runs a 32GB card out of memory on its own; fp8-cast
+# keeps generation working on that class of card without a noticeable quality hit.
+DEFAULT_QUANTIZATION = "fp8-cast"
+
 
 def _round_to_divisor(value: float) -> int:
     return max(RESOLUTION_DIVISOR, round(value / RESOLUTION_DIVISOR) * RESOLUTION_DIVISOR)
@@ -74,7 +78,7 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         num_inference_steps: int = 30,
         motion_prompt: str = DEFAULT_MOTION_PROMPT,
         negative_prompt: str = DEFAULT_NEGATIVE_PROMPT,
-        quantization: Optional[str] = None,
+        quantization: Optional[str] = DEFAULT_QUANTIZATION,
         camera_lora_strength: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -120,7 +124,8 @@ class VideoGenerationStage(PipelineStage):
         num_frames must be 8k+1.
       motion_prompt   — appended to the caption to keep the camera static.
       negative_prompt — steers away from camera movement and quality artifacts.
-      quantization    — None (default), "fp8-cast", or "fp8-scaled-mm".
+      quantization    — "fp8-cast" (default, needed to fit the ~22B checkpoint on a
+                         32GB card), "fp8-scaled-mm", or None for full precision.
       camera_lora_strength — strength of the Camera-Control-Static LoRA (default 1.0,
                          full rigidity), applied on top of motion_prompt to lock the
                          camera off. 0 disables the LoRA entirely.

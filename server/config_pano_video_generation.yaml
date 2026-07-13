@@ -21,6 +21,5 @@ stages:
 
   - name: Video Generation
     stage: VideoGenerationStage
-    quantization: fp8-cast
     keys:
       input: panorama
