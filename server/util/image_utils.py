@@ -1,12 +1,13 @@
 from __future__ import annotations
 import PIL
 import PIL.ImageDraw
-import matplotlib.pyplot as plt
-from matplotlib import colormaps
 from pathlib import Path
 import numpy as np
-import cv2
-import torchvision.transforms.functional as F
+
+# cv2/matplotlib are only needed by a few debug/color-transfer helpers below,
+# not by the Image class itself — imported lazily inside those so that
+# remote worker conda envs (which only need Image for encode/decode over the
+# RemoteClient/RemoteServer socket) aren't forced to install them.
 
 
 def make_context_composite(
@@ -74,6 +75,8 @@ def lab_color_transfer(
     """
     if strength <= 0.0:
         return target
+
+    import cv2
 
     def to_lab(img: PIL.Image.Image) -> np.ndarray:
         rgb = np.array(img.convert("RGB"), dtype=np.float32) / 255.0
@@ -194,10 +197,12 @@ class Image:
         return np.array_equal(np.array(self.image), np.array(other.image))
 
     def show_masks(self, masks):
+        from matplotlib import colormaps
+
         image = self.image.convert("RGBA")
 
         masks = 255 * masks.cpu().numpy().astype(np.uint8)
-    
+
         n_masks = masks.shape[0]
         cmap = colormaps.get_cmap("rainbow").resampled(n_masks)
         colors = [
@@ -216,11 +221,13 @@ class Image:
 
 
     def _generate_canny(self, img):
+        import cv2
         img = np.array(img)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
         return PIL.Image.fromarray(cv2.Canny(img, 100, 200))
-    
+
     def _show_image(self, image):
+        import matplotlib.pyplot as plt
         plt.imshow(image)
         plt.axis('off')
         plt.show()
