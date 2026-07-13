@@ -21,6 +21,6 @@ stages:
 
   - name: Video Generation
     stage: VideoGenerationStage
-    num_frames: 241  # ~10s @ 24fps, up from the 121-frame (~5s) default
+    num_frames: 169  # ~7s @ 24fps, up from the 121-frame (~5s) default
     keys:
       input: panorama
