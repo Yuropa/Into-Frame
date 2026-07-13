@@ -12,7 +12,13 @@ def link_or_copy(src: Path, dst: Path) -> None:
     cost when they share a filesystem. Falls back to a full copy across
     filesystem boundaries (os.link raises OSError, e.g. errno EXDEV) or on
     filesystems without hardlink support.
+
+    Overwrites dst if it already exists — including the case where dst is a
+    leftover hardlink to this exact src from a previous run (a plain retry
+    would otherwise hit shutil.SameFileError, since src was rewritten in place
+    rather than replaced).
     """
+    dst.unlink(missing_ok=True)
     try:
         os.link(src, dst)
     except OSError:
