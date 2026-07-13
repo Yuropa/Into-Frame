@@ -109,15 +109,18 @@ class LTX2Server(RemoteServer):
                 tiling_config=tiling_config,
             )
 
-        self.report_progress(0.9, "Encoding video…")
-        output_path = temp_path / "output.mp4"
-        encode_video(
-            video=video,
-            fps=frame_rate,
-            audio=audio,
-            output_path=str(output_path),
-            video_chunks_number=video_chunks_number,
-        )
+            # encode_video does in-place ops on video/audio; those tensors have no version
+            # counter outside inference_mode (RuntimeError: "Inference tensors do not
+            # track version counter"), so the call has to stay inside this block.
+            self.report_progress(0.9, "Encoding video…")
+            output_path = temp_path / "output.mp4"
+            encode_video(
+                video=video,
+                fps=frame_rate,
+                audio=audio,
+                output_path=str(output_path),
+                video_chunks_number=video_chunks_number,
+            )
 
         self.report_progress(1.0, "Done")
         return str(output_path)
