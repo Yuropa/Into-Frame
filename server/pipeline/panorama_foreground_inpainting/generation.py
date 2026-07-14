@@ -18,7 +18,9 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
 
     use_depth_filter (bool, default True):
         Whether to run DepthObjectFilter on SAM masks before removal.
-        Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH) in context.
+        Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH) in context. Also reads
+        PANORAMA_SKY_MASK if present, so sky doesn't get treated as a real depth
+        reference (see DepthObjectFilter).
 
     depth_filter_threshold / depth_filter_edge_threshold:
         Same semantics as PanoramaInpaintingConfiguration — see that class. Note
@@ -140,10 +142,14 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         if self.config.use_depth_filter:
             depth = context.input_depth(depth_key) or context.input_depth(ContextKey.PANORAMA_DEPTH)
             if depth is not None:
+                sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+                if isinstance(sky_mask, list):
+                    sky_mask = np.array(sky_mask, dtype=bool)
                 result = DepthObjectFilter().filter(
                     result, depth,
                     threshold=self.config.depth_filter_threshold,
                     edge_threshold=self.config.depth_filter_edge_threshold,
+                    sky_mask=sky_mask,
                 )
                 depth_filtered_out = sam_detected - result.length
                 if depth_filtered_out:

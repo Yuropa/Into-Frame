@@ -208,10 +208,14 @@ class PanoramaInpaintingStage(PipelineStage):
         if self.config.use_depth_filter:
             depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH) or context.input_depth(ContextKey.PANORAMA_DEPTH)
             if depth is not None:
+                sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+                if isinstance(sky_mask, list):
+                    sky_mask = np.array(sky_mask, dtype=bool)
                 result = DepthObjectFilter().filter(
                     result, depth,
                     threshold=self.config.depth_filter_threshold,
                     edge_threshold=self.config.depth_filter_edge_threshold,
+                    sky_mask=sky_mask,
                 )
                 depth_filtered_out = sam_detected - result.length
                 if depth_filtered_out:
