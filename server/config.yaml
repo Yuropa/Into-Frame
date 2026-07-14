@@ -50,8 +50,9 @@ stages:
   - name: Panorama Foreground Inpainting
     stage: PanoramaForegroundInpaintingStage
     enabled: true
-    use_depth_filter: true
-    depth_filter_distance_m: 5.0
+    foreground_distance_m: 5.0  # mask built directly from depth: pixel is foreground if closer than this (metres)
+    min_region_area_px: 200     # drop connected components smaller than this (denoise depth-model glitches)
+    closing_radius_px: 12       # morphological closing to bridge small real gaps into one solid region
     mask_dilation_px: 15
     guidance_scale: 2.5
     num_inference_steps: 30
