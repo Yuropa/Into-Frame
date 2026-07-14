@@ -89,7 +89,13 @@ class SceneGenerationStage(PipelineStage):
         extrinsics = context.input_extrinsics(extrinsics_key)
         depth = context.input_depth(depth_key)
         input = context.input_image(input_key)
-        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        # Objects were detected on the ORIGINAL panorama, so their bounding boxes must be
+        # unprojected using depth measured on that same original panorama (PANORAMA_OBJECT_DEPTH)
+        # — not PANORAMA_DEPTH, which is recomputed after foreground inpainting and no longer
+        # has real depth at removed-object locations (it has the reconstructed background
+        # instead), which would silently misplace exactly the near-camera objects most likely
+        # to have been removed.
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         panorama = context.input_panorama(panorama_key)
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
 

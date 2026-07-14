@@ -40,7 +40,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
     those.
 
     Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class' and 'box'),
-            crop_{i}, ContextKey.PANORAMA_DEPTH, ContextKey.PANORAMA
+            crop_{i}, ContextKey.PANORAMA_OBJECT_DEPTH (depth on the ORIGINAL panorama,
+            matching what objects were detected against), ContextKey.PANORAMA
     Writes: category_mesh_{class} for each qualifying category
     Config: billboard_distance_m (default 10.0 m), generator_type (default TRELLIS)
     """
@@ -59,7 +60,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             self.log_info("No objects to process, skipping")
             return context
 
-        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         panorama = context.input_panorama(ContextKey.PANORAMA)
         threshold = self.config.billboard_distance_m
 
@@ -191,7 +192,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
             return False
-        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         panorama = context.input_panorama(ContextKey.PANORAMA)
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None

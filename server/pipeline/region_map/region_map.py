@@ -64,7 +64,11 @@ class RegionMapStage(PipelineStage):
     ground, vegetation, built, other) among all ground-plane panorama pixels that project
     into it.  Empty cells are filled by nearest-neighbour propagation.
 
-    Reads:  ContextKey.PANORAMA_DEPTH            (equirectangular depth, metres)
+    Reads:  ContextKey.PANORAMA_OBJECT_DEPTH      (equirectangular depth on the ORIGINAL
+                                                   panorama, metres — not PANORAMA_DEPTH,
+                                                   which is computed on the foreground-
+                                                   inpainted panorama_terrain and is reserved
+                                                   for height/terrain-mesh generation)
             ContextKey.PANORAMA_REGION_TYPE_MAP   (per-pixel uint8 type indices from
                                                    PanoramaRegionStage)
             ContextKey.PANORAMA_SKY_MASK          (optional bool sky mask)
@@ -86,7 +90,7 @@ class RegionMapStage(PipelineStage):
 
     def _resolved_keys(self):
         return self.keys({
-            SemanticKey.DEPTH: ContextKey.PANORAMA_DEPTH,
+            SemanticKey.DEPTH: ContextKey.PANORAMA_OBJECT_DEPTH,
             SemanticKey.OUTPUT: ContextKey.REGION_MAP,
         })
 
@@ -104,19 +108,20 @@ class RegionMapStage(PipelineStage):
 
         # Source photo for the panorama-space debug overlays below (see "Debug:
         # project extracted features back onto the source panorama"). Matches
-        # what panorama_depth was itself computed from (see Panorama Depth's
-        # "panorama_terrain" input key in config.yaml), so features stay
-        # correctly aligned when projected back. The grid→panorama pixel map is
-        # the same for every grid-space feature this stage extracts, so it's
-        # computed once here rather than per debug image.
-        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
-        panorama_terrain_rgb = None
+        # what panorama_depth was itself computed from (ContextKey.PANORAMA —
+        # the ORIGINAL panorama, not the foreground-inpainted panorama_terrain;
+        # see this stage's docstring), so features stay correctly aligned when
+        # projected back. The grid→panorama pixel map is the same for every
+        # grid-space feature this stage extracts, so it's computed once here
+        # rather than per debug image.
+        panorama_source = context.input_panorama(ContextKey.PANORAMA)
+        panorama_source_rgb = None
         _grid_pano_u = _grid_pano_v = None
-        if self.temp is not None and panorama_terrain is not None:
-            panorama_terrain_rgb = np.array(panorama_terrain.rgb())
+        if self.temp is not None and panorama_source is not None:
+            panorama_source_rgb = np.array(panorama_source.rgb())
             _grid_pano_u, _grid_pano_v, _, _ = grid_cell_panorama_uv(
                 cfg.grid_size_meters, cfg.grid_resolution, cfg.camera_height_meters,
-                panorama_terrain_rgb.shape[0], panorama_terrain_rgb.shape[1],
+                panorama_source_rgb.shape[0], panorama_source_rgb.shape[1],
             )
         self.advance_progress(task)
 
@@ -160,9 +165,9 @@ class RegionMapStage(PipelineStage):
                 self.temp / "region_map.png"
             )
             Depth(certainty_array).save_debug_image(self.temp / "region_map_certainty.png")
-            if panorama_terrain_rgb is not None:
+            if panorama_source_rgb is not None:
                 overlay = self._panorama_debug_scatter_colors(
-                    panorama_terrain_rgb, colorize_region_type_map(region_map),
+                    panorama_source_rgb, colorize_region_type_map(region_map),
                     _grid_pano_u, _grid_pano_v,
                 )
                 PILImage.fromarray(overlay).save(self.temp / "panorama_debug_regions.png")
@@ -193,9 +198,9 @@ class RegionMapStage(PipelineStage):
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)
             PILImage.fromarray(rgb).save(self.temp / "mountain_silhouette.png")
-            if panorama_terrain_rgb is not None and panorama_terrain is not None:
+            if panorama_source_rgb is not None and panorama_source is not None:
                 overlay = self._panorama_debug_chains(
-                    panorama_terrain_rgb, ridge_chains, panorama_terrain, color=(255, 0, 0),
+                    panorama_source_rgb, ridge_chains, panorama_source, color=(255, 0, 0),
                 )
                 PILImage.fromarray(overlay).save(self.temp / "panorama_debug_ridge.png")
         self.advance_progress(task)
@@ -243,9 +248,9 @@ class RegionMapStage(PipelineStage):
         if self.temp is not None:
             peak_img = (interior_peaks * 255).clip(0, 255).astype(np.uint8)
             PILImage.fromarray(peak_img).save(self.temp / "interior_peaks.png")
-            if panorama_terrain_rgb is not None:
+            if panorama_source_rgb is not None:
                 overlay = self._panorama_debug_scatter(
-                    panorama_terrain_rgb, interior_peaks, _grid_pano_u, _grid_pano_v,
+                    panorama_source_rgb, interior_peaks, _grid_pano_u, _grid_pano_v,
                     color=(255, 140, 0),
                 )
                 PILImage.fromarray(overlay).save(self.temp / "panorama_debug_peaks.png")
@@ -275,9 +280,9 @@ class RegionMapStage(PipelineStage):
                 rgb = np.zeros((*skeleton.shape, 3), dtype=np.uint8)
                 rgb[skeleton > 0] = color
                 PILImage.fromarray(rgb).save(self.temp / filename)
-                if panorama_terrain_rgb is not None:
+                if panorama_source_rgb is not None:
                     overlay = self._panorama_debug_scatter(
-                        panorama_terrain_rgb, skeleton, _grid_pano_u, _grid_pano_v,
+                        panorama_source_rgb, skeleton, _grid_pano_u, _grid_pano_v,
                         color=_panorama_debug_colors[type_idx],
                     )
                     debug_name = "panorama_debug_" + filename.replace(".png", "") + ".png"
@@ -294,9 +299,9 @@ class RegionMapStage(PipelineStage):
         )
         context.add_object(ContextKey.WATER_CHAINS, water_chains)
         self.log_info(f"Water chains: {len(water_chains)}")
-        if self.temp is not None and panorama_terrain_rgb is not None and panorama_terrain is not None:
+        if self.temp is not None and panorama_source_rgb is not None and panorama_source is not None:
             overlay = self._panorama_debug_chains(
-                panorama_terrain_rgb, water_chains, panorama_terrain, color=(0, 120, 255),
+                panorama_source_rgb, water_chains, panorama_source, color=(0, 120, 255),
             )
             PILImage.fromarray(overlay).save(self.temp / "panorama_debug_water_chains.png")
 
