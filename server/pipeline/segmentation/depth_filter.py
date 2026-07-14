@@ -1,6 +1,6 @@
 from __future__ import annotations
 import numpy as np
-from scipy.ndimage import binary_dilation, binary_erosion
+from scipy.ndimage import binary_dilation, binary_erosion, percentile_filter
 from util.depth_utils import Depth
 from pipeline.segmentation.segmentation_result import SegmentationResult
 
@@ -13,10 +13,18 @@ class DepthObjectFilter:
     Two complementary signals are combined with OR — a mask is kept if it passes
     either test, so genuinely foreground objects are less likely to be dropped:
 
-    1. Row-wise baseline (original signal)
-       Normalises depth, builds a per-row maximum (the farthest/sky plane at each
-       elevation) and scores each mask by the median of (depth − baseline).
-       Foreground objects sit clearly in front of the background → score < 0.
+    1. Local windowed baseline
+       Normalises depth and builds a local background reference per pixel: the
+       Nth percentile depth within a horizontal window around it, wrapping at the
+       panorama's 360° seam. A single *row-wide* max (the original version of this
+       signal) is a poor background reference for wide equirectangular panoramas —
+       one far horizon pixel anywhere in a 360° sweep would set the baseline for
+       the entire row, making ordinary near terrain elsewhere in that same row
+       look like it "pops out" against it. Windowing keeps the reference local to
+       each object's actual surroundings.
+       Scores each mask by the median of (depth − baseline). Foreground objects
+       sit clearly in front of their local background → score well below 0.
+       Background/terrain sits close to its own local baseline → score ≈ 0.
 
     2. Boundary edge gradient (research-code signal)
        Scores each mask by how consistently the pixels just *outside* the boundary
@@ -29,8 +37,10 @@ class DepthObjectFilter:
         self,
         result: SegmentationResult,
         depth: Depth,
-        threshold: float = 0.0,
+        threshold: float = -0.05,
         edge_threshold: float = 0.01,
+        baseline_window_frac: float = 0.12,
+        baseline_percentile: float = 90.0,
     ) -> SegmentationResult:
         if result.is_empty():
             return result
@@ -41,11 +51,20 @@ class DepthObjectFilter:
         if dmax - dmin < 1e-6:
             return result
         depth_norm = (depth_arr - dmin) / (dmax - dmin)
+        # Unknown depth treated as "far" (matches the old row-baseline behaviour
+        # for fully-NaN rows), so missing data can't masquerade as foreground.
+        depth_safe = np.nan_to_num(depth_norm, nan=1.0)
 
-        # Signal 1: row-wise maximum baseline
-        row_max  = np.nan_to_num(np.nanmax(depth_norm, axis=1), nan=1.0)
-        baseline = row_max[:, np.newaxis]
-        residual = depth_norm - baseline          # objects < 0, background ≈ 0
+        # Signal 1: local windowed baseline, wrapping horizontally since the
+        # panorama is a 360° cylinder. A percentile (rather than a hard max) is
+        # used so a single stray near or far outlier within the window can't
+        # swing the baseline.
+        window = max(3, int(round(depth_safe.shape[1] * baseline_window_frac)))
+        baseline = percentile_filter(
+            depth_safe, percentile=baseline_percentile,
+            size=(1, window), mode="wrap",
+        )
+        residual = depth_safe - baseline           # objects << 0, background ≈ 0
 
         kept_masks, kept_boxes, kept_scores = [], [], []
         for mask, box, score in zip(result.masks, result.boxes, result.scores):

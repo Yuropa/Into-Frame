@@ -27,11 +27,13 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         Requires PANORAMA_OBJECT_DEPTH in context (set by PanoramaDepthStage
         before this stage).
 
-    depth_filter_threshold (float, default 0.05):
-        Signal 1 (row-wise baseline): a mask is kept if its median depth residual
-        is below this value. 0.0 = must be strictly closer than row max; small
-        positive values (e.g. 0.05) give objects a little slack for soft depth
-        edges, which is helpful on panorama depth maps.
+    depth_filter_threshold (float, default -0.05):
+        Signal 1 (local windowed baseline): a mask is kept if its median depth
+        residual is below this value. residual = depth − local background
+        baseline, which is ≤ 0 by construction, so this value must be negative —
+        a mask needs to sit at least |threshold| below its local background to
+        count as foreground. A positive or zero threshold makes this signal a
+        no-op (every mask passes), since residual can never exceed 0.
 
     depth_filter_edge_threshold (float, default 0.005):
         Signal 2 (boundary edge gradient): a mask is kept if its edge-gradient
@@ -39,7 +41,7 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         tight for panorama depth models whose edges are softer than pinhole
         depth; 0.005 is a better starting point.
     """
-    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, use_depth_filter: bool = True, depth_filter_threshold: float = 0.05, depth_filter_edge_threshold: float = 0.005, **kwargs):
+    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, use_depth_filter: bool = True, depth_filter_threshold: float = -0.05, depth_filter_edge_threshold: float = 0.005, **kwargs):
         super().__init__(*args, **kwargs)
         self.full_panorama = full_panorama
         self.max_object_area_fraction = max_object_area_fraction

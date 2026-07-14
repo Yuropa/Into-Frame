@@ -21,7 +21,11 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH) in context.
 
     depth_filter_threshold / depth_filter_edge_threshold:
-        Same semantics as PanoramaInpaintingConfiguration — see that class.
+        Same semantics as PanoramaInpaintingConfiguration — see that class. Note
+        depth_filter_threshold must be negative (a mask is foreground only when
+        it sits meaningfully closer than its local background baseline); a
+        positive or zero value makes DepthObjectFilter's baseline signal a
+        no-op, since depth − baseline can never exceed 0 by construction.
 
     max_object_area_fraction (float, default 0.15):
         Same semantics as PanoramaInpaintingConfiguration — any single SAM mask
@@ -56,7 +60,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         self,
         *args,
         use_depth_filter: bool = True,
-        depth_filter_threshold: float = 0.05,
+        depth_filter_threshold: float = -0.05,
         depth_filter_edge_threshold: float = 0.005,
         max_object_area_fraction: float = 0.15,
         mask_dilation_px: int = 15,
