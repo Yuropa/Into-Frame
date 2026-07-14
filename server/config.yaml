@@ -210,7 +210,7 @@ stages:
     road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
     noise_scale: 80.0             # fBm base wavelength in pixels
     noise_octaves: 4              # fractal octave count
-    noise_amplitude: 0.4          # metres of peak noise displacement
+    noise_amplitude: 0.2          # metres of peak noise displacement
     linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
     diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
                                    # Raised from 200 (≈0.9 m) — that was only rounding multi-cell
@@ -225,13 +225,21 @@ stages:
     peak_sharpness_window_m: 20.0 # sliding window size (metres) for local jaggedness scoring
     peak_sharpness_spread_m: 15.0 # Gaussian spread radius (metres) from ridge into surrounding terrain
     hydro_enabled: true           # stream power erosion to carve valleys and channel networks
-    hydro_erodibility: 1.0e-5    # K_sp: erodibility constant (m^(1-2m)/yr); increase to carve deeper
+    hydro_erodibility: 5.0e-6    # K_sp: erodibility constant (m^(1-2m)/yr); increase to carve deeper
     hydro_dt: 1000.0              # timestep per erosion step (conceptual years)
     hydro_n_steps: 10             # number of erosion steps; total time = hydro_dt × hydro_n_steps
     hydro_resolution: 256         # downsample resolution for flow routing (speed vs. channel detail)
-    cliff_noise_suppression: 0.85 # fraction of fBm noise amplitude suppressed on CLIFF_MASK cells;
-                                   # diffusion and hydro erosion are always fully excluded there
-                                   # (see TerrainReconstructionStage for how the mask is built)
+    cliff_noise_suppression: 0.85 # fraction of fBm noise amplitude suppressed on protected (cliff OR
+                                   # observed-trust, see observed_trust_strength) cells; diffusion and
+                                   # hydro erosion are always fully excluded there (see
+                                   # TerrainReconstructionStage for how CLIFF_MASK is built)
+    observed_trust_strength: 1.0  # how strongly HEIGHT_MAP_CERTAINTY (real point-cloud trust, already
+                                   # decaying smoothly with distance from observed data) additionally
+                                   # protects cells from noise/diffusion/erosion, on top of CLIFF_MASK.
+                                   # 0 = old behaviour (only the literal true_observed boolean, restored
+                                   # at the very end of this stage, is protected -- everything else gets
+                                   # full-strength synthesis no matter how close it is to real data).
+                                   # 1.0 = a certainty=1 cell is fully protected, same as a cliff cell.
 
   - name: Region Map Refinement
     stage: RegionMapRefinementStage
