@@ -110,6 +110,17 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
+        # Longest-edge cap (px) for the panorama layer's own tile -- deliberately
+        # decoupled from tile_size, which sizes the *synthetic* FLUX tiles (a real
+        # generation constraint that doesn't apply here). This layer is just a
+        # resize of the real photo, so it should carry as much of that photo's
+        # actual resolution as reasonable, not the same 1024px budget the FLUX
+        # model needs. Also stops forcing the panorama's native ~2:1 equirect
+        # aspect into a square, which discarded vertical resolution for no
+        # reason -- the shader samples it with independent U/V in [0,1], so a
+        # non-square texture is not a problem. Native resolution is used as-is
+        # whenever it's already under this cap.
+        panorama_layer_max_resolution: int = 4096,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
@@ -212,6 +223,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_fade_deg = nadir_fade_deg
         self.horizon_fade_deg = horizon_fade_deg
+        self.panorama_layer_max_resolution = panorama_layer_max_resolution
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
@@ -496,7 +508,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
             half = grid_size / 2.0
 
-            pano_tile = self._panorama_tile(panorama_terrain, cfg.tile_size)
+            pano_tile = self._panorama_tile(panorama_terrain, cfg.panorama_layer_max_resolution)
             pano_weight = self._panorama_visibility_weight(
                 height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
                 nadir_cutoff_deg=cfg.nadir_cutoff_deg,
@@ -543,9 +555,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         return SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
 
     @staticmethod
-    def _panorama_tile(panorama, tile_size: int) -> PIL.Image.Image:
+    def _panorama_tile(panorama, max_resolution: int) -> PIL.Image.Image:
         """
-        Resize the full equirectangular panorama to a square tile for storage.
+        Prepare the full equirectangular panorama as a texture for storage.
 
         The full image is kept (not cropped to the lower half) so mountain detail
         near and above the horizon is preserved.  The shader uses standard equirect
@@ -554,10 +566,22 @@ class TerrainTextureGenerationStage(PipelineStage):
             V = 0.5 − φ / π   where φ = atan2(Y, √(X²+Z²))
         Mountains at φ > 0 (above camera level) sit at V < 0.5 in the tile.
         Terrain below the horizon sits at V > 0.5.  Nadir maps to V = 1.0.
+
+        Unlike the synthetic FLUX tiles, this layer is just a resize of a real
+        photo with no generation-resolution constraint, so it keeps its native
+        ~2:1 equirect aspect ratio (U and V are sampled independently in [0,1]
+        anyway — a square texture was never required) and is only downscaled if
+        its longest edge exceeds max_resolution. This is also what the
+        ground_point_cloud.glb debug export samples color from (at a pixel
+        stride, but no resize) — matching resolution here keeps the mesh's
+        real-photo layer as close to that reference as reasonable.
         """
-        return panorama.image.convert("RGB").resize(
-            (tile_size, tile_size), PIL.Image.LANCZOS
-        )
+        img = panorama.image.convert("RGB")
+        w, h = img.size
+        scale = min(1.0, max_resolution / max(w, h))
+        if scale < 1.0:
+            img = img.resize((round(w * scale), round(h * scale)), PIL.Image.LANCZOS)
+        return img
 
     @staticmethod
     def _panorama_visibility_weight(
