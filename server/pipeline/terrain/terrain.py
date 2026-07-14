@@ -137,6 +137,7 @@ class TerrainMeshStage(PipelineStage):
                         self.log_warning("No texture source — geometry-only terrain mesh")
 
         region_map = context.input_depth(ContextKey.REGION_MAP)
+        observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
         mesh, water_mesh = TerrainMeshGenerator.generate(
@@ -156,6 +157,7 @@ class TerrainMeshStage(PipelineStage):
             texture_tile_factor=tile_factor,
             region_map=region_map,
             water_depression_m=cfg.water_depression_m,
+            observed_mask=observed_mask,
         )
         self.advance_progress(task)
 

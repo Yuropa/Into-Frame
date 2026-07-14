@@ -36,6 +36,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         save_point_cloud: bool = True,
         point_cloud_stride: int = 4,
         min_forward_samples: int = 4,
+        fill_boundary_falloff_cells: float = 6.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -84,6 +85,14 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # sample is overridden by real per-cell mean/relief/slope statistics. Below
         # this, either a plane fit is impossible (<3 points) or too noisy to trust.
         self.min_forward_samples = min_forward_samples
+        # How many cells (at each octave's own resolution) beyond a real
+        # observation the synthetic fill's injected noise needs before reaching
+        # full amplitude -- unobserved cells near real data (e.g. the occluded
+        # top of a cliff whose base is directly observed) hug that data's
+        # diffused trend instead of drifting via unconstrained randomness; only
+        # cells with no nearby observation get real freedom to wander. See
+        # HeightMapGenerator._interpolate.
+        self.fill_boundary_falloff_cells = fill_boundary_falloff_cells
 
 
 class HeightMapStage(PipelineStage):
@@ -188,6 +197,7 @@ class HeightMapStage(PipelineStage):
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
             min_forward_samples=cfg.min_forward_samples,
+            fill_boundary_falloff_cells=cfg.fill_boundary_falloff_cells,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

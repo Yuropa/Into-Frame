@@ -133,6 +133,12 @@ stages:
                                  # real per-cell mean/relief/slope statistics (near-field only —
                                  # far cells rarely collect enough samples and keep using the
                                  # existing inverse-mapped value)
+    fill_boundary_falloff_cells: 6.0 # unobserved-cell fill: how many cells (at each octave's
+                                 # own resolution) beyond a real observation the injected noise
+                                 # needs before reaching full amplitude — fill right next to real
+                                 # data (e.g. the occluded top of a cliff whose base is directly
+                                 # observed) hugs that data's diffused trend instead of drifting
+                                 # via unconstrained randomness
 
   - name: Region Map
     stage: RegionMapStage
@@ -240,7 +246,9 @@ stages:
     noise_amplitude: 0.05   # metres of peak noise displacement
     noise_blend_floor: 0.15 # minimum noise blend fraction at the camera origin (was 0, which left
                              # the ground directly under the user perfectly noise-free); ramps up
-                             # to 1.0 at the domain corner as before
+                             # to 1.0 at the domain corner as before. Only applies where
+                             # HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on real
+                             # point-cloud geometry get zero added noise regardless of distance.
     water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
                              # WATER cells), so an eventually-animated water plane's wave amplitude
                              # never exposes the terrain underneath it. Also emits a separate flat

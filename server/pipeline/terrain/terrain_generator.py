@@ -32,6 +32,7 @@ class TerrainMeshGenerator:
         texture_tile_factor: float = 1.0,
         region_map: Optional[Depth] = None,
         water_depression_m: float = 0.5,
+        observed_mask: Optional[Depth] = None,
     ) -> tuple[Mesh, Optional[Mesh]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -51,6 +52,14 @@ class TerrainMeshGenerator:
                     the exact same triangulation so its shoreline matches the
                     terrain mesh's water hole precisely.
         water_depression_m: how far below the water surface the lakebed is carved.
+        observed_mask: optional HEIGHT_MAP_OBSERVED_MASK (same grid as height_map,
+                    True where a cell has a genuine direct point-cloud measurement,
+                    already restored verbatim through Reconstruction and Noise
+                    Refinement). When supplied, the vertex noise below is
+                    suppressed on real cells and only applied on synthetic/
+                    interpolated ones -- otherwise this stage's own noise would be
+                    the one place in the pipeline that displaces real geometry
+                    regardless of how confidently it was observed.
 
         Returns (terrain_mesh, water_mesh). water_mesh is None when region_map is
         not supplied or the panorama has no detected water.
@@ -117,6 +126,19 @@ class TerrainMeshGenerator:
         r_end = np.hypot(x_half, z_far)
         blend = noise_blend_floor + (1.0 - noise_blend_floor) * (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
         noise_add = noise_vals * noise_amplitude * blend
+
+        if observed_mask is not None and observed_mask.depth.shape == hm.shape:
+            # Suppress noise on vertices sitting on real point-cloud geometry —
+            # sigma=1 matches the feather TerrainReconstructionStage/
+            # TerrainNoiseRefinementStage already use when restoring observed
+            # cells, so the transition doesn't leave a sudden seam in vertex
+            # noise right at the observed/interpolated boundary.
+            observed_field = gaussian_filter(observed_mask.depth.astype(np.float64), sigma=1.0)
+            observed_weight = map_coordinates(
+                observed_field, [row_coords, col_coords], order=1, mode="nearest",
+            ).astype(np.float32).clip(0.0, 1.0)
+            noise_add *= (1.0 - observed_weight)
+
         if is_water is not None:
             # A lakebed shouldn't get the same surface-relief noise as dry
             # ground — zero it under water so the depression below stays clean.

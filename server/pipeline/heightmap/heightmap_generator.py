@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import PIL.Image
 from pathlib import Path
-from scipy.ndimage import gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
+from scipy.ndimage import distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -43,6 +43,7 @@ class HeightMapGenerator:
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
         min_forward_samples: int = 4,
+        fill_boundary_falloff_cells: float = 6.0,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -121,6 +122,11 @@ class HeightMapGenerator:
                             by real per-cell statistics (mean/relief/slope). Below this,
                             a plane fit is either impossible (<3 points) or too noisy to
                             trust over the existing inverse-mapped value.
+        fill_boundary_falloff_cells: see _interpolate — how many cells (at each
+                            octave's own resolution) beyond a real observation the
+                            synthetic fill's injected noise needs before reaching full
+                            amplitude. Cells nearer a real observation than this stay
+                            close to its diffused trend instead of drifting via noise.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -337,7 +343,9 @@ class HeightMapGenerator:
                     debug_dir / "heightmap_cell_slope.png"
                 )
 
-        result = HeightMapGenerator._interpolate(height_map)
+        result = HeightMapGenerator._interpolate(
+            height_map, boundary_falloff_cells=fill_boundary_falloff_cells
+        )
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
 
@@ -699,7 +707,12 @@ class HeightMapGenerator:
                 levels[hi, rows, cols] * frac).astype(np.float32)
 
     @staticmethod
-    def _interpolate(height_map: np.ndarray, n_octaves: int = 4, noise_seed: int = 0) -> np.ndarray:
+    def _interpolate(
+        height_map: np.ndarray,
+        n_octaves: int = 4,
+        noise_seed: int = 0,
+        boundary_falloff_cells: float = 6.0,
+    ) -> np.ndarray:
         """
         Multi-scale noise inpainting for unknown (NaN) cells.
 
@@ -709,6 +722,19 @@ class HeightMapGenerator:
         with cubically-decreasing amplitude is injected into still-unknown cells
         (front-loading large-scale structure), and diffusion propagates boundary
         values inward.  Known cells are hard constraints throughout.
+
+        boundary_falloff_cells: the injected noise at each level is additionally
+        scaled by distance (in that level's own cells) to the nearest real known
+        cell — 0 right at the boundary, ramping to full amplitude
+        boundary_falloff_cells away. Without this, a cell immediately next to a
+        real observation (e.g. the occluded top of a cliff whose base is
+        directly observed) could get just as much random noise as a cell deep in
+        a large unobserved region with no nearby evidence at all — every level
+        already diffuses in the value from known neighbours, but the noise
+        term itself didn't defer to how close a real observation actually was.
+        Gating it means fill immediately adjacent to real data continues that
+        data's trend (diffusion-dominated, "close to known neighbours"), while
+        only cells with no nearby observation get real freedom to wander.
         """
         known_mask = ~np.isnan(height_map)
         if np.all(known_mask):
@@ -749,7 +775,11 @@ class HeightMapGenerator:
                 # noise-free so diffusion — not randomness — sets the last detail.
                 ZI_up = zoom(ZI, (sh / ZI.shape[0], sw / ZI.shape[1]), order=3)
                 amplitude = noise_scale * (octave ** 3) * 1e-2
-                noise = rng.standard_normal((sh, sw)).astype(np.float32) * amplitude
+                dist_to_known = distance_transform_edt(~ds_mask)
+                boundary_gate = np.clip(
+                    dist_to_known / max(boundary_falloff_cells, 1e-6), 0.0, 1.0
+                ).astype(np.float32)
+                noise = rng.standard_normal((sh, sw)).astype(np.float32) * amplitude * boundary_gate
                 ZI = np.where(ds_mask, ds_vals, ZI_up + noise)
 
             n_iters = max(20, sh * 2 if octave == n_octaves - 1 else sh // 4)
