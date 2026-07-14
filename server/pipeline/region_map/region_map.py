@@ -119,10 +119,31 @@ class RegionMapStage(PipelineStage):
         _grid_pano_u = _grid_pano_v = None
         if self.temp is not None and panorama_source is not None:
             panorama_source_rgb = np.array(panorama_source.rgb())
-            _grid_pano_u, _grid_pano_v, _, _ = grid_cell_panorama_uv(
+            # X/Z only here -- grid_cell_panorama_uv's own pano_u/pano_v assume every
+            # cell sits on a flat plane camera_height_meters below the camera. That's
+            # the right bootstrap assumption for HeightMapStage (elevation isn't known
+            # yet there), but wrong for debug-projecting cells that are actually on
+            # real terrain far from flat (a mountain slope, easily metres above camera
+            # height) -- it squashed virtually the whole grid into a thin band near the
+            # mathematical flat-ground horizon row, regardless of where that terrain
+            # actually appears in the photo. Use HEIGHT_MAP's real per-cell elevation
+            # (already computed by this point in the pipeline) with the unrestricted
+            # Panorama.project_3d instead.
+            _, _, X_grid, Z_grid = grid_cell_panorama_uv(
                 cfg.grid_size_meters, cfg.grid_resolution, cfg.camera_height_meters,
                 panorama_source_rgb.shape[0], panorama_source_rgb.shape[1],
             )
+            height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+            if height_map_depth is not None and height_map_depth.depth.shape == X_grid.shape:
+                Y_grid = height_map_depth.depth.astype(np.float32)
+            else:
+                Y_grid = np.full_like(X_grid, -cfg.camera_height_meters)
+            vertices = np.stack(
+                [X_grid.ravel(), Y_grid.ravel(), Z_grid.ravel()], axis=1
+            ).astype(np.float64)
+            pu, pv = panorama_source.project_3d(vertices)
+            _grid_pano_u = pu.reshape(X_grid.shape).astype(np.float32)
+            _grid_pano_v = pv.reshape(X_grid.shape).astype(np.float32)
         self.advance_progress(task)
 
         if panorama_depth is None:
@@ -314,13 +335,15 @@ class RegionMapStage(PipelineStage):
     # extracted feature over it in a single bold colour, so the feature can be
     # visually sanity-checked against what's actually in the photo (as opposed
     # to the top-down grid debug images above, which have no photographic
-    # context at all). Grid-space features (region types, skeletons, peaks) go
-    # through grid_cell_panorama_uv — the same flat-ground-plane forward
-    # projection inverse_map_panorama_to_grid uses in the other direction.
-    # World-space features (ridge/water chains, which carry real elevation) go
-    # through Panorama.uv_for_3d, the shared world-point → panorama-pixel
-    # projection used throughout this codebase (mesh texture baking, reference-
-    # patch cropping, etc).
+    # context at all). Grid-space features (region types, skeletons, peaks) use
+    # _grid_pano_u/_grid_pano_v, computed once above from each cell's real
+    # HEIGHT_MAP elevation via Panorama.project_3d — not grid_cell_panorama_uv's
+    # own flat-ground-plane pano_u/pano_v, which is right for
+    # inverse_map_panorama_to_grid's bootstrap use (elevation isn't known yet
+    # there) but wrong for debug-projecting cells on real, non-flat terrain.
+    # World-space features (ridge/water chains, which already carry real
+    # elevation) also go through Panorama.project_3d directly, in
+    # _panorama_debug_chains below.
 
     def _panorama_debug_scatter(
         self,
@@ -408,17 +431,23 @@ class RegionMapStage(PipelineStage):
     ) -> np.ndarray:
         """
         Draw world-space XYZ polylines (MOUNTAIN_RIDGE_CHAINS, WATER_CHAINS) onto
-        a copy of panorama_rgb via Panorama.uv_for_3d.
+        a copy of panorama_rgb via Panorama.project_3d.
+
+        Deliberately not Panorama.sample_3d's horizon/sky gating (there was a
+        prior version of this that reused a since-removed uv_for_3d, which
+        excluded anything above the horizon): a mountain ridgeline silhouette
+        sits above the horizon by definition, so gating on that basis meant
+        every ridge-chain segment was silently dropped and nothing was ever
+        drawn. This function only needs pixel coordinates to draw a line at,
+        not a real-colour sample, so no sky/horizon gate applies here at all.
         """
         overlay = panorama_rgb.copy()
         w = overlay.shape[1]
         for chain in chains:
             if len(chain) < 2:
                 continue
-            pu, pv, valid = panorama.uv_for_3d(chain)
+            pu, pv = panorama.project_3d(chain)
             for i in range(len(chain) - 1):
-                if not (valid[i] and valid[i + 1]):
-                    continue
                 u0, u1 = float(pu[i]), float(pu[i + 1])
                 if abs(u1 - u0) > w / 2:
                     # Consecutive chain points straddle the panorama's 360° seam --

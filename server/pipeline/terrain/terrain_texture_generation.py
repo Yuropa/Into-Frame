@@ -568,6 +568,10 @@ class TerrainTextureGenerationStage(PipelineStage):
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         terrain_half = grid_size / 2.0
 
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
         for i, formation in enumerate(formations):
             mesh = context.mesh(formation["mesh_key"])
             if mesh is None:
@@ -577,6 +581,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 panorama_terrain, height_map_depth.depth, terrain_half,
                 formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
                 formation["x_center"], formation["z_center"],
+                sky_mask=sky_mask,
             )
             tile = PIL.Image.fromarray((layer.clip(0.0, 1.0) * 255.0).astype("uint8"), "RGB")
             if cfg.use_intrinsic_delighting:
@@ -889,6 +894,10 @@ class TerrainTextureGenerationStage(PipelineStage):
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         half = grid_size / 2.0
 
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
         vertices = np.asarray(terrain_mesh.mesh.vertices, dtype=np.float64)
         faces = np.asarray(terrain_mesh.mesh.faces, dtype=np.int64)
         if len(faces) == 0:
@@ -929,6 +938,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             "face_region_idx": face_region_idx,
             "height_map": height_map_depth.depth,
             "half": half,
+            "sky_mask": sky_mask,
         }
 
     def _synthesize_pattern_layer(
@@ -967,6 +977,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             z_far=pattern_ctx["half"],
             canvas_size=cfg.pattern_canvas_size,
             seed=cfg.seed + seed_offset,
+            sky_mask=pattern_ctx["sky_mask"],
             sample_res=cfg.pattern_sample_res,
             border_width_frac=cfg.pattern_border_width_frac,
             feather_band_px=cfg.pattern_feather_band_px,

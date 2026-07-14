@@ -1,6 +1,7 @@
 from typing import Any, Optional
 from logging import Logger
 
+import numpy as np
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -163,6 +164,9 @@ class TerrainMeshStage(PipelineStage):
         region_map = context.input_depth(ContextKey.REGION_MAP)
         observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
         component_id = context.input_depth(ContextKey.HEIGHT_MAP_COMPONENT_ID)
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
         mesh, water_mesh = TerrainMeshGenerator.generate(
@@ -185,6 +189,7 @@ class TerrainMeshStage(PipelineStage):
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,
+            sky_mask=sky_mask,
         )
         self.advance_progress(task)
 

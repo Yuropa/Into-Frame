@@ -1,6 +1,7 @@
 from typing import Any, Optional
 from logging import Logger
 
+import numpy as np
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -79,6 +80,10 @@ class TerrainTextureBakeStage(PipelineStage):
         height_certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
         height_certainty = height_certainty_depth.depth if height_certainty_depth is not None else None
 
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
         task = self.create_progress(2, "Terrain Texture Bake…")
 
         color, certainty = TerrainMeshGenerator.bake_topdown_texture_with_certainty(
@@ -91,6 +96,7 @@ class TerrainTextureBakeStage(PipelineStage):
             nadir_cutoff_deg=cfg.nadir_cutoff_deg,
             nadir_fade_deg=cfg.nadir_fade_deg,
             horizon_fade_deg=cfg.horizon_fade_deg,
+            sky_mask=sky_mask,
         )
         self.advance_progress(task)
 

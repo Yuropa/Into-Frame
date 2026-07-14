@@ -35,6 +35,7 @@ class TerrainMeshGenerator:
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
+        sky_mask: Optional[np.ndarray] = None,
     ) -> tuple[Mesh, Optional[Mesh]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -76,6 +77,10 @@ class TerrainMeshGenerator:
                     any gap of its own could be seen through.
         formation_depression_m: how far below its real height the base terrain
                     is carved wherever a separate component's own mesh covers it.
+        sky_mask: optional PANORAMA_SKY_MASK, forwarded to the inline panorama
+                    bake (Panorama.sample_3d) so real terrain above the horizon
+                    (a mountain slope, easily above the camera's own height) is
+                    sampled directly instead of being treated as sky.
 
         Returns (terrain_mesh, water_mesh). water_mesh is None when region_map is
         not supplied or the panorama has no detected water.
@@ -207,7 +212,7 @@ class TerrainMeshGenerator:
         # ── Colour / texture ──────────────────────────────────────────────
         baked_tex = (
             precomputed_texture
-            or (TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far)
+            or (TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far, sky_mask=sky_mask)
                 if panorama is not None else None)
         )
         if baked_tex is not None:
@@ -518,6 +523,7 @@ class TerrainMeshGenerator:
         x_half: float,
         z_far: float,
         tex_size: int = 4096,
+        sky_mask: Optional[np.ndarray] = None,
     ) -> PIL.Image.Image:
         """
         Rasterise the panorama into a top-down orthographic texture.
@@ -542,7 +548,7 @@ class TerrainMeshGenerator:
         Y = np.nan_to_num(Y, nan=0.0)
 
         grid_verts = np.stack([X, Y, Z], axis=-1)
-        rgba = panorama.sample_3d(grid_verts)
+        rgba = panorama.sample_3d(grid_verts, sky_mask=sky_mask)
         return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
 
     @staticmethod
@@ -556,6 +562,7 @@ class TerrainMeshGenerator:
         nadir_cutoff_deg: float = -35.0,
         nadir_fade_deg: float = 10.0,
         horizon_fade_deg: float = 5.0,
+        sky_mask: Optional[np.ndarray] = None,
     ) -> tuple[PIL.Image.Image, np.ndarray]:
         """
         Bake a top-down panorama texture and a per-texel certainty map.
@@ -596,7 +603,7 @@ class TerrainMeshGenerator:
         Y = np.nan_to_num(Y, nan=0.0)
 
         grid_verts = np.stack([X, Y, Z], axis=-1)
-        rgba = panorama.sample_3d(grid_verts)
+        rgba = panorama.sample_3d(grid_verts, sky_mask=sky_mask)
         color = PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
 
         # ── Latitude-based certainty (magnitude of viewing angle, not sign) ──────

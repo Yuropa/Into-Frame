@@ -171,11 +171,16 @@ def bake_real_layer(
     canvas_size: int,
     x_center: float = 0.0,
     z_center: float = 0.0,
+    sky_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Dewarped real-photo colour, sampled directly in world space (no
     intermediate grid resampling -- see Panorama.sample_3d) across a
     [-x_half, x_half] x [-z_far, z_far] canvas around (x_center, z_center).
+
+    sky_mask (optional PANORAMA_SKY_MASK) is forwarded to sample_3d so real
+    terrain above the horizon (a mountain slope, a nearby rock formation taller
+    than the camera) is sampled directly instead of being treated as sky.
 
     This is the same "real content everywhere" bake synthesize_region_layer
     uses as its base layer and feather target; factored out here so it can
@@ -203,7 +208,7 @@ def bake_real_layer(
     Y = np.nan_to_num(Y, nan=0.0)
     world_pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3).astype(np.float32)
     return (
-        panorama.sample_3d(world_pts)[:, :3].astype(np.float32) / 255.0
+        panorama.sample_3d(world_pts, sky_mask=sky_mask)[:, :3].astype(np.float32) / 255.0
     ).reshape(canvas_size, canvas_size, 3)
 
 
@@ -286,6 +291,7 @@ def synthesize_region_layer(
     feather_band_px: float = 48.0,
     feather_sigma_px: float = 8.0,
     min_coverage_fraction: float = 0.002,
+    sky_mask: Optional[np.ndarray] = None,
 ) -> Optional[PIL.Image.Image]:
     """
     Build this region type's texture layer by assigning boundary-matched real
@@ -325,6 +331,7 @@ def synthesize_region_layer(
     # and the feather target at the library/real seam.
     real_everywhere = bake_real_layer(
         panorama, height_map, terrain_half, x_half, z_far, canvas_size, x_center, z_center,
+        sky_mask=sky_mask,
     )
 
     canvas = real_everywhere.copy()
