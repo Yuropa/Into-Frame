@@ -53,7 +53,11 @@ class SceneGenerationStage(PipelineStage):
       metadata_{i}  → object  ({"box": [...], "score": float})
 
     Optional:
-      ContextKey.TERRAIN_MESH  → Mesh  (placed at origin if present)
+      ContextKey.TERRAIN_MESH        → Mesh        (placed at origin if present)
+      ContextKey.WATER_MESH          → Mesh        (placed at origin if present)
+      ContextKey.TERRAIN_FORMATIONS  → list[dict]  (each references a dynamic
+                                        "terrain_formation_{id}" Mesh key, already
+                                        in absolute world space -- placed at origin)
 
     Output key (SemanticKey.OUTPUT) → ContextKey.SCENE (Scene)
     """
@@ -240,6 +244,29 @@ class SceneGenerationStage(PipelineStage):
             water = Object3D.mesh(ContextKey.WATER_MESH, x=0.0, y=0.0, z=0.0)
             water.name = "water"
             scene.add_object(water)
+
+        # Non-primary ground components (see TerrainMeshStage / HeightMapGenerator.
+        # _label_ground_components) -- a separate landmass, an isolated rock
+        # formation, anything real but genuinely disconnected from the base terrain.
+        # Each already carries its own absolute-world-space vertices (built by
+        # TerrainMeshGenerator.generate_component_mesh) and its own baked texture
+        # (TerrainTextureGenerationStage._texture_formations), so it's placed at the
+        # origin exactly like terrain/water above.
+        #
+        # Object3D.name deliberately does NOT contain "terrain" -- the Unity client's
+        # TerrainMaterialManager matches meshes to apply the shared, separately-
+        # transmitted SplatMaterial by a case-insensitive substring check against
+        # "terrain" (confirmed this session), and a formation mesh already carries
+        # its own baked-in texture; it must not be swept up by that name match.
+        formations = context.input_object(ContextKey.TERRAIN_FORMATIONS) or []
+        for formation in formations:
+            formation_mesh = context.input_mesh(formation["mesh_key"])
+            if formation_mesh is None:
+                continue
+            self.log_info(f"Adding formation mesh {formation['id']} to scene")
+            formation_obj = Object3D.mesh(formation["mesh_key"], x=0.0, y=0.0, z=0.0)
+            formation_obj.name = f"formation_{formation['id']}"
+            scene.add_object(formation_obj)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:

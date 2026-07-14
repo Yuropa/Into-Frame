@@ -18,7 +18,8 @@ from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.terrain.pattern_texture import synthesize_region_layer
+from pipeline.terrain.pattern_texture import bake_real_layer, synthesize_region_layer
+from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
 from util.device_utils import DeviceStrategy, preferred_device
@@ -521,9 +522,78 @@ class TerrainTextureGenerationStage(PipelineStage):
             f"SplatMaterial: {material.layer_count} layer(s), "
             f"{len(material.blend_maps)} blend map(s) at {cfg.blend_map_size}px"
         )
+
+        self._texture_formations(context, cfg)
+
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    # ── Formation meshes ─────────────────────────────────────────────────────
+
+    def _texture_formations(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+    ) -> None:
+        """
+        Bake and apply each non-primary ground component's own texture (see
+        TerrainMeshStage / ContextKey.TERRAIN_FORMATIONS) directly onto its
+        mesh's own UVs -- unlike the base terrain, a formation mesh has no
+        separately-transmitted SplatMaterial to fall back on (confirmed
+        against the Unity client: mesh/material association is name-matched
+        to "terrain" specifically), so its final texture has to be baked
+        into its own GLB, the same standard glTF texturing every other
+        object mesh in this codebase already uses.
+
+        A formation is, by construction, made entirely of directly-observed
+        cells (component membership in
+        HeightMapGenerator._label_ground_components requires real height
+        data) -- essentially never the nadir hole, horizon band, or an
+        occlusion gap a synthesized/library layer exists for. So this skips
+        the library/assignment machinery entirely and just bakes real,
+        dewarped, delit photo content (pattern_texture.bake_real_layer),
+        the same operation the main terrain's own panorama layer performs.
+        """
+        formations = context.input_object(ContextKey.TERRAIN_FORMATIONS)
+        if not formations:
+            return
+
+        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        if panorama_terrain is None or height_map_depth is None:
+            self.log_warning("Formations present but no panorama/height map — leaving them untextured")
+            return
+        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+        terrain_half = grid_size / 2.0
+
+        for i, formation in enumerate(formations):
+            mesh = context.mesh(formation["mesh_key"])
+            if mesh is None:
+                continue
+
+            layer = bake_real_layer(
+                panorama_terrain, height_map_depth.depth, terrain_half,
+                formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
+                formation["x_center"], formation["z_center"],
+            )
+            tile = PIL.Image.fromarray((layer.clip(0.0, 1.0) * 255.0).astype("uint8"), "RGB")
+            if cfg.use_intrinsic_delighting:
+                tile = self._delight_patch(tile, cfg)
+
+            TerrainMeshGenerator.apply_component_texture(
+                mesh, tile,
+                formation["x_center"], formation["z_center"],
+                formation["x_half"], formation["z_half"],
+            )
+            context.add_mesh(formation["mesh_key"], mesh)
+
+            self.log_info(f"Textured formation {formation['id']} ({formation['mesh_key']})")
+            if self.temp is not None:
+                tile.save(self.temp / f"terrain_formation_{formation['id']}_texture.png")
+
+        self._close_intrinsics()
 
     # ── Material construction ─────────────────────────────────────────────────
 
@@ -892,6 +962,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             reference_patches=delit_patches,
             panorama=panorama,
             height_map=pattern_ctx["height_map"],
+            terrain_half=pattern_ctx["half"],
             x_half=pattern_ctx["half"],
             z_far=pattern_ctx["half"],
             canvas_size=cfg.pattern_canvas_size,

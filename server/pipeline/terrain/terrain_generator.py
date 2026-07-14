@@ -33,6 +33,8 @@ class TerrainMeshGenerator:
         region_map: Optional[Depth] = None,
         water_depression_m: float = 0.5,
         observed_mask: Optional[Depth] = None,
+        component_id: Optional[Depth] = None,
+        formation_depression_m: float = 0.5,
     ) -> tuple[Mesh, Optional[Mesh]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -60,6 +62,20 @@ class TerrainMeshGenerator:
                     interpolated ones -- otherwise this stage's own noise would be
                     the one place in the pipeline that displaces real geometry
                     regardless of how confidently it was observed.
+        component_id: optional HEIGHT_MAP_COMPONENT_ID (same grid as height_map;
+                    see HeightMapGenerator._label_ground_components). Cells with
+                    id > 1 belong to a connected ground component other than the
+                    largest/base one -- a separate landmass, an isolated rock
+                    formation, anything real but genuinely disconnected from this
+                    mesh's own ground. Those get extracted as their own separate
+                    mesh elsewhere (see generate_component_mesh), so *this* --
+                    the base terrain -- mirrors the water-depression pattern
+                    above and pushes its own vertices there below the real
+                    height by formation_depression_m, instead of showing the
+                    same geometry twice or leaving a hole an extracted mesh with
+                    any gap of its own could be seen through.
+        formation_depression_m: how far below its real height the base terrain
+                    is carved wherever a separate component's own mesh covers it.
 
         Returns (terrain_mesh, water_mesh). water_mesh is None when region_map is
         not supplied or the panorama has no detected water.
@@ -113,6 +129,25 @@ class TerrainMeshGenerator:
             if is_water.any():
                 water_Y = Y_pos.copy()
 
+        # ── Formation mask ────────────────────────────────────────────────────
+        # Same idea as the water mask above: capture each formation vertex's real
+        # height before noise/depression, so the base terrain can be pushed below
+        # it later without disturbing the value generate_component_mesh needs to
+        # build that formation's own separate mesh.
+        is_formation = None
+        formation_Y = None
+        if component_id is not None and component_id.depth.shape == hm.shape:
+            cid = component_id.depth
+            h_c, w_c = cid.shape
+            row_c = ((Z_pos + z_far)  / (2.0 * z_far)   * (h_c - 1)).clip(0, h_c - 1)
+            col_c = ((X_pos + x_half) / grid_size_meters * (w_c - 1)).clip(0, w_c - 1)
+            vertex_component_id = map_coordinates(
+                cid, [row_c, col_c], order=0, mode="nearest"
+            ).round().astype(np.int32)
+            is_formation = vertex_component_id > 1
+            if is_formation.any():
+                formation_Y = Y_pos.copy()
+
         # ── Noise, blended in with distance from origin ───────────────────
         noise_tex = TerrainMeshGenerator._smooth_noise((256, 256), seed=noise_seed)
         nr = (row_coords / (h_hm - 1) * 255).clip(0, 255)
@@ -143,12 +178,27 @@ class TerrainMeshGenerator:
             # A lakebed shouldn't get the same surface-relief noise as dry
             # ground — zero it under water so the depression below stays clean.
             noise_add = np.where(is_water, 0.0, noise_add)
+        if is_formation is not None:
+            # Hidden beneath an extracted formation's own mesh -- no point
+            # texturing/relief-shaping ground nobody will ever see.
+            noise_add = np.where(is_formation, 0.0, noise_add)
         Y_pos += noise_add
+
+        if formation_Y is not None:
+            # Push the base terrain below each extracted formation's own real
+            # height by a fixed margin, mirroring the water depression below --
+            # never a literal hole, just hidden geometry underneath, so nothing
+            # pokes through and no gap is visible from an angle that looks past
+            # the extracted mesh's own edge.
+            Y_pos = np.where(is_formation, formation_Y - formation_depression_m, Y_pos)
 
         if water_Y is not None:
             # Carve the lakebed a fixed margin below the (already correct,
             # noise-free) water surface so an animated water plane's wave
-            # amplitude never exposes the terrain underneath it.
+            # amplitude never exposes the terrain underneath it. Applied after
+            # the formation depression so real water always wins in the rare
+            # case a cell is classified as both (e.g. the submerged base of a
+            # rock formation that also pokes above the surface elsewhere).
             Y_pos = np.where(is_water, water_Y - water_depression_m, Y_pos)
 
         # ── Vertex array ──────────────────────────────────────────────────
@@ -226,6 +276,148 @@ class TerrainMeshGenerator:
                 water_mesh = Mesh(water_tri_mesh)
 
         return Mesh(tri_mesh), water_mesh
+
+    # ── Component (formation) meshes ────────────────────────────────────────────
+
+    @staticmethod
+    def generate_component_mesh(
+        height_map: Depth,
+        component_id: Depth,
+        target_id: int,
+        grid_size_meters: float,
+        min_dist: float = 0.5,
+        n_boundary: int = 8,
+        seed: int = 42,
+        footprint_margin: float = 2.0,
+    ) -> Optional[tuple[Mesh, float, float, float, float]]:
+        """
+        Build an independent geometry-only mesh for one non-primary ground
+        component (see HeightMapGenerator._label_ground_components) -- a
+        separate landmass, an isolated rock formation, anything real but
+        disconnected from the base terrain. Uses real height directly, no
+        depression (that's the base terrain's own job -- see the
+        component_id/formation_depression_m parameters on generate() above,
+        which hide the base terrain's copy of this same footprint below it).
+
+        Scoped to the component's own bounding box, not the whole grid: a
+        UNIFORM-density Poisson disc (no near-camera falloff -- a formation
+        doesn't have its own obvious "near" reference point the way the main
+        terrain has the camera) fills the bounding box, then both points and
+        triangles are filtered down to the component's own footprint mask --
+        Delaunay triangulates the convex hull of whatever points survive, so
+        without also dropping faces whose centroid falls outside the
+        footprint, an irregular or concave component (a crescent-shaped
+        sandbar, say) would get bridged over with incorrect flat triangles
+        cutting across the concave part.
+
+        No texture/UV is set here -- TerrainTextureGenerationStage bakes and
+        applies each formation's own texture separately (see
+        pipeline/terrain/pattern_texture.py's x_center/z_center support),
+        using the returned (x_center, z_center, x_half, z_half) to align its
+        canvas and UVs with this mesh's own local footprint.
+
+        Returns None if the component doesn't exist, or its footprint is too
+        small/degenerate to mesh (fewer than 3 surviving points, or a
+        bounding half-extent under min_dist).
+        """
+        hm = height_map.depth
+        cid = component_id.depth
+        h, w = cid.shape
+        if hm.shape != cid.shape:
+            return None
+        half = grid_size_meters / 2.0
+
+        footprint = np.round(cid).astype(np.int32) == target_id
+        if not footprint.any():
+            return None
+
+        rows, cols = np.where(footprint)
+        z_coords = rows.astype(np.float64) / (h - 1) * grid_size_meters - half
+        x_coords = cols.astype(np.float64) / (w - 1) * grid_size_meters - half
+        x_center = float((x_coords.min() + x_coords.max()) / 2.0)
+        z_center = float((z_coords.min() + z_coords.max()) / 2.0)
+        x_half = float((x_coords.max() - x_coords.min()) / 2.0) + footprint_margin
+        z_half = float((z_coords.max() - z_coords.min()) / 2.0) + footprint_margin
+        if x_half < min_dist or z_half < min_dist:
+            return None
+
+        local_xz = TerrainMeshGenerator._poisson_disc_xz(
+            x_half=x_half, z_far=z_half,
+            inner_min_dist=min_dist, outer_min_dist=min_dist,
+            n_boundary=n_boundary, seed=seed,
+        )
+        local_xz = np.unique(np.round(local_xz, 4), axis=0)
+
+        world_x = local_xz[:, 0] + x_center
+        world_z = local_xz[:, 1] + z_center
+
+        # Shrink-wrap to the component's real (possibly irregular) footprint:
+        # drop any point whose nearest grid cell isn't actually this component.
+        row_i = np.clip(((world_z + half) / grid_size_meters * (h - 1)).round().astype(np.int64), 0, h - 1)
+        col_i = np.clip(((world_x + half) / grid_size_meters * (w - 1)).round().astype(np.int64), 0, w - 1)
+        in_footprint = footprint[row_i, col_i]
+        local_xz = local_xz[in_footprint]
+        world_x, world_z = world_x[in_footprint], world_z[in_footprint]
+        row_i, col_i = row_i[in_footprint], col_i[in_footprint]
+        if len(local_xz) < 3:
+            return None
+
+        try:
+            faces = Delaunay(local_xz).simplices[:, ::-1].astype(np.int32)
+        except Exception:
+            return None  # degenerate point set (e.g. all collinear)
+
+        # Drop faces bridging across a concave part of the footprint (see
+        # docstring) -- centroid, in the same nearest-cell sense used above.
+        centroid_x = world_x[faces].mean(axis=1)
+        centroid_z = world_z[faces].mean(axis=1)
+        c_row = np.clip(((centroid_z + half) / grid_size_meters * (h - 1)).round().astype(np.int64), 0, h - 1)
+        c_col = np.clip(((centroid_x + half) / grid_size_meters * (w - 1)).round().astype(np.int64), 0, w - 1)
+        faces = faces[footprint[c_row, c_col]]
+        if len(faces) == 0:
+            return None
+
+        world_y = hm[row_i, col_i].astype(np.float32)
+        world_y = np.nan_to_num(world_y, nan=0.0)
+        vertices = np.stack([world_x, world_y, world_z], axis=-1).astype(np.float32)
+
+        tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+        tri_mesh.remove_unreferenced_vertices()
+        if len(tri_mesh.faces) == 0:
+            return None
+
+        return Mesh(tri_mesh), x_center, z_center, x_half, z_half
+
+    @staticmethod
+    def apply_component_texture(
+        mesh: Mesh,
+        tile: PIL.Image.Image,
+        x_center: float,
+        z_center: float,
+        x_half: float,
+        z_half: float,
+    ) -> None:
+        """
+        Apply a formation mesh's own baked texture (see
+        pipeline/terrain/pattern_texture.py, called with this same
+        x_center/z_center/x_half/z_half so the canvas lines up) with simple
+        orthographic top-down UVs local to the formation's own footprint --
+        the standard "one texture, one UV per vertex" glTF case every other
+        object mesh in this codebase already uses (confirmed against the
+        Unity client: no per-triangle/texture-array support, so this -- not
+        the terrain's own separately-transmitted SplatMaterial -- is how a
+        formation mesh needs to carry its texture, baked directly into its
+        own GLB).
+        """
+        verts = mesh.mesh.vertices
+        u = ((verts[:, 0] - x_center + x_half) / (2.0 * x_half)).astype(np.float32)
+        v = (1.0 - (verts[:, 2] - z_center + z_half) / (2.0 * z_half)).astype(np.float32)
+        uv = np.stack([u, v], axis=-1)
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=tile.convert("RGB"),
+            baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+        )
+        mesh.mesh.visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
 
     # ── Point generation ──────────────────────────────────────────────────────
 

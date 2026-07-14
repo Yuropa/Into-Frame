@@ -160,11 +160,67 @@ def build_library(
     ]
 
 
-# ── Rasterization ────────────────────────────────────────────────────────────
+# ── Real-content baking ──────────────────────────────────────────────────────
 
-def _world_to_px(xy: np.ndarray, x_half: float, z_far: float, canvas_size: int) -> np.ndarray:
-    u = (xy[..., 0] + x_half) / (2.0 * x_half) * canvas_size
-    v = (xy[..., 1] + z_far) / (2.0 * z_far) * canvas_size
+def bake_real_layer(
+    panorama: Panorama,
+    height_map: np.ndarray,
+    terrain_half: float,
+    x_half: float,
+    z_far: float,
+    canvas_size: int,
+    x_center: float = 0.0,
+    z_center: float = 0.0,
+) -> np.ndarray:
+    """
+    Dewarped real-photo colour, sampled directly in world space (no
+    intermediate grid resampling -- see Panorama.sample_3d) across a
+    [-x_half, x_half] x [-z_far, z_far] canvas around (x_center, z_center).
+
+    This is the same "real content everywhere" bake synthesize_region_layer
+    uses as its base layer and feather target; factored out here so it can
+    also be used directly for a formation mesh's own texture
+    (TerrainTextureGenerationStage) -- a formation is, by construction, made
+    entirely of directly-observed cells (component membership in
+    HeightMapGenerator._label_ground_components requires real height data),
+    so it essentially never needs the library/assignment machinery below;
+    it just needs this same dewarped real bake, applied directly.
+
+    terrain_half is the *shared* HEIGHT_MAP's own half-extent (always
+    centered at the world origin, regardless of what this call's own canvas
+    covers) -- needed separately so a small local canvas can still correctly
+    look up real height from the one shared grid.
+
+    Returns (canvas_size, canvas_size, 3) float32 in [0, 1].
+    """
+    ys, xs = np.mgrid[0:canvas_size, 0:canvas_size].astype(np.float64)
+    Z = ys / canvas_size * (2.0 * z_far) - z_far + z_center
+    X = xs / canvas_size * (2.0 * x_half) - x_half + x_center
+    hm_h, hm_w = height_map.shape
+    row_c = ((Z + terrain_half) / (2.0 * terrain_half) * (hm_h - 1)).clip(0, hm_h - 1)
+    col_c = ((X + terrain_half) / (2.0 * terrain_half) * (hm_w - 1)).clip(0, hm_w - 1)
+    Y = map_coordinates(height_map, [row_c, col_c], order=1, mode="nearest").astype(np.float32)
+    Y = np.nan_to_num(Y, nan=0.0)
+    world_pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3).astype(np.float32)
+    return (
+        panorama.sample_3d(world_pts)[:, :3].astype(np.float32) / 255.0
+    ).reshape(canvas_size, canvas_size, 3)
+
+
+# ── Rasterization ────────────────────────────────────────────────────────────
+#
+# x_center/z_center let the canvas domain be [-x_half, x_half] x [-z_far, z_far]
+# around an arbitrary world point rather than always the world origin -- the
+# main terrain is centered at the origin (defaults below preserve that), but a
+# formation mesh (see TerrainMeshGenerator.generate_component_mesh) lives
+# wherever its own footprint actually is.
+
+def _world_to_px(
+    xy: np.ndarray, x_half: float, z_far: float, canvas_size: int,
+    x_center: float = 0.0, z_center: float = 0.0,
+) -> np.ndarray:
+    u = (xy[..., 0] - x_center + x_half) / (2.0 * x_half) * canvas_size
+    v = (xy[..., 1] - z_center + z_far) / (2.0 * z_far) * canvas_size
     return np.stack([u, v], axis=-1)
 
 
@@ -175,9 +231,11 @@ def _rasterize_triangle(
     colors_fn,                # (w0, w1, w2, tri_xz) -> (H_bbox, W_bbox, 3) colours in [0,1]
     x_half: float,
     z_far: float,
+    x_center: float = 0.0,
+    z_center: float = 0.0,
 ) -> None:
     canvas_size = canvas.shape[0]
-    px = _world_to_px(tri_xz, x_half, z_far, canvas_size)
+    px = _world_to_px(tri_xz, x_half, z_far, canvas_size, x_center, z_center)
     x0, y0 = np.floor(px.min(axis=0)).astype(int)
     x1, y1 = np.ceil(px.max(axis=0)).astype(int)
     x0, y0 = max(x0, 0), max(y0, 0)
@@ -216,10 +274,13 @@ def synthesize_region_layer(
     reference_patches: list[PIL.Image.Image],
     panorama: Panorama,
     height_map: np.ndarray,
+    terrain_half: float,
     x_half: float,
     z_far: float,
     canvas_size: int,
     seed: int,
+    x_center: float = 0.0,
+    z_center: float = 0.0,
     sample_res: int = 128,
     border_width_frac: float = 0.45,
     feather_band_px: float = 48.0,
@@ -232,6 +293,16 @@ def synthesize_region_layer(
     (TerrainTextureGenerationStage's panorama layer rejected it) and belongs
     to this region type, then feathering the seam against real photo content
     everywhere else on the canvas.
+
+    The canvas domain is [-x_half, x_half] x [-z_far, z_far] around
+    (x_center, z_center) -- 0, 0 for the main terrain (its own domain is
+    centered at the world origin), but a formation mesh (see
+    TerrainMeshGenerator.generate_component_mesh) lives wherever its own
+    footprint actually is, hence the offset. terrain_half is the *shared*
+    HEIGHT_MAP's own half-extent (always centered at the origin, regardless
+    of what this call's own canvas covers) -- needed separately so a
+    formation's much smaller canvas can still correctly look up real height
+    from the one shared grid.
 
     Returns None if there are no reference patches (caller should fall back
     to FLUX generation) or the qualifying footprint is smaller than
@@ -252,18 +323,9 @@ def synthesize_region_layer(
     # Real content everywhere on the canvas -- the base layer (so any pixel
     # not covered by a qualifying triangle is a sane fallback, not blank),
     # and the feather target at the library/real seam.
-    ys, xs = np.mgrid[0:canvas_size, 0:canvas_size].astype(np.float64)
-    Z = ys / canvas_size * (2.0 * z_far) - z_far
-    X = xs / canvas_size * (2.0 * x_half) - x_half
-    hm_h, hm_w = height_map.shape
-    row_c = ((Z + z_far) / (2.0 * z_far) * (hm_h - 1)).clip(0, hm_h - 1)
-    col_c = ((X + x_half) / (2.0 * x_half) * (hm_w - 1)).clip(0, hm_w - 1)
-    Y = map_coordinates(height_map, [row_c, col_c], order=1, mode="nearest").astype(np.float32)
-    Y = np.nan_to_num(Y, nan=0.0)
-    world_pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3).astype(np.float32)
-    real_everywhere = (
-        panorama.sample_3d(world_pts)[:, :3].astype(np.float32) / 255.0
-    ).reshape(canvas_size, canvas_size, 3)
+    real_everywhere = bake_real_layer(
+        panorama, height_map, terrain_half, x_half, z_far, canvas_size, x_center, z_center,
+    )
 
     canvas = real_everywhere.copy()
     synth_mask = np.zeros((canvas_size, canvas_size), dtype=bool)
@@ -287,7 +349,7 @@ def synthesize_region_layer(
             sy = np.clip(((1.0 - sv) * sample_res).astype(int), 0, sample_res - 1)
             return sample[sy, sx]
 
-        _rasterize_triangle(canvas, synth_mask, tri_xz, colors_fn, x_half, z_far)
+        _rasterize_triangle(canvas, synth_mask, tri_xz, colors_fn, x_half, z_far, x_center, z_center)
 
     coverage = float(synth_mask.mean())
     if coverage < min_coverage_fraction:

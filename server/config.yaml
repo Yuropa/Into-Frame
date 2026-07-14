@@ -139,6 +139,10 @@ stages:
                                  # data (e.g. the occluded top of a cliff whose base is directly
                                  # observed) hugs that data's diffused trend instead of drifting
                                  # via unconstrained randomness
+    min_component_area_fraction: 0.001 # connected ground components smaller than this fraction
+                                 # of the grid are folded into the interpolated-gap fallback
+                                 # instead of kept as their own component (see
+                                 # HEIGHT_MAP_COMPONENT_ID / TerrainMeshStage's formation meshes)
 
   - name: Region Map
     stage: RegionMapStage
@@ -253,6 +257,15 @@ stages:
                              # WATER cells), so an eventually-animated water plane's wave amplitude
                              # never exposes the terrain underneath it. Also emits a separate flat
                              # water mesh (WATER_MESH) at the un-depressed water surface elevation.
+    # Non-primary connected ground components (HEIGHT_MAP_COMPONENT_ID -- a separate
+    # landmass, an isolated rock formation, anything real but genuinely disconnected
+    # from the base terrain) each get their own separate mesh instead of being folded
+    # into or discarded from the base terrain. See TERRAIN_FORMATIONS.
+    formation_depression_m: 0.5  # metres the base terrain is carved below each formation's
+                                 # own real height where it sits, mirroring water_depression_m
+    formation_min_dist: 0.5     # metres between samples in a formation's own (uniform-density,
+                                 # unlike the main terrain's near/far falloff) Poisson disc mesh
+    formation_n_boundary: 8     # anchor points per edge of a formation's own bounding rectangle
 
   - name: Terrain Texture Generation
     stage: TerrainTextureGenerationStage

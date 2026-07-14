@@ -25,6 +25,13 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         noise_blend_floor: float = 0.15,
         texture_tile_factor: float = 8.0,
         water_depression_m: float = 0.5,
+        # Non-primary connected ground components (see HEIGHT_MAP_COMPONENT_ID /
+        # HeightMapGenerator._label_ground_components) each get their own separate
+        # mesh -- a real, physically disconnected landmass or rock formation,
+        # rather than being folded into (or discarded from) the base terrain.
+        formation_depression_m: float = 0.5,
+        formation_min_dist: float = 0.5,
+        formation_n_boundary: int = 8,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.inner_min_dist = inner_min_dist
@@ -35,6 +42,9 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.noise_blend_floor = noise_blend_floor
         self.texture_tile_factor = texture_tile_factor
         self.water_depression_m = water_depression_m
+        self.formation_depression_m = formation_depression_m
+        self.formation_min_dist = formation_min_dist
+        self.formation_n_boundary = formation_n_boundary
 
 
 class TerrainMeshStage(PipelineStage):
@@ -54,11 +64,25 @@ class TerrainMeshStage(PipelineStage):
     (so an eventually-animated water plane never clips through the lakebed),
     and a separate flat water Mesh is written to ContextKey.WATER_MESH.
 
+    Where ContextKey.HEIGHT_MAP_COMPONENT_ID identifies non-primary connected
+    ground components (see HeightMapGenerator._label_ground_components) --
+    real geometry genuinely disconnected from the base terrain, e.g. a
+    separate landmass or an isolated rock formation across water -- each gets
+    its own geometry-only mesh (TerrainMeshGenerator.generate_component_mesh),
+    written under a dynamic "terrain_formation_{id}" key, with the base
+    terrain's own copy of that footprint depressed formation_depression_m
+    below it (same reasoning as the water depression). A manifest of what was
+    created is written to ContextKey.TERRAIN_FORMATIONS for
+    TerrainTextureGenerationStage (bakes+applies each formation's own
+    texture) and SceneGenerationStage (places each as its own object) to
+    consume.
+
     Input key       (SemanticKey.INPUT)      → ContextKey.HEIGHT_MAP
     Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA        (optional)
     Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (optional)
     Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH
                                               → ContextKey.WATER_MESH     (optional)
+                                              → ContextKey.TERRAIN_FORMATIONS (optional)
     """
 
     @classmethod
@@ -138,6 +162,7 @@ class TerrainMeshStage(PipelineStage):
 
         region_map = context.input_depth(ContextKey.REGION_MAP)
         observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+        component_id = context.input_depth(ContextKey.HEIGHT_MAP_COMPONENT_ID)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
         mesh, water_mesh = TerrainMeshGenerator.generate(
@@ -158,6 +183,8 @@ class TerrainMeshStage(PipelineStage):
             region_map=region_map,
             water_depression_m=cfg.water_depression_m,
             observed_mask=observed_mask,
+            component_id=component_id,
+            formation_depression_m=cfg.formation_depression_m,
         )
         self.advance_progress(task)
 
@@ -167,6 +194,44 @@ class TerrainMeshStage(PipelineStage):
             f"Terrain mesh: {mesh.vertex_count} vertices, {mesh.face_count} triangles, "
             f"{grid_size:.0f} m grid, UV scale ×{tile_factor:.0f}"
         )
+
+        # ── Formation meshes (non-primary ground components) ─────────────────────
+        formations: list[dict] = []
+        if component_id is not None:
+            n_components = int(component_id.depth.max())
+            for target_id in range(2, n_components + 1):
+                result = TerrainMeshGenerator.generate_component_mesh(
+                    height_map=height_map,
+                    component_id=component_id,
+                    target_id=target_id,
+                    grid_size_meters=grid_size,
+                    min_dist=cfg.formation_min_dist,
+                    n_boundary=cfg.formation_n_boundary,
+                    seed=cfg.seed + target_id,
+                )
+                if result is None:
+                    continue
+                formation_mesh, x_center, z_center, x_half, z_half = result
+                mesh_key = f"terrain_formation_{target_id}"
+                context.add_mesh(mesh_key, formation_mesh)
+                formations.append({
+                    "id": target_id,
+                    "mesh_key": mesh_key,
+                    "x_center": x_center,
+                    "z_center": z_center,
+                    "x_half": x_half,
+                    "z_half": z_half,
+                })
+                self.log_info(
+                    f"Formation mesh {target_id}: {formation_mesh.vertex_count} vertices, "
+                    f"{formation_mesh.face_count} triangles, centered ({x_center:.1f}, {z_center:.1f}), "
+                    f"±({x_half:.1f}, {z_half:.1f}) m"
+                )
+                if self.temp is not None:
+                    formation_mesh.save(self.temp / f"terrain_formation_{target_id}.glb")
+
+        if formations:
+            context.add_object(ContextKey.TERRAIN_FORMATIONS, formations)
 
         if self.temp is not None:
             mesh.save(self.temp / "terrain.glb")
