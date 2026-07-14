@@ -314,7 +314,11 @@ stages:
     # Panorama layer coverage: viewing-latitude ramp (camera at world origin) that keeps
     # the real photo dominant across almost the whole terrain. Synthetic tiles only fill
     # the narrow nadir hole under the camera and a thin band right at the horizon, where
-    # distant flat ground is compressed into just a few panorama pixel rows.
+    # distant flat ground is compressed into just a few panorama pixel rows -- plus
+    # (automatic, no config knob) anywhere HEIGHT_MAP_OBSERVED_MASK says the height at
+    # that point was interpolated rather than measured, even if the viewing angle looks
+    # safe, since the shader's panorama lookup uses that (possibly fabricated) world
+    # position and would otherwise sample whatever real content happens to sit there.
     use_panorama_layer: true
     panorama_blend_power: 1.0   # exponent on the latitude ramp; higher sharpens the fades
     nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
@@ -330,6 +334,31 @@ stages:
     # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
     # <temp>/texture_generation/, so each step can be inspected.
     debug_save_steps: true
+    # Real-material pattern texturing (pipeline/terrain/pattern_texture.py, adapted from
+    # Neyret & Cani's "Pattern-Based Texturing Revisited", SIGGRAPH '99 -- see
+    # resources.bib): tried first for every region type, using the real photo instead of
+    # FLUX hallucination wherever the panorama layer above doesn't already cover it
+    # directly. FLUX generation above is the explicit last-resort fallback when this
+    # returns nothing (no usable real reference for that region type, or the terrain
+    # mesh isn't available yet).
+    use_pattern_texture: true
+    pattern_certainty_threshold: 0.5  # panorama-layer weight below this -> needs synthesis
+    pattern_reference_patch_size: 512 # library samples are small triangular crops, not a
+                                       # whole tile's guidance seed -- smaller than tile_size
+    pattern_num_reference_patches: 4  # library variants per region type
+    pattern_sample_res: 128           # working resolution of one triangular library sample
+    pattern_border_width_frac: 0.45   # fraction of a sample's inradius blended toward the
+                                       # shared border colour -- wide and low-contrast (not a
+                                       # thin flat ring) reads as one continuous material
+                                       # rather than a visibly "faceted" tiling
+    pattern_feather_band_px: 48.0     # image-space feather (px, at pattern_canvas_size)
+                                       # blending the synthesized region back toward real
+                                       # photo content at its boundary with the panorama layer
+    pattern_feather_sigma_px: 8.0
+    pattern_min_coverage_fraction: 0.002 # skip (fall back to FLUX) if a region type's
+                                       # needs-synthesis footprint is smaller than this
+    pattern_canvas_size: 2048         # resolution of the baked layer (tile_factor=1.0, a
+                                       # one-shot world-space bake, not tiled like FLUX layers)
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
