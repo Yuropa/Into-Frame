@@ -18,26 +18,23 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
 
     use_depth_filter (bool, default True):
         Whether to run DepthObjectFilter on SAM masks before removal.
-        Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH) in context. Also reads
-        PANORAMA_SKY_MASK if present, so sky doesn't get treated as a real depth
-        reference (see DepthObjectFilter).
+        Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH) in context.
 
-    depth_filter_threshold / depth_filter_edge_threshold:
-        Same semantics as PanoramaInpaintingConfiguration — see that class. Note
-        depth_filter_threshold must be negative (a mask is foreground only when
-        it sits meaningfully closer than its local background baseline); a
-        positive or zero value makes DepthObjectFilter's baseline signal a
-        no-op, since depth − baseline can never exceed 0 by construction.
+    depth_filter_distance_m (float, default 5.0):
+        A mask is kept as a removable foreground occluder if its median real
+        (metric) depth is closer than this many metres. These panoramas are
+        shot from ~1-2m off the ground, so this is a direct physical-proximity
+        cutoff, not a relative/local one — see DepthObjectFilter for why a
+        local-relative signal doesn't work here (it favours rough distant
+        terrain over flat close terrain, backwards from what "foreground"
+        means).
 
     max_object_area_fraction (float, default 0.15):
         Same semantics as PanoramaInpaintingConfiguration — any single SAM mask
         covering more than this fraction of the panorama is dropped before it
-        reaches the union, rather than treated as a removable foreground object.
-        Without this, a SAM mask that captures a whole background plane (sky,
-        open water, sand) can slip past the depth filter — such a mask sits at
-        or near its own row's baseline by construction, so DepthObjectFilter's
-        signal 1 reads it as "at the background" rather than clearly rejecting
-        it — and ObjectClear ends up asked to regenerate most of the panorama.
+        reaches the union, rather than treated as a removable foreground object,
+        since ObjectClear can't plausibly regenerate that much of the image at
+        once (e.g. a whole near ground-cover plane filling most of the frame).
 
     mask_dilation_px (int, default 15):
         Pixels to dilate the unioned foreground mask before removal, giving
@@ -62,8 +59,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         self,
         *args,
         use_depth_filter: bool = True,
-        depth_filter_threshold: float = -0.05,
-        depth_filter_edge_threshold: float = 0.005,
+        depth_filter_distance_m: float = 5.0,
         max_object_area_fraction: float = 0.15,
         mask_dilation_px: int = 15,
         guidance_scale: float = 2.5,
@@ -73,8 +69,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(*args, **kwargs)
         self.use_depth_filter = use_depth_filter
-        self.depth_filter_threshold = depth_filter_threshold
-        self.depth_filter_edge_threshold = depth_filter_edge_threshold
+        self.depth_filter_distance_m = depth_filter_distance_m
         self.max_object_area_fraction = max_object_area_fraction
         self.mask_dilation_px = mask_dilation_px
         self.guidance_scale = guidance_scale
@@ -142,14 +137,9 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         if self.config.use_depth_filter:
             depth = context.input_depth(depth_key) or context.input_depth(ContextKey.PANORAMA_DEPTH)
             if depth is not None:
-                sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-                if isinstance(sky_mask, list):
-                    sky_mask = np.array(sky_mask, dtype=bool)
                 result = DepthObjectFilter().filter(
                     result, depth,
-                    threshold=self.config.depth_filter_threshold,
-                    edge_threshold=self.config.depth_filter_edge_threshold,
-                    sky_mask=sky_mask,
+                    distance_threshold_m=self.config.depth_filter_distance_m,
                 )
                 depth_filtered_out = sam_detected - result.length
                 if depth_filtered_out:

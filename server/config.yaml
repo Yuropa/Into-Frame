@@ -38,8 +38,7 @@ stages:
     enabled: false
     full_panorama: true
     use_depth_filter: true
-    depth_filter_threshold: -0.05      # Signal 1: mask must sit at least this far below its local depth baseline
-    depth_filter_edge_threshold: 0.005 # Signal 2: min edge depth-pop to keep a mask (lower = less strict)
+    depth_filter_distance_m: 5.0  # mask kept as foreground if median depth is closer than this (metres)
     # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
     # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
     # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
@@ -52,8 +51,7 @@ stages:
     stage: PanoramaForegroundInpaintingStage
     enabled: true
     use_depth_filter: true
-    depth_filter_threshold: -0.05
-    depth_filter_edge_threshold: 0.005
+    depth_filter_distance_m: 5.0
     mask_dilation_px: 15
     guidance_scale: 2.5
     num_inference_steps: 30
