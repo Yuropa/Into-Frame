@@ -407,6 +407,8 @@ stages:
     size_jitter: 0.15
     input_boundary_pad_factor: 1.5
     # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
+    # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
+                        # default (unset) is os.cpu_count()
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage

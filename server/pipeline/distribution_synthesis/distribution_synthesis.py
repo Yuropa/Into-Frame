@@ -2,6 +2,7 @@ import json
 import math
 import os
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from logging import Logger
@@ -154,6 +155,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         size_jitter: float = 0.15,
         input_boundary_pad_factor: float = 1.5,
         synthesize_cli_path: str | None = None,
+        max_workers: int | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.min_blob_area_cells = min_blob_area_cells
@@ -162,6 +164,11 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.size_jitter = size_jitter
         self.input_boundary_pad_factor = input_boundary_pad_factor
         self.synthesize_cli_path = synthesize_cli_path
+        # Each tile's synthesize_cli call is an independent, CPU-bound subprocess (no
+        # shared state), so tiles run concurrently in a thread pool -- subprocess.run
+        # releases the GIL while the child process runs, so this gets real OS-level
+        # parallelism across cores despite being threads, not processes. None -> os.cpu_count().
+        self.max_workers = max_workers
 
 
 class DistributionSynthesisStage(PipelineStage):
@@ -181,6 +188,15 @@ class DistributionSynthesisStage(PipelineStage):
     SceneGenerationStage places them through its normal terrain-snap + mesh/billboard
     path.
 
+    Every tile across every group is an independent synthesize_cli subprocess call, so
+    they're all built up front (cheap: boundary/contour geometry, no CLI calls) and then
+    run concurrently in a thread pool (see max_workers) rather than one at a time — this
+    is what previously made the stage take tens of minutes on a large/densely-tiled
+    scene despite having many idle cores. Per-tile results are still consumed back in
+    the exact same deterministic (group, blob, tile) order the serial version used, so
+    the RNG draws for size/jitter — and therefore the output for a given seed — are
+    unchanged by parallelizing.
+
     Reads:  ContextKey.OBJECT_DISTRIBUTION, ContextKey.REGION_MAP,
             ContextKey.HEIGHT_MAP_PARAMS, ContextKey.OBJECT_COUNT
     Writes: metadata_{idx} for each synthesized point, ContextKey.OBJECT_COUNT (bumped)
@@ -192,6 +208,8 @@ class DistributionSynthesisStage(PipelineStage):
                                        sampled footprint sizes
             input_boundary_pad_factor (float, default 1.5) — exemplar hull padding, in
                                        units of mean exemplar nearest-neighbour spacing
+            max_workers               (int, optional) — concurrent synthesize_cli
+                                       subprocesses; default os.cpu_count()
     Debug:  self.temp/synthesis_{region_type}_{object_type}.png
     """
 
@@ -245,13 +263,19 @@ class DistributionSynthesisStage(PipelineStage):
         next_idx = object_count
         seed_counter = 0
 
-        task = self.create_progress(len(groups), "Painting distributions…")
-        for region_type, obj_type, dist in groups:
+        # Phase 1: build every tile's synthesize_cli job up front — boundary/contour
+        # geometry only, no subprocess calls yet — so all of them (across every group)
+        # can run concurrently in phase 2. Jobs are appended in the same deterministic
+        # (group, blob, tile) order the old serial loop used, and seeded the same way
+        # (self.seed + seed_counter), so results are consumed in that same order below
+        # and the RNG draws for size/jitter — hence the final output for a given seed —
+        # are unaffected by parallelizing.
+        jobs: list[dict] = []
+        for group_idx, (region_type, obj_type, dist) in enumerate(groups):
             try:
                 region_type_idx = int(RegionType.from_label(region_type))
             except KeyError:
                 self.log_info(f"  {obj_type} [{region_type}]: unknown region type, skipping")
-                self.advance_progress(task)
                 continue
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
@@ -273,8 +297,6 @@ class DistributionSynthesisStage(PipelineStage):
 
             mask = region_map == region_type_idx
             labels, n_components = ndimage.label(mask, structure=np.ones((3, 3), dtype=np.int32))
-
-            group_placed: list[tuple[float, float, float, float]] = []  # x, z, w, h
 
             for label_id in range(1, n_components + 1):
                 blob_mask = labels == label_id
@@ -316,26 +338,73 @@ class DistributionSynthesisStage(PipelineStage):
                         domain_points = np.concatenate([exemplar_domain, tile_domain], axis=0)
 
                         seed_counter += 1
-                        synth = _run_synthesize_cli(
-                            cli_path,
-                            domain_points=domain_points,
-                            exemplar_points=exemplar_pts,
-                            input_boundary=input_boundary,
-                            output_boundary=output_boundary,
-                            n_points=-1,
-                            bin_count=dist.bin_count,
-                            max_iters=cfg.max_iters,
-                            seed=self.seed + seed_counter,
-                        )
-                        if not synth or not synth.get("output_points"):
-                            continue
+                        jobs.append({
+                            "group_idx": group_idx,
+                            "domain_points": domain_points,
+                            "exemplar_points": exemplar_pts,
+                            "input_boundary": input_boundary,
+                            "output_boundary": output_boundary,
+                            "bin_count": dist.bin_count,
+                            "seed": self.seed + seed_counter,
+                        })
 
-                        for x, z in synth["output_points"]:
-                            w, h = dist.sizes[int(rng.integers(len(dist.sizes)))]
-                            jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))
-                            group_placed.append((float(x), float(z), w * jitter, h * jitter))
+        group_placed: list[list[tuple[float, float, float, float]]] = [[] for _ in groups]
 
-            for x, z, w, h in group_placed:
+        if jobs:
+            max_workers = cfg.max_workers or os.cpu_count() or 1
+            self.log_info(
+                f"Painting {len(jobs)} tile(s) across {len(groups)} group(s) "
+                f"using up to {max_workers} concurrent synthesize_cli worker(s)…"
+            )
+            task = self.create_progress(len(jobs), "Painting distributions…")
+
+            # Phase 2: run every tile's synthesize_cli call concurrently — each is an
+            # independent, CPU-bound subprocess with no shared state. subprocess.run
+            # releases the GIL while its child process runs, so threads give real
+            # OS-level parallelism across cores here without process-pool overhead or
+            # having to pickle the (potentially large) domain-point arrays.
+            results: list[dict | None] = [None] * len(jobs)
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = {
+                    pool.submit(
+                        _run_synthesize_cli,
+                        cli_path,
+                        domain_points=job["domain_points"],
+                        exemplar_points=job["exemplar_points"],
+                        input_boundary=job["input_boundary"],
+                        output_boundary=job["output_boundary"],
+                        n_points=-1,
+                        bin_count=job["bin_count"],
+                        max_iters=cfg.max_iters,
+                        seed=job["seed"],
+                    ): i
+                    for i, job in enumerate(jobs)
+                }
+                for future in as_completed(futures):
+                    i = futures[future]
+                    try:
+                        results[i] = future.result()
+                    except Exception as e:
+                        self.log_warning(f"synthesize_cli tile {i} failed: {e}")
+                    self.advance_progress(task)
+
+            # Phase 3: consume results back in the original deterministic job order
+            # (not completion order) so RNG draws for size/jitter stay reproducible.
+            for job, synth in zip(jobs, results):
+                if not synth or not synth.get("output_points"):
+                    continue
+                dist = groups[job["group_idx"]][2]
+                placed = group_placed[job["group_idx"]]
+                for x, z in synth["output_points"]:
+                    w, h = dist.sizes[int(rng.integers(len(dist.sizes)))]
+                    jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))
+                    placed.append((float(x), float(z), w * jitter, h * jitter))
+
+            self.finish_progress(task)
+
+        for group_idx, (region_type, obj_type, dist) in enumerate(groups):
+            placed = group_placed[group_idx]
+            for x, z, w, h in placed:
                 context.add_object(f"metadata_{next_idx}", {
                     "class": obj_type,
                     "synthetic": True,
@@ -345,17 +414,15 @@ class DistributionSynthesisStage(PipelineStage):
                 })
                 next_idx += 1
 
-            self.log_info(f"  {obj_type} [{region_type}]: painted {len(group_placed)} instances")
+            self.log_info(f"  {obj_type} [{region_type}]: painted {len(placed)} instances")
             if self.temp is not None:
                 self._write_debug_image(region_map, grid_size_meters, dist.points,
-                                         [(p[0], p[1]) for p in group_placed],
+                                         [(p[0], p[1]) for p in placed],
                                          region_type, obj_type)
-            self.advance_progress(task)
 
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
         context.add_object(_RAN_MARKER, True)
         self.log_info(f"Object count {object_count} -> {next_idx} after painting")
-        self.finish_progress(task)
         return context
 
     def _write_debug_image(
