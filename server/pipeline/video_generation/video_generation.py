@@ -73,7 +73,7 @@ class VideoGenerationConfiguration(PipelineStageConfiguration):
         target_pixels: int = 1536 * 1024,
         min_side: int = 512,
         max_side: int = 2048,
-        num_frames: int = 121,
+        num_frames: int = 169,  # ~7s @ 24fps — confirmed to fit alongside fp8-cast on a 32GB card
         frame_rate: float = 24.0,
         num_inference_steps: int = 30,
         motion_prompt: str = DEFAULT_MOTION_PROMPT,
