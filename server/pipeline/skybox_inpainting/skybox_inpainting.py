@@ -430,28 +430,22 @@ class SkyboxInpaintingStage(PipelineStage):
         # over a much larger radius without asking Telea to hallucinate that
         # whole radius itself.
         #
-        # Heal around flux_mask_arr's boundary, not sky_mask's: the shroud
-        # dilation above (~shroud_radius px) pushed the actual FLUX paint
-        # boundary that far into the sky, so healing around the original
-        # sky_mask edge misses the real seam entirely once shroud_radius
-        # exceeds half the heal band width.
-        #
-        # feather_px is scaled to shroud_radius rather than left as a fixed
-        # constant: shroud_radius grows with panorama height, so on a tall
-        # panorama a fixed feather only reaches a short way back down from
-        # flux_mask_arr's edge, well short of the true horizon — the healed
-        # band ends up stranded shroud_radius px up into the sky instead of
-        # blending continuously down toward the horizon. band_width_px is
-        # deliberately left alone (not scaled) — it's the Telea fill depth,
-        # and per the note above, growing it risks banding.
-        seam_feather_px = max(self.config.seam_heal_feather_px, shroud_radius)
+        # Heal around sky_mask's boundary, not flux_mask_arr's: the shroud
+        # dilation buries the *silhouette* from FLUX's context image, but FLUX
+        # still reconstructs its own ridge line close to the real one (it's
+        # conditioned on the real sky right up to the shroud edge, and mountain
+        # silhouettes are a strong prior) — so the visible join in the actual
+        # output sits at the original horizon, not out at flux_mask_arr's
+        # buried edge. Healing around flux_mask_arr's boundary was centering
+        # the band on a stretch of plain sky well above where the real seam
+        # shows up, leaving the actual join untouched.
         result_pil = heal_seam(
             result_pil,
-            ~flux_mask_arr,
+            sky_mask,
             band_width_px=self.config.seam_heal_width_px,
             wrap_horizontal=True,
             method=self.config.seam_heal_method,
-            feather_px=seam_feather_px,
+            feather_px=self.config.seam_heal_feather_px,
             debug_dir=self.output or self.temp,
             debug_prefix="panorama_sky_seam",
             log_fn=self.log_warning,
@@ -475,9 +469,23 @@ class SkyboxInpaintingStage(PipelineStage):
         flux.set_lora_enabled(False)
 
         def _sky_seam_inpaint(rolled_img: PILImage.Image, mask_img: PILImage.Image) -> PILImage.Image:
+            # Downscale to flux_max like Pass 2 does — FLUX Fill run directly on
+            # a full panorama (several times its trained resolution) produces a
+            # visible patch/grid artifact instead of coherent detail. heal_wrap_seam
+            # resizes the result back up to the caller's resolution on return, so
+            # returning it at flux_max here is fine.
+            sw, sh = rolled_img.size
+            if sw > flux_max or sh > flux_max:
+                scale = flux_max / max(sw, sh)
+                fw = max(16, (int(sw * scale) // 16) * 16)
+                fh = max(16, (int(sh * scale) // 16) * 16)
+                seam_input = rolled_img.resize((fw, fh), PILImage.LANCZOS)
+                seam_mask = mask_img.resize((fw, fh), PILImage.NEAREST)
+            else:
+                seam_input, seam_mask = rolled_img, mask_img
             return flux.inpaint(
-                rolled_img,
-                mask_img,
+                seam_input,
+                seam_mask,
                 temp_path=self.temp,
                 prompt=prompt,
                 num_inference_steps=30,
@@ -492,6 +500,11 @@ class SkyboxInpaintingStage(PipelineStage):
             seam_width_px=256,
             feather_px=32,
             eligible_mask=flux_mask_arr,
+            # Crop to the band instead of handing FLUX the whole panorama —
+            # combined with _sky_seam_inpaint's own flux_max downscale, this
+            # means only the seam's actual neighbourhood gets downscaled (if
+            # at all), instead of the entire multi-thousand-pixel-wide canvas.
+            crop_context_px=256,
             debug_dir=self.temp,
             debug_prefix="sky_wrap_seam",
             log_fn=self.log_warning,

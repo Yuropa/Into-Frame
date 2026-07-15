@@ -424,28 +424,13 @@ class TerrainReconstructionStage(PipelineStage):
         else:
             new_hm = new_hm_s.astype(np.float32)
 
-        # ── Restore observed data ───────────────────────────────────────────────
-        # The solve_resolution downsample + bicubic upsample above necessarily loses
-        # native-resolution precision, regardless of how confidently a cell was
-        # observed. Splice the original native-resolution height back in wherever
-        # we have a genuine direct point-cloud measurement -- that's real geometry,
-        # not something the harmonic solve should be allowed to touch. This
-        # subsumes the narrower cliff-only restoration this replaced: measured_cliff
-        # is now always a subset of true_observed (same observed gate, plus a
-        # steepness requirement). Feathering only softens the transition right at
-        # the observed/gap boundary -- cells deep inside real regions stay at ~full
-        # restore weight.
-        if true_observed.any():
-            restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0).astype(np.float32)
-            new_hm = (
-                new_hm * (1.0 - restore_weight) + heightmap.astype(np.float32) * restore_weight
-            ).astype(np.float32)
-            self.log_info(
-                f"Observed-data restoration: {int(true_observed.sum())} px reverted "
-                f"to measured elevation"
-            )
-
         # ── Fine-grain noise on the upsampled grid ────────────────────────────
+        # Runs BEFORE the observed-data restore below, not after -- this noise is
+        # meant to texture the solver's smooth interpolation, not real point-cloud
+        # geometry. Applying it first means the restore step (which splices real
+        # elevation back in) also undoes any noise that landed on genuinely
+        # observed cells, instead of permanently baking a couple of centimetres of
+        # random offset onto real data with nothing downstream to revert it.
         if cfg.upsample_noise_amplitude > 0.0:
             rng = np.random.default_rng(cfg.seed)
             noise = np.zeros((H, W), dtype=np.float32)
@@ -458,6 +443,27 @@ class TerrainReconstructionStage(PipelineStage):
             if peak > 0.0:
                 noise /= peak
             new_hm += noise * cfg.upsample_noise_amplitude
+
+        # ── Restore observed data ───────────────────────────────────────────────
+        # The solve_resolution downsample + bicubic upsample above necessarily loses
+        # native-resolution precision, regardless of how confidently a cell was
+        # observed. Splice the original native-resolution height back in wherever
+        # we have a genuine direct point-cloud measurement -- that's real geometry,
+        # not something the harmonic solve or the fine-grain noise above should be
+        # allowed to touch. This subsumes the narrower cliff-only restoration this
+        # replaced: measured_cliff is now always a subset of true_observed (same
+        # observed gate, plus a steepness requirement). Feathering only softens the
+        # transition right at the observed/gap boundary -- cells deep inside real
+        # regions stay at ~full restore weight.
+        if true_observed.any():
+            restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0).astype(np.float32)
+            new_hm = (
+                new_hm * (1.0 - restore_weight) + heightmap.astype(np.float32) * restore_weight
+            ).astype(np.float32)
+            self.log_info(
+                f"Observed-data restoration: {int(true_observed.sum())} px reverted "
+                f"to measured elevation"
+            )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 

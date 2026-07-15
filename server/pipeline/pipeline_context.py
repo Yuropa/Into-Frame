@@ -39,6 +39,7 @@ class ContextKey:
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
     WATER_MESH = "water_mesh"
+    TERRAIN_FORMATIONS = "terrain_formations"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
     OBJECT_CORRELATION = "object_correlation"
@@ -59,6 +60,7 @@ class ContextKey:
     HEIGHT_MAP_CELL_RELIEF = "height_map_cell_relief"
     HEIGHT_MAP_CELL_SLOPE = "height_map_cell_slope"
     HEIGHT_MAP_OBSERVED_MASK = "height_map_observed_mask"
+    HEIGHT_MAP_COMPONENT_ID = "height_map_component_id"
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
@@ -87,6 +89,7 @@ class ContextKey:
         "height_map_params",
         "terrain_mesh",
         "water_mesh",
+        "terrain_formations",
         "lighting",
         "recognize_tags",
         "object_correlation",
@@ -106,6 +109,7 @@ class ContextKey:
         "height_map_certainty",
         "height_map_cell_relief",
         "height_map_observed_mask",
+        "height_map_component_id",
         "region_map_certainty",
         "terrain_texture",
         "terrain_texture_certainty",

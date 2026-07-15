@@ -113,7 +113,8 @@ class ObjectDistributionStage(PipelineStage):
     Reads:  ContextKey.OBJECT_CORRELATION, ContextKey.REGION_MAP,
             ContextKey.HEIGHT_MAP_PARAMS, ContextKey.INTRINSICS, ContextKey.EXTRINSICS,
             ContextKey.DEPTH, ContextKey.INPUT, ContextKey.PANORAMA,
-            ContextKey.PANORAMA_DEPTH (optional)
+            ContextKey.PANORAMA_OBJECT_DEPTH (optional — depth on the ORIGINAL panorama;
+            matches what objects were detected against, unlike PANORAMA_DEPTH)
     Writes: ContextKey.OBJECT_DISTRIBUTION (ObjectDistributionResult)
     Config: pcf_cli_path (str, optional) — override binary location
             bin_count    (int, default 48)
@@ -157,7 +158,9 @@ class ObjectDistributionStage(PipelineStage):
         depth = context.input_depth(ContextKey.DEPTH)
         input_image = context.input_image(ContextKey.INPUT)
         panorama = context.input_panorama(ContextKey.PANORAMA)
-        panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        # See SceneGenerationStage's PANORAMA_OBJECT_DEPTH comment — objects were detected on
+        # the original panorama, so unprojection needs depth measured on that same image.
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
 
         distributable_types = [
             obj_type

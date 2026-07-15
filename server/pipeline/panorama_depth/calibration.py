@@ -70,18 +70,18 @@ def _equirect_uv_for_rays(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> tuple[
     return u, v
 
 
-def calibrate_panorama_depth(
+def _fit_panorama_depth_curve(
     da3_depth: np.ndarray,
     da3_placement_fov_deg: float,
     dap_pred_raw: np.ndarray,
     sky_mask: Optional[np.ndarray],
     num_bins: int = 14,
     min_samples: int = 300,
-) -> Optional[np.ndarray]:
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
     """
     Fits a monotonic lookup curve from DAP's raw (0-1) prediction to real metric depth, using
     the region where the hero photo (metric depth `da3_depth`, from Depth Anything 3) was
-    placed into the panorama, then applies that curve to the entire panorama depth map.
+    placed into the panorama.
 
     da3_placement_fov_deg must be the horizontal FOV actually used to place the photo into the
     panorama (server/pipeline/panorama/panorama.py sends 2x the camera's own estimated FOV to
@@ -90,8 +90,9 @@ def calibrate_panorama_depth(
     dap_pred_raw is DAP's native 0-1 output (i.e. panorama depth with the *100 metres
     assumption undone) — same shape as the target panorama.
 
-    Returns None if too few valid overlap samples survive filtering, signalling the caller
-    should leave the panorama depth uncalibrated.
+    Returns (centers_sorted, medians_monotonic) — apply via _apply_panorama_depth_curve — or
+    None if too few valid overlap samples survive filtering, signalling the caller should leave
+    the panorama depth uncalibrated.
     """
     h, w = da3_depth.shape
     dap_h, dap_w = dap_pred_raw.shape
@@ -135,14 +136,72 @@ def calibrate_panorama_depth(
     # Depth should not decrease as DAP's raw prediction increases — enforce that prior so a
     # noisy bin can't punch a dip into the curve.
     medians_monotonic = np.maximum.accumulate(np.array(medians)[order])
+    return centers_sorted, medians_monotonic
 
-    corrected = np.interp(dap_pred_raw.astype(np.float64).ravel(), centers_sorted, medians_monotonic)
+
+def _apply_panorama_depth_curve(
+    dap_pred_raw: np.ndarray, centers_sorted: np.ndarray, medians_monotonic: np.ndarray
+) -> np.ndarray:
+    """Applies a curve fitted by _fit_panorama_depth_curve to a (possibly different) raw
+    DAP prediction array — the fitted raw→metric response curve is treated as a property of
+    the DAP model, not of the specific image it ran on.
+
+    The hero photo's overlap with the panorama only ever covers its own near-field content
+    (a few to a few tens of metres) — it never sees genuinely distant terrain (mountains,
+    open horizons). np.interp flat-clamps any raw value outside the fitted range to the
+    curve's nearest endpoint, which collapses every one of those far pixels onto a single
+    depth (whatever the hero photo's own farthest point happened to be) — mountains a
+    kilometre away and a tree just past the fitted range end up at the *same* calibrated
+    depth. Extrapolate instead, in log-depth space (DAP's raw output approaches its ceiling
+    asymptotically as true depth grows, so metric depth should keep growing past the fitted
+    range, not flatten) using the slope from a small tail of the fitted curve. This can't
+    recover the true distance — there's no ground truth out there — but it keeps far depths
+    monotonically ordered instead of all landing on one value.
+    """
+    x = dap_pred_raw.astype(np.float64).ravel()
+    corrected = np.interp(x, centers_sorted, medians_monotonic)
+
+    tail = min(3, len(centers_sorted) - 1)
+    if tail >= 1:
+        log_med = np.log(np.maximum(medians_monotonic, 1e-3))
+
+        far_mask = x > centers_sorted[-1]
+        if np.any(far_mask):
+            dx = centers_sorted[-1] - centers_sorted[-1 - tail]
+            slope = (log_med[-1] - log_med[-1 - tail]) / dx if abs(dx) > 1e-9 else 0.0
+            corrected[far_mask] = np.exp(log_med[-1] + slope * (x[far_mask] - centers_sorted[-1]))
+
+        near_mask = x < centers_sorted[0]
+        if np.any(near_mask):
+            dx = centers_sorted[tail] - centers_sorted[0]
+            slope = (log_med[tail] - log_med[0]) / dx if abs(dx) > 1e-9 else 0.0
+            corrected[near_mask] = np.exp(log_med[0] + slope * (x[near_mask] - centers_sorted[0]))
+
+    corrected = np.clip(corrected, 1e-3, 1e6)
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
+
+
+def calibrate_panorama_depth(
+    da3_depth: np.ndarray,
+    da3_placement_fov_deg: float,
+    dap_pred_raw: np.ndarray,
+    sky_mask: Optional[np.ndarray],
+    num_bins: int = 14,
+    min_samples: int = 300,
+) -> Optional[np.ndarray]:
+    """Fits a curve (see _fit_panorama_depth_curve) and applies it to dap_pred_raw in one call.
+    Returns None if too few valid overlap samples survive filtering."""
+    curve = _fit_panorama_depth_curve(
+        da3_depth, da3_placement_fov_deg, dap_pred_raw, sky_mask, num_bins, min_samples
+    )
+    if curve is None:
+        return None
+    return _apply_panorama_depth_curve(dap_pred_raw, *curve)
 
 
 class PanoramaDepthCalibrationStage(PipelineStage):
     """
-    Recalibrates ContextKey.PANORAMA_DEPTH (DAP's equirectangular depth, which converts its
+    Recalibrates both panorama depth maps (DAP's equirectangular depth, which converts its
     raw 0-1 output to metres via a flat, unverified *100 assumption and hard-clamps sky to
     1.0 — see server/pipeline/panorama_depth/pano_depth_imp.py) against ContextKey.DEPTH, the
     genuine metric depth Depth Anything 3 already estimated for the original hero photo before
@@ -157,12 +216,23 @@ class PanoramaDepthCalibrationStage(PipelineStage):
     previously indistinguishable from the hard-clamped sky value) is no longer flattened onto
     a uniform-radius arc.
 
+    The curve is fit against ContextKey.PANORAMA_OBJECT_DEPTH (DAP run on the original,
+    unmodified panorama) rather than ContextKey.PANORAMA_DEPTH (DAP run on panorama_terrain,
+    after foreground inpainting) — the overlap region has to be real, untouched photo content
+    to match DA3's genuine hero-photo depth. If part of the hero photo's footprint fell inside
+    the foreground-removal mask, PANORAMA_DEPTH there is a hallucinated re-estimate, not the
+    same scene DA3 measured. The fitted curve (a property of DAP's raw→metric response, not of
+    a specific image) is then applied to both depth maps: PANORAMA_OBJECT_DEPTH (consumed by
+    region/object analysis on the original panorama) and PANORAMA_DEPTH (consumed by Height
+    Map / terrain reconstruction on the post-inpainting terrain plate).
+
     If too little of the hero photo's real (non-hallucinated) footprint survives filtering
-    (e.g. a very narrow FOV, or a mostly-sky photo), calibration is skipped and
-    ContextKey.PANORAMA_DEPTH is left as DAP produced it.
+    (e.g. a very narrow FOV, or a mostly-sky photo), calibration is skipped and both depth
+    maps are left as DAP produced them.
 
     Input keys  (SemanticKey.DEPTH, SemanticKey.INTRINSICS) → ContextKey.DEPTH, ContextKey.INTRINSICS
     Output key  (SemanticKey.OUTPUT)                        → ContextKey.PANORAMA_DEPTH (overwritten in place)
+                                                               ContextKey.PANORAMA_OBJECT_DEPTH (overwritten in place, if present)
     """
 
     @classmethod
@@ -188,6 +258,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         da3_depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)
         panorama_depth = context.input_depth(panorama_depth_key)
+        panorama_object_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
         if isinstance(sky_mask, list):
             sky_mask = np.array(sky_mask, dtype=bool)
@@ -197,20 +268,24 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             self.finish_progress(task)
             return context
 
-        dap_pred_raw = panorama_depth.depth.astype(np.float64) / 100.0
+        # Fit against the original (pre-foreground-inpainting) panorama depth when available —
+        # see class docstring for why. Falls back to PANORAMA_DEPTH itself if it's missing.
+        fit_source = panorama_object_depth if panorama_object_depth is not None else panorama_depth
+        dap_pred_raw_fit = fit_source.depth.astype(np.float64) / 100.0
+
         # server/pipeline/panorama/panorama.py sends `intrinsics.fov * 2.0` to WorldGen when
         # placing the hero photo into the panorama — reproduce that exact value here so the
         # correspondence matches the real placement, whatever the doubling's own justification.
-        corrected = calibrate_panorama_depth(
+        curve = _fit_panorama_depth_curve(
             da3_depth.depth,
             intrinsics.fov * 2.0,
-            dap_pred_raw,
+            dap_pred_raw_fit,
             sky_mask,
             num_bins=cfg.num_bins,
             min_samples=cfg.min_samples,
         )
 
-        if corrected is None:
+        if curve is None:
             self.log_warning(
                 "Not enough hero-photo/panorama overlap to calibrate — leaving panorama depth unchanged"
             )
@@ -218,7 +293,8 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             return context
 
         before_min, before_max = panorama_depth.min(), panorama_depth.max()
-        calibrated = Depth(corrected)
+        dap_pred_raw = panorama_depth.depth.astype(np.float64) / 100.0
+        calibrated = Depth(_apply_panorama_depth_curve(dap_pred_raw, *curve))
         if self.temp is not None:
             calibrated.save_debug_image(self.temp / "pano_depth_calibrated.png")
 
@@ -227,6 +303,17 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             f"into {calibrated.min():.1f} → {calibrated.max():.1f} m (calibrated)"
         )
         context.add_depth(panorama_depth_key, calibrated)
+
+        if panorama_object_depth is not None:
+            obj_before_min, obj_before_max = panorama_object_depth.min(), panorama_object_depth.max()
+            calibrated_object = Depth(_apply_panorama_depth_curve(dap_pred_raw_fit, *curve))
+            if self.temp is not None:
+                calibrated_object.save_debug_image(self.temp / "pano_object_depth_calibrated.png")
+            self.log_info(
+                f"Calibrated panorama object depth {obj_before_min:.1f} → {obj_before_max:.1f} m (raw) "
+                f"into {calibrated_object.min():.1f} → {calibrated_object.max():.1f} m (calibrated)"
+            )
+            context.add_depth(ContextKey.PANORAMA_OBJECT_DEPTH, calibrated_object)
 
         self.advance_progress(task)
         self.finish_progress(task)

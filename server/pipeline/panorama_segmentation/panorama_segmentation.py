@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image as PILImage
+from scipy.ndimage import uniform_filter1d
 
 from remote_connection.remote_client import RemoteClient
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -117,6 +118,54 @@ def _build_result(raw: dict) -> tuple[PanoramaRegionResult, np.ndarray]:
     return result, type_idx_map
 
 
+def _clean_nadir_band(
+    type_idx_map: np.ndarray,
+    nadir_cutoff_deg: float,
+    nadir_band_deg: float,
+) -> np.ndarray:
+    """
+    Replace the panorama's near-nadir rows (looking almost straight down at the
+    tripod/rig) with an estimate borrowed from the reliable ring just above them,
+    rather than trusting SegFormer there directly. That band is heavily warped
+    by the equirectangular projection and shows content (the rig, the operator's
+    feet, extreme close-range blur) a model trained on rectilinear photos wasn't
+    trained on, so its labels there are close to noise (e.g. flagging distorted
+    ground as WATER).
+
+    Equirectangular rows map linearly to elevation angle (row 0 = +90°/zenith,
+    row h-1 = -90°/nadir), independent of scene geometry, so the cutoff can be
+    computed directly from image height. Everything at/below nadir_cutoff_deg is
+    replaced by a per-column majority vote taken over the nadir_band_deg of rows
+    immediately above the cutoff, then smoothed circularly along the row (it's a
+    full 360° ring — the left and right edges are adjacent, not a hard border)
+    to remove single-column segmentation noise before extending it straight down
+    through the excluded band.
+    """
+    h, w = type_idx_map.shape
+    n_types = len(RegionType)
+
+    # Row -> elevation angle (deg) is linear and independent of world geometry.
+    cutoff_row = int(np.clip(np.ceil((90.0 - nadir_cutoff_deg) / 180.0 * h - 0.5), 0, h))
+    band_row = int(np.clip(np.floor((90.0 - (nadir_cutoff_deg + nadir_band_deg)) / 180.0 * h - 0.5), 0, cutoff_row))
+    if cutoff_row >= h or cutoff_row <= band_row:
+        return type_idx_map
+
+    band = type_idx_map[band_row:cutoff_row]
+    one_hot = band[:, None, :] == np.arange(n_types, dtype=type_idx_map.dtype)[None, :, None]
+    ring = one_hot.sum(axis=0).argmax(axis=0).astype(type_idx_map.dtype)  # (w,) majority vote per column
+
+    kernel_px = max(1, int(round(w * 0.01)))  # ~3.6° of azimuth
+    scores = np.stack([
+        uniform_filter1d((ring == t).astype(np.float32), size=2 * kernel_px + 1, mode="wrap")
+        for t in range(n_types)
+    ])
+    ring = scores.argmax(axis=0).astype(type_idx_map.dtype)
+
+    cleaned = type_idx_map.copy()
+    cleaned[cutoff_row:] = ring[np.newaxis, :]
+    return cleaned
+
+
 def _dominant_label_name(
     label_map: np.ndarray,
     type_mask: np.ndarray,
@@ -134,6 +183,23 @@ def _dominant_label_name(
     return id2label.get(best_id, "unknown")
 
 
+class PanoramaRegionConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device,
+        torch_dtype,
+        log,
+        keys=None,
+        seed: int = 0,
+        nadir_cutoff_deg: float = -55.0,
+        nadir_band_deg: float = 15.0,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.nadir_cutoff_deg = nadir_cutoff_deg
+        self.nadir_band_deg = nadir_band_deg
+
+
 class PanoramaRegionStage(PipelineStage):
     """
     Identifies coarse semantic regions in the equirectangular panorama.
@@ -144,13 +210,22 @@ class PanoramaRegionStage(PipelineStage):
     minimum area threshold is recorded as a PanoramaRegion with its type, bounding
     box, centroid, and area fraction.
 
+    Rows at/below nadir_cutoff_deg elevation (the tripod/rig, heavily warped by
+    the equirectangular projection) are excluded from SegFormer's raw output and
+    replaced via _clean_nadir_band — see that function's docstring.
+
     Reads:  ContextKey.PANORAMA
     Writes: ContextKey.PANORAMA_REGIONS (PanoramaRegionResult)
-    Debug:  self.output/regions.json
-            self.output/label_overlay.png
+    Debug:  self.output/regions.json      (reflects SegFormer's raw output —
+                                           not nadir-cleaned)
+            self.output/label_overlay.png (nadir-cleaned)
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls) -> type[PanoramaRegionConfiguration]:
+        return PanoramaRegionConfiguration
+
+    def __init__(self, config: PanoramaRegionConfiguration) -> None:
         super().__init__(config)
         self._client: PanoramaSegmentationClient | None = None
 
@@ -160,6 +235,7 @@ class PanoramaRegionStage(PipelineStage):
             self.log_info("No panorama in context, skipping")
             return context
 
+        cfg: PanoramaRegionConfiguration = self.config
         task = self.create_progress(3, "Segmenting panorama regions…")
 
         if self._client is None:
@@ -170,6 +246,7 @@ class PanoramaRegionStage(PipelineStage):
         self.advance_progress(task)
 
         result, type_idx_map = _build_result(raw)
+        type_idx_map = _clean_nadir_band(type_idx_map, cfg.nadir_cutoff_deg, cfg.nadir_band_deg)
         context.add_panorama_regions(ContextKey.PANORAMA_REGIONS, result)
         context.add_depth(ContextKey.PANORAMA_REGION_TYPE_MAP, type_idx_map.astype(np.float32))
 

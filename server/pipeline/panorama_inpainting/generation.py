@@ -27,26 +27,22 @@ class PanoramaInpaintingConfiguration(PipelineStageConfiguration):
         Requires PANORAMA_OBJECT_DEPTH in context (set by PanoramaDepthStage
         before this stage).
 
-    depth_filter_threshold (float, default 0.05):
-        Signal 1 (row-wise baseline): a mask is kept if its median depth residual
-        is below this value. 0.0 = must be strictly closer than row max; small
-        positive values (e.g. 0.05) give objects a little slack for soft depth
-        edges, which is helpful on panorama depth maps.
-
-    depth_filter_edge_threshold (float, default 0.005):
-        Signal 2 (boundary edge gradient): a mask is kept if its edge-gradient
-        score exceeds this value. Lower = less strict. 0.01 (original) is too
-        tight for panorama depth models whose edges are softer than pinhole
-        depth; 0.005 is a better starting point.
+    depth_filter_distance_m (float, default 5.0):
+        A mask is kept as a removable foreground occluder if its median real
+        (metric) depth is closer than this many metres. These panoramas are
+        shot from ~1-2m off the ground, so this is a direct physical-proximity
+        cutoff, not a relative/local one — see DepthObjectFilter for why a
+        local-relative signal doesn't work here (it favours rough distant
+        terrain over flat close terrain, backwards from what "foreground"
+        means).
     """
-    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, use_depth_filter: bool = True, depth_filter_threshold: float = 0.05, depth_filter_edge_threshold: float = 0.005, **kwargs):
+    def __init__(self, *args, full_panorama: bool = False, max_object_area_fraction: float = 0.15, supersample_inpaint: bool = True, use_depth_filter: bool = True, depth_filter_distance_m: float = 5.0, **kwargs):
         super().__init__(*args, **kwargs)
         self.full_panorama = full_panorama
         self.max_object_area_fraction = max_object_area_fraction
         self.supersample_inpaint = supersample_inpaint
         self.use_depth_filter = use_depth_filter
-        self.depth_filter_threshold = depth_filter_threshold
-        self.depth_filter_edge_threshold = depth_filter_edge_threshold
+        self.depth_filter_distance_m = depth_filter_distance_m
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.depth_filter import DepthObjectFilter
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
@@ -208,8 +204,7 @@ class PanoramaInpaintingStage(PipelineStage):
             if depth is not None:
                 result = DepthObjectFilter().filter(
                     result, depth,
-                    threshold=self.config.depth_filter_threshold,
-                    edge_threshold=self.config.depth_filter_edge_threshold,
+                    distance_threshold_m=self.config.depth_filter_distance_m,
                 )
                 depth_filtered_out = sam_detected - result.length
                 if depth_filtered_out:

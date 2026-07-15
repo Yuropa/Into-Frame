@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import PIL.Image
 from pathlib import Path
-from scipy.ndimage import gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
+from scipy.ndimage import distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -43,14 +43,17 @@ class HeightMapGenerator:
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
         min_forward_samples: int = 4,
+        fill_boundary_falloff_cells: float = 6.0,
+        min_component_area_fraction: float = 0.001,
         debug_dir: Optional[Path] = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
 
         Returns (height_array, certainty_array, cell_relief_array, cell_slope_array,
-        true_observed_array). The first four are (grid_resolution, grid_resolution)
-        float32; true_observed_array is bool. certainty is in [0, 1]:
+        true_observed_array, component_id_array). The first four are
+        (grid_resolution, grid_resolution) float32; true_observed_array is bool;
+        component_id_array is int32. certainty is in [0, 1]:
         sin²(depression_angle) for cells with any direct observation (primary or
         panorama depth), 0 for pure interpolation -- but it decays with distance and
         is nonzero even on the synthetic flat-ground-prior cells, so it is a "how
@@ -58,7 +61,15 @@ class HeightMapGenerator:
         true_observed_array is that latter signal: True only for cells with a
         genuine direct measurement (primary projection, dense forward-projected
         stats, or panorama fill), independent of distance-based certainty decay and
-        excluding both the flat-ground prior and interpolated fill. cell_relief is the raw Y range
+        excluding both the flat-ground prior and interpolated fill. component_id_array
+        labels which connected walkable-ground component each cell belongs to (see
+        _label_ground_components): 0 = none/interpolated gap, 1 = the largest
+        component (the base terrain), 2, 3, ... = smaller components ranked by size
+        -- a separate landmass, an isolated rock formation across water, anything
+        genuinely disconnected from the base terrain by a real discontinuity, kept
+        as real geometry rather than discarded. Downstream stages route non-primary
+        components to their own separate mesh instead of folding them into the base
+        terrain. cell_relief is the raw Y range
         (max - min, in metres) among all depth samples that landed in that one grid
         cell before being collapsed to their mean -- evidence of real vertical
         structure (e.g. a cliff face narrower than one grid cell) that survives only
@@ -91,10 +102,15 @@ class HeightMapGenerator:
         sky_mask: optional bool (H, W) array from the depth model where True = sky.
                   Sky pixels are excluded before projection, preventing the horizon
                   artefacts that come from sky pixels being assigned far depth values.
-        flood_fill: if True, BFS from the grid centre outward to keep only connected
-                    ground; stops at height discontinuities and empty cells (sky gaps).
+        flood_fill: if True, label connected walkable-ground components (see
+                    _label_ground_components) and keep every one large enough to
+                    qualify, instead of every cell in the grid; stops at height
+                    discontinuities and empty cells (sky gaps).
         flood_fill_max_step: maximum Y change (metres) between adjacent cells allowed
-                             during flood-fill; larger steps are treated as walls.
+                             within one component; larger steps are treated as walls.
+        min_component_area_fraction: components smaller than this fraction of the
+                             grid are folded into the interpolated-gap fallback
+                             instead of kept as their own component.
         grid_size_meters: side length of the square grid; both X and Z span ±half.
         use_equirectangular: treat depth as equirectangular (radial distances); otherwise
                              use pinhole unprojection via intrinsics.
@@ -121,6 +137,11 @@ class HeightMapGenerator:
                             by real per-cell statistics (mean/relief/slope). Below this,
                             a plane fit is either impossible (<3 points) or too noisy to
                             trust over the existing inverse-mapped value.
+        fill_boundary_falloff_cells: see _interpolate — how many cells (at each
+                            octave's own resolution) beyond a real observation the
+                            synthetic fill's injected noise needs before reaching full
+                            amplitude. Cells nearer a real observation than this stay
+                            close to its diffused trend instead of drifting via noise.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -244,16 +265,24 @@ class HeightMapGenerator:
             # Plane-fit slope is only computed for the equirectangular path above.
             cell_slope_deg = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
-        # Flood-fill from the grid centre (camera XZ = 0,0) outward. Cells connected to
-        # the starting point with small height steps are kept; everything else is set to
-        # NaN and filled by nearest-neighbour extrapolation from the flood-fill boundary.
+        # Label connected walkable ground components (see _label_ground_components):
+        # component 1 is the largest -- the base terrain -- component 2, 3, ... are
+        # smaller components (a separate landmass, a rock formation across water,
+        # anything genuinely disconnected from the base terrain by a real
+        # discontinuity) kept as real geometry rather than discarded. Cells not in
+        # any qualifying component are set to NaN and filled by _interpolate's
+        # synthetic fill, same as the old single-component flood fill did for
+        # everything outside its one kept component.
         if flood_fill:
-            accepted = HeightMapGenerator._flood_fill_ground(
-                height_map, camera_height_meters, flood_fill_max_step
+            component_id = HeightMapGenerator._label_ground_components(
+                height_map, flood_fill_max_step, min_component_area_fraction
             )
+            accepted = component_id > 0
             height_map[~accepted] = np.nan
             cell_relief[~accepted] = 0.0
             cell_slope_deg[~accepted] = 0.0
+        else:
+            component_id = (~np.isnan(height_map)).astype(np.int32)
 
         # Fill remaining NaN cells from the panorama depth (360° coverage) before
         # falling back to pure interpolation. Only cells that are still empty after
@@ -303,6 +332,15 @@ class HeightMapGenerator:
             cell_relief[flat_prior_mask] = 0.0
             cell_slope_deg[flat_prior_mask] = 0.0
 
+        # Cells filled by the panorama-depth fallback or the nadir flat-ground prior
+        # above weren't part of the walkable-component analysis (they're
+        # supplementary data / a synthetic prior, not connectivity evidence), but
+        # they're still real content the base terrain owns -- fold them into the
+        # primary component rather than leaving them at 0 (which downstream stages
+        # would otherwise treat as an untethered, roughly one-cell-wide "component"
+        # scattered wherever panorama-fill happened to land).
+        component_id[(component_id == 0) & ~np.isnan(height_map)] = 1
+
         # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
         # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
         # + nadir_ramp_width, avoiding the hard ring artifact a step boundary creates.
@@ -337,7 +375,9 @@ class HeightMapGenerator:
                     debug_dir / "heightmap_cell_slope.png"
                 )
 
-        result = HeightMapGenerator._interpolate(height_map)
+        result = HeightMapGenerator._interpolate(
+            height_map, boundary_falloff_cells=fill_boundary_falloff_cells
+        )
         if smooth_sigma > 0:
             result = HeightMapGenerator._smooth_edge_preserving(result, max_sigma=smooth_sigma)
 
@@ -348,8 +388,15 @@ class HeightMapGenerator:
             PIL.Image.fromarray((true_observed * 255).astype(np.uint8), "L").save(
                 debug_dir / "heightmap_true_observed_mask.png"
             )
+            n_components = int(component_id.max())
+            if n_components > 0:
+                # Distinct intensities per component id (0 stays black); mainly
+                # useful to eyeball how many components exist and their relative
+                # size/shape, not precise values.
+                viz = (component_id.astype(np.float32) / max(n_components, 1) * 255).astype(np.uint8)
+                PIL.Image.fromarray(viz, "L").save(debug_dir / "heightmap_component_id.png")
 
-        return result, certainty, cell_relief, cell_slope_deg, true_observed
+        return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id
 
     @staticmethod
     def _forward_project_cell_stats(
@@ -537,56 +584,76 @@ class HeightMapGenerator:
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod
-    def _flood_fill_ground(
+    def _label_ground_components(
         height_map: np.ndarray,
-        camera_height_meters: float,
         max_step: float,
+        min_component_area_fraction: float = 0.001,
     ) -> np.ndarray:
         """
-        Connected-component ground mask, seeded from the grid centre.
+        Connected-component labeling of walkable ground, ranked by size.
 
         A cell is walkable if it has data and its 3x3 neighbourhood height range
         (max - min) does not exceed max_step -- i.e. no discontinuity passes
         through it. Empty cells (NaN) can never bridge a gap, so they are excluded
         from both the max and min before the range is taken (sky-masked regions
-        near the horizon naturally stop the fill, as before). The accepted region
-        is then the walkable component connected to the seed.
+        near the horizon naturally stop a component, as before).
 
-        Uses 8-connectivity rather than a 4-connected BFS: 4-connectivity measures
-        reachability in Manhattan distance, which grows a diamond/star from the
+        Unlike an earlier single-seed version of this function (which kept only
+        the component connected to the camera's own position and discarded
+        every other component to NaN, later overwritten by _interpolate's
+        synthetic fill), every sufficiently large component is kept here. A
+        physically separate landmass or rock formation across water -- or
+        across any other genuine discontinuity, real depth data with nothing
+        connecting it back to the camera's own footing -- is real observed
+        geometry, not noise; discarding it and replacing it with fabricated
+        terrain was never correct just because it happens to be unreachable
+        from the seed. Downstream stages use the ranking here (see
+        HEIGHT_MAP_COMPONENT_ID) to keep the largest component as the base
+        terrain mesh and route every other qualifying component to its own
+        separate mesh instead.
+
+        Uses 8-connectivity rather than 4-connectivity: 4-connectivity measures
+        reachability in Manhattan distance, which grows a diamond/star from any
         seed regardless of the actual terrain -- purely a grid-connectivity
-        artifact, which is why it showed up in every heightmap_observed_mask.png.
-        8-connectivity approximates a circular ball much more closely, and
-        scipy.ndimage's compiled filters replace an O(H*W) pure-Python BFS with a
-        handful of vectorised passes.
+        artifact. 8-connectivity approximates a circular ball much more closely.
+
+        Returns an int32 (H, W) label array: 0 = not part of any qualifying
+        component (falls through to _interpolate's synthetic fill, as the
+        discarded region always did), 1 = the largest component, 2, 3, ... =
+        smaller components ranked by size descending.
+
+        min_component_area_fraction: components smaller than this fraction of
+        the grid are folded into 0 (gap) rather than kept as their own
+        component -- avoids spurious few-cell noise clusters becoming a
+        "formation" of their own.
         """
         grid_h, grid_w = height_map.shape
         has_data = ~np.isnan(height_map)
-
-        start_r, start_c = grid_h // 2, grid_w // 2
-
-        # If the centre cell is empty, find the nearest filled cell to it.
-        if not has_data[start_r, start_c]:
-            ys, xs = np.where(has_data)
-            if len(ys) == 0:
-                return has_data
-            dist = np.hypot(ys - start_r, xs - start_c)
-            best = int(np.argmin(dist))
-            start_r, start_c = int(ys[best]), int(xs[best])
 
         # -inf/+inf for missing cells so they never win the max/min at a boundary.
         local_max = maximum_filter(np.where(has_data, height_map, -np.inf), size=3)
         local_min = minimum_filter(np.where(has_data, height_map,  np.inf), size=3)
         walkable = has_data & (local_max - local_min <= max_step)
-        walkable[start_r, start_c] = True  # the seed is always accepted
 
         structure = generate_binary_structure(2, 2)  # 8-connectivity
-        labels, _ = label(walkable, structure=structure)
-        seed_label = labels[start_r, start_c]
-        if seed_label == 0:
-            return np.zeros((grid_h, grid_w), dtype=bool)
+        labels, n_labels = label(walkable, structure=structure)
+        if n_labels == 0:
+            return np.zeros((grid_h, grid_w), dtype=np.int32)
 
-        return labels == seed_label
+        counts = np.bincount(labels.ravel())
+        counts[0] = 0  # background (unwalkable / no data) is never a component
+        min_cells = max(1, int(min_component_area_fraction * grid_h * grid_w))
+
+        qualifying = np.flatnonzero(counts >= min_cells)
+        if len(qualifying) == 0:
+            return np.zeros((grid_h, grid_w), dtype=np.int32)
+        qualifying = qualifying[np.argsort(-counts[qualifying])]  # largest first
+
+        remap = np.zeros(n_labels + 1, dtype=np.int32)
+        for new_id, old_label in enumerate(qualifying, start=1):
+            remap[old_label] = new_id
+
+        return remap[labels]
 
     @staticmethod
     def _fill_from_panorama_depth(
@@ -699,7 +766,12 @@ class HeightMapGenerator:
                 levels[hi, rows, cols] * frac).astype(np.float32)
 
     @staticmethod
-    def _interpolate(height_map: np.ndarray, n_octaves: int = 4, noise_seed: int = 0) -> np.ndarray:
+    def _interpolate(
+        height_map: np.ndarray,
+        n_octaves: int = 4,
+        noise_seed: int = 0,
+        boundary_falloff_cells: float = 6.0,
+    ) -> np.ndarray:
         """
         Multi-scale noise inpainting for unknown (NaN) cells.
 
@@ -709,6 +781,19 @@ class HeightMapGenerator:
         with cubically-decreasing amplitude is injected into still-unknown cells
         (front-loading large-scale structure), and diffusion propagates boundary
         values inward.  Known cells are hard constraints throughout.
+
+        boundary_falloff_cells: the injected noise at each level is additionally
+        scaled by distance (in that level's own cells) to the nearest real known
+        cell — 0 right at the boundary, ramping to full amplitude
+        boundary_falloff_cells away. Without this, a cell immediately next to a
+        real observation (e.g. the occluded top of a cliff whose base is
+        directly observed) could get just as much random noise as a cell deep in
+        a large unobserved region with no nearby evidence at all — every level
+        already diffuses in the value from known neighbours, but the noise
+        term itself didn't defer to how close a real observation actually was.
+        Gating it means fill immediately adjacent to real data continues that
+        data's trend (diffusion-dominated, "close to known neighbours"), while
+        only cells with no nearby observation get real freedom to wander.
         """
         known_mask = ~np.isnan(height_map)
         if np.all(known_mask):
@@ -749,7 +834,11 @@ class HeightMapGenerator:
                 # noise-free so diffusion — not randomness — sets the last detail.
                 ZI_up = zoom(ZI, (sh / ZI.shape[0], sw / ZI.shape[1]), order=3)
                 amplitude = noise_scale * (octave ** 3) * 1e-2
-                noise = rng.standard_normal((sh, sw)).astype(np.float32) * amplitude
+                dist_to_known = distance_transform_edt(~ds_mask)
+                boundary_gate = np.clip(
+                    dist_to_known / max(boundary_falloff_cells, 1e-6), 0.0, 1.0
+                ).astype(np.float32)
+                noise = rng.standard_normal((sh, sw)).astype(np.float32) * amplitude * boundary_gate
                 ZI = np.where(ds_mask, ds_vals, ZI_up + noise)
 
             n_iters = max(20, sh * 2 if octave == n_octaves - 1 else sh // 4)

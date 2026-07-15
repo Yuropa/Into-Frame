@@ -14,6 +14,16 @@ Applies three passes after TerrainReconstructionStage:
                         slopes without the uniform blurring of Laplacian
                         diffusion or the staircase artefacts of thermal erosion.
 
+Noise, diffusion, and erosion strength are additionally scaled down continuously by
+HEIGHT_MAP_CERTAINTY (see observed_trust_strength) on top of the existing hard
+CLIFF_MASK exclusion -- certainty already decays smoothly with distance from real
+point-cloud data (HeightMapStage's certainty_falloff_meters), so this "nudges" cells
+near real data instead of applying the exact same full-strength synthesis there as
+on terrain that was never observed at all. The literal true_observed boolean is still
+restored exactly at the end of this stage (undoing whatever residual each pass left
+even after gating), so this only changes how strongly those passes reshape cells in
+the transition zone around real data, not the real cells themselves.
+
 Pipeline position: after TerrainReconstructionStage, before TerrainMeshStage.
 
 Reads:
@@ -21,6 +31,8 @@ Reads:
   ContextKey.HEIGHT_MAP_PARAMS (dict, optional) — grid_size_meters
   ContextKey.HEIGHT_MAP_OBSERVED_MASK (Depth, optional) — true direct-observation
                                 mask; real cells are restored after all passes run
+  ContextKey.HEIGHT_MAP_CERTAINTY (Depth, optional) — continuous observed-data trust,
+                                used to taper noise/diffusion/erosion near real data
   ContextKey.ROAD_SKELETON    (Depth, optional) — binary road/trail mask
 
 Writes:
@@ -57,7 +69,7 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         # fBm noise
         noise_scale: float = 40.0,
         noise_octaves: int = 4,
-        noise_amplitude: float = 0.4,
+        noise_amplitude: float = 0.2,
         # Landlab hillslope diffusion
         linear_diffusivity: float = 1e-3,
         diffusion_dt: float = 200.0,
@@ -75,7 +87,7 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         # mountain channels not observed in the water chains — then carves valleys
         # proportional to drainage area × slope.
         hydro_enabled: bool = True,
-        hydro_erodibility: float = 1e-5,   # K_sp stream power erodibility (m^(1-2m)/yr)
+        hydro_erodibility: float = 5e-6,   # K_sp stream power erodibility (m^(1-2m)/yr)
         hydro_dt: float = 1000.0,          # timestep per erosion step (conceptual years)
         hydro_n_steps: int = 10,           # number of erosion steps
         hydro_resolution: int = 256,       # downsample to this for flow routing (speed)
@@ -83,6 +95,16 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         # excluded from hillslope diffusion and hydro erosion, and get suppressed
         # fBm noise, so measured/inferred steep faces survive this stage's smoothing.
         cliff_noise_suppression: float = 0.85,
+        # How strongly HEIGHT_MAP_CERTAINTY (real point-cloud trust, already decaying
+        # smoothly with distance from observed data -- see HeightMapStage's
+        # certainty_falloff_meters) additionally protects cells from noise/diffusion/
+        # erosion, on top of cliff protection. 0 disables (old behaviour: only the
+        # literal true_observed boolean, restored at the very end, is protected --
+        # everything else gets full-strength synthesis regardless of how close it is
+        # to real data). 1.0 = a cell at certainty=1 is fully protected, same as a
+        # cliff cell; certainty fades this out gradually rather than the hard on/off
+        # edge the final true_observed-only restore leaves behind.
+        observed_trust_strength: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.road_blend_weight = road_blend_weight
@@ -105,6 +127,7 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.hydro_n_steps = hydro_n_steps
         self.hydro_resolution = hydro_resolution
         self.cliff_noise_suppression = cliff_noise_suppression
+        self.observed_trust_strength = observed_trust_strength
 
 
 class TerrainNoiseRefinementStage(PipelineStage):
@@ -160,7 +183,24 @@ class TerrainNoiseRefinementStage(PipelineStage):
             if cliff_depth is not None and cliff_depth.depth.shape == (H, W)
             else np.zeros((H, W), dtype=np.float64)
         )
-        has_cliffs = bool(cliff_mask.any())
+
+        # Combined protection field: a cliff cell OR a cell HEIGHT_MAP_CERTAINTY says
+        # we can trust (real point-cloud data nearby, continuously decaying with
+        # distance -- see HeightMapStage's certainty_falloff_meters) both resist this
+        # stage's noise/diffusion/erosion passes. This is what makes the true_observed
+        # restore at the end of this stage a final correction rather than the *only*
+        # thing protecting real data: without it, a cell one pixel outside the literal
+        # observed boolean got the exact same full-strength synthetic reshaping as
+        # terrain 90 m away that was never observed at all -- a hard "trust cliff"
+        # right at the boundary of real coverage instead of a gradual taper.
+        certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
+        certainty = (
+            certainty_depth.depth.astype(np.float64)
+            if certainty_depth is not None and certainty_depth.depth.shape == (H, W)
+            else np.zeros((H, W), dtype=np.float64)
+        )
+        protect = np.maximum(cliff_mask, certainty * cfg.observed_trust_strength)
+        has_protection = bool(protect.any())
 
         # ── Pass 1: Road Grading ──────────────────────────────────────────────
         road_depth = context.input_depth(ContextKey.ROAD_SKELETON)
@@ -189,11 +229,12 @@ class TerrainNoiseRefinementStage(PipelineStage):
         self.advance_progress(task)
 
         # ── Pass 2: fBm Noise ─────────────────────────────────────────────────
-        # Rolling-hill noise looks wrong splattered across a rock face, so it's
-        # suppressed (not zeroed — a little texture keeps cliff faces from
-        # looking perfectly planar) in proportion to cliff strength.
+        # Rolling-hill noise looks wrong splattered across a rock face (or over
+        # real point-cloud data), so it's suppressed (not zeroed — a little texture
+        # keeps cliff faces from looking perfectly planar) in proportion to combined
+        # cliff + observed-trust protection.
         noise_layer = self._make_noise(H, W, cfg.noise_scale, cfg.noise_octaves, cfg.seed)
-        noise_gate = (1.0 - cfg.cliff_noise_suppression * cliff_mask) if has_cliffs else 1.0
+        noise_gate = (1.0 - cfg.cliff_noise_suppression * protect) if has_protection else 1.0
         terrain += noise_layer * cfg.noise_amplitude * noise_gate
         self.advance_progress(task)
 
@@ -219,11 +260,12 @@ class TerrainNoiseRefinementStage(PipelineStage):
                 cfg.linear_diffusivity, cfg.diffusion_dt,
             )
 
-        # Hillslope creep is a rounding process — undo it on cliff cells by
-        # restoring their pre-diffusion elevation, feathered by cliff strength
-        # so the cliff base blends into the diffused terrain around it.
-        if has_cliffs:
-            terrain = terrain * (1.0 - cliff_mask) + pre_diffusion * cliff_mask
+        # Hillslope creep is a rounding process — undo it on protected cells
+        # (cliffs, and cells near trusted real data) by restoring their
+        # pre-diffusion elevation, feathered by protection strength so the
+        # transition blends into the diffused terrain around it.
+        if has_protection:
+            terrain = terrain * (1.0 - protect) + pre_diffusion * protect
 
         # ── Pass 4: Peak Sharpening ───────────────────────────────────────────────
         # Normalise to [0,1], apply h^sharpness_map element-wise, rescale back.
@@ -276,9 +318,10 @@ class TerrainNoiseRefinementStage(PipelineStage):
                     cfg.hydro_erodibility, cfg.hydro_dt, cfg.hydro_n_steps,
                 )
             # Stream-power erosion carves V-shaped valleys — the wrong shape for
-            # a cliff face. Restore pre-erosion elevation on cliff cells.
-            if has_cliffs:
-                terrain = terrain * (1.0 - cliff_mask) + pre_erosion * cliff_mask
+            # a cliff face, and not something that should carve into terrain we
+            # actually measured. Restore pre-erosion elevation on protected cells.
+            if has_protection:
+                terrain = terrain * (1.0 - protect) + pre_erosion * protect
             self.log_info(
                 f"Terrain noise refinement: hydrological erosion "
                 f"(K={cfg.hydro_erodibility:.1e}, dt={cfg.hydro_dt:.0f}×{cfg.hydro_n_steps})"
@@ -290,9 +333,10 @@ class TerrainNoiseRefinementStage(PipelineStage):
         # per-pass exclusion logic to each one -- simpler, and avoids a pass like
         # peak sharpening (a global tone-curve remap) producing local kinks from
         # mid-algorithm exclusion. Real cells end up with zero net synthetic
-        # influence; CLIFF_MASK protection above (for distant/inferred ridge
-        # cliffs, which have no real data behind them) is unaffected by this and
-        # still applies on top.
+        # influence, exactly as before `protect` existed above; the certainty-based
+        # tapering earlier in this stage only changes how much the *surrounding*
+        # (not-quite-observed) cells get reshaped on the way here, so this final
+        # hard restore and that continuous gating are complementary, not redundant.
         if true_observed.any():
             restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0)
             terrain = terrain * (1.0 - restore_weight) + original_terrain * restore_weight

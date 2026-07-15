@@ -1,0 +1,61 @@
+# Foreground inpainting test pipeline
+#
+# Same stage list and parameters as config.yaml, truncated to stop right after
+# Panorama Foreground Inpainting — everything downstream (terrain, texture,
+# object placement, scene generation) is skipped so you can iterate on the
+# depth-filtered SAM removal + ObjectClear pass without paying for the rest
+# of the pipeline each time.
+#
+# Usage:
+#   python main.py run <image> -o <output dir> --config config_foreground_inpainting_test.yaml
+#
+# To re-test a change to this stage against an existing output dir without
+# redoing Captioning/Depth/Panorama/Panorama Object Depth:
+#   python main.py run <image> -o <output dir> --config config_foreground_inpainting_test.yaml \
+#       --rerun "Panorama Foreground Inpainting"
+
+stages:
+  - name: Captioning
+    stage: CaptioningStage
+
+  - name: Depth Generation
+    stage: DepthStage
+
+  - name: Panorama
+    stage: PanoramaStage
+    generator_type: WORLDGEN
+
+  - name: Panorama Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
+
+  - name: Panorama Object Depth
+    stage: PanoramaDepthStage
+    keys:
+      output: panorama_object_depth
+
+  - name: Panorama Inpainting
+    stage: PanoramaInpaintingStage
+    enabled: false
+    full_panorama: true
+    use_depth_filter: true
+    depth_filter_distance_m: 5.0  # mask kept as foreground if median depth is closer than this (metres)
+    # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
+    # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
+    # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
+    # PanoramaForegroundInpaintingStage already leaves it untouched today. PANORAMA_TERRAIN
+    # (what Panorama Depth → Height Map actually consumes) is written unconditionally either way.
+    keys:
+      output: panorama_foreground_removed
+
+  - name: Panorama Foreground Inpainting
+    stage: PanoramaForegroundInpaintingStage
+    enabled: true
+    foreground_distance_m: 5.0  # mask built directly from depth: pixel is foreground if closer than this (metres)
+    min_region_area_px: 200     # drop connected components smaller than this (denoise depth-model glitches)
+    closing_radius_px: 12       # morphological closing to bridge small real gaps into one solid region
+    mask_dilation_px: 15
+    guidance_scale: 2.5
+    num_inference_steps: 30

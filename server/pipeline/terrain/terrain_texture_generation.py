@@ -18,6 +18,8 @@ from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
+from pipeline.terrain.pattern_texture import bake_real_layer, synthesize_region_layer
+from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
 from util.device_utils import DeviceStrategy, preferred_device
@@ -110,6 +112,17 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
+        # Longest-edge cap (px) for the panorama layer's own tile -- deliberately
+        # decoupled from tile_size, which sizes the *synthetic* FLUX tiles (a real
+        # generation constraint that doesn't apply here). This layer is just a
+        # resize of the real photo, so it should carry as much of that photo's
+        # actual resolution as reasonable, not the same 1024px budget the FLUX
+        # model needs. Also stops forcing the panorama's native ~2:1 equirect
+        # aspect into a square, which discarded vertical resolution for no
+        # reason -- the shader samples it with independent U/V in [0,1], so a
+        # non-square texture is not a problem. Native resolution is used as-is
+        # whenever it's already under this cap.
+        panorama_layer_max_resolution: int = 4096,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
@@ -195,6 +208,40 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # self.temp/texture_generation/, so each step can be inspected. No-op unless
         # self.temp is set.
         debug_save_steps: bool = True,
+        # Real-material pattern texturing (see pipeline/terrain/pattern_texture.py) --
+        # tried first for every region type; today's FLUX generation above is the
+        # explicit last-resort fallback when this returns nothing (no usable real
+        # reference for that type, or the terrain mesh isn't available yet).
+        use_pattern_texture: bool = True,
+        # A triangle "needs synthesis" (pattern-texture territory, not left to the
+        # panorama layer) when _panorama_visibility_weight at its centroid is below
+        # this. Matches the panorama layer's own certainty gate so the two never
+        # fight over the same ground -- see _pattern_texture_context.
+        pattern_certainty_threshold: float = 0.5,
+        # Reference crops for the pattern-texture library reuse _extract_reference_patches
+        # (same mechanism the FLUX path uses), just with different sizing --  library
+        # samples are small triangular crops, not a whole tile's guidance seed.
+        pattern_reference_patch_size: int = 512,
+        pattern_num_reference_patches: int = 4,
+        # Working resolution of one triangular library sample.
+        pattern_sample_res: int = 128,
+        # Fraction of a sample's inradius blended toward the shared border colour.
+        # Wide and low-contrast (not a thin flat ring) reads as one continuous
+        # material rather than a visibly "faceted" tiling -- see pattern_texture.py.
+        pattern_border_width_frac: float = 0.45,
+        # Image-space feather (px, at pattern_canvas_size) blending the synthesized
+        # region back toward real photo content at its boundary with the panorama
+        # layer's own territory.
+        pattern_feather_band_px: float = 48.0,
+        pattern_feather_sigma_px: float = 8.0,
+        # Skip a region type's pattern-texture layer (fall back to FLUX) if its
+        # needs-synthesis footprint is smaller than this fraction of the canvas --
+        # not worth a dedicated bake.
+        pattern_min_coverage_fraction: float = 0.002,
+        # Resolution of the baked pattern-texture layer (a one-shot world-space
+        # bake, tile_factor=1.0 -- not tiled like the FLUX layers, so this alone
+        # sets its on-terrain texel density).
+        pattern_canvas_size: int = 2048,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_size = tile_size
@@ -212,6 +259,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_fade_deg = nadir_fade_deg
         self.horizon_fade_deg = horizon_fade_deg
+        self.panorama_layer_max_resolution = panorama_layer_max_resolution
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
@@ -230,6 +278,16 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.lora_scale = lora_scale
         self.use_lora = use_lora
         self.debug_save_steps = debug_save_steps
+        self.use_pattern_texture = use_pattern_texture
+        self.pattern_certainty_threshold = pattern_certainty_threshold
+        self.pattern_reference_patch_size = pattern_reference_patch_size
+        self.pattern_num_reference_patches = pattern_num_reference_patches
+        self.pattern_sample_res = pattern_sample_res
+        self.pattern_border_width_frac = pattern_border_width_frac
+        self.pattern_feather_band_px = pattern_feather_band_px
+        self.pattern_feather_sigma_px = pattern_feather_sigma_px
+        self.pattern_min_coverage_fraction = pattern_min_coverage_fraction
+        self.pattern_canvas_size = pattern_canvas_size
 
 
 class TerrainTextureGenerationStage(PipelineStage):
@@ -387,10 +445,36 @@ class TerrainTextureGenerationStage(PipelineStage):
         self._init_inpainter()
 
         reference = self._bake_reference(context, cfg) if cfg.use_photo_reference else None
+        pattern_ctx = self._pattern_texture_context(context, cfg) if cfg.use_pattern_texture else None
 
         tiles: dict[str, PIL.Image.Image] = {}
+        tile_factors: dict[str, float] = {}
         try:
             for idx, rt in enumerate(present_types):
+                pattern_layer = None
+                if pattern_ctx is not None and reference is not None:
+                    panorama, type_map = reference
+                    ref_patches = self._extract_reference_patches(
+                        panorama, type_map, int(rt),
+                        patch_size=cfg.pattern_reference_patch_size,
+                        num_patches=cfg.pattern_num_reference_patches,
+                    )
+                    if ref_patches:
+                        pattern_layer = self._synthesize_pattern_layer(
+                            pattern_ctx, panorama, int(rt), ref_patches, cfg, seed_offset=idx,
+                        )
+
+                if pattern_layer is not None:
+                    tiles[rt.label] = pattern_layer
+                    tile_factors[rt.label] = 1.0  # one-shot world-space bake, not a repeating tile
+                    self.log_info(f"Generated {rt.label} layer via real-material pattern texturing")
+                    self.advance_progress(task)
+                    self.advance_progress(task)
+                    continue
+
+                # Last-resort fallback: no usable real reference for this region type
+                # (or pattern texturing disabled / mesh not yet available) -- today's
+                # FLUX generation path, unchanged.
                 prompt = self._build_prompt(rt, caption)
                 if reference is not None:
                     panorama, type_map = reference
@@ -405,6 +489,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                     tiles[rt.label] = self._generate_tileable_tile(
                         prompt, cfg, seed_offset=idx, debug_label=rt.label,
                     )
+                tile_factors[rt.label] = cfg.synthetic_tile_factor
                 self.log_info(
                     f"Generated {rt.label} tile ({cfg.tile_size}px, seamless"
                     f"{', photo-referenced (largest-region crop)' if reference is not None else ''})"
@@ -421,7 +506,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             self._close_supersampler()
             self._close_captioner()
 
-        material = self._build_material(context, cfg, present_types, tiles, region_map_depth)
+        material = self._build_material(context, cfg, present_types, tiles, region_map_depth, tile_factors)
 
         context.add_splat_material(ContextKey.TERRAIN_MATERIAL, material)
 
@@ -437,9 +522,83 @@ class TerrainTextureGenerationStage(PipelineStage):
             f"SplatMaterial: {material.layer_count} layer(s), "
             f"{len(material.blend_maps)} blend map(s) at {cfg.blend_map_size}px"
         )
+
+        self._texture_formations(context, cfg)
+
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    # ── Formation meshes ─────────────────────────────────────────────────────
+
+    def _texture_formations(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+    ) -> None:
+        """
+        Bake and apply each non-primary ground component's own texture (see
+        TerrainMeshStage / ContextKey.TERRAIN_FORMATIONS) directly onto its
+        mesh's own UVs -- unlike the base terrain, a formation mesh has no
+        separately-transmitted SplatMaterial to fall back on (confirmed
+        against the Unity client: mesh/material association is name-matched
+        to "terrain" specifically), so its final texture has to be baked
+        into its own GLB, the same standard glTF texturing every other
+        object mesh in this codebase already uses.
+
+        A formation is, by construction, made entirely of directly-observed
+        cells (component membership in
+        HeightMapGenerator._label_ground_components requires real height
+        data) -- essentially never the nadir hole, horizon band, or an
+        occlusion gap a synthesized/library layer exists for. So this skips
+        the library/assignment machinery entirely and just bakes real,
+        dewarped, delit photo content (pattern_texture.bake_real_layer),
+        the same operation the main terrain's own panorama layer performs.
+        """
+        formations = context.input_object(ContextKey.TERRAIN_FORMATIONS)
+        if not formations:
+            return
+
+        panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        if panorama_terrain is None or height_map_depth is None:
+            self.log_warning("Formations present but no panorama/height map — leaving them untextured")
+            return
+        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+        terrain_half = grid_size / 2.0
+
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
+        for i, formation in enumerate(formations):
+            mesh = context.mesh(formation["mesh_key"])
+            if mesh is None:
+                continue
+
+            layer = bake_real_layer(
+                panorama_terrain, height_map_depth.depth, terrain_half,
+                formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
+                formation["x_center"], formation["z_center"],
+                sky_mask=sky_mask,
+            )
+            tile = PIL.Image.fromarray((layer.clip(0.0, 1.0) * 255.0).astype("uint8"), "RGB")
+            if cfg.use_intrinsic_delighting:
+                tile = self._delight_patch(tile, cfg)
+
+            TerrainMeshGenerator.apply_component_texture(
+                mesh, tile,
+                formation["x_center"], formation["z_center"],
+                formation["x_half"], formation["z_half"],
+            )
+            context.add_mesh(formation["mesh_key"], mesh)
+
+            self.log_info(f"Textured formation {formation['id']} ({formation['mesh_key']})")
+            if self.temp is not None:
+                tile.save(self.temp / f"terrain_formation_{formation['id']}_texture.png")
+
+        self._close_intrinsics()
 
     # ── Material construction ─────────────────────────────────────────────────
 
@@ -450,6 +609,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         present_types: list[RegionType],
         tiles: dict[str, PIL.Image.Image],
         region_map_depth,
+        tile_factors: Optional[dict[str, float]] = None,
     ) -> SplatMaterial:
         """
         Assemble the SplatMaterial with an optional panorama layer prepended.
@@ -460,7 +620,15 @@ class TerrainTextureGenerationStage(PipelineStage):
         (see _panorama_visibility_weight) that keeps it dominant across
         almost the whole terrain. The synthetic region layer weights are
         scaled by (1 − panorama_weight) so all weights sum to 1 everywhere.
+
+        tile_factors: per-label UV tiling factor override. A pattern-texture
+        layer (see _synthesize_pattern_layer) is a one-shot world-space bake
+        covering the whole terrain, not a small repeating tile, so it needs
+        tile_factor=1.0 like the panorama layer; a FLUX-generated layer keeps
+        cfg.synthetic_tile_factor. Falls back to cfg.synthetic_tile_factor
+        for any label not present (e.g. if called by older/other code).
         """
+        tile_factors = tile_factors or {}
         # ── Compute raw synthetic region weights ──────────────────────────────
         sigma_px = max(4.0, cfg.blend_sigma * cfg.blend_map_size)
         synth_weight_maps: dict[str, np.ndarray] = {}
@@ -491,17 +659,23 @@ class TerrainTextureGenerationStage(PipelineStage):
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.use_panorama_layer else None
         height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
         height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        observed_mask_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
 
         if panorama_terrain is not None and height_map_depth is not None:
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
             half = grid_size / 2.0
 
-            pano_tile = self._panorama_tile(panorama_terrain, cfg.tile_size)
+            pano_tile = self._panorama_tile(panorama_terrain, cfg.panorama_layer_max_resolution)
             pano_weight = self._panorama_visibility_weight(
                 height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
                 nadir_cutoff_deg=cfg.nadir_cutoff_deg,
                 nadir_fade_deg=cfg.nadir_fade_deg,
                 horizon_fade_deg=cfg.horizon_fade_deg,
+                observed_mask=(
+                    observed_mask_depth.depth
+                    if observed_mask_depth is not None and observed_mask_depth.depth.shape == height_map_depth.depth.shape
+                    else None
+                ),
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -519,7 +693,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 SplatLayer(
                     name=rt.label,
                     tile=tiles[rt.label],
-                    tile_factor=cfg.synthetic_tile_factor,
+                    tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
                 )
                 for rt in present_types if rt.label in tiles
@@ -530,7 +704,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 SplatLayer(
                     name=rt.label,
                     tile=tiles[rt.label],
-                    tile_factor=cfg.synthetic_tile_factor,
+                    tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
                 )
                 for rt in present_types if rt.label in tiles
@@ -543,9 +717,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         return SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
 
     @staticmethod
-    def _panorama_tile(panorama, tile_size: int) -> PIL.Image.Image:
+    def _panorama_tile(panorama, max_resolution: int) -> PIL.Image.Image:
         """
-        Resize the full equirectangular panorama to a square tile for storage.
+        Prepare the full equirectangular panorama as a texture for storage.
 
         The full image is kept (not cropped to the lower half) so mountain detail
         near and above the horizon is preserved.  The shader uses standard equirect
@@ -554,10 +728,22 @@ class TerrainTextureGenerationStage(PipelineStage):
             V = 0.5 − φ / π   where φ = atan2(Y, √(X²+Z²))
         Mountains at φ > 0 (above camera level) sit at V < 0.5 in the tile.
         Terrain below the horizon sits at V > 0.5.  Nadir maps to V = 1.0.
+
+        Unlike the synthetic FLUX tiles, this layer is just a resize of a real
+        photo with no generation-resolution constraint, so it keeps its native
+        ~2:1 equirect aspect ratio (U and V are sampled independently in [0,1]
+        anyway — a square texture was never required) and is only downscaled if
+        its longest edge exceeds max_resolution. This is also what the
+        ground_point_cloud.glb debug export samples color from (at a pixel
+        stride, but no resize) — matching resolution here keeps the mesh's
+        real-photo layer as close to that reference as reasonable.
         """
-        return panorama.image.convert("RGB").resize(
-            (tile_size, tile_size), PIL.Image.LANCZOS
-        )
+        img = panorama.image.convert("RGB")
+        w, h = img.size
+        scale = min(1.0, max_resolution / max(w, h))
+        if scale < 1.0:
+            img = img.resize((round(w * scale), round(h * scale)), PIL.Image.LANCZOS)
+        return img
 
     @staticmethod
     def _panorama_visibility_weight(
@@ -568,6 +754,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
+        observed_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
@@ -594,6 +781,20 @@ class TerrainTextureGenerationStage(PipelineStage):
         terrain whenever the height map's values don't happen to fall below
         the camera's zero reference.
 
+        observed_mask (optional): HEIGHT_MAP_OBSERVED_MASK — True only where
+        that cell has a genuine direct point-cloud measurement (see
+        HeightMapGenerator.generate). A viewing angle can be perfectly safe
+        (not near nadir or horizon) while the height sampled there is still
+        pure interpolation/noise fill, e.g. deep inside a large occluded gap —
+        in that case the world position handed to the shader's panorama
+        lookup is fabricated, so whatever it samples is not actually this
+        point's real appearance, just whatever real content happens to sit at
+        that made-up height. Gating on this too means the panorama layer only
+        claims a point once both its viewing geometry *and* its underlying
+        geometry are trustworthy; everywhere it cedes, weight goes to the
+        synthetic layers via the existing (1 − pano_weight) scaling in
+        _build_material, same as an unfavourable viewing angle already does.
+
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
         us = np.linspace(0.0, 1.0, blend_map_size, dtype=np.float32)
@@ -618,6 +819,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         fade_in  = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
         fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
         weight   = np.minimum(fade_in, fade_out).astype(np.float32)
+
+        if observed_mask is not None and observed_mask.shape == height_map.shape:
+            # Blur at native resolution before sampling so the observed/
+            # interpolated boundary feathers smoothly instead of leaving a
+            # hard step once resampled down to blend_map_size (point-sampling
+            # a sharp binary mask at a much coarser grid aliases badly).
+            sigma_native = max(2.0, 0.01 * min(hm_h, hm_w))
+            obs_smooth = gaussian_filter(observed_mask.astype(np.float32), sigma=sigma_native)
+            obs_gate = map_coordinates(
+                obs_smooth, [row_c.ravel(), col_c.ravel()], order=1, mode="nearest"
+            ).reshape(blend_map_size, blend_map_size).astype(np.float32)
+            weight = weight * obs_gate.clip(0.0, 1.0)
 
         return (weight ** blend_power).astype(np.float32)
 
@@ -648,6 +861,129 @@ class TerrainTextureGenerationStage(PipelineStage):
         if panorama_terrain is None or type_map_depth is None:
             return None
         return panorama_terrain, type_map_depth.depth
+
+    def _pattern_texture_context(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+    ) -> Optional[dict]:
+        """
+        Precompute what every region type's pattern-texture layer needs, once,
+        shared across all of them: the actual terrain mesh (so the triangles
+        used for library assignment are exactly the render mesh's own, per
+        the pattern-texture plan -- no separate texture-mesh resolution to
+        keep in sync), which of its triangles the panorama layer already
+        rejects (needs_synthesis -- reusing _panorama_visibility_weight's own
+        certainty formula, evaluated at each triangle's centroid instead of a
+        blend-map grid, so the two layers never fight over the same ground),
+        and which region type each triangle belongs to (top-down REGION_MAP
+        sampled at the same centroids).
+
+        Returns None if the terrain mesh, height map, or region map isn't
+        available yet (e.g. Terrain Mesh stage was skipped) -- callers fall
+        back to FLUX.
+        """
+        terrain_mesh = context.mesh(ContextKey.TERRAIN_MESH)
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        region_map_depth = context.input_depth(ContextKey.REGION_MAP)
+        if terrain_mesh is None or height_map_depth is None or region_map_depth is None:
+            return None
+
+        observed_mask_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+        half = grid_size / 2.0
+
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
+        vertices = np.asarray(terrain_mesh.mesh.vertices, dtype=np.float64)
+        faces = np.asarray(terrain_mesh.mesh.faces, dtype=np.int64)
+        if len(faces) == 0:
+            return None
+        centroids = vertices[faces].mean(axis=1)  # (M, 3) world XYZ
+
+        pano_weight_grid = self._panorama_visibility_weight(
+            height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
+            nadir_cutoff_deg=cfg.nadir_cutoff_deg,
+            nadir_fade_deg=cfg.nadir_fade_deg,
+            horizon_fade_deg=cfg.horizon_fade_deg,
+            observed_mask=(
+                observed_mask_depth.depth
+                if observed_mask_depth is not None and observed_mask_depth.depth.shape == height_map_depth.depth.shape
+                else None
+            ),
+        )
+        row_c = ((centroids[:, 2] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
+        col_c = ((centroids[:, 0] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
+        face_pano_weight = map_coordinates(pano_weight_grid, [row_c, col_c], order=1, mode="nearest")
+        face_needs_synthesis = face_pano_weight < cfg.pattern_certainty_threshold
+
+        rm = region_map_depth.depth
+        rm_h, rm_w = rm.shape
+        row_rm = ((centroids[:, 2] + half) / (2.0 * half) * (rm_h - 1)).clip(0, rm_h - 1)
+        col_rm = ((centroids[:, 0] + half) / (2.0 * half) * (rm_w - 1)).clip(0, rm_w - 1)
+        face_region_idx = map_coordinates(rm, [row_rm, col_rm], order=0, mode="nearest").astype(np.int32)
+
+        self.log_info(
+            f"Pattern texture: {int(face_needs_synthesis.sum())}/{len(faces)} triangles "
+            f"need synthesis (panorama weight < {cfg.pattern_certainty_threshold:.2f})"
+        )
+
+        return {
+            "vertices": vertices,
+            "faces": faces,
+            "face_needs_synthesis": face_needs_synthesis,
+            "face_region_idx": face_region_idx,
+            "height_map": height_map_depth.depth,
+            "half": half,
+            "sky_mask": sky_mask,
+        }
+
+    def _synthesize_pattern_layer(
+        self,
+        pattern_ctx: dict,
+        panorama: Panorama,
+        region_val: int,
+        ref_patches: list[PIL.Image.Image],
+        cfg: "TerrainTextureGenerationConfiguration",
+        seed_offset: int,
+    ) -> Optional[PIL.Image.Image]:
+        """
+        Delight each real reference crop (same operation the FLUX path's own
+        patches go through -- see _delight_patch) before handing them to
+        pattern_texture.build_library, so library samples match the same
+        flat-lighting convention as the panorama layer's own observed-mask-
+        gated content and don't visually clash at the boundary between them
+        ("use the un-lit panorama, not hallucination" applies here too).
+        """
+        delit_patches = (
+            [self._delight_patch(p, cfg) for p in ref_patches]
+            if cfg.use_intrinsic_delighting else ref_patches
+        )
+
+        face_region_mask = pattern_ctx["face_region_idx"] == region_val
+        return synthesize_region_layer(
+            vertices=pattern_ctx["vertices"],
+            faces=pattern_ctx["faces"],
+            face_needs_synthesis=pattern_ctx["face_needs_synthesis"],
+            face_region_mask=face_region_mask,
+            reference_patches=delit_patches,
+            panorama=panorama,
+            height_map=pattern_ctx["height_map"],
+            terrain_half=pattern_ctx["half"],
+            x_half=pattern_ctx["half"],
+            z_far=pattern_ctx["half"],
+            canvas_size=cfg.pattern_canvas_size,
+            seed=cfg.seed + seed_offset,
+            sky_mask=pattern_ctx["sky_mask"],
+            sample_res=cfg.pattern_sample_res,
+            border_width_frac=cfg.pattern_border_width_frac,
+            feather_band_px=cfg.pattern_feather_band_px,
+            feather_sigma_px=cfg.pattern_feather_sigma_px,
+            min_coverage_fraction=cfg.pattern_min_coverage_fraction,
+        )
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

@@ -15,7 +15,7 @@ class Panorama:
 
       equirectangular_unproject(depth) — static; depth map → (X, Y, Z) world coords.
       unproject(depth)                 — instance alias of the above.
-      uv_for_3d(vertices)              — 3D world points → panorama pixel (u, v, valid).
+      project_3d(vertices)             — 3D world points → panorama pixel (u, v), unrestricted.
       sample_3d(vertices)              — 3D world points → bilinear-sampled RGBA colours.
       to_cubemap(face_w)               — equirectangular → CubeMap conversion.
 
@@ -107,7 +107,7 @@ class Panorama:
         self,
         vertices: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Shared equirectangular projection for uv_for_3d and sample_3d."""
+        """Shared equirectangular projection for project_3d and sample_3d."""
         X = vertices[:, 0].astype(np.float64)
         Y = vertices[:, 1].astype(np.float64)
         Z = vertices[:, 2].astype(np.float64)
@@ -121,25 +121,29 @@ class Panorama:
         pv = (0.5 - lat / np.pi) * (H - 1)
         return pu, pv, lat
 
-    def uv_for_3d(
-        self,
-        vertices: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def project_3d(self, vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """
-        Project 3D world-space vertices onto this panorama.
+        Project 3D world-space vertices onto this panorama's pixel coordinates,
+        with no horizon restriction.
+
+        Unlike sample_3d, whose sky_mask gating exists because it fetches real
+        photo colour at the projected pixel (a sky pixel has no ground-truth
+        colour to speak of), this is for callers that only need "where would
+        this point draw on the panorama," e.g. debug-overlaying an above-horizon
+        feature like a mountain ridgeline silhouette. pu, pv are well-defined for
+        any vertex not exactly on the vertical poles (X=Z=0), regardless of
+        whether it's above or below eye level, so there is nothing to gate here.
 
         vertices: (N, 3) float array of (X, Y, Z) positions.
-        Returns (pu, pv, valid):
-          pu    — float pixel column  in [0, W-1], wraps horizontally.
-          pv    — float pixel row     in [0, H-1].
-          valid — bool mask; True where the vertex is below the horizon (lat < 0).
+        Returns (pu, pv): float pixel column [0, W-1], row [0, H-1].
         """
-        pu, pv, lat = self._project_vertices(vertices)
-        return pu, pv, lat < 0.0
+        pu, pv, _ = self._project_vertices(vertices)
+        return pu, pv
 
     def sample_3d(
         self,
         vertices: np.ndarray,
+        sky_mask: np.ndarray | None = None,
         min_lat_deg: float = -35.0,
     ) -> np.ndarray:
         """
@@ -148,10 +152,25 @@ class Panorama:
         Bilinear sampling is used; the image wraps horizontally.
         Two classes of vertex are treated as holes and filled via nearest-valid-
         neighbour in the XZ plane:
-          • above the horizon  (lat >= 0)       — would sample sky
-          • below min_lat_deg  (near-nadir)     — poorly-generated region
+          • sky                                 — determined by sky_mask (see
+                                                   below), not by elevation angle.
+                                                   A vertex sitting above the
+                                                   camera's own height (a rise, a
+                                                   hillside, a mountain slope) is
+                                                   just as real and just as visible
+                                                   in the panorama as one below it;
+                                                   only an actual sky pixel has no
+                                                   ground-truth colour to sample.
+          • below min_lat_deg  (near-nadir)     — poorly-generated region; this is
+                                                   the equirectangular pole
+                                                   singularity, unrelated to sky.
 
         vertices:    (N, 3) float array.
+        sky_mask:    optional (h, w) bool array in panorama pixel space, True =
+                     sky. Nearest-neighbour resampled to this panorama's own
+                     size first if its shape differs. When None, no vertex is
+                     excluded for being "sky" -- only the near-nadir cutoff below
+                     still applies.
         min_lat_deg: most-negative latitude still considered valid (degrees).
         Returns:     (N, 4) uint8 RGBA array.
         """
@@ -163,7 +182,18 @@ class Panorama:
 
         pu, pv, lat  = self._project_vertices(vertices)
         min_lat_rad  = np.radians(min_lat_deg)
-        valid        = (lat < 0.0) & (lat >= min_lat_rad)
+        valid        = lat >= min_lat_rad
+
+        if sky_mask is not None:
+            sky_arr = np.asarray(sky_mask, dtype=bool)
+            if sky_arr.shape != (H, W):
+                sky_img = PIL.Image.fromarray((sky_arr * 255).astype(np.uint8)).resize(
+                    (W, H), PIL.Image.NEAREST
+                )
+                sky_arr = np.asarray(sky_img) > 127
+            pu_i = np.clip(np.round(pu).astype(np.int64), 0, W - 1)
+            pv_i = np.clip(np.round(pv).astype(np.int64), 0, H - 1)
+            valid &= ~sky_arr[pv_i, pu_i]
 
         pu0 = np.floor(pu).astype(np.int32) % W
         pu1 = (pu0 + 1) % W

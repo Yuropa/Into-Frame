@@ -36,6 +36,8 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         save_point_cloud: bool = True,
         point_cloud_stride: int = 4,
         min_forward_samples: int = 4,
+        fill_boundary_falloff_cells: float = 6.0,
+        min_component_area_fraction: float = 0.001,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -84,6 +86,19 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # sample is overridden by real per-cell mean/relief/slope statistics. Below
         # this, either a plane fit is impossible (<3 points) or too noisy to trust.
         self.min_forward_samples = min_forward_samples
+        # How many cells (at each octave's own resolution) beyond a real
+        # observation the synthetic fill's injected noise needs before reaching
+        # full amplitude -- unobserved cells near real data (e.g. the occluded
+        # top of a cliff whose base is directly observed) hug that data's
+        # diffused trend instead of drifting via unconstrained randomness; only
+        # cells with no nearby observation get real freedom to wander. See
+        # HeightMapGenerator._interpolate.
+        self.fill_boundary_falloff_cells = fill_boundary_falloff_cells
+        # Connected walkable-ground components smaller than this fraction of the
+        # grid are folded into the interpolated-gap fallback rather than kept as
+        # their own component -- avoids spurious few-cell noise clusters becoming
+        # a "formation" downstream. See HeightMapGenerator._label_ground_components.
+        self.min_component_area_fraction = min_component_area_fraction
 
 
 class HeightMapStage(PipelineStage):
@@ -169,7 +184,7 @@ class HeightMapStage(PipelineStage):
                     f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.glb"
                 )
 
-        height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array = HeightMapGenerator.generate(
+        height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array, component_id_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -188,6 +203,8 @@ class HeightMapStage(PipelineStage):
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
             min_forward_samples=cfg.min_forward_samples,
+            fill_boundary_falloff_cells=cfg.fill_boundary_falloff_cells,
+            min_component_area_fraction=cfg.min_component_area_fraction,
             debug_dir=self.temp,
         )
         self.advance_progress(task)
@@ -199,6 +216,9 @@ class HeightMapStage(PipelineStage):
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE, Depth(cell_slope_array))
         context.add_depth(
             ContextKey.HEIGHT_MAP_OBSERVED_MASK, Depth(true_observed_array.astype(np.float32))
+        )
+        context.add_depth(
+            ContextKey.HEIGHT_MAP_COMPONENT_ID, Depth(component_id_array.astype(np.float32))
         )
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
@@ -227,6 +247,15 @@ class HeightMapStage(PipelineStage):
             f"{n_slope} cell(s) with measured plane-fit slope "
             f"(max {cell_slope_array.max():.1f}°)"
         )
+
+        n_components = int(component_id_array.max())
+        if n_components > 1:
+            sizes = [int((component_id_array == i).sum()) for i in range(1, n_components + 1)]
+            self.log_info(
+                f"Ground components: {n_components} ({sizes[0]:,} base + "
+                f"{', '.join(f'{s:,}' for s in sizes[1:])} cell(s) in {n_components - 1} "
+                f"separate component(s), kept as real geometry instead of discarded)"
+            )
 
         self.finish_progress(task)
         return context
