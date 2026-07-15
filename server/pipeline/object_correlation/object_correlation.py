@@ -1,6 +1,5 @@
 import colorsys
 import json
-import math
 import PIL.Image
 import PIL.ImageDraw
 import PIL.ImageFont
@@ -9,6 +8,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
 from pipeline.object_typing.categories import UNIQUE_CATEGORIES
+from util.panorama_projection import project_box_to_pano
 
 _DISTRIBUTION_MIN_COUNT = 2
 
@@ -39,37 +39,6 @@ def _category_colors(categories: list[str]) -> dict[str, tuple[int, int, int]]:
         r, g, b = colorsys.hsv_to_rgb(h, 0.80, 0.95)
         colors[cat] = (int(r * 255), int(g * 255), int(b * 255))
     return colors
-
-
-def _project_box_to_pano(box, intrinsics, pano_w: int, pano_h: int) -> list[tuple[float, float]]:
-    """Project a perspective bounding box onto equirectangular panorama pixel coordinates.
-
-    Assumes the input camera faces lon=0, lat=0 (the panorama's forward direction).
-    Returns four (u, v) corner points in panorama pixel space.
-    """
-    x, y, w, h = box
-    corners_img = [(x, y), (x + w, y), (x + w, y + h), (x, y + h)]
-
-    scale_x = intrinsics.color_width / intrinsics.width if intrinsics.width else 1.0
-    scale_y = intrinsics.color_height / intrinsics.height if intrinsics.height else 1.0
-    fx = intrinsics.fx * scale_x
-    fy = intrinsics.fy * scale_y
-    cx = intrinsics.px * scale_x
-    cy = intrinsics.py * scale_y
-
-    result = []
-    for px, py in corners_img:
-        x_cam = (px - cx) / fx
-        y_cam = -((py - cy) / fy)  # image +y is down; world +Y is up
-        z_cam = 1.0
-        n = math.sqrt(x_cam ** 2 + y_cam ** 2 + z_cam ** 2)
-        x_cam /= n; y_cam /= n; z_cam /= n
-        lon = math.atan2(x_cam, z_cam)
-        lat = math.atan2(y_cam, math.sqrt(x_cam ** 2 + z_cam ** 2))
-        u = (lon / (2.0 * math.pi) + 0.5) * pano_w
-        v = (0.5 - lat / math.pi) * pano_h
-        result.append((u, v))
-    return result
 
 
 class ObjectCorrelationStage(PipelineStage):
@@ -240,7 +209,7 @@ class ObjectCorrelationStage(PipelineStage):
                 if not box:
                     continue
 
-                corners = _project_box_to_pano(box, intrinsics, pano_w, pano_h)
+                corners = project_box_to_pano(box, intrinsics, pano_w, pano_h)
                 draw.polygon(corners, fill=(r, g, b, 50), outline=outline, width=2)
 
                 cx = sum(c[0] for c in corners) / 4

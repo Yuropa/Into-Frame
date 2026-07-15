@@ -33,6 +33,22 @@ stages:
     keys:
       output: panorama_object_depth
 
+  # Moved ahead of Panorama Foreground Inpainting (out of the main Object
+  # processing block below) so tree/forest crops already exist by the time
+  # that stage builds its removal mask — see foreground_distance_m comment
+  # in Panorama Foreground Inpainting for why depth thresholding alone misses
+  # mid-ground vegetation. Object Recognition/Detection/Correlation/
+  # Distribution/Panorama Asset Generation still run in their original later
+  # position and simply see crop_{i}/metadata_{i} as already populated.
+  - name: Object Segmentation
+    stage: SegmentationStage
+
+  - name: Object Classification
+    stage: PanoramaObjectClassificationStage
+
+  - name: Object Typing
+    stage: ObjectTypingStage
+
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
     enabled: false
@@ -393,15 +409,9 @@ stages:
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
-
-  - name: Object Segmentation
-    stage: SegmentationStage
-
-  - name: Object Classification
-    stage: PanoramaObjectClassificationStage
-
-  - name: Object Typing
-    stage: ObjectTypingStage
+  # Segmentation/Classification/Typing now run earlier (see Panorama Foreground Inpainting
+  # section above) — Recognition/Detection/Correlation pick up their crop_{i}/metadata_{i}
+  # output from there, unchanged.
 
   - name: Object Recognition
     stage: RecognizeAnythingStage
