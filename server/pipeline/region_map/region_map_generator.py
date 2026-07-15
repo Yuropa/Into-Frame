@@ -509,9 +509,14 @@ class RegionMapGenerator:
 
         Pixels must satisfy both (1) AND at least one of (2)/(3) to be accepted —
         this filters out pure depth-estimation noise (no visual evidence) and flat
-        colour boundaries (no depth change). Sky pixels are excluded; pixels
-        farther than half the grid size away in XZ are clamped onto the grid
-        boundary along their camera ray rather than dropped.
+        colour boundaries (no depth change). Sky, vegetation, and built pixels are
+        excluded: foliage canopies and structures are full of depth jumps and
+        Canny/corner responses of their own (leaf clusters, eaves, window
+        mullions) that look just like rock edges to this heuristic, but they're
+        occluding objects rather than terrain and are handled by separate object
+        extraction, not the terrain mesh. Pixels farther than half the grid size
+        away in XZ are clamped onto the grid boundary along their camera ray
+        rather than dropped.
 
         The panorama is processed at its native resolution; if depth or type maps
         are at a different resolution they are rescaled to match.
@@ -539,7 +544,8 @@ class RegionMapGenerator:
             work_h, work_w = ref_h, ref_w
 
         sky_mask = types_work == sky_idx
-        valid = (~sky_mask) & np.isfinite(d_work) & (d_work > 0.5)
+        occluder_mask = (types_work == RegionType.VEGETATION) | (types_work == RegionType.BUILT)
+        valid = (~sky_mask) & (~occluder_mask) & np.isfinite(d_work) & (d_work > 0.5)
 
         # ── 1. Relative depth gradient ────────────────────────────────────────
         gy, gx = np.gradient(d_work)
