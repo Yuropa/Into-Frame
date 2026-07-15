@@ -86,14 +86,17 @@ stages:
 
   - name: Skybox Inpainting
     stage: SkyboxInpaintingStage
-    # Widened from the previous 1/25 (4% of height) and 40px defaults — the boundary
-    # between FLUX-generated sky and the real photo was reading as harsh/abrupt.
-    shroud_radius_frac: 0.0667  # ~1/15 of panorama height: how far the fill mask buries
+    # Widened again from 1/15 (previously widened from 1/25/40px) — still reading as
+    # too abrupt at the sky/terrain boundary.
+    shroud_radius_frac: 0.1     # ~1/10 of panorama height: how far the fill mask buries
                                 # the real horizon/ridge silhouette before FLUX paints, so
                                 # it has no jagged contour to read. Larger = smoother
                                 # sky-to-real transition, but covers more real photo content.
     seam_heal_width_px: 64      # width (px) of the final content-aware healing band blending
                                 # any residual exposure/colour mismatch at the sky/terrain join.
+    guidance_scale: 5.5         # Pass 2 FLUX's prompt-adherence strength for the sky fill;
+                                # raised from 4.0 for a stronger, more defined cloud/atmosphere
+                                # result instead of hewing close to the muted procedural gradient.
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
