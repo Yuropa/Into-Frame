@@ -123,6 +123,7 @@ def heal_wrap_seam(
     seam_width_px: int = 96,
     feather_px: int = 12,
     eligible_mask: np.ndarray | None = None,
+    crop_context_px: int | None = None,
     debug_dir: Path | None = None,
     debug_prefix: str = "wrap_seam",
     log_fn: Callable[[str], None] | None = None,
@@ -143,8 +144,12 @@ def heal_wrap_seam(
 
     image:          equirectangular RGB source.
     inpaint_fn:     runs the actual generative fill, e.g. a FLUX/SD inpaint
-                    call. Receives (rolled_image, feathered_mask) and must
-                    return an image of the same size.
+                    call. Receives (rolled_image, feathered_mask) — the full
+                    rolled image, unless crop_context_px is set, in which case
+                    just the crop around the band — and its return value is
+                    resized back to whatever it was given if the sizes don't
+                    match, so inpaint_fn is free to internally downscale for
+                    its model's resolution limits.
     seam_width_px:  total width of the band straddling the seam that is
                     eligible to change, before feathering.
     feather_px:     Gaussian blur radius applied to the band mask so the
@@ -153,6 +158,17 @@ def heal_wrap_seam(
                     restricting the heal to True regions — e.g. only the
                     generatively-filled sky, leaving real photographed pixels
                     untouched. None = heal everywhere the band covers.
+    crop_context_px: when set, inpaint_fn is only given the band's bounding
+                    box padded by this many pixels on every side, instead of
+                    the full rolled image — everything outside the band has
+                    alpha 0 in the composite below regardless, so pixels the
+                    generator produces out there are always discarded. Handing
+                    over a small crop instead of the whole panorama lets
+                    inpaint_fn work at (or near) native resolution without
+                    having to downscale, avoiding the patch/grid artifacts a
+                    generative model produces when run far above its trained
+                    resolution. None (default) sends the full rolled image,
+                    matching the historical behaviour other callers rely on.
     debug_dir:      when set, every intermediate (rolled input, raw mask,
                     feathered mask, raw inpaint output, final composite,
                     unrolled result) is written here so the process can be
@@ -220,21 +236,47 @@ def heal_wrap_seam(
     if debug_dir is not None:
         mask_pil.save(debug_dir / f"{debug_prefix}_3_mask_feathered.png")
 
-    healed_rolled = inpaint_fn(rolled_pil, mask_pil)
+    if crop_context_px is not None:
+        # Crop to the band's bounding box (+ context) before handing anything
+        # to inpaint_fn. Only pixels inside the band can survive the alpha
+        # composite below, so the rest of the panorama is wasted input —
+        # worse than wasted, since forcing inpaint_fn to see the whole thing
+        # is what pushes it to downscale and produce a patch/grid artifact.
+        rows_nz, cols_nz = np.where(band > 0)
+        crop_row_lo = max(0, int(rows_nz.min()) - crop_context_px)
+        crop_row_hi = min(h, int(rows_nz.max()) + 1 + crop_context_px)
+        crop_col_lo = max(0, int(cols_nz.min()) - crop_context_px)
+        crop_col_hi = min(w, int(cols_nz.max()) + 1 + crop_context_px)
+    else:
+        crop_row_lo, crop_row_hi = 0, h
+        crop_col_lo, crop_col_hi = 0, w
+
+    rolled_crop_pil = PIL.Image.fromarray(rolled[crop_row_lo:crop_row_hi, crop_col_lo:crop_col_hi])
+    mask_crop_pil = mask_pil.crop((crop_col_lo, crop_row_lo, crop_col_hi, crop_row_hi))
+
+    if debug_dir is not None and crop_context_px is not None:
+        rolled_crop_pil.save(debug_dir / f"{debug_prefix}_3b_crop.png")
+        mask_crop_pil.save(debug_dir / f"{debug_prefix}_3c_mask_crop.png")
+
+    healed_crop = inpaint_fn(rolled_crop_pil, mask_crop_pil)
 
     if debug_dir is not None:
-        healed_rolled.save(debug_dir / f"{debug_prefix}_4_inpainted_rolled_raw.png")
+        healed_crop.save(debug_dir / f"{debug_prefix}_4_inpainted_rolled_raw.png")
 
-    healed_arr = np.array(healed_rolled.convert("RGB"))
-    if healed_arr.shape[:2] != (h, w):
-        healed_arr = np.array(PIL.Image.fromarray(healed_arr).resize((w, h), PIL.Image.LANCZOS))
+    crop_w, crop_h = crop_col_hi - crop_col_lo, crop_row_hi - crop_row_lo
+    healed_crop_arr = np.array(healed_crop.convert("RGB"))
+    if healed_crop_arr.shape[:2] != (crop_h, crop_w):
+        healed_crop_arr = np.array(PIL.Image.fromarray(healed_crop_arr).resize((crop_w, crop_h), PIL.Image.LANCZOS))
+
+    healed_full = rolled.copy()
+    healed_full[crop_row_lo:crop_row_hi, crop_col_lo:crop_col_hi] = healed_crop_arr
 
     # Composite explicitly against the feathered mask rather than trusting
     # inpaint_fn to have left everything outside it untouched — guarantees the
     # only pixels that can change are the ones we asked for, regardless of how
     # faithfully the underlying pipeline honours its own mask.
     alpha = np.asarray(mask_pil, dtype=np.float32)[:, :, None] / 255.0
-    composited_rolled = (rolled.astype(np.float32) * (1.0 - alpha) + healed_arr.astype(np.float32) * alpha)
+    composited_rolled = (rolled.astype(np.float32) * (1.0 - alpha) + healed_full.astype(np.float32) * alpha)
     composited_rolled = composited_rolled.clip(0, 255).astype(np.uint8)
 
     if debug_dir is not None:

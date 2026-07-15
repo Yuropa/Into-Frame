@@ -469,9 +469,23 @@ class SkyboxInpaintingStage(PipelineStage):
         flux.set_lora_enabled(False)
 
         def _sky_seam_inpaint(rolled_img: PILImage.Image, mask_img: PILImage.Image) -> PILImage.Image:
+            # Downscale to flux_max like Pass 2 does — FLUX Fill run directly on
+            # a full panorama (several times its trained resolution) produces a
+            # visible patch/grid artifact instead of coherent detail. heal_wrap_seam
+            # resizes the result back up to the caller's resolution on return, so
+            # returning it at flux_max here is fine.
+            sw, sh = rolled_img.size
+            if sw > flux_max or sh > flux_max:
+                scale = flux_max / max(sw, sh)
+                fw = max(16, (int(sw * scale) // 16) * 16)
+                fh = max(16, (int(sh * scale) // 16) * 16)
+                seam_input = rolled_img.resize((fw, fh), PILImage.LANCZOS)
+                seam_mask = mask_img.resize((fw, fh), PILImage.NEAREST)
+            else:
+                seam_input, seam_mask = rolled_img, mask_img
             return flux.inpaint(
-                rolled_img,
-                mask_img,
+                seam_input,
+                seam_mask,
                 temp_path=self.temp,
                 prompt=prompt,
                 num_inference_steps=30,
@@ -486,6 +500,11 @@ class SkyboxInpaintingStage(PipelineStage):
             seam_width_px=256,
             feather_px=32,
             eligible_mask=flux_mask_arr,
+            # Crop to the band instead of handing FLUX the whole panorama —
+            # combined with _sky_seam_inpaint's own flux_max downscale, this
+            # means only the seam's actual neighbourhood gets downscaled (if
+            # at all), instead of the entire multi-thousand-pixel-wide canvas.
+            crop_context_px=256,
             debug_dir=self.temp,
             debug_prefix="sky_wrap_seam",
             log_fn=self.log_warning,
