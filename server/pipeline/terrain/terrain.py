@@ -79,7 +79,7 @@ class TerrainMeshStage(PipelineStage):
     consume.
 
     Input key       (SemanticKey.INPUT)      → ContextKey.HEIGHT_MAP
-    Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA        (optional)
+    Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA_TERRAIN (optional)
     Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (optional)
     Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH
                                               → ContextKey.WATER_MESH     (optional)
@@ -96,7 +96,7 @@ class TerrainMeshStage(PipelineStage):
     def _resolved_keys(self):
         return self.keys({
             SemanticKey.INPUT: ContextKey.HEIGHT_MAP,
-            SemanticKey.PANORAMA: ContextKey.PANORAMA,
+            SemanticKey.PANORAMA: ContextKey.PANORAMA_TERRAIN,
             SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
             SemanticKey.OUTPUT: ContextKey.TERRAIN_MESH,
         })
