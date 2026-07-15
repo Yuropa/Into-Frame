@@ -16,7 +16,11 @@ from scipy.spatial import ConvexHull, KDTree
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.panorama_segmentation.panorama_region_result import RegionType, colorize_region_type_map
+from pipeline.panorama_segmentation.panorama_region_result import (
+    RegionType,
+    colorize_region_type_map,
+    paintable_region_types,
+)
 
 _HERE = Path(__file__).resolve().parent
 
@@ -177,10 +181,20 @@ class DistributionSynthesisStage(PipelineStage):
     patch of the top-down REGION_MAP, filling the whole environment rather than only
     the originally-detected instances.
 
+    "Matching patch" is the region_type's whole paintable group (see
+    panorama_region_result.paintable_region_types), not just an exact label match:
+    TERRAIN/GROUND/VEGETATION are merged into one ground-like domain, since ADE20K
+    segmentation routinely splits one contiguous walkable area into those three
+    labels (grass underfoot vs. a distant hillside vs. a tree's own canopy shadow).
+    Without this, a distribution learned from exemplars observed on whichever single
+    label they happened to land on would only ever paint that same small patch,
+    instead of spreading across the much larger surrounding ground-like terrain.
+
     For each non-singleton TypeDistribution: finds connected components of
-    `region_map == region_type`, splits large components into bounded-candidate-count
-    tiles (the underlying synthesize_pattern optimizer is O(candidates²), so a single
-    call can't cover a large area), and calls the `synthesize_cli` binary from
+    `region_map`'s paintable group for that region_type, splits large components
+    into bounded-candidate-count tiles (the underlying synthesize_pattern optimizer
+    is O(candidates²), so a single call can't cover a large area), and calls the
+    `synthesize_cli` binary from
     pattern-synthesis once per tile — exemplar points/PCF stay fixed per group, only
     the output boundary and RNG seed change per tile. Synthesized points are appended
     as new `metadata_{idx}` entries (`"synthetic": True`, world position + footprint,
@@ -295,7 +309,8 @@ class DistributionSynthesisStage(PipelineStage):
             tile_side_m = tile_res * spacing
             tile_side_px = max(1, int(round(tile_side_m / cell_m)))
 
-            mask = region_map == region_type_idx
+            paintable_idxs = [int(rt) for rt in paintable_region_types(RegionType(region_type_idx))]
+            mask = np.isin(region_map, paintable_idxs)
             labels, n_components = ndimage.label(mask, structure=np.ones((3, 3), dtype=np.int32))
 
             for label_id in range(1, n_components + 1):
