@@ -205,12 +205,19 @@ class RegionMapGenerator:
         Xs, Ys, Zs = equirectangular_pixels_to_world(sample_rows, cols, depths, h, w)
 
         half = grid_size_meters / 2.0
-        in_bounds = (
-            has_silhouette
-            & np.isfinite(depths)
-            & (np.abs(Xs) <= half)
-            & (np.abs(Zs) <= half)
-        )
+        in_bounds = has_silhouette & np.isfinite(depths)
+
+        # Ridge points beyond the grid's representable extent (very often true for
+        # genuinely distant mountains) are clamped radially onto the grid boundary
+        # along their real camera ray, rather than silently dropped — a distant
+        # peak should render at the edge of the mesh, not vanish or leave a gap in
+        # the silhouette. Y is foreshortened by the same factor so the ray's real
+        # elevation angle from the camera is preserved (only the distance along it
+        # is compressed to fit).
+        r_inf = np.maximum(np.abs(Xs), np.abs(Zs))
+        scale = np.where(r_inf > half, half / np.maximum(r_inf, 1e-9), 1.0)
+        Xs, Ys, Zs = Xs * scale, Ys * scale, Zs * scale
+
         # Mountains above the horizon have phi > 0, so Ys > 0 (above camera).
         Ys_valid = Ys[in_bounds]
         cols_valid = cols[in_bounds]
@@ -502,8 +509,9 @@ class RegionMapGenerator:
 
         Pixels must satisfy both (1) AND at least one of (2)/(3) to be accepted —
         this filters out pure depth-estimation noise (no visual evidence) and flat
-        colour boundaries (no depth change).  Sky pixels and pixels more than
-        half the grid size away in XZ are excluded.
+        colour boundaries (no depth change). Sky pixels are excluded; pixels
+        farther than half the grid size away in XZ are clamped onto the grid
+        boundary along their camera ray rather than dropped.
 
         The panorama is processed at its native resolution; if depth or type maps
         are at a different resolution they are rescaled to match.
@@ -596,12 +604,15 @@ class RegionMapGenerator:
         half = grid_size_meters / 2.0
         Xs, _, Zs = equirectangular_pixels_to_world(rows, cols, depths, work_h, work_w)
 
-        in_bounds = (
-            np.isfinite(Xs) & np.isfinite(Zs)
-            & (np.abs(Xs) <= half)
-            & (np.abs(Zs) <= half)
-        )
+        in_bounds = np.isfinite(Xs) & np.isfinite(Zs)
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
+
+        # Clamp out-of-range peaks onto the grid boundary along their camera ray
+        # instead of dropping them — see extract_mountain_ridgeline for the same
+        # treatment and rationale.
+        r_inf = np.maximum(np.abs(Xs), np.abs(Zs))
+        scale = np.where(r_inf > half, half / np.maximum(r_inf, 1e-9), 1.0)
+        Xs, Zs = Xs * scale, Zs * scale
 
         if len(Xs) == 0:
             return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)

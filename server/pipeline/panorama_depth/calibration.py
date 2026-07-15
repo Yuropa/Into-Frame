@@ -144,8 +144,40 @@ def _apply_panorama_depth_curve(
 ) -> np.ndarray:
     """Applies a curve fitted by _fit_panorama_depth_curve to a (possibly different) raw
     DAP prediction array — the fitted raw→metric response curve is treated as a property of
-    the DAP model, not of the specific image it ran on."""
-    corrected = np.interp(dap_pred_raw.astype(np.float64).ravel(), centers_sorted, medians_monotonic)
+    the DAP model, not of the specific image it ran on.
+
+    The hero photo's overlap with the panorama only ever covers its own near-field content
+    (a few to a few tens of metres) — it never sees genuinely distant terrain (mountains,
+    open horizons). np.interp flat-clamps any raw value outside the fitted range to the
+    curve's nearest endpoint, which collapses every one of those far pixels onto a single
+    depth (whatever the hero photo's own farthest point happened to be) — mountains a
+    kilometre away and a tree just past the fitted range end up at the *same* calibrated
+    depth. Extrapolate instead, in log-depth space (DAP's raw output approaches its ceiling
+    asymptotically as true depth grows, so metric depth should keep growing past the fitted
+    range, not flatten) using the slope from a small tail of the fitted curve. This can't
+    recover the true distance — there's no ground truth out there — but it keeps far depths
+    monotonically ordered instead of all landing on one value.
+    """
+    x = dap_pred_raw.astype(np.float64).ravel()
+    corrected = np.interp(x, centers_sorted, medians_monotonic)
+
+    tail = min(3, len(centers_sorted) - 1)
+    if tail >= 1:
+        log_med = np.log(np.maximum(medians_monotonic, 1e-3))
+
+        far_mask = x > centers_sorted[-1]
+        if np.any(far_mask):
+            dx = centers_sorted[-1] - centers_sorted[-1 - tail]
+            slope = (log_med[-1] - log_med[-1 - tail]) / dx if abs(dx) > 1e-9 else 0.0
+            corrected[far_mask] = np.exp(log_med[-1] + slope * (x[far_mask] - centers_sorted[-1]))
+
+        near_mask = x < centers_sorted[0]
+        if np.any(near_mask):
+            dx = centers_sorted[tail] - centers_sorted[0]
+            slope = (log_med[tail] - log_med[0]) / dx if abs(dx) > 1e-9 else 0.0
+            corrected[near_mask] = np.exp(log_med[0] + slope * (x[near_mask] - centers_sorted[0]))
+
+    corrected = np.clip(corrected, 1e-3, 1e6)
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
 
 
