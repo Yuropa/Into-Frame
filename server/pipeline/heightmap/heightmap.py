@@ -38,6 +38,8 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         min_forward_samples: int = 4,
         fill_boundary_falloff_cells: float = 6.0,
         min_component_area_fraction: float = 0.001,
+        despike_threshold_m: float = 0.3,
+        despike_window: int = 5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -99,6 +101,15 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # their own component -- avoids spurious few-cell noise clusters becoming
         # a "formation" downstream. See HeightMapGenerator._label_ground_components.
         self.min_component_area_fraction = min_component_area_fraction
+        # Equirectangular mode only: despike single-inverse-mapped-sample cells
+        # (not backed by min_forward_samples' dense statistics) that diverge from
+        # their own despike_window-sized neighbourhood median by more than this
+        # many metres -- source depth-map noise (a "flying pixel" edge flickering
+        # between two competing surfaces) otherwise lands as an alternating
+        # checkerboard of wildly different heights between adjacent grid cells.
+        # 0 disables. See HeightMapGenerator._despike_single_sample_cells.
+        self.despike_threshold_m = despike_threshold_m
+        self.despike_window = despike_window
 
 
 class HeightMapStage(PipelineStage):
@@ -205,6 +216,8 @@ class HeightMapStage(PipelineStage):
             min_forward_samples=cfg.min_forward_samples,
             fill_boundary_falloff_cells=cfg.fill_boundary_falloff_cells,
             min_component_area_fraction=cfg.min_component_area_fraction,
+            despike_threshold_m=cfg.despike_threshold_m,
+            despike_window=cfg.despike_window,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

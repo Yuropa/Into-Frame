@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import PIL.Image
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
+from scipy.ndimage import distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, median_filter, minimum_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -45,6 +45,8 @@ class HeightMapGenerator:
         min_forward_samples: int = 4,
         fill_boundary_falloff_cells: float = 6.0,
         min_component_area_fraction: float = 0.001,
+        despike_threshold_m: float = 0.3,
+        despike_window: int = 5,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -142,6 +144,19 @@ class HeightMapGenerator:
                             synthetic fill's injected noise needs before reaching full
                             amplitude. Cells nearer a real observation than this stay
                             close to its diffused trend instead of drifting via noise.
+        despike_threshold_m: equirectangular mode only. A single-inverse-mapped-
+                            sample cell (i.e. not in dense_mask — see
+                            _forward_project_cell_stats) whose height differs from
+                            its own despike_window-sized neighbourhood median by
+                            more than this is replaced by that median. Single-
+                            sample cells have no intra-cell averaging to smooth
+                            over source depth-map noise; a "flying pixel" edge
+                            where the depth model flickers between two competing
+                            surfaces from one equirectangular pixel to the next
+                            otherwise lands as an alternating checkerboard of
+                            wildly different heights between adjacent grid cells.
+                            0 disables. See _despike_single_sample_cells.
+        despike_window: odd cell-window size for the local median used above.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -201,6 +216,19 @@ class HeightMapGenerator:
                 height_map[dense_mask] = fwd_mean_y[dense_mask]
                 cell_relief[dense_mask] = fwd_relief[dense_mask]
             cell_slope_deg = fwd_slope_deg
+
+            if despike_threshold_m > 0:
+                height_map, spike_mask = HeightMapGenerator._despike_single_sample_cells(
+                    height_map, protected_mask=dense_mask,
+                    threshold_m=despike_threshold_m, window=despike_window,
+                )
+                if spike_mask.any():
+                    cell_relief[spike_mask] = 0.0
+                    cell_slope_deg[spike_mask] = 0.0
+                    if debug_dir is not None:
+                        PIL.Image.fromarray((spike_mask * 255).astype(np.uint8), "L").save(
+                            debug_dir / "heightmap_despiked_cells.png"
+                        )
 
         else:
             if sky_mask is not None and sky_mask.shape == d.shape:
@@ -550,6 +578,63 @@ class HeightMapGenerator:
         slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
 
         return dense_mask, mean_y_grid, relief_grid, slope_grid
+
+    @staticmethod
+    def _despike_single_sample_cells(
+        height_map: np.ndarray,
+        protected_mask: np.ndarray,
+        threshold_m: float,
+        window: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Replace isolated height outliers among single-inverse-mapped-sample cells
+        with their local neighbourhood median.
+
+        Single-sample cells (protected_mask is False -- i.e. not backed by
+        _forward_project_cell_stats' dense_mask) have no intra-cell averaging to
+        smooth over source depth-map noise: a "flying pixel" edge where the depth
+        model flickers between two competing surfaces from one equirectangular
+        pixel to the next lands directly as an alternating checkerboard of wildly
+        different heights between immediately adjacent grid cells, instead of the
+        smooth gradient a real slope would produce.
+
+        A cell is only corrected if it diverges from its own window-sized
+        neighbourhood median by more than threshold_m. A genuine, spatially
+        coherent step edge (a real cliff/ridge) moves many neighbouring cells
+        together, so the local median there already reflects the step and isn't
+        flagged; only a cell disagreeing with a neighbourhood that mostly agrees
+        with itself gets touched -- the same principle as a standard median/
+        Hampel despike filter for salt-and-pepper sensor noise. Dense cells
+        (protected_mask) are never candidates, even if their value happens to
+        differ from neighbours, since they're backed by real multi-sample
+        statistics rather than a single noisy ray.
+
+        Returns (height_map, spike_mask) -- a new array (input is not mutated)
+        and the bool mask of cells that were replaced, so callers can also clear
+        any relief/slope measurement that belonged to the discarded value.
+        """
+        valid = ~np.isnan(height_map)
+        candidates = valid & ~protected_mask
+        empty_spikes = np.zeros_like(valid)
+        if not candidates.any():
+            return height_map, empty_spikes
+
+        # The local median needs a real value at every cell to be meaningful --
+        # fill NaN gaps with their nearest valid neighbour first (cheap,
+        # vectorized) rather than letting missing cells pollute the window.
+        filled = height_map
+        if not valid.all():
+            nearest_idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+            filled = height_map[tuple(nearest_idx)]
+
+        local_median = median_filter(filled, size=window)
+        spike = candidates & (np.abs(height_map - local_median) > threshold_m)
+        if not spike.any():
+            return height_map, empty_spikes
+
+        despiked = height_map.copy()
+        despiked[spike] = local_median[spike]
+        return despiked, spike
 
     @staticmethod
     def _build_certainty(

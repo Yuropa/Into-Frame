@@ -167,6 +167,14 @@ stages:
                                  # of the grid are folded into the interpolated-gap fallback
                                  # instead of kept as their own component (see
                                  # HEIGHT_MAP_COMPONENT_ID / TerrainMeshStage's formation meshes)
+    despike_threshold_m: 0.3    # single-inverse-mapped-sample cells (below min_forward_samples,
+                                 # so no intra-cell averaging) whose height differs from their own
+                                 # despike_window neighbourhood median by more than this are
+                                 # replaced by that median — a "flying pixel" edge where the depth
+                                 # model flickers between two competing surfaces otherwise lands as
+                                 # an alternating checkerboard of spikes between adjacent cells.
+                                 # 0 disables.
+    despike_window: 5           # odd cell-window size for the local median used above
 
   - name: Region Map
     stage: RegionMapStage
