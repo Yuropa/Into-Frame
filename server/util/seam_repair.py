@@ -94,6 +94,19 @@ def heal_seam(
     blend_mask_pil = PIL.Image.fromarray(band_u8, mode="L")
     if feather_px > 0:
         blend_mask_pil = blend_mask_pil.filter(PIL.ImageFilter.GaussianBlur(feather_px))
+        # A wide feather relative to the (deliberately narrow) band washes the
+        # whole mask out to a faint grey — the Gaussian spreads the band's 255
+        # core thin rather than just softening its edges, so the healed seam
+        # never gets blended in at full strength anywhere. Renormalise back up
+        # so the band's centre reaches full opacity again; the taper shape
+        # (and thus the "wide, soft transition" this feather exists for) is
+        # unchanged, only the weak peak is restored.
+        peak = np.asarray(blend_mask_pil, dtype=np.float32).max()
+        if 0 < peak < 255:
+            blend_mask_pil = PIL.Image.fromarray(
+                np.clip(np.asarray(blend_mask_pil, dtype=np.float32) * (255.0 / peak), 0, 255).astype(np.uint8),
+                mode="L",
+            )
 
     if debug_dir is not None:
         debug_dir = Path(debug_dir)
@@ -170,9 +183,20 @@ def heal_wrap_seam(
         # cut straight across the strip, leaving FLUX a thin, jagged sliver
         # to fill instead of a simple vertical band, which is what was
         # producing noise instead of coherent cloud continuation.
+        #
+        # row_has_eligible from a per-row `.any()` is still just a boolean
+        # per row, not necessarily contiguous — a single noisy/eroded row
+        # inside the strip (segmentation noise near the shroud edge) reads
+        # as ineligible while the rows above and below it don't, punching a
+        # one-row hole straight through the middle of the band. Take the
+        # eligible rows' min/max instead and fill solid between them, so the
+        # box is a true unbroken vertical rectangle.
         rolled_eligible = np.roll(eligible_mask, half, axis=1)
         row_has_eligible = rolled_eligible[:, col_lo:col_hi].any(axis=1)
-        band[row_has_eligible, col_lo:col_hi] = 255
+        eligible_rows = np.flatnonzero(row_has_eligible)
+        if eligible_rows.size > 0:
+            row_lo, row_hi = eligible_rows[0], eligible_rows[-1] + 1
+            band[row_lo:row_hi, col_lo:col_hi] = 255
     else:
         band[:, col_lo:col_hi] = 255
 
