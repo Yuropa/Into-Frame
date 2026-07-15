@@ -487,6 +487,8 @@ class RegionMapGenerator:
         canny_high: int = 150,
         corner_quality: float = 0.08,
         corner_min_dist: int = 5,
+        max_range_factor: float = 2.0,
+        min_depth_m: float = 50.0,
     ) -> np.ndarray:
         """
         Detect elevated terrain features visible against background terrain (rather
@@ -514,9 +516,21 @@ class RegionMapGenerator:
         Canny/corner responses of their own (leaf clusters, eaves, window
         mullions) that look just like rock edges to this heuristic, but they're
         occluding objects rather than terrain and are handled by separate object
-        extraction, not the terrain mesh. Pixels farther than half the grid size
-        away in XZ are clamped onto the grid boundary along their camera ray
-        rather than dropped.
+        extraction, not the terrain mesh. Pixels nearer than min_depth_m are also
+        excluded: depth_jump_rel is a *relative* threshold, so it's trivially
+        satisfied by routine close-range ground undulation (a dip, a rock, a
+        snow-patch edge) that isn't a meaningfully "elevated" feature — and since
+        near_side below always ends up selecting whichever side of an edge is
+        already closer, near-camera terrain dominates the output by construction
+        unless it's excluded up front. Pixels moderately farther than half the
+        grid size away in XZ (within max_range_factor) are clamped onto the grid
+        boundary along their camera ray rather than dropped, same treatment as
+        extract_mountain_ridgeline; pixels beyond that are dropped outright — a
+        real mountain summit kilometres out isn't representable in a local
+        terrain grid this small, and clamping it onto the boundary just produces
+        a meaningless flattened position once reprojected using local terrain
+        elevation (that content is already covered by the sky-terrain ridgeline
+        silhouette this method is meant to complement, not duplicate).
 
         The panorama is processed at its native resolution; if depth or type maps
         are at a different resolution they are rescaled to match.
@@ -545,7 +559,10 @@ class RegionMapGenerator:
 
         sky_mask = types_work == sky_idx
         occluder_mask = (types_work == RegionType.VEGETATION) | (types_work == RegionType.BUILT)
-        valid = (~sky_mask) & (~occluder_mask) & np.isfinite(d_work) & (d_work > 0.5)
+        valid = (
+            (~sky_mask) & (~occluder_mask)
+            & np.isfinite(d_work) & (d_work > max(0.5, min_depth_m))
+        )
 
         # ── 1. Relative depth gradient ────────────────────────────────────────
         gy, gx = np.gradient(d_work)
@@ -613,15 +630,26 @@ class RegionMapGenerator:
         in_bounds = np.isfinite(Xs) & np.isfinite(Zs)
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
 
-        # Clamp out-of-range peaks onto the grid boundary along their camera ray
-        # instead of dropping them — see extract_mountain_ridgeline for the same
-        # treatment and rationale.
+        # Drop peaks far beyond what a local terrain grid can plausibly represent
+        # (e.g. the mountain's own summit, kilometres out) — unlike
+        # extract_mountain_ridgeline's silhouette (which this content already
+        # duplicates), there's no meaningful "edge of the local terrain" position
+        # for something that far away, and clamping it onto the boundary would
+        # only produce a flattened artifact once reprojected using local terrain
+        # elevation for debug display.
         r_inf = np.maximum(np.abs(Xs), np.abs(Zs))
-        scale = np.where(r_inf > half, half / np.maximum(r_inf, 1e-9), 1.0)
-        Xs, Zs = Xs * scale, Zs * scale
+        in_range = r_inf <= half * max_range_factor
+        Xs, Zs, r_inf = Xs[in_range], Zs[in_range], r_inf[in_range]
 
         if len(Xs) == 0:
             return np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        # Remaining moderately-out-of-range peaks (within max_range_factor) are
+        # still clamped onto the grid boundary along their camera ray rather than
+        # dropped — same treatment as extract_mountain_ridgeline — since a real
+        # ridge just past the grid edge is still plausibly part of the local scene.
+        scale = np.where(r_inf > half, half / np.maximum(r_inf, 1e-9), 1.0)
+        Xs, Zs = Xs * scale, Zs * scale
 
         x_edges = np.linspace(-half, half, grid_resolution + 1)
         z_edges = np.linspace(-half, half, grid_resolution + 1)

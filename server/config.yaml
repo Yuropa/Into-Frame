@@ -193,6 +193,19 @@ stages:
                                  # being capped to avoid enlarging an unconstrained flat disc.
     nadir_ramp_width: 5.0       # metres over which flood-fill certainty ramps up from 0.
     certainty_falloff_meters: 20.0 # must match Height Map's value — see that stage's comment.
+    interior_peak_max_range_factor: 2.0 # interior-peak candidates farther than
+                                 # (grid_size_meters/2 * this) are dropped rather than
+                                 # clamped onto the grid boundary — real distant content
+                                 # (a mountain summit kilometres out) isn't representable
+                                 # in this local terrain grid and would otherwise clamp to
+                                 # a meaningless flattened position (see
+                                 # RegionMapGenerator.extract_interior_peaks)
+    interior_peak_min_depth_m: 50.0 # interior-peak candidates nearer than this are
+                                 # excluded — depth_jump_rel is a relative threshold,
+                                 # trivially satisfied by routine close-range ground
+                                 # undulation that isn't a meaningfully elevated feature;
+                                 # near_side's foreground-bias selection would otherwise
+                                 # let near-camera noise dominate the output
 
   - name: Linear Structures
     stage: LinearStructureStage

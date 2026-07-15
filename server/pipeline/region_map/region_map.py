@@ -38,6 +38,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         water_skeleton_smooth_radius: int = 40,
         road_skeleton_smooth_radius: int = 8,
         trail_skeleton_smooth_radius: int = 4,
+        interior_peak_max_range_factor: float = 2.0,
+        interior_peak_min_depth_m: float = 50.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -53,6 +55,20 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.water_skeleton_smooth_radius = water_skeleton_smooth_radius
         self.road_skeleton_smooth_radius = road_skeleton_smooth_radius
         self.trail_skeleton_smooth_radius = trail_skeleton_smooth_radius
+        # Interior-peak candidates farther than grid_size_meters/2 * this factor are
+        # dropped entirely rather than clamped onto the grid boundary — real distant
+        # content (a mountain summit kilometres out) isn't representable in a local
+        # terrain grid this small, and clamping it there just produces a meaningless,
+        # flattened position once reprojected using local terrain elevation. That
+        # content is already covered by extract_mountain_ridgeline's silhouette. See
+        # RegionMapGenerator.extract_interior_peaks.
+        self.interior_peak_max_range_factor = interior_peak_max_range_factor
+        # Interior-peak candidates nearer than this are excluded — a relative depth
+        # jump this close to camera is routine ground undulation, not a meaningfully
+        # elevated feature, and near_side's foreground-bias selection would otherwise
+        # let near-camera noise dominate the output. See
+        # RegionMapGenerator.extract_interior_peaks.
+        self.interior_peak_min_depth_m = interior_peak_min_depth_m
 
 
 class RegionMapStage(PipelineStage):
@@ -262,6 +278,8 @@ class RegionMapStage(PipelineStage):
             panorama_rgb=panorama_rgb,
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
+            max_range_factor=cfg.interior_peak_max_range_factor,
+            min_depth_m=cfg.interior_peak_min_depth_m,
         )
         context.add_depth(ContextKey.INTERIOR_PEAKS, interior_peaks)
         peak_cells = int((interior_peaks > 0).sum())
