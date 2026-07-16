@@ -86,17 +86,19 @@ stages:
 
   - name: Skybox Inpainting
     stage: SkyboxInpaintingStage
-    # Widened again from 1/15 (previously widened from 1/25/40px) — still reading as
-    # too abrupt at the sky/terrain boundary.
-    shroud_radius_frac: 0.1     # ~1/10 of panorama height: how far the fill mask buries
-                                # the real horizon/ridge silhouette before FLUX paints, so
-                                # it has no jagged contour to read. Larger = smoother
-                                # sky-to-real transition, but covers more real photo content.
-    seam_heal_width_px: 64      # width (px) of the final content-aware healing band blending
-                                # any residual exposure/colour mismatch at the sky/terrain join.
-    guidance_scale: 5.5         # Pass 2 FLUX's prompt-adherence strength for the sky fill;
+    # FLUX now regenerates the entire panorama (not just the non-sky region) — see
+    # the stage docstring: masking to just the non-sky area left a hard kept/generated
+    # boundary shaped exactly like the buried mountain silhouette, which FLUX reliably
+    # rendered back as a visible cloud-ridge line tracing the seam. Full-canvas
+    # generation removes that boundary (and the artifact) entirely, so
+    # shroud_radius_frac / seam_heal_width_px no longer apply and have been removed.
+    guidance_scale: 5.5         # FLUX's prompt-adherence strength for the sky generation;
                                 # raised from 4.0 for a stronger, more defined cloud/atmosphere
                                 # result instead of hewing close to the muted procedural gradient.
+    strength: 0.85              # how much of the gradient composite (incl. real photographed
+                                # sky) survives Pass 2 vs. being replaced by FLUX's own
+                                # generation. 1.0 = fully overwritten, ignores the input almost
+                                # entirely; lower keeps more of the original sky's colour/texture.
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
