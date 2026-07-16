@@ -93,6 +93,25 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         guidance_scale: float = 3.5,
         seam_width_fraction: float = 0.08,
         seam_dilation_px: int = 4,
+        # Real pixels of context kept on each side of the seam band when _seam_fix_band
+        # crops it out -- gives FLUX genuine surrounding texture to condition on rather
+        # than a crop whose edge is exactly the mask boundary (which reads as a hard
+        # image border, the same reasoning as heal_wrap_seam's crop_context_px for the
+        # skybox panorama's own wrap-seam repair).
+        seam_fix_context_px: int = 64,
+        # Longest edge (px) the cropped seam band is downscaled to before FLUX, then
+        # LANCZOS'd back up to the crop's real size. Deliberately well under tile_size:
+        # running FLUX directly at full tile resolution on a strip this narrow tends to
+        # stamp a crisp, mismatched patch of new high-frequency detail right on the seam
+        # (the same blocky "patch/grid" artifact noted in skybox_inpainting for FLUX run
+        # above its comfortable resolution) instead of a smoother fill that blends into
+        # its real neighbours on both sides.
+        seam_fix_max_size: int = 512,
+        # Gaussian feather radius (px, at the crop's own resolution) on the seam band mask
+        # before compositing the healed crop back over the original -- wide enough that the
+        # fix fades in as a soft transition rather than a hard-edged patch, so real detail
+        # everywhere outside the band is preserved untouched.
+        seam_fix_feather_px: float = 24.0,
         # Width (as a fraction of tile_size) of a margin around all four tile edges that
         # Pass 1 treats as "keep" real content (the upscaled reference background — see
         # _build_reference_canvas) rather than "generate". _patch_placements keeps every
@@ -267,6 +286,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.guidance_scale = guidance_scale
         self.seam_width_fraction = seam_width_fraction
         self.seam_dilation_px = seam_dilation_px
+        self.seam_fix_context_px = seam_fix_context_px
+        self.seam_fix_max_size = seam_fix_max_size
+        self.seam_fix_feather_px = seam_fix_feather_px
         self.border_fill_fraction = border_fill_fraction
         self.use_panorama_layer = use_panorama_layer
         self.panorama_blend_power = panorama_blend_power
@@ -1511,35 +1533,123 @@ class TerrainTextureGenerationStage(PipelineStage):
         seed: int,
         inpainter: Optional[InPainting] = None,
     ) -> PIL.Image.Image:
-        """Circular-shift the tile by half its size and inpaint over the new seam, then shift back."""
+        """
+        Circular-shift the tile by half its size so all four original tile
+        edges land at the centre as a "+"-shaped seam, repair each arm of
+        that cross separately (_seam_fix_band), then shift back.
+        """
         inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         arr = np.array(generated.convert("RGB"), dtype=np.uint8)
         half = T // 2
         shifted = np.roll(np.roll(arr, half, axis=0), half, axis=1)
 
-        seam_mask = np.zeros((T, T), dtype=np.uint8)
         sw = max(2, int(T * cfg.seam_width_fraction / 2))
-        seam_mask[max(0, half - sw): min(T, half + sw), :] = 255
-        seam_mask[:, max(0, half - sw): min(T, half + sw)] = 255
-        if cfg.seam_dilation_px > 0:
-            seam_mask = (
-                binary_dilation(seam_mask, iterations=cfg.seam_dilation_px).astype(np.uint8) * 255
-            )
+        shifted = self._seam_fix_band(
+            shifted, axis=0, center=half, half_width=sw, cfg=cfg,
+            prompt=prompt, seed=seed + 1000, inpainter=inpainter,
+        )
+        shifted = self._seam_fix_band(
+            shifted, axis=1, center=half, half_width=sw, cfg=cfg,
+            prompt=prompt, seed=seed + 1001, inpainter=inpainter,
+        )
 
-        fixed = inpainter.inpaint(
-            input_image=PIL.Image.fromarray(shifted),
-            mask_image=PIL.Image.fromarray(seam_mask, "L"),
+        result = np.roll(np.roll(shifted, -half, axis=0), -half, axis=1)
+        return PIL.Image.fromarray(result)
+
+    def _seam_fix_band(
+        self,
+        arr: np.ndarray,
+        axis: int,
+        center: int,
+        half_width: int,
+        cfg: TerrainTextureGenerationConfiguration,
+        prompt: str,
+        seed: int,
+        inpainter: InPainting,
+    ) -> np.ndarray:
+        """
+        Repair one arm of the seam cross -- axis=0: a horizontal band
+        spanning the tile's full width at row `center`; axis=1: a vertical
+        band spanning its full height at column `center`.
+
+        Unlike inpainting the whole tile, this crops tightly around just the
+        band (plus seam_fix_context_px of real surrounding pixels so FLUX has
+        genuine texture to condition on, not a crop edge that reads as a hard
+        image border), downscales that crop to seam_fix_max_size before
+        inpainting, then LANCZOS's the result back up and feathers it into
+        the original crop. Running FLUX directly at the tile's own full
+        resolution on a strip this narrow tends to stamp a crisp, mismatched
+        patch of new high-frequency noise right on the seam; downscaling
+        first produces a smoother fill that actually blends into its real
+        neighbours on both sides -- the same "crop, downscale, inpaint,
+        upscale back" trick used for the skybox panorama's own wrap-seam
+        repair (see skybox_inpainting's _sky_seam_inpaint /
+        util.seam_repair.heal_wrap_seam's crop_context_px). Feathering the
+        composite back over the original crop (rather than pasting the FLUX
+        result verbatim) means real detail everywhere outside the band is
+        untouched.
+
+        arr: full tile, already rolled so the seam sits at `center`.
+        Returns the tile with this one band repaired (same shape as `arr`).
+        """
+        T = arr.shape[0]
+        context = cfg.seam_fix_context_px
+        lo = max(0, center - half_width - context)
+        hi = min(T, center + half_width + context)
+        crop = arr[lo:hi, :] if axis == 0 else arr[:, lo:hi]
+        crop_h, crop_w = crop.shape[:2]
+
+        band_lo = (center - half_width) - lo
+        band_hi = (center + half_width) - lo
+        mask = np.zeros((crop_h, crop_w), dtype=np.uint8)
+        if axis == 0:
+            mask[max(0, band_lo):min(crop_h, band_hi), :] = 255
+        else:
+            mask[:, max(0, band_lo):min(crop_w, band_hi)] = 255
+        if cfg.seam_dilation_px > 0:
+            mask = (binary_dilation(mask, iterations=cfg.seam_dilation_px).astype(np.uint8) * 255)
+
+        scale = min(1.0, cfg.seam_fix_max_size / max(crop_w, crop_h))
+        fw = max(16, int(round(crop_w * scale)))
+        fh = max(16, int(round(crop_h * scale)))
+        crop_pil = PIL.Image.fromarray(crop)
+        mask_pil = PIL.Image.fromarray(mask, "L")
+        flux_input = crop_pil.resize((fw, fh), PIL.Image.LANCZOS) if scale < 1.0 else crop_pil
+        flux_mask = mask_pil.resize((fw, fh), PIL.Image.NEAREST) if scale < 1.0 else mask_pil
+
+        healed = inpainter.inpaint(
+            input_image=flux_input,
+            mask_image=flux_mask,
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=cfg.num_inference_steps,
             guidance_scale=cfg.guidance_scale,
-            seed=seed + 1000,
+            seed=seed,
         )
+        if scale < 1.0:
+            healed = healed.resize((crop_w, crop_h), PIL.Image.LANCZOS)
+        healed_arr = np.array(healed.convert("RGB"), dtype=np.float32)
 
-        result = np.array(fixed.convert("RGB"), dtype=np.uint8)
-        result = np.roll(np.roll(result, -half, axis=0), -half, axis=1)
-        return PIL.Image.fromarray(result)
+        alpha = mask.astype(np.float32) / 255.0
+        if cfg.seam_fix_feather_px > 0:
+            alpha = gaussian_filter(alpha, sigma=cfg.seam_fix_feather_px)
+            # A feather this wide relative to the (deliberately narrow) band washes its
+            # whole peak down below 1.0 -- renormalise back up so the seam's own centre
+            # still gets the fix at full strength; only the taper shape (the actual "wide,
+            # soft transition") is what the blur is for. Same idiom as heal_seam.
+            peak = float(alpha.max())
+            if 0 < peak < 1.0:
+                alpha = np.clip(alpha / peak, 0.0, 1.0)
+        alpha = alpha[..., None]
+
+        blended = crop.astype(np.float32) * (1.0 - alpha) + healed_arr * alpha
+        result = arr.copy()
+        if axis == 0:
+            result[lo:hi, :] = blended.clip(0, 255).astype(np.uint8)
+        else:
+            result[:, lo:hi] = blended.clip(0, 255).astype(np.uint8)
+        return result
 
     def _extract_reference_patches(
         self,

@@ -336,6 +336,12 @@ stages:
     guidance_scale: 3.5
     seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
     seam_dilation_px: 4         # dilation applied to seam mask before inpainting
+    # Seam fix crops each seam band out, downscales it, inpaints, then upscales/feathers
+    # it back in -- avoids stamping a patch of crisp, full-resolution FLUX noise right on
+    # the seam (same trick as the skybox panorama's own wrap-seam repair).
+    seam_fix_context_px: 64     # real pixels of surrounding context kept around the band
+    seam_fix_max_size: 512      # crop is downscaled to this before FLUX, then upscaled back
+    seam_fix_feather_px: 24.0   # gaussian feather radius blending the fix back into the original
     # Margin (fraction of tile_size) around all four tile edges that Pass 1 fills with
     # real (upscaled, if soft) reference content and marks "keep" instead of "generate".
     # Reference patches are always kept away from the edges (see seam_width_fraction /
