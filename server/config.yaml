@@ -342,21 +342,21 @@ stages:
     seam_fix_context_px: 64     # real pixels of surrounding context kept around the band
     seam_fix_max_size: 512      # crop is downscaled to this before FLUX, then upscaled back
     seam_fix_feather_px: 24.0   # gaussian feather radius blending the fix back into the original
-    # Margin (fraction of tile_size) around all four tile edges that Pass 1 fills with
-    # real (upscaled, if soft) reference content and marks "keep" instead of "generate".
-    # Reference patches are always kept away from the edges (see seam_width_fraction /
-    # seam_dilation_px above), which otherwise left the outer border as one huge unbounded
-    # generate region right at the tile edge -- the least-conditioned spot for a hole-fill
-    # model, and the source of a visibly soft/artificial ring there. 0 disables it.
-    border_fill_fraction: 0.08
-    # Several real reference crops (_extract_reference_patches), spaced apart on the tile
-    # canvas (_patch_placements), instead of one -- gives Pass 1 more than one real colour/
-    # lighting anchor to match against, since generated fill can drift far from a single one.
+    # Width (fraction of tile_size) of the ring around all four tile edges that Pass 1
+    # actually has to generate -- reference patches are tiled edge to edge to fill the rest
+    # of the interior (_build_reference_canvas), so this is a real, bounded outpaint of a
+    # thin border rather than extrapolating most of the tile from a small inset patch. 0
+    # disables it (patches fill the whole tile, nothing left to outpaint).
+    outpaint_border_fraction: 0.08
+    # Several real reference crops (_extract_reference_patches) instead of one -- tiled
+    # across the interior grid (_build_reference_canvas), gives Pass 1 more than one real
+    # colour/lighting anchor since generated fill (in the outpaint ring) can drift far from
+    # a single one.
     num_reference_patches: 1
-    # Each patch's size as a fraction of tile_size when there's only one; scaled down by
-    # 1/sqrt(num_reference_patches) so total covered area stays comparable. 0.7 still leaves
-    # a comfortable margin before the seam-fix band (~4-9% of tile_size from each edge) so
-    # the two never overlap.
+    # Each extracted patch's own resolution, as a fraction of tile_size when there's only
+    # one; scaled down by 1/sqrt(num_reference_patches) so total sampled area stays
+    # comparable. Independent of how large it ends up on the tile canvas -- the interior
+    # grid resizes each patch again to fill its own cell regardless of this size.
     reference_patch_fraction: 0.7
     # Delight each reference patch with IntrinsicDiffusion (predicted albedo) before it's
     # used as a Pass 1 guidance seed, instead of the raw photo pixels -- the raw patch's
