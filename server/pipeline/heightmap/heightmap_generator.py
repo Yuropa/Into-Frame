@@ -50,6 +50,7 @@ class HeightMapGenerator:
         despike_window: int = 5,
         despike_reference_distance_m: float = 10.0,
         region_closing_iterations: int = 2,
+        single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -202,6 +203,21 @@ class HeightMapGenerator:
                             single-pixel holes/islands that would otherwise show
                             up as salt-and-pepper speckle in both the observed
                             mask and the height values sampled from it. 0 disables.
+        single_sample_blur_sigma: equirectangular mode only. Gaussian sigma (in
+                            grid cells) for a partial blur applied only to
+                            single-inverse-mapped-sample cells (not backed by
+                            _forward_project_cell_stats' dense_mask), blended in
+                            per-cell by (1 - certainty) -- confident single-sample
+                            cells stay close to their raw value, poorly-
+                            conditioned ones (see elevation_distortion_power) lean
+                            further toward the local average. Dense cells are
+                            never touched: they already average multiple real
+                            samples, so there's no single-ray noise to correct.
+                            Targets pervasive per-pixel depth-model dither that
+                            despiking's outlier test can't catch (neighbouring
+                            single-sample cells usually carry similar-magnitude
+                            noise, so no individual cell stands out from a clean
+                            local median). 0 disables.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -401,12 +417,17 @@ class HeightMapGenerator:
         # use to decide "is this a real point" rather than "how much do we trust it."
         true_observed = ~np.isnan(height_map)
 
-        # Flat ground prior: pin all cells within the nadir exclusion radius to
-        # -camera_height_meters. The equirectangular depth model is unreliable near
-        # the nadir, and the ground directly under the user is expected to be
-        # approximately level. These cells receive a low fixed certainty so the solver
-        # treats them as a soft prior rather than an observation, letting the Laplacian
-        # blend them smoothly into real terrain observations beyond the zone.
+        # Ground-under-the-user prior: the equirectangular depth model is unreliable
+        # near the nadir, so cells within the nadir exclusion radius get a synthetic
+        # value rather than a direct sample. Rather than assuming a hard-flat plane
+        # at -camera_height_meters, interpolate inward from the real terrain just
+        # outside the disc via pure Laplacian diffusion (no injected noise, unlike
+        # _interpolate's synthetic multi-octave fill for large gaps) -- this follows
+        # whatever local slope the real surrounding ground actually has, while still
+        # deferring entirely to real data at the boundary. These cells receive a low
+        # fixed certainty so the solver treats them as a soft prior rather than an
+        # observation, letting the Laplacian blend them smoothly into real terrain
+        # observations beyond the zone.
         cell_m = grid_size_meters / grid_resolution
         _x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float32)
         _X_cell, _Z_cell = np.meshgrid(_x_c, _x_c)
@@ -415,9 +436,33 @@ class HeightMapGenerator:
         flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
         if nadir_exclusion_radius > 0:
             flat_prior_mask = _r_cell <= nadir_exclusion_radius
-            height_map[flat_prior_mask] = -camera_height_meters
+
+            # The disc is always centred on the grid; diffuse over a small local
+            # crop around it (padded well past the disc radius to reach real
+            # boundary data) rather than the whole grid -- the disc's resolved
+            # value only depends on its immediate surroundings.
+            radius_cells = nadir_exclusion_radius / cell_m
+            pad = max(int(radius_cells * 6), 64)
+            c0 = grid_resolution // 2
+            lo, hi = max(0, c0 - pad), min(grid_resolution, c0 + pad)
+
+            crop_hm = height_map[lo:hi, lo:hi]
+            crop_disc = flat_prior_mask[lo:hi, lo:hi]
+            crop_known = ~np.isnan(crop_hm) & ~crop_disc
+
+            if crop_known.any():
+                seed = np.where(np.isnan(crop_hm), 0.0, crop_hm).astype(np.float32)
+                diffused = diffuse_heightmap(
+                    seed, crop_known, n_iters=max(200, int(radius_cells) * 8), seed_from='nearest',
+                )
+                height_map[lo:hi, lo:hi] = np.where(crop_disc, diffused, crop_hm)
+            else:
+                # No real terrain nearby yet to interpolate from -- fall back to
+                # the flat assumption.
+                height_map[flat_prior_mask] = -camera_height_meters
+
             # Any measured relief/slope here belonged to a height value we just
-            # discarded in favour of the flat prior -- it's no longer evidence of
+            # discarded in favour of the prior -- it's no longer evidence of
             # anything.
             cell_relief[flat_prior_mask] = 0.0
             cell_slope_deg[flat_prior_mask] = 0.0
@@ -444,6 +489,28 @@ class HeightMapGenerator:
         )
         if flat_prior_mask.any():
             certainty[flat_prior_mask] = flat_zone_certainty
+
+        # Partial, density-gated blur: single-inverse-mapped-sample cells (not
+        # backed by _forward_project_cell_stats' dense_mask) have no intra-cell
+        # averaging to fall back on, so per-pixel depth-model noise survives as
+        # visible per-cell dither -- not sharp enough for despiking's outlier test
+        # (a cell disagreeing with an otherwise-agreeing neighbourhood), since
+        # neighbouring single-sample cells usually carry similar-magnitude noise
+        # rather than one cell standing out from a clean local median. Blur is
+        # blended in per-cell by (1 - certainty), which by this point already
+        # reflects both distance and projection-distortion trust (see
+        # _build_certainty) -- confident single-sample cells stay close to their
+        # raw value, poorly-conditioned ones lean further toward the local
+        # average. Dense cells are never blurred: they're already a real
+        # multi-sample average, so there's no single-ray noise here to correct.
+        if use_equirectangular and single_sample_blur_sigma > 0:
+            blurred = gaussian_filter(
+                np.where(observed, height_map, 0.0), sigma=single_sample_blur_sigma
+            )
+            blur_weight = np.where(observed & ~dense_mask, 1.0 - certainty, 0.0)
+            height_map = np.where(
+                observed, height_map * (1.0 - blur_weight) + blurred * blur_weight, height_map
+            ).astype(np.float32)
 
         if debug_dir is not None:
             PIL.Image.fromarray((observed * 255).astype(np.uint8), "L").save(

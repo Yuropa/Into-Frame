@@ -43,6 +43,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         despike_window: int = 5,
         despike_reference_distance_m: float = 10.0,
         region_closing_iterations: int = 2,
+        single_sample_blur_sigma: float = 1.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -135,6 +136,13 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # in both the observed mask and the height values sampled from it.
         # 0 disables.
         self.region_closing_iterations = region_closing_iterations
+        # Gaussian sigma (grid cells) for a partial blur applied only to single-
+        # inverse-mapped-sample cells (no intra-cell averaging), blended in
+        # per-cell by (1 - certainty) -- dense (multi-sample) cells are never
+        # touched. Targets per-pixel depth-model dither that despiking's outlier
+        # test can't catch. 0 disables. See
+        # HeightMapGenerator._despike_single_sample_cells and _build_certainty.
+        self.single_sample_blur_sigma = single_sample_blur_sigma
 
 
 class HeightMapStage(PipelineStage):
@@ -246,6 +254,7 @@ class HeightMapStage(PipelineStage):
             despike_window=cfg.despike_window,
             despike_reference_distance_m=cfg.despike_reference_distance_m,
             region_closing_iterations=cfg.region_closing_iterations,
+            single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

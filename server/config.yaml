@@ -202,6 +202,14 @@ stages:
                                  # otherwise show up as salt-and-pepper speckle in both the
                                  # observed mask and the height values sampled from it.
                                  # 0 disables.
+    single_sample_blur_sigma: 1.5 # Gaussian sigma (grid cells) for a partial blur applied
+                                 # only to single-inverse-mapped-sample cells (no intra-cell
+                                 # averaging), blended in per-cell by (1 - certainty) — dense
+                                 # (multi-sample) cells are never touched. Targets per-pixel
+                                 # depth-model dither that despiking's outlier test can't
+                                 # catch (neighbouring single-sample cells usually carry
+                                 # similar-magnitude noise, so no individual cell stands out
+                                 # from a clean local median). 0 disables.
 
   - name: Region Map
     stage: RegionMapStage
