@@ -130,11 +130,15 @@ class SceneGenerationStage(PipelineStage):
         if object_count is not None:
             # Build category → list of crop indices so billboards can be drawn
             # from the full pool for a category rather than only the per-object crop.
+            # Synthetic (DistributionSynthesisStage) entries never get their own
+            # crop_{idx} image, so they must be excluded here -- otherwise a
+            # synthetic point can be chosen as another object's billboard texture,
+            # pointing at a crop image that was never created.
             class_to_crop_indices: dict[str, list[int]] = {}
             for idx in range(object_count):
                 meta = context.input_object(f"metadata_{idx}") or {}
                 cls = meta.get("class")
-                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate":
+                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate" and not meta.get("synthetic"):
                     class_to_crop_indices.setdefault(cls, []).append(idx)
 
             rng = np.random.default_rng(self.seed)
