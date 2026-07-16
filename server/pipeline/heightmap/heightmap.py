@@ -144,7 +144,6 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # HeightMapGenerator._despike_single_sample_cells and _build_certainty.
         self.single_sample_blur_sigma = single_sample_blur_sigma
 
-
 class HeightMapStage(PipelineStage):
     """
     Projects ground-plane points from a rectilinear depth map into a top-down

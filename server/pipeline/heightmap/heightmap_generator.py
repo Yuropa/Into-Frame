@@ -277,7 +277,7 @@ class HeightMapGenerator:
             # samples in the same cell.
             cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
-            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg = (
+            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg, any_forward_mask = (
                 HeightMapGenerator._forward_project_cell_stats(
                     d, sky_mask, region_type_mask, grid_size_meters, grid_resolution,
                     ground_y_max, ground_y_min, nadir_exclusion_radius, min_forward_samples,
@@ -288,6 +288,26 @@ class HeightMapGenerator:
                 height_map[dense_mask] = fwd_mean_y[dense_mask]
                 cell_relief[dense_mask] = fwd_relief[dense_mask]
             cell_slope_deg = fwd_slope_deg
+
+            # The primary single-sample ray always assumes its target lies on a
+            # flat ground plane at the camera's own height (phi_grid <= 0
+            # identically), so Y_grid can never represent a point above camera
+            # height even when the real surface there does -- it's a correct
+            # position along *some* fixed downward ray, just not necessarily the
+            # one that would actually reach whatever is really at this cell's
+            # (X, Z). Any real forward-projected sample -- dense or not -- is a
+            # genuine unprojection using that pixel's own true ray angle, so it's
+            # always at least as correctly positioned/signed as the primary ray's
+            # flat-ground guess (an earlier version of this tried to gate this on
+            # a flat-ground depth-consistency check first; real outdoor terrain
+            # routinely isn't flat -- rolling meadow, a slope, a distant ridge --
+            # so that consistency check fired on the majority of ordinary cells
+            # and collapsed coverage. Real forward-projected data is simply
+            # always preferred instead, unconditionally, whenever it exists).
+            if any_forward_mask.any():
+                use_weak = valid & ~dense_mask & any_forward_mask
+                height_map[use_weak] = fwd_mean_y[use_weak]
+                cell_relief[use_weak] = fwd_relief[use_weak]
 
             if despike_threshold_m > 0:
                 height_map, spike_mask = HeightMapGenerator._despike_single_sample_cells(
@@ -600,10 +620,10 @@ class HeightMapGenerator:
         nadir_exclusion_radius: float,
         min_samples: int,
         region_closing_iterations: int = 2,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Forward-project every panorama pixel (rather than one inverse-mapped ray per
-        output cell) and compute real per-cell statistics wherever enough independent
+        output cell) and compute real per-cell statistics wherever any independent
         samples land in the same cell to support them.
 
         Near the camera, many panorama pixels legitimately land in one fine grid
@@ -611,33 +631,50 @@ class HeightMapGenerator:
         inverse mapping in the equirectangular branch above cannot see. Far from
         the camera the opposite is true (one pixel covers a huge ground area, most
         cells stay empty), which is why inverse mapping is used as the primary
-        projection there. This recovers, wherever a cell is dense enough:
+        projection there. This recovers:
 
-          mean_y    -- per-cell mean elevation from multiple real samples, instead
-                       of a single ray sample.
+          mean_y    -- per-cell mean elevation from real forward-projected samples,
+                       instead of a single assumed-flat-ground ray. Populated for
+                       any cell with >= 1 sample (see any_mask), not just dense
+                       ones: unlike the primary inverse-mapped path (which always
+                       assumes the target lies on a flat ground plane at the
+                       camera's own height, and so can never represent a point
+                       above camera height even when the real sample does), every
+                       forward-projected point is a genuine, correctly-signed and
+                       correctly-positioned 3-D unprojection regardless of count --
+                       it just lacks intra-cell averaging below the dense
+                       threshold, same as the primary path's single sample.
           relief    -- per-cell Y range (max - min); the same intra-cell-relief
                        signal the pinhole branch already produces, previously
-                       always zero here.
+                       always zero here. Also populated for any populated cell
+                       (0 for a lone sample, same as "nothing to measure a range
+                       from").
           slope_deg -- per-cell surface tilt (0 = flat, 90 = vertical) from the
                        smallest-eigenvalue eigenvector of the points' 3x3
                        covariance matrix (a local least-squares plane fit) -- a
                        direct measurement of true 3-D orientation, not a proxy
-                       inferred from a 2-D gradient or a scalar Y range.
+                       inferred from a 2-D gradient or a scalar Y range. Requires
+                       >= min_samples (dense_mask), since a plane fit needs >= 3
+                       points and is noisy just above that.
 
         Grouping is done via a unique-linear-index groupby (np.unique +
         return_inverse) rather than scattering into full (grid_resolution,
         grid_resolution) accumulators, so cost and memory scale with the number
         of valid points / populated cells, not the square of grid_resolution.
 
-        Returns (dense_mask, mean_y, relief, slope_deg), all (grid_resolution,
-        grid_resolution). Only cells with >= min_samples independent forward
-        projections are set in dense_mask; the other three arrays are 0 elsewhere.
+        Returns (dense_mask, mean_y, relief, slope_deg, any_mask), all
+        (grid_resolution, grid_resolution) except any_mask/dense_mask which are
+        bool. any_mask marks every cell with >= 1 forward-projected sample;
+        dense_mask (a subset) marks cells with >= min_samples, the only ones with
+        a real slope_deg. mean_y/relief are populated wherever any_mask is set;
+        slope_deg only wherever dense_mask is set.
         """
         empty = (
             np.zeros((grid_resolution, grid_resolution), dtype=bool),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=bool),
         )
 
         d_masked = d.copy()
@@ -731,20 +768,25 @@ class HeightMapGenerator:
             slope_1d[dense_idx] = np.degrees(np.arccos(normal_y))
 
         dense_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        any_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
         mean_y_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
         relief_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
         slope_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        zi_all = (uniq_lin // grid_resolution).astype(np.int64)
+        xi_all = (uniq_lin % grid_resolution).astype(np.int64)
+        any_mask[zi_all, xi_all] = True
+        mean_y_grid[zi_all, xi_all] = mean_y.astype(np.float32)
+        relief_grid[zi_all, xi_all] = relief_1d.astype(np.float32)
 
         d_lin = uniq_lin[dense_idx]
         zi_d = (d_lin // grid_resolution).astype(np.int64)
         xi_d = (d_lin % grid_resolution).astype(np.int64)
 
         dense_mask[zi_d, xi_d] = True
-        mean_y_grid[zi_d, xi_d] = mean_y[dense_idx].astype(np.float32)
-        relief_grid[zi_d, xi_d] = relief_1d[dense_idx].astype(np.float32)
         slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
 
-        return dense_mask, mean_y_grid, relief_grid, slope_grid
+        return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask
 
     @staticmethod
     def _despike_single_sample_cells(
