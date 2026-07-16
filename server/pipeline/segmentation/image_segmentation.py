@@ -27,3 +27,13 @@ class ImageSeg(RemoteClient):
             boxes=result["boxes"],
             scores=result["scores"],
         )
+
+    def segment_boxes(self, input: Image, boxes: list, temp_path: Path, on_progress=None) -> list:
+        """Box-prompted SAM2: one mask per [x, y, w, h] box, in `boxes` order."""
+        result = self.send(
+            action="segment_boxes",
+            input={"image": input.image, "boxes": boxes},
+            temp_path=temp_path,
+            on_progress=on_progress,
+        )
+        return result["masks"]

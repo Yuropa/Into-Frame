@@ -130,11 +130,15 @@ class SceneGenerationStage(PipelineStage):
         if object_count is not None:
             # Build category → list of crop indices so billboards can be drawn
             # from the full pool for a category rather than only the per-object crop.
+            # Synthetic (DistributionSynthesisStage) entries never get their own
+            # crop_{idx} image, so they must be excluded here -- otherwise a
+            # synthetic point can be chosen as another object's billboard texture,
+            # pointing at a crop image that was never created.
             class_to_crop_indices: dict[str, list[int]] = {}
             for idx in range(object_count):
                 meta = context.input_object(f"metadata_{idx}") or {}
                 cls = meta.get("class")
-                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate":
+                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate" and not meta.get("synthetic"):
                     class_to_crop_indices.setdefault(cls, []).append(idx)
 
             rng = np.random.default_rng(self.seed)
@@ -201,10 +205,16 @@ class SceneGenerationStage(PipelineStage):
                 category_mesh = context.input_mesh(f"category_mesh_{cls}")
                 if category_mesh is not None and rng.integers(2) == 0:
                     # Use the shared category mesh with a random Y rotation.
-                    # The mesh is already normalised to a 1×1 box; scale uniformly
-                    # so it fits the depth-estimated world dimensions.
+                    # Mesh.fit_to_box recenters on the mesh's centroid, not its bounding-box
+                    # center, so the mesh's lowest vertex is not reliably at -extent/2 --
+                    # for a bottom-heavy shape (e.g. a tree trunk) the centroid sits below
+                    # the bbox center, and assuming symmetry would still leave a gap above
+                    # the terrain. Sample the mesh's actual lowest vertex (bounds[0][1])
+                    # and offset by exactly that, so the true bottom -- not an assumed one
+                    # -- lands on terrain_y.
                     mesh_scale = float(min(width, height))
-                    mesh_place_y = terrain_y + mesh_scale / 2.0 if terrain_y is not None else position[1]
+                    mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
+                    mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
                     mesh_key = f"category_mesh_{cls}"
                     self.log_info(f"Creating mesh for {idx} ({cls})")
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
