@@ -15,7 +15,11 @@ class SegmentationStage(PipelineStage):
     Detects and segments foreground objects in the input image, storing each
     object's masked crop and bounding-box metadata for downstream stages.
 
-    Input key  (SemanticKey.INPUT)  → ContextKey.INPUT          (Image)
+    Input key  (SemanticKey.INPUT)  → ContextKey.INPUT          (Image, default)
+                                       or a Panorama at the same key — e.g.
+                                       point it at ContextKey.PANORAMA to detect
+                                       objects across the full 360° panorama
+                                       instead of the narrow input photo.
     Output key (SemanticKey.OUTPUT) → ContextKey.OBJECT_COUNT    (int)
 
     Dynamic context keys per detected object (index i):
@@ -36,10 +40,27 @@ class SegmentationStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.OBJECT_COUNT
         })
 
+    def _resolve_source(self, context: PipelineContext, input_key) -> "Image | None":
+        """Image and Panorama both expose .width/.height/.rgb()/.image, so either
+        can be the detection source — try Image (the common case) before Panorama,
+        wrapping a Panorama into a plain Image since Panorama has no .rgba(), which
+        masked_images() below needs."""
+        image = context.input_image(input_key)
+        if image is not None:
+            return image
+        panorama = context.input_panorama(input_key)
+        if panorama is not None:
+            return Image(panorama.image)
+        return None
+
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
 
-        input_image = context.input_image(input_key).copy()
+        source = self._resolve_source(context, input_key)
+        if source is None:
+            self.log_info("No input image or panorama, skipping")
+            return context
+        input_image = source.copy()
         total_crops = 0
 
         def store_segmentation_result(result: SegmentationResult):

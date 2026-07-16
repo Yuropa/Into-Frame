@@ -4,7 +4,6 @@ from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
-from util.panorama_projection import project_mask_to_pano
 from util.panorama_utils import Panorama
 import numpy as np
 from PIL import Image as PILImage, ImageFilter
@@ -254,19 +253,20 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
 
     def _vegetation_mask(self, context: PipelineContext, pano_h: int, pano_w: int) -> np.ndarray | None:
         """Union of tree/forest crop masks (from Object Segmentation/Classification/
-        Typing, which run earlier specifically to feed this), projected from the
-        source perspective photo into equirectangular panorama pixel space.
+        Typing, which run earlier specifically to feed this), pasted directly at
+        each crop's own box position in panorama pixel space.
 
-        Returns None if there's nothing to add (no objects, no intrinsics, or no
-        crop classified as tree/forest), so callers can skip the union cheaply.
+        Object Segmentation/Detection now run directly on the panorama (see
+        config.yaml's `keys: input: panorama`), so metadata_{i}["box"] is already
+        panorama-pixel-space -- no reprojection needed here any more (an earlier
+        version reprojected from the hero photo's perspective space via
+        util.panorama_projection.project_mask_to_pano, which needed intrinsics).
+
+        Returns None if there's nothing to add (no objects, or no crop classified
+        as tree/forest), so callers can skip the union cheaply.
         """
         object_count = context.input_object(ContextKey.OBJECT_COUNT)
         if not object_count:
-            return None
-
-        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
-        if intrinsics is None:
-            self.log_info("No intrinsics in context, skipping tree/forest mask projection")
             return None
 
         mask = np.zeros((pano_h, pano_w), dtype=bool)
@@ -282,10 +282,19 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                 continue
 
             crop_mask = np.array(crop.image.getchannel("A")) > 127
-            projected = project_mask_to_pano(crop_mask, box, intrinsics, pano_w, pano_h)
-            if projected is not None:
-                mask |= projected
-                found = True
+            x, y, w, h = (int(round(v)) for v in box)
+            ch, cw = crop_mask.shape
+            y0, y1 = max(0, y), min(pano_h, y + ch)
+            if y1 <= y0:
+                continue
+            # Columns wrapped modulo pano_w: a crop whose box straddles the
+            # panorama's own left/right seam (rare -- only an object too large
+            # for any tile-merge candidate to land on the non-wrapping side,
+            # see util/instance_merge.py) still pastes into the right place.
+            cols = (x + np.arange(cw)) % pano_w
+            rows = np.arange(y0, y1)
+            mask[np.ix_(rows, cols)] |= crop_mask[y0 - y: y1 - y, :]
+            found = True
 
         return mask if found else None
 

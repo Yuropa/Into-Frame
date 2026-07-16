@@ -10,17 +10,26 @@ from util.device_utils import DeviceStrategy, preferred_device
 
 # Appended to the CaptioningStage caption so the video reads as a living photo rather
 # than a moving-camera shot: locked-off framing with only ambient environmental motion.
+# Sky/cloud drift and lighting are called out explicitly (not just omitted) because
+# leaving them unconstrained let LTX-2 drift cloud shapes and brighten/dim the scene
+# over the clip -- especially noticeable on a panorama's much wider sky coverage than
+# a narrow input photo -- reading as a time-lapse rather than a single held moment.
 DEFAULT_MOTION_PROMPT = (
     "The camera is completely static on a locked tripod, with no panning, zooming, "
     "dolly, or handheld movement. Only subtle natural motion animates the scene: a "
-    "gentle breeze stirs leaves and grasses, light ripples cross any visible water, "
-    "and clouds drift almost imperceptibly across the sky."
+    "gentle breeze stirs leaves and grasses, and light ripples cross any visible "
+    "water. The sky and clouds stay essentially still, with no drifting or "
+    "reshaping, and the lighting stays constant and steady throughout -- no "
+    "brightening, dimming, flickering, or moving shadows, and no time-lapse effect."
 )
 
 DEFAULT_NEGATIVE_PROMPT = (
     "camera movement, camera panning, zooming, dolly movement, tracking shot, "
-    "handheld shake, jittery motion, blurry, low quality, distorted, warped "
-    "geometry, artifacts, watermark, text overlay"
+    "handheld shake, jittery motion, moving clouds, drifting clouds, reshaping "
+    "clouds, sky movement, time-lapse, flickering light, flickering exposure, "
+    "changing lighting, brightness changes, shifting shadows, sun movement, "
+    "blurry, low quality, distorted, warped geometry, artifacts, watermark, "
+    "text overlay"
 )
 
 # LTX-2 two-stage pipelines require height/width divisible by 64 (assert_resolution).

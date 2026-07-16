@@ -5,6 +5,7 @@ from pipeline.object_detection.grounding_dino import GroundingDino
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from util.device_utils import DeviceStrategy, preferred_device
+from util.image_utils import Image
 
 
 class ObjectDetectionStage(PipelineStage):
@@ -12,6 +13,11 @@ class ObjectDetectionStage(PipelineStage):
     Localises every RAM++ tag in the input image using Grounding DINO, masks each
     detection with box-prompted SAM2 (Grounding DINO only gives boxes), and appends
     new crop_{i} / metadata_{i} entries after the existing SAM2 detections.
+
+    Input key (SemanticKey.INPUT) → ContextKey.INPUT (Image, default) or a
+    Panorama at the same key — e.g. point it at ContextKey.PANORAMA to detect
+    objects across the full 360° panorama instead of the narrow input photo
+    (GroundingDinoServer tiles internally in that case — see grounding_dino_imp.py).
 
     Reads:  ContextKey.RECOGNIZE_TAGS (pipe-separated str), SemanticKey.INPUT image,
             ContextKey.OBJECT_COUNT (existing SAM2 count)
@@ -29,15 +35,28 @@ class ObjectDetectionStage(PipelineStage):
     def _input_key(self):
         return self._resolve_key(SemanticKey.INPUT, ContextKey.INPUT)
 
+    def _resolve_source(self, context: PipelineContext, input_key) -> "Image | None":
+        """Image and Panorama both expose .width/.height/.rgb()/.image, so either
+        can be the detection source — try Image (the common case) before Panorama,
+        wrapping a Panorama into a plain Image since Panorama has no .rgba(), which
+        masked_images() below needs."""
+        image = context.input_image(input_key)
+        if image is not None:
+            return image
+        panorama = context.input_panorama(input_key)
+        if panorama is not None:
+            return Image(panorama.image)
+        return None
+
     def run(self, context: PipelineContext) -> PipelineContext:
         tags_str = context.input_object(ContextKey.RECOGNIZE_TAGS)
         if not tags_str:
             self.log_info("No recognition tags — skipping detection")
             return context
 
-        input_image = context.input_image(self._input_key())
+        input_image = self._resolve_source(context, self._input_key())
         if input_image is None:
-            self.log_info("No input image — skipping detection")
+            self.log_info("No input image or panorama — skipping detection")
             return context
 
         tags = [t.strip() for t in tags_str.split("|") if t.strip()]

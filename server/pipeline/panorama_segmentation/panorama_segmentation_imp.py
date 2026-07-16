@@ -1,7 +1,6 @@
 from path_utils import add_project_paths
 add_project_paths()
 
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +10,7 @@ import torch
 from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
 
 from remote_connection.remote_server import RemoteServer
+from util.panorama_tiling import Tile as _Tile, build_tiles as _build_tiles, extract_tile as _extract_tile
 
 
 _MODEL_ID = "nvidia/segformer-b5-finetuned-ade-640-640"
@@ -31,59 +31,10 @@ _TILE_OVERLAP_FRAC = 0.25
 # than this is simply processed in multiple batches.
 _MAX_BATCH = 8
 
-
-@dataclass(frozen=True)
-class _Tile:
-    x0: int  # may exceed the panorama width for tiles straddling the wrap seam — resolved via modulo on use
-    y0: int  # always within [0, height - h]
-    w: int
-    h: int
-
-
-def _axis_starts(extent: int, tile: int, overlap_frac: float, wrap: bool) -> list[int]:
-    """Tile start positions covering `extent`, evenly spaced with the given overlap."""
-    if extent <= tile:
-        return [0]
-
-    stride = max(1, int(tile * (1.0 - overlap_frac)))
-    starts = list(range(0, extent, stride))
-
-    if wrap:
-        # Equirectangular panoramas wrap horizontally — column 0 and column
-        # extent-1 are the same seam in the final 360° view. Add a tile
-        # explicitly centred on that seam so it's never left straddled
-        # between two tile edges no matter how the stride above lands.
-        starts.append(extent - tile // 2)
-    else:
-        # No vertical wrap (top/bottom are the zenith/nadir poles, not a
-        # seam) — clamp so the last tile's far edge lands exactly on the
-        # image border instead of overshooting it.
-        starts = [min(s, extent - tile) for s in starts]
-        starts.append(extent - tile)
-
-    # De-dup while preserving order.
-    seen: set[int] = set()
-    deduped = []
-    for s in starts:
-        if s not in seen:
-            seen.add(s)
-            deduped.append(s)
-    return deduped
-
-
-def _build_tiles(width: int, height: int, tile_size: int, overlap_frac: float) -> list[_Tile]:
-    tw = min(tile_size, width)
-    th = min(tile_size, height)
-    x_starts = _axis_starts(width, tw, overlap_frac, wrap=True)
-    y_starts = _axis_starts(height, th, overlap_frac, wrap=False)
-    return [_Tile(x0=x, y0=y, w=tw, h=th) for y in y_starts for x in x_starts]
-
-
-def _extract_tile(img_arr: np.ndarray, tile: _Tile) -> np.ndarray:
-    width = img_arr.shape[1]
-    cols = np.arange(tile.x0, tile.x0 + tile.w) % width
-    rows = np.arange(tile.y0, tile.y0 + tile.h)
-    return img_arr[rows][:, cols]
+# _Tile/_build_tiles/_extract_tile now live in util.panorama_tiling (shared with
+# SAM2/Grounding DINO panorama tiling -- see image_segmentation_imp.py,
+# grounding_dino_imp.py); re-imported above under their original local names so
+# nothing below this line needs to change.
 
 
 def _feather_window(h: int, w: int) -> np.ndarray:

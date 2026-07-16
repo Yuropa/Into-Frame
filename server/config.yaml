@@ -42,6 +42,15 @@ stages:
   # position and simply see crop_{i}/metadata_{i} as already populated.
   - name: Object Segmentation
     stage: SegmentationStage
+    # Detect objects across the full 360° panorama (ContextKey.PANORAMA -- the
+    # original, with real objects still in it) instead of just the narrow hero
+    # photo, so crop_{i}/metadata_{i} boxes are panorama-pixel-space throughout
+    # the rest of the object pipeline (Correlation/Distribution/Asset Generation/
+    # Scene Generation already assume this -- see Object Recognition/Detection
+    # below for the same change, and image_segmentation_imp.py for the panorama
+    # tiling this now needs to avoid quality loss).
+    keys:
+      input: panorama
 
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
@@ -484,9 +493,13 @@ stages:
 
   - name: Object Recognition
     stage: RecognizeAnythingStage
+    keys:
+      input: panorama
 
   - name: Object Detection
     stage: ObjectDetectionStage
+    keys:
+      input: panorama
 
   - name: Object Correlation
     stage: ObjectCorrelationStage
@@ -539,6 +552,11 @@ stages:
 
   - name: Video Generation
     stage: VideoGenerationStage
+    # Animate the full 360° panorama (ContextKey.PANORAMA -- the original, with real
+    # objects still in it, not PANORAMA_TERRAIN/PANORAMA_SKY which have been through
+    # foreground/sky inpainting) instead of just the narrow raw input photo.
+    keys:
+      input: panorama
     # camera_lora_strength: 0.0   # uncomment to disable the Camera-Control-Static LoRA
 
   - name: Video Object Extraction
@@ -546,7 +564,9 @@ stages:
     # Tracks each Object Segmentation crop's mask across the video above (SAM2's video
     # predictor) and writes one object_video_{i} per detected object, isolated against
     # a black background. reference_frame_idx defaults to 0, matching Video Generation's
-    # frame-0 conditioning on the same input photo Object Segmentation ran against.
+    # frame-0 conditioning on the same panorama Object Segmentation now ran against.
+    keys:
+      input: panorama
 
   - name: Report
     stage: ReportGenerationStage

@@ -40,11 +40,14 @@ class VideoObjectExtractionStage(PipelineStage):
     video per object: same frame size and frame count as the source, with everything
     outside that object's per-frame mask blacked out.
 
-    Input key      (SemanticKey.INPUT)         -> ContextKey.INPUT            (Image)
+    Input key      (SemanticKey.INPUT)         -> ContextKey.INPUT            (Image, default)
+                                                   or a Panorama at the same key
       The frame crop_{i}/metadata_{i}'s boxes are expressed against, and which
       reference_frame_idx (below) corresponds to in the video — normally the same
-      photo VideoGenerationStage conditions frame 0 on, so the defaults line up
-      without extra config.
+      image/panorama VideoGenerationStage conditions frame 0 on, so the defaults
+      line up without extra config (see config.yaml's `keys: input: panorama`
+      override, matching the same override on Video Generation and Object
+      Segmentation/Recognition/Detection once those also run on the panorama).
     Video key      (SemanticKey.VIDEO)         -> ContextKey.GENERATED_VIDEO   (Video)
     Object count   (SemanticKey.OBJECT_COUNT)  -> ContextKey.OBJECT_COUNT     (int)
     Output key     (SemanticKey.OUTPUT)        -> ContextKey.OBJECT_VIDEO_COUNT (int)
@@ -73,6 +76,14 @@ class VideoObjectExtractionStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.OBJECT_VIDEO_COUNT,
         })
 
+    def _resolve_source(self, context: PipelineContext, input_key):
+        """Image and Panorama both expose .width/.height/.size, so either can define
+        ref_size below — try Image (the common case) before Panorama."""
+        image = context.input_image(input_key)
+        if image is not None:
+            return image
+        return context.input_panorama(input_key)
+
     def _reference_mask(
         self,
         idx: int,
@@ -98,11 +109,25 @@ class VideoObjectExtractionStage(PipelineStage):
         if alpha.size != target_size:
             alpha = alpha.resize(target_size)
 
-        canvas = PILImage.new("L", ref_size, 0)
-        canvas.paste(alpha, (round(x), round(y)))
+        # Columns wrapped modulo ref_size's width: a box straddling the
+        # panorama's own left/right seam (rare -- see util/instance_merge.py)
+        # still pastes into the right place instead of being silently clipped
+        # by a plain PIL paste.
+        ref_w, ref_h = ref_size
+        alpha_arr = np.array(alpha) > 127
+        canvas = np.zeros((ref_h, ref_w), dtype=bool)
+        ix, iy = round(x), round(y)
+        ch, cw = alpha_arr.shape
+        y0, y1 = max(0, iy), min(ref_h, iy + ch)
+        if y1 > y0:
+            cols = (ix + np.arange(cw)) % ref_w
+            rows = np.arange(y0, y1)
+            canvas[np.ix_(rows, cols)] |= alpha_arr[y0 - iy: y1 - iy, :]
+
+        canvas_img = PILImage.fromarray((canvas * 255).astype(np.uint8), mode="L")
         if ref_size != video_size:
-            canvas = canvas.resize(video_size, PILImage.NEAREST)
-        return np.array(canvas) > 127
+            canvas_img = canvas_img.resize(video_size, PILImage.NEAREST)
+        return np.array(canvas_img) > 127
 
     def _read_frames(self, path: Path) -> tuple[list[np.ndarray], float]:
         with av.open(str(path)) as container:
@@ -129,7 +154,7 @@ class VideoObjectExtractionStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, video_key, count_key, output_key = self._resolved_keys()
 
-        input_image = context.input_image(input_key)
+        input_image = self._resolve_source(context, input_key)
         video = context.input_video(video_key)
         object_count = context.input_object(count_key) or 0
 
