@@ -100,7 +100,17 @@ class HeightMapGenerator:
         camera_height_meters: assumed height of the camera above the ground plane
                               (used to derive the Y floor filter and flood-fill seed).
         ground_y_max: upper Y bound in camera space; points with Y <= this are ground
-                      candidates (e.g. -0.5 = at least 0.5 m below camera).
+                      candidates (e.g. -0.5 = at least 0.5 m below camera). Only
+                      enforced where region_type_mask is unavailable -- a real
+                      slope, hill, or cliff can genuinely rise above the camera's
+                      own eye level (someone standing partway up a mountain still
+                      looks at more mountain going up), so wherever a pixel is
+                      semantically classified as ground-valid (see
+                      RegionType.ground_valid), that classification alone is
+                      trusted and this ceiling is skipped for it. Without a region
+                      mask there's no way to distinguish real elevated terrain from
+                      a depth-model sky/artifact glitch, so the ceiling still
+                      applies as a fallback guard in that case.
         sky_mask: optional bool (H, W) array from the depth model where True = sky.
                   Sky pixels are excluded before projection, preventing the horizon
                   artefacts that come from sky pixels being assigned far depth values.
@@ -181,17 +191,25 @@ class HeightMapGenerator:
             phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
             Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
 
-            valid = (
-                np.isfinite(sampled_depth) & (sampled_depth > 0)
-                & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)
-            )
-            if sky_mask is not None and sky_mask.shape == d.shape:
-                valid &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
+            region_valid = None
             if region_type_mask is not None:
                 rm = np.round(region_type_mask).astype(np.int32)
                 if rm.shape != d.shape:
                     rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-                valid &= np.isin(nearest_sample_grid(rm, pano_u, pano_v), _VALID_REGION_INDICES)
+                region_valid = np.isin(nearest_sample_grid(rm, pano_u, pano_v), _VALID_REGION_INDICES)
+
+            valid = np.isfinite(sampled_depth) & (sampled_depth > 0) & (Y_grid >= ground_y_min)
+            if region_valid is not None:
+                # A semantically-classified ground/terrain pixel (mountain, hill,
+                # cliff, trail, ...) can legitimately sit above the camera's own eye
+                # level -- someone standing partway up a slope still looks at more
+                # slope going up. ground_y_max below is only a fallback sky/artifact
+                # guard for when there's no classification to trust instead.
+                valid &= region_valid
+            else:
+                valid &= Y_grid <= ground_y_max
+            if sky_mask is not None and sky_mask.shape == d.shape:
+                valid &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
             if nadir_exclusion_radius > 0:
                 valid &= r_grid >= nadir_exclusion_radius
 
@@ -243,7 +261,7 @@ class HeightMapGenerator:
             Z = d
 
             ground_mask = (
-                (Y <= ground_y_max) & (Y >= ground_y_min)
+                (Y >= ground_y_min)
                 & (np.abs(Z) <= half) & (np.abs(X) <= half)
                 & np.isfinite(d)
             )
@@ -251,7 +269,12 @@ class HeightMapGenerator:
                 rm = np.round(region_type_mask).astype(np.int32)
                 if rm.shape != d.shape:
                     rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+                # See the equirectangular path above: classified ground/terrain is
+                # allowed above the camera's own eye level; ground_y_max is only a
+                # fallback guard for when there's no classification to trust instead.
                 ground_mask &= np.isin(rm, _VALID_REGION_INDICES)
+            else:
+                ground_mask &= Y <= ground_y_max
 
             Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
             if len(Xg) == 0:
@@ -486,7 +509,7 @@ class HeightMapGenerator:
         half = grid_size_meters / 2.0
         valid = (
             np.isfinite(d_masked) & (d_masked > 0)
-            & (Y <= ground_y_max) & (Y >= ground_y_min)
+            & (Y >= ground_y_min)
             & (np.abs(X) <= half) & (np.abs(Z) <= half)
         )
         if nadir_exclusion_radius > 0:
@@ -495,7 +518,12 @@ class HeightMapGenerator:
             rm = np.round(region_type_mask).astype(np.int32)
             if rm.shape != d.shape:
                 rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
+            # See the primary equirectangular projection above: a classified
+            # ground/terrain pixel is allowed above the camera's own eye level;
+            # ground_y_max is only a fallback guard when there's no classification.
             valid &= np.isin(rm, _VALID_REGION_INDICES)
+        else:
+            valid &= Y <= ground_y_max
 
         Xg, Yg, Zg = X[valid], Y[valid], Z[valid]
         if len(Xg) == 0:
@@ -785,9 +813,15 @@ class HeightMapGenerator:
 
         pano_valid = (
             np.isfinite(sampled_depth) & (sampled_depth > 0)
-            & (Y_grid >= ground_y_min) & (Y_grid <= ground_y_max)
+            & (Y_grid >= ground_y_min)
             & (r_grid >= nadir_exclusion_radius)
         )
+        if region_type_mask is None:
+            # d_excl above already NaN'd out non-ground-valid pixels when a region
+            # mask was supplied, so classified ground/terrain is already allowed
+            # above the camera's own eye level; ground_y_max is only a fallback
+            # guard for when there's no classification to trust instead.
+            pano_valid &= Y_grid <= ground_y_max
         result = height_map.copy()
         result[missing & pano_valid] = Y_grid[missing & pano_valid]
         return result
