@@ -205,10 +205,15 @@ class SceneGenerationStage(PipelineStage):
                 category_mesh = context.input_mesh(f"category_mesh_{cls}")
                 if category_mesh is not None and rng.integers(2) == 0:
                     # Use the shared category mesh with a random Y rotation.
-                    # The mesh is already normalised to a 1×1 box; scale uniformly
-                    # so it fits the depth-estimated world dimensions.
+                    # The mesh is already normalised to fit within a 1×1 box (see
+                    # Mesh.fit_to_box), but that preserves aspect ratio -- only the
+                    # limiting dimension actually reaches 1.0, so a footprint wider
+                    # than it is tall ends up with a Y-extent below 1.0. Ground
+                    # placement must use that real extent, not assume a uniform cube,
+                    # or the mesh's true bottom sits above terrain_y by the shortfall.
                     mesh_scale = float(min(width, height))
-                    mesh_place_y = terrain_y + mesh_scale / 2.0 if terrain_y is not None else position[1]
+                    mesh_half_height = float(category_mesh.extents[1]) * mesh_scale / 2.0
+                    mesh_place_y = terrain_y + mesh_half_height if terrain_y is not None else position[1]
                     mesh_key = f"category_mesh_{cls}"
                     self.log_info(f"Creating mesh for {idx} ({cls})")
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])

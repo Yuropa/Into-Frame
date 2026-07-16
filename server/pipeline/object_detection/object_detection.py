@@ -92,7 +92,11 @@ class ObjectDetectionStage(PipelineStage):
         if masks:
             result = SegmentationResult(masks=masks, boxes=clamped_boxes, scores=[d["score"] for d in valid_dets])
             for det, crop in zip(valid_dets, result.masked_images(input_image)):
-                x, y, w, h = det["box"]
+                # Use crop.box (== the clamped box the mask/crop was actually generated
+                # from), not det["box"] (Grounding DINO's raw, possibly out-of-image
+                # box) -- downstream depth sampling and world size/position estimation
+                # key off this box, and it must describe the same pixels as crop.image.
+                x, y, w, h = crop.box
                 metadata = {
                     "box": [float(x), float(y), float(w), float(h)],
                     "score": float(det["score"]),
