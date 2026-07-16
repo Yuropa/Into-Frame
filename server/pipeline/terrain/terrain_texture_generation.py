@@ -160,6 +160,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # fights the target tile's own "flat overcast, no directional shadows" prompt.
         # Falls back to the raw patch if the model errors on a given crop.
         use_intrinsic_delighting: bool = True,
+        # Blend factor toward the predicted albedo: 1.0 = pure albedo (fully delit), 0.0 =
+        # the raw patch untouched. IntrinsicDiffusion's albedo can look unnaturally flat/
+        # washed out at full strength -- a partial blend keeps some of the patch's own real
+        # shading/micro-contrast while still knocking down the baked-in directional sun/
+        # shadow that fights the tile's own flat-overcast prompt.
+        intrinsic_delight_strength: float = 0.6,
         # Working resolution for the delighting pass -- independent of tile_size since
         # patches are much smaller than a full tile; upsampled internally then resized
         # back down to the patch's own size.
@@ -277,6 +283,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
         self.use_intrinsic_delighting = use_intrinsic_delighting
+        self.intrinsic_delight_strength = intrinsic_delight_strength
         self.intrinsic_resolution = intrinsic_resolution
         self.intrinsic_agg_num = intrinsic_agg_num
         self.use_patch_supersampling = use_patch_supersampling
@@ -1071,10 +1078,10 @@ class TerrainTextureGenerationStage(PipelineStage):
         cfg: "TerrainTextureGenerationConfiguration",
     ) -> PIL.Image.Image:
         """
-        Replace `patch`'s RGB with IntrinsicDiffusion's predicted albedo (delit,
-        lighting-free reflectance), keeping its own region-mask alpha channel (see
-        _extract_reference_patches) untouched. Falls back to the raw patch if the
-        model errors on this particular crop.
+        Blend `patch`'s RGB toward IntrinsicDiffusion's predicted albedo (delit,
+        lighting-free reflectance) by cfg.intrinsic_delight_strength, keeping its
+        own region-mask alpha channel (see _extract_reference_patches) untouched.
+        Falls back to the raw patch if the model errors on this particular crop.
         """
         self._init_intrinsics()
         try:
@@ -1088,6 +1095,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         except Exception as exc:
             self.log_info(f"IntrinsicDiffusion delighting failed, using raw patch: {exc}")
             return patch
+
+        strength = cfg.intrinsic_delight_strength
+        if strength < 1.0:
+            albedo_rgb = np.asarray(albedo.convert("RGB"), dtype=np.float32)
+            original_rgb = np.asarray(patch.convert("RGB"), dtype=np.float32)
+            blended = albedo_rgb * strength + original_rgb * (1.0 - strength)
+            albedo = PIL.Image.fromarray(blended.clip(0, 255).astype(np.uint8), "RGB")
 
         if patch.mode == "RGBA":
             albedo = albedo.convert("RGBA")

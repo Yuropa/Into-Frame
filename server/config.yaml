@@ -358,6 +358,8 @@ stages:
     # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
     # overcast, no directional shadows" prompt.
     use_intrinsic_delighting: true
+    intrinsic_delight_strength: 0.6 # blend toward the predicted albedo (1.0 = fully delit) --
+                                 # full strength looked unnaturally flat/washed out
     intrinsic_resolution: 768   # working resolution for the delighting pass
     intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
     # Swin2SR 2x each (optionally delit) reference patch, then LANCZOS back down to its own
