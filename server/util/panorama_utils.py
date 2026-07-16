@@ -322,6 +322,163 @@ class Panorama:
         alpha = np.clip(mask_s * 255, 0, 255).astype(np.uint8)
         return PIL.Image.fromarray(np.dstack([color, alpha]), "RGBA")
 
+    def unwarp_box(
+        self,
+        depth: np.ndarray,
+        box: list[float],
+        mask: "np.ndarray | None" = None,
+        out_size: int = 256,
+        min_points: int = 64,
+        extent_percentile: float = 98.0,
+    ) -> "PIL.Image.Image | None":
+        """
+        Flatten the patch in `box` onto its own local surface plane, fit from
+        its own real 3D points (unprojected from `depth`) -- removes true
+        oblique-view foreshortening, not just equirectangular distortion
+        (perspective_crop only fixes the latter).
+
+        Unlike a whole-scene top-down bake (tried once, reverted -- see
+        terrain_texture_generation._extract_reference_patches's docstring --
+        it collapses to a radial/pinwheel singularity right around the
+        camera), this stays local to `box` and, like bake_real_layer,
+        forward-projects each *output* canvas point analytically back into
+        the panorama rather than scatter-interpolating the box's own points.
+        An earlier version of this function did the latter (Delaunay +
+        linear interpolation directly over the box's own unprojected
+        points) and, when tested against real texture detail (not just a
+        smooth gradient), produced visible directional streak artefacts:
+        the box's own point density is strongly anisotropic (dense near its
+        camera-facing edge, sparse toward its far edge -- an unavoidable
+        consequence of viewing any oblique patch from one camera), and
+        piecewise-linear interpolation across the resulting long, thin
+        triangles smears real texture values along the compression
+        direction. That's the same failure mode as the reverted whole-scene
+        bake, just shrunk to patch scale. Using the box's own points only to
+        fit the plane -- not to rasterize it -- avoids this: actual pixel
+        values come from ordinary bilinear panorama sampling (the same
+        primitive perspective_crop itself uses), which has no notion of
+        triangulation density to go wrong.
+
+        depth:   (H, W) radial depth aligned to this panorama's own pixels.
+        box:     [bx, by, bw, bh] in panorama pixel coordinates, used both to
+                 gather the plane-fit points and to size the output canvas.
+        mask:    optional (H, W) float32 region mask in [0, 1]; pixels below
+                 0.5 are excluded from the plane fit, and resampled as this
+                 patch's own alpha channel (1 = genuine same-region content).
+        out_size: output image side length (always square).
+        min_points: minimum valid (depth+mask) pixels required to fit a
+                 plane; returns None below this so the caller can fall back
+                 to perspective_crop.
+        extent_percentile: percentile (of |u|, |v| of the box's own points in
+                 the fitted plane) used to size the output canvas -- keeps a
+                 few noisy far-outlier depth pixels from blowing up the scale.
+
+        Returns None (caller should fall back to perspective_crop) if there
+        aren't enough valid points to fit a plane, or the fitted plane's
+        canvas would pass too close to the camera for a stable reprojection
+        (near-nadir/zenith singularity).
+        """
+        W, H = self.width, self.height
+        bx, by, bw, bh = box
+        x0, y0 = max(int(round(bx)), 0), max(int(round(by)), 0)
+        x1, y1 = min(int(round(bx + bw)), W), min(int(round(by + bh)), H)
+        if x1 - x0 < 2 or y1 - y0 < 2:
+            return None
+
+        depth_crop = depth[y0:y1, x0:x1].astype(np.float64)
+        valid = np.isfinite(depth_crop) & (depth_crop > 1e-4)
+        if mask is not None:
+            valid &= mask[y0:y1, x0:x1] > 0.5
+        if int(valid.sum()) < min_points:
+            return None
+
+        # Same angular convention as equirectangular_unproject, offset by the
+        # box's own position within the full panorama (angular pixel density
+        # is defined relative to the *full* image, not the crop).
+        yy, xx = np.mgrid[y0:y1, x0:x1].astype(np.float64)
+        theta = (xx / W - 0.5) * 2.0 * np.pi
+        phi = (0.5 - yy / H) * np.pi
+        cos_phi = np.cos(phi)
+        X = depth_crop * cos_phi * np.sin(theta)
+        Y = depth_crop * np.sin(phi)
+        Z = depth_crop * cos_phi * np.cos(theta)
+
+        pts = np.stack([X[valid], Y[valid], Z[valid]], axis=-1)
+
+        centroid = pts.mean(axis=0)
+        centered = pts - centroid
+        try:
+            _, _, vt = np.linalg.svd(centered, full_matrices=False)
+        except np.linalg.LinAlgError:
+            return None
+        normal = vt[-1]
+        # Orient toward the camera (world origin) so "up" stays consistent.
+        if np.dot(normal, -centroid) < 0:
+            normal = -normal
+
+        world_up = np.array([0.0, 1.0, 0.0])
+        e1 = np.cross(normal, world_up)
+        if np.linalg.norm(e1) < 1e-6:
+            e1 = np.cross(normal, np.array([1.0, 0.0, 0.0]))
+        e1 = e1 / np.linalg.norm(e1)
+        e2 = np.cross(normal, e1)
+        e2 = e2 / np.linalg.norm(e2)
+
+        u_pts = centered @ e1
+        v_pts = centered @ e2
+        half_extent = max(
+            float(np.percentile(np.abs(u_pts), extent_percentile)),
+            float(np.percentile(np.abs(v_pts), extent_percentile)),
+            1e-3,
+        )
+
+        # Output canvas, defined directly in the fitted plane's own (u, v)
+        # coordinates -- each cell's real-world position, then forward-
+        # projected back into the panorama (same maths as _project_vertices)
+        # and bilinearly sampled, exactly like perspective_crop's own raster.
+        lin = np.linspace(-half_extent, half_extent, out_size)
+        uu, vv = np.meshgrid(lin, lin)
+        world = centroid[None, None, :] + uu[..., None] * e1 + vv[..., None] * e2
+        Xo, Yo, Zo = world[..., 0], world[..., 1], world[..., 2]
+
+        r_xz = np.sqrt(Xo ** 2 + Zo ** 2)
+        if float(r_xz.min()) < 1e-3:
+            return None  # too close to the nadir/zenith singularity to reproject safely
+
+        lat = np.arctan2(Yo, r_xz)
+        lon = np.arctan2(Xo, Zo)
+        pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
+        pv = (0.5 - lat / np.pi) * (H - 1)
+
+        pano_rgb = np.array(self.rgb(), dtype=np.float32)
+        u0 = np.floor(pu).astype(np.int64) % W
+        u1 = (u0 + 1) % W
+        v0 = np.clip(np.floor(pv).astype(np.int64), 0, H - 1)
+        v1 = np.clip(v0 + 1, 0, H - 1)
+        fu = (pu - np.floor(pu))[..., np.newaxis]
+        fv = (pv - np.floor(pv))[..., np.newaxis]
+
+        color = (
+            pano_rgb[v0, u0] * (1 - fu) * (1 - fv)
+            + pano_rgb[v0, u1] * fu * (1 - fv)
+            + pano_rgb[v1, u0] * (1 - fu) * fv
+            + pano_rgb[v1, u1] * fu * fv
+        )
+        rgb_out = np.clip(color, 0, 255).astype(np.uint8)
+
+        if mask is None:
+            return PIL.Image.fromarray(rgb_out, "RGB")
+
+        fu2, fv2 = fu[..., 0], fv[..., 0]
+        mask_s = (
+            mask[v0, u0] * (1 - fu2) * (1 - fv2)
+            + mask[v0, u1] * fu2 * (1 - fv2)
+            + mask[v1, u0] * (1 - fu2) * fv2
+            + mask[v1, u1] * fu2 * fv2
+        )
+        alpha = np.clip(mask_s * 255, 0, 255).astype(np.uint8)
+        return PIL.Image.fromarray(np.dstack([rgb_out, alpha]), "RGBA")
+
     def to_cubemap(self, face_w: int = 512) -> "CubeMap":
         """Convert to a CubeMap via equirectangular → cubemap projection."""
         import py360convert
