@@ -194,12 +194,18 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         # silhouette so FLUX has no contour to read, at the cost of pushing the
         # generated/real boundary that much further into the photographed sky.
         shroud_radius_frac: float = 1 / 15,
+        # Pass 2 FLUX's guidance scale: how strongly the fill follows the time-of-day
+        # sky prompt versus the gradient/haze conditioning image. Higher pushes the
+        # generated clouds/atmosphere further from the muted procedural gradient
+        # toward the prompt's own texture and contrast.
+        guidance_scale: float = 4.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.seam_heal_width_px = seam_heal_width_px
         self.seam_heal_feather_px = seam_heal_feather_px
         self.seam_heal_method = seam_heal_method
         self.shroud_radius_frac = shroud_radius_frac
+        self.guidance_scale = guidance_scale
 
 
 class SkyboxInpaintingStage(PipelineStage):
@@ -396,7 +402,7 @@ class SkyboxInpaintingStage(PipelineStage):
             temp_path=self.temp,
             prompt=prompt,
             num_inference_steps=50,
-            guidance_scale=4.0,
+            guidance_scale=self.config.guidance_scale,
             seed=self.seed,
         )
 

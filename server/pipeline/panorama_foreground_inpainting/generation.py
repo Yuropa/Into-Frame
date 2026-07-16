@@ -4,10 +4,19 @@ from pipeline.inpainting.inpainting import InPainting, InPaintingType
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
+from util.panorama_projection import project_mask_to_pano
 from util.panorama_utils import Panorama
 import numpy as np
 from PIL import Image as PILImage, ImageFilter
 from scipy.ndimage import binary_dilation, binary_closing, label
+
+# Vegetation categories large enough that a mid-ground crop the depth threshold
+# doesn't reach (foreground_distance_m) is still a real occluder of the terrain
+# behind it. Deliberately narrower than object_typing.categories.VEGETATION_CATEGORIES
+# (which also has bush/flower/plant) -- those are exactly the small, individually
+# salient blobs foreground_distance_m's own docstring explains SAM fragments into a
+# scatter of tiny holes rather than one solid region.
+_FOREGROUND_VEGETATION_CATEGORIES = frozenset({"tree", "forest"})
 
 
 class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
@@ -30,6 +39,16 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         shadow gaps), leaving a scatter of small holes rather than one solid
         near-field region. Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH)
         in context; the stage no-ops without it.
+
+        Separately, crops already classified as "tree" or "forest" (by the
+        Object Segmentation/Classification/Typing stages, which now run before
+        this one specifically to feed it) are unioned in regardless of
+        foreground_distance_m — a mid-ground tree well beyond the near-field
+        cutoff still occludes the terrain behind it, and unlike flowers/grass
+        a whole classified tree crop is large and coherent enough that folding
+        it in doesn't reintroduce the small-blob fragmentation problem above.
+        Their per-pixel masks are projected from the source perspective photo
+        into equirectangular panorama space using CameraIntrinsics.
 
     min_region_area_px (int, default 200):
         Connected components of the raw depth-threshold mask smaller than this
@@ -148,13 +167,11 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
 
             near_mask = np.isfinite(depth_arr) & (depth_arr < self.config.foreground_distance_m)
 
-            if not near_mask.any():
-                self.log_info("Nothing within foreground distance, skipping removal")
-                terrain_pil = original_pil
-            else:
-                # Denoise: drop connected components too small to be a real occluder
-                # (stray depth-model glitches), then close small real gaps (a thin
-                # bare patch between two close bushes) into one solid region.
+            # Denoise the depth-threshold mask alone: drop connected components too
+            # small to be a real occluder (stray depth-model glitches). Classified
+            # tree/forest crops below are unioned in afterward, since they've
+            # already been validated by SAM2 + CLIP and don't need this filter.
+            if near_mask.any():
                 labeled, num_labels = label(near_mask)
                 if num_labels > 0:
                     counts = np.bincount(labeled.ravel())
@@ -162,72 +179,115 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                     if small_labels.size:
                         near_mask &= ~np.isin(labeled, small_labels)
 
-                if not near_mask.any():
-                    self.log_info("Nothing left after denoising, skipping removal")
-                    terrain_pil = original_pil
-                else:
-                    closed_mask = binary_closing(
-                        near_mask,
-                        iterations=self.config.closing_radius_px,
-                    )
+            vegetation_mask = self._vegetation_mask(context, h, w)
+            if vegetation_mask is not None:
+                near_mask = near_mask | vegetation_mask
 
-                    dilated_union = (binary_dilation(
-                        closed_mask,
-                        iterations=self.config.mask_dilation_px,
-                    ).astype(np.uint8)) * 255
-                    mask_pil = PILImage.fromarray(dilated_union, mode="L")
+            if not near_mask.any():
+                self.log_info("Nothing within foreground distance, skipping removal")
+                terrain_pil = original_pil
+            else:
+                # Close small real gaps (a thin bare patch between two close bushes)
+                # into one solid region before dilation.
+                closed_mask = binary_closing(
+                    near_mask,
+                    iterations=self.config.closing_radius_px,
+                )
 
-                    if self.temp is not None:
-                        mask_pil.save(self.temp / "foreground_mask.png")
+                dilated_union = (binary_dilation(
+                    closed_mask,
+                    iterations=self.config.mask_dilation_px,
+                ).astype(np.uint8)) * 255
+                mask_pil = PILImage.fromarray(dilated_union, mode="L")
 
-                    objectclear_pil = self._objectclear.inpaint(
-                        original_pil,
-                        mask_pil,
-                        temp_path=self.temp,
-                        guidance_scale=self.config.guidance_scale,
-                        num_inference_steps=self.config.num_inference_steps,
-                    )
+                if self.temp is not None:
+                    mask_pil.save(self.temp / "foreground_mask.png")
 
-                    if self.temp is not None:
-                        objectclear_pil.save(self.temp / "panorama_objectclear_raw.png")
+                objectclear_pil = self._objectclear.inpaint(
+                    original_pil,
+                    mask_pil,
+                    temp_path=self.temp,
+                    guidance_scale=self.config.guidance_scale,
+                    num_inference_steps=self.config.num_inference_steps,
+                )
 
-                    # ObjectClear returns at its native ~512px-short-side inference resolution.
-                    # Supersample before the final upscale to panorama resolution — halves the
-                    # LANCZOS stretch ratio (same trick PanoramaInpaintingStage uses for Flux)
-                    # so the removed region isn't visibly softer than the rest of the panorama.
+                if self.temp is not None:
+                    objectclear_pil.save(self.temp / "panorama_objectclear_raw.png")
+
+                # ObjectClear returns at its native ~512px-short-side inference resolution.
+                # Supersample before the final upscale to panorama resolution — halves the
+                # LANCZOS stretch ratio (same trick PanoramaInpaintingStage uses for Flux)
+                # so the removed region isn't visibly softer than the rest of the panorama.
+                if objectclear_pil.size != (w, h):
+                    if self.config.supersample_result:
+                        if self._samp is None:
+                            self._samp = ImageSupersampling(self.preferred_device)
+                        objectclear_pil = self._samp.supersample(Image(objectclear_pil), self.temp).image
                     if objectclear_pil.size != (w, h):
-                        if self.config.supersample_result:
-                            if self._samp is None:
-                                self._samp = ImageSupersampling(self.preferred_device)
-                            objectclear_pil = self._samp.supersample(Image(objectclear_pil), self.temp).image
-                        if objectclear_pil.size != (w, h):
-                            objectclear_pil = objectclear_pil.resize((w, h), PILImage.LANCZOS)
+                        objectclear_pil = objectclear_pil.resize((w, h), PILImage.LANCZOS)
 
-                    if self.temp is not None:
-                        objectclear_pil.save(self.temp / "panorama_objectclear_upscaled.png")
+                if self.temp is not None:
+                    objectclear_pil.save(self.temp / "panorama_objectclear_upscaled.png")
 
-                    # ObjectClear's own output is a full-panorama resample (it runs inference on
-                    # the whole image, not just the masked region), so pixels outside the mask
-                    # drift from the source even though nothing there should change. Feather-
-                    # composite back onto original_pil, restoring everything but the dilated
-                    # foreground region — mirrors PanoramaInpaintingStage's compositing.
-                    feather_radius = max(8, min(w, h) // 100)
-                    feather_arr = np.array(
-                        mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
-                    ).astype(np.float32)[..., np.newaxis] / 255.0
-                    composited = (
-                        np.array(original_pil) * (1.0 - feather_arr)
-                        + np.array(objectclear_pil) * feather_arr
-                    ).astype(np.uint8)
-                    terrain_pil = PILImage.fromarray(composited)
+                # ObjectClear's own output is a full-panorama resample (it runs inference on
+                # the whole image, not just the masked region), so pixels outside the mask
+                # drift from the source even though nothing there should change. Feather-
+                # composite back onto original_pil, restoring everything but the dilated
+                # foreground region — mirrors PanoramaInpaintingStage's compositing.
+                feather_radius = max(8, min(w, h) // 100)
+                feather_arr = np.array(
+                    mask_pil.filter(ImageFilter.GaussianBlur(radius=feather_radius))
+                ).astype(np.float32)[..., np.newaxis] / 255.0
+                composited = (
+                    np.array(original_pil) * (1.0 - feather_arr)
+                    + np.array(objectclear_pil) * feather_arr
+                ).astype(np.uint8)
+                terrain_pil = PILImage.fromarray(composited)
 
-                    if self.temp is not None:
-                        terrain_pil.save(self.temp / "panorama_terrain.png")
+                if self.temp is not None:
+                    terrain_pil.save(self.temp / "panorama_terrain.png")
 
         self.finish_progress(remove_task)
 
         context.add_panorama(output_key, Panorama(terrain_pil))
         return context
+
+    def _vegetation_mask(self, context: PipelineContext, pano_h: int, pano_w: int) -> np.ndarray | None:
+        """Union of tree/forest crop masks (from Object Segmentation/Classification/
+        Typing, which run earlier specifically to feed this), projected from the
+        source perspective photo into equirectangular panorama pixel space.
+
+        Returns None if there's nothing to add (no objects, no intrinsics, or no
+        crop classified as tree/forest), so callers can skip the union cheaply.
+        """
+        object_count = context.input_object(ContextKey.OBJECT_COUNT)
+        if not object_count:
+            return None
+
+        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        if intrinsics is None:
+            self.log_info("No intrinsics in context, skipping tree/forest mask projection")
+            return None
+
+        mask = np.zeros((pano_h, pano_w), dtype=bool)
+        found = False
+        for idx in range(object_count):
+            metadata = context.input_object(f"metadata_{idx}") or {}
+            if metadata.get("class") not in _FOREGROUND_VEGETATION_CATEGORIES:
+                continue
+
+            box = metadata.get("box")
+            crop = context.input_image(f"crop_{idx}")
+            if not box or crop is None or crop.image.mode != "RGBA":
+                continue
+
+            crop_mask = np.array(crop.image.getchannel("A")) > 127
+            projected = project_mask_to_pano(crop_mask, box, intrinsics, pano_w, pano_h)
+            if projected is not None:
+                mask |= projected
+                found = True
+
+        return mask if found else None
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, output_key = self._resolved_keys()

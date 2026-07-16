@@ -20,6 +20,7 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         num_bins: int = 14,
         min_samples: int = 300,
+        max_extrapolation_factor: float = 20.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -31,6 +32,13 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # panorama (extreme FOV, mostly-sky shot) and any fit would be unreliable — skip and
         # leave the panorama depth as DAP produced it.
         self.min_samples = min_samples
+        # Caps _apply_panorama_depth_curve's log-space extrapolation for raw predictions
+        # beyond the fitted (near-field-only) range at this many times the farthest/nearest
+        # fitted median, instead of letting a slope estimated from a handful of tail bins
+        # extrapolate unbounded — see that function's docstring for why unbounded blow-up
+        # silently discards real distant terrain (mountains) as "out of bounds" once it
+        # dominates the metric scale.
+        self.max_extrapolation_factor = max_extrapolation_factor
 
 
 def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -140,7 +148,10 @@ def _fit_panorama_depth_curve(
 
 
 def _apply_panorama_depth_curve(
-    dap_pred_raw: np.ndarray, centers_sorted: np.ndarray, medians_monotonic: np.ndarray
+    dap_pred_raw: np.ndarray,
+    centers_sorted: np.ndarray,
+    medians_monotonic: np.ndarray,
+    max_extrapolation_factor: float = 20.0,
 ) -> np.ndarray:
     """Applies a curve fitted by _fit_panorama_depth_curve to a (possibly different) raw
     DAP prediction array — the fitted raw→metric response curve is treated as a property of
@@ -154,9 +165,26 @@ def _apply_panorama_depth_curve(
     kilometre away and a tree just past the fitted range end up at the *same* calibrated
     depth. Extrapolate instead, in log-depth space (DAP's raw output approaches its ceiling
     asymptotically as true depth grows, so metric depth should keep growing past the fitted
-    range, not flatten) using the slope from a small tail of the fitted curve. This can't
-    recover the true distance — there's no ground truth out there — but it keeps far depths
-    monotonically ordered instead of all landing on one value.
+    range, not flatten) using the slope from a small tail of the fitted curve.
+
+    DAP's raw output saturates well before true distance does: a mountainside a few hundred
+    metres out and hard-clamped sky pixels both read at (or past) the same near-1.0 ceiling,
+    right at the edge of a curve fit only against tens of metres of hero-photo overlap. A
+    slope estimated from that fit's last few bins, applied over the (potentially large) gap
+    out to the ceiling, is extremely sensitive to noise once exponentiated — a small slope
+    error compounds into a wildly oversized, effectively fabricated depth (observed: tens of
+    kilometres) for every pixel sharing that saturated raw value. That single huge, near-
+    uniform outlier then dominates anything downstream that treats panorama depth as a
+    trustworthy metric scale (height-map Y-bounds checks, the debug point-cloud export's
+    colour normalization), silently discarding real terrain — mountains included — as
+    "out of bounds" instead of just "far".
+
+    Cap the extrapolated result at max_extrapolation_factor times the farthest (nearest)
+    fitted median instead of letting it grow unbounded. This can't recover the true distance
+    for pixels the model genuinely can't resolve — there's no signal left to extrapolate from
+    once DAP saturates — but it keeps "far" bounded to a plausible multiple of the fit's own
+    scale, monotonically ordered past the fitted range, rather than an arbitrary, ungrounded
+    number.
     """
     x = dap_pred_raw.astype(np.float64).ravel()
     corrected = np.interp(x, centers_sorted, medians_monotonic)
@@ -169,13 +197,17 @@ def _apply_panorama_depth_curve(
         if np.any(far_mask):
             dx = centers_sorted[-1] - centers_sorted[-1 - tail]
             slope = (log_med[-1] - log_med[-1 - tail]) / dx if abs(dx) > 1e-9 else 0.0
-            corrected[far_mask] = np.exp(log_med[-1] + slope * (x[far_mask] - centers_sorted[-1]))
+            extrapolated = np.exp(log_med[-1] + slope * (x[far_mask] - centers_sorted[-1]))
+            far_cap = medians_monotonic[-1] * max_extrapolation_factor
+            corrected[far_mask] = np.minimum(extrapolated, far_cap)
 
         near_mask = x < centers_sorted[0]
         if np.any(near_mask):
             dx = centers_sorted[tail] - centers_sorted[0]
             slope = (log_med[tail] - log_med[0]) / dx if abs(dx) > 1e-9 else 0.0
-            corrected[near_mask] = np.exp(log_med[0] + slope * (x[near_mask] - centers_sorted[0]))
+            extrapolated = np.exp(log_med[0] + slope * (x[near_mask] - centers_sorted[0]))
+            near_floor = medians_monotonic[0] / max_extrapolation_factor
+            corrected[near_mask] = np.maximum(extrapolated, near_floor)
 
     corrected = np.clip(corrected, 1e-3, 1e6)
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
@@ -188,6 +220,7 @@ def calibrate_panorama_depth(
     sky_mask: Optional[np.ndarray],
     num_bins: int = 14,
     min_samples: int = 300,
+    max_extrapolation_factor: float = 20.0,
 ) -> Optional[np.ndarray]:
     """Fits a curve (see _fit_panorama_depth_curve) and applies it to dap_pred_raw in one call.
     Returns None if too few valid overlap samples survive filtering."""
@@ -196,7 +229,7 @@ def calibrate_panorama_depth(
     )
     if curve is None:
         return None
-    return _apply_panorama_depth_curve(dap_pred_raw, *curve)
+    return _apply_panorama_depth_curve(dap_pred_raw, *curve, max_extrapolation_factor=max_extrapolation_factor)
 
 
 class PanoramaDepthCalibrationStage(PipelineStage):
@@ -294,7 +327,9 @@ class PanoramaDepthCalibrationStage(PipelineStage):
 
         before_min, before_max = panorama_depth.min(), panorama_depth.max()
         dap_pred_raw = panorama_depth.depth.astype(np.float64) / 100.0
-        calibrated = Depth(_apply_panorama_depth_curve(dap_pred_raw, *curve))
+        calibrated = Depth(_apply_panorama_depth_curve(
+            dap_pred_raw, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
+        ))
         if self.temp is not None:
             calibrated.save_debug_image(self.temp / "pano_depth_calibrated.png")
 
@@ -306,7 +341,9 @@ class PanoramaDepthCalibrationStage(PipelineStage):
 
         if panorama_object_depth is not None:
             obj_before_min, obj_before_max = panorama_object_depth.min(), panorama_object_depth.max()
-            calibrated_object = Depth(_apply_panorama_depth_curve(dap_pred_raw_fit, *curve))
+            calibrated_object = Depth(_apply_panorama_depth_curve(
+                dap_pred_raw_fit, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
+            ))
             if self.temp is not None:
                 calibrated_object.save_debug_image(self.temp / "pano_object_depth_calibrated.png")
             self.log_info(

@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import PIL.Image
 from pathlib import Path
-from scipy.ndimage import distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, minimum_filter, zoom
+from scipy.ndimage import binary_closing, distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, median_filter, minimum_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -42,9 +42,15 @@ class HeightMapGenerator:
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
+        elevation_distortion_power: float = 1.0,
         min_forward_samples: int = 4,
         fill_boundary_falloff_cells: float = 6.0,
         min_component_area_fraction: float = 0.001,
+        despike_threshold_m: float = 0.3,
+        despike_window: int = 5,
+        despike_reference_distance_m: float = 10.0,
+        region_closing_iterations: int = 2,
+        single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -98,7 +104,17 @@ class HeightMapGenerator:
         camera_height_meters: assumed height of the camera above the ground plane
                               (used to derive the Y floor filter and flood-fill seed).
         ground_y_max: upper Y bound in camera space; points with Y <= this are ground
-                      candidates (e.g. -0.5 = at least 0.5 m below camera).
+                      candidates (e.g. -0.5 = at least 0.5 m below camera). Only
+                      enforced where region_type_mask is unavailable -- a real
+                      slope, hill, or cliff can genuinely rise above the camera's
+                      own eye level (someone standing partway up a mountain still
+                      looks at more mountain going up), so wherever a pixel is
+                      semantically classified as ground-valid (see
+                      RegionType.ground_valid), that classification alone is
+                      trusted and this ceiling is skipped for it. Without a region
+                      mask there's no way to distinguish real elevated terrain from
+                      a depth-model sky/artifact glitch, so the ceiling still
+                      applies as a fallback guard in that case.
         sky_mask: optional bool (H, W) array from the depth model where True = sky.
                   Sky pixels are excluded before projection, preventing the horizon
                   artefacts that come from sky pixels being assigned far depth values.
@@ -131,6 +147,19 @@ class HeightMapGenerator:
                                   camera height — using camera height here (as before)
                                   collapses certainty within a couple of metres, well
                                   under any usable confidence_threshold downstream.
+        elevation_distortion_power: exponent on cos(phi) (phi = true camera-relative
+                                  elevation angle to each observed cell), multiplied
+                                  into certainty. This is the standard equirectangular
+                                  areal-distortion factor: 1 at the horizon ("straight
+                                  ahead", least warped), falling to 0 at the top/bottom
+                                  of the source panorama (looking straight up or down,
+                                  where equirectangular stretching -- and therefore raw
+                                  depth-estimate reliability -- is worst). Independent
+                                  of certainty_falloff_meters: that captures how much a
+                                  depth error amplifies into ground-position error at
+                                  grazing incidence; this captures source-image
+                                  reliability by row, regardless of ground distance.
+                                  0 disables (cos^0 == 1, neutral). See _build_certainty.
         min_forward_samples: equirectangular mode only. Minimum number of independent
                             forward-projected panorama pixels that must land in a grid
                             cell before its single inverse-mapped sample is overridden
@@ -142,6 +171,53 @@ class HeightMapGenerator:
                             synthetic fill's injected noise needs before reaching full
                             amplitude. Cells nearer a real observation than this stay
                             close to its diffused trend instead of drifting via noise.
+        despike_threshold_m: equirectangular mode only. A single-inverse-mapped-
+                            sample cell (i.e. not in dense_mask — see
+                            _forward_project_cell_stats) whose height differs from
+                            its own despike_window-sized neighbourhood median by
+                            more than this is replaced by that median. Single-
+                            sample cells have no intra-cell averaging to smooth
+                            over source depth-map noise; a "flying pixel" edge
+                            where the depth model flickers between two competing
+                            surfaces from one equirectangular pixel to the next
+                            otherwise lands as an alternating checkerboard of
+                            wildly different heights between adjacent grid cells.
+                            0 disables. See _despike_single_sample_cells.
+        despike_window: odd cell-window size for the local median used above.
+        despike_reference_distance_m: equirectangular mode only. Per-pixel depth-
+                            model noise grows with sampled radial range, and is
+                            further amplified for elevated/steep rays via
+                            Y = depth * sin(phi) -- a single fixed
+                            despike_threshold_m tuned for near, roughly-flat
+                            ground under-catches real noise on longer, steeper
+                            single-sample rays. The effective threshold shrinks
+                            below despike_threshold_m (never grows past it) for
+                            cells sampled beyond this distance, scaled by
+                            despike_reference_distance_m / sampled_depth. See
+                            _despike_single_sample_cells.
+        region_closing_iterations: equirectangular mode only. Binary closing
+                            iterations applied to the ground-valid classification
+                            (see _ground_valid_mask) before it gates which pixels
+                            count as ground. Per-pixel semantic segmentation is
+                            noisy right at class boundaries; closing removes
+                            single-pixel holes/islands that would otherwise show
+                            up as salt-and-pepper speckle in both the observed
+                            mask and the height values sampled from it. 0 disables.
+        single_sample_blur_sigma: equirectangular mode only. Gaussian sigma (in
+                            grid cells) for a partial blur applied only to
+                            single-inverse-mapped-sample cells (not backed by
+                            _forward_project_cell_stats' dense_mask), blended in
+                            per-cell by (1 - certainty) -- confident single-sample
+                            cells stay close to their raw value, poorly-
+                            conditioned ones (see elevation_distortion_power) lean
+                            further toward the local average. Dense cells are
+                            never touched: they already average multiple real
+                            samples, so there's no single-ray noise to correct.
+                            Targets pervasive per-pixel depth-model dither that
+                            despiking's outlier test can't catch (neighbouring
+                            single-sample cells usually carry similar-magnitude
+                            noise, so no individual cell stands out from a clean
+                            local median). 0 disables.
         """
         d = depth.depth.astype(np.float32)
         h, w = d.shape
@@ -166,17 +242,27 @@ class HeightMapGenerator:
             phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
             Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
 
-            valid = (
-                np.isfinite(sampled_depth) & (sampled_depth > 0)
-                & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)
-            )
+            region_valid = None
+            if region_type_mask is not None:
+                ground_valid_pano = HeightMapGenerator._ground_valid_mask(
+                    region_type_mask, d.shape, closing_iterations=region_closing_iterations
+                )
+                region_valid = nearest_sample_grid(
+                    ground_valid_pano.astype(np.uint8), pano_u, pano_v
+                ).astype(bool)
+
+            valid = np.isfinite(sampled_depth) & (sampled_depth > 0) & (Y_grid >= ground_y_min)
+            if region_valid is not None:
+                # A semantically-classified ground/terrain pixel (mountain, hill,
+                # cliff, trail, ...) can legitimately sit above the camera's own eye
+                # level -- someone standing partway up a slope still looks at more
+                # slope going up. ground_y_max below is only a fallback sky/artifact
+                # guard for when there's no classification to trust instead.
+                valid &= region_valid
+            else:
+                valid &= Y_grid <= ground_y_max
             if sky_mask is not None and sky_mask.shape == d.shape:
                 valid &= ~nearest_sample_grid(sky_mask.astype(np.uint8), pano_u, pano_v).astype(bool)
-            if region_type_mask is not None:
-                rm = np.round(region_type_mask).astype(np.int32)
-                if rm.shape != d.shape:
-                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-                valid &= np.isin(nearest_sample_grid(rm, pano_u, pano_v), _VALID_REGION_INDICES)
             if nadir_exclusion_radius > 0:
                 valid &= r_grid >= nadir_exclusion_radius
 
@@ -191,16 +277,51 @@ class HeightMapGenerator:
             # samples in the same cell.
             cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
-            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg = (
+            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg, any_forward_mask = (
                 HeightMapGenerator._forward_project_cell_stats(
                     d, sky_mask, region_type_mask, grid_size_meters, grid_resolution,
                     ground_y_max, ground_y_min, nadir_exclusion_radius, min_forward_samples,
+                    region_closing_iterations,
                 )
             )
             if dense_mask.any():
                 height_map[dense_mask] = fwd_mean_y[dense_mask]
                 cell_relief[dense_mask] = fwd_relief[dense_mask]
             cell_slope_deg = fwd_slope_deg
+
+            # The primary single-sample ray always assumes its target lies on a
+            # flat ground plane at the camera's own height (phi_grid <= 0
+            # identically), so Y_grid can never represent a point above camera
+            # height even when the real surface there does -- it's a correct
+            # position along *some* fixed downward ray, just not necessarily the
+            # one that would actually reach whatever is really at this cell's
+            # (X, Z). Any real forward-projected sample -- dense or not -- is a
+            # genuine unprojection using that pixel's own true ray angle, so it's
+            # always at least as correctly positioned/signed as the primary ray's
+            # flat-ground guess (an earlier version of this tried to gate this on
+            # a flat-ground depth-consistency check first; real outdoor terrain
+            # routinely isn't flat -- rolling meadow, a slope, a distant ridge --
+            # so that consistency check fired on the majority of ordinary cells
+            # and collapsed coverage. Real forward-projected data is simply
+            # always preferred instead, unconditionally, whenever it exists).
+            if any_forward_mask.any():
+                use_weak = valid & ~dense_mask & any_forward_mask
+                height_map[use_weak] = fwd_mean_y[use_weak]
+                cell_relief[use_weak] = fwd_relief[use_weak]
+
+            if despike_threshold_m > 0:
+                height_map, spike_mask = HeightMapGenerator._despike_single_sample_cells(
+                    height_map, protected_mask=dense_mask,
+                    threshold_m=despike_threshold_m, window=despike_window,
+                    distance_m=sampled_depth, reference_distance_m=despike_reference_distance_m,
+                )
+                if spike_mask.any():
+                    cell_relief[spike_mask] = 0.0
+                    cell_slope_deg[spike_mask] = 0.0
+                    if debug_dir is not None:
+                        PIL.Image.fromarray((spike_mask * 255).astype(np.uint8), "L").save(
+                            debug_dir / "heightmap_despiked_cells.png"
+                        )
 
         else:
             if sky_mask is not None and sky_mask.shape == d.shape:
@@ -215,15 +336,19 @@ class HeightMapGenerator:
             Z = d
 
             ground_mask = (
-                (Y <= ground_y_max) & (Y >= ground_y_min)
+                (Y >= ground_y_min)
                 & (np.abs(Z) <= half) & (np.abs(X) <= half)
                 & np.isfinite(d)
             )
             if region_type_mask is not None:
-                rm = np.round(region_type_mask).astype(np.int32)
-                if rm.shape != d.shape:
-                    rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-                ground_mask &= np.isin(rm, _VALID_REGION_INDICES)
+                # See the equirectangular path above: classified ground/terrain is
+                # allowed above the camera's own eye level; ground_y_max is only a
+                # fallback guard for when there's no classification to trust instead.
+                ground_mask &= HeightMapGenerator._ground_valid_mask(
+                    region_type_mask, d.shape, closing_iterations=region_closing_iterations
+                )
+            else:
+                ground_mask &= Y <= ground_y_max
 
             Xg, Yg, Zg = X[ground_mask], Y[ground_mask], Z[ground_mask]
             if len(Xg) == 0:
@@ -299,6 +424,7 @@ class HeightMapGenerator:
                 camera_height_meters=camera_height_meters,
                 region_type_mask=region_type_mask,
                 nadir_exclusion_radius=nadir_exclusion_radius,
+                region_closing_iterations=region_closing_iterations,
             )
 
         # True observed mask: cells with a genuine direct measurement (primary
@@ -311,12 +437,17 @@ class HeightMapGenerator:
         # use to decide "is this a real point" rather than "how much do we trust it."
         true_observed = ~np.isnan(height_map)
 
-        # Flat ground prior: pin all cells within the nadir exclusion radius to
-        # -camera_height_meters. The equirectangular depth model is unreliable near
-        # the nadir, and the ground directly under the user is expected to be
-        # approximately level. These cells receive a low fixed certainty so the solver
-        # treats them as a soft prior rather than an observation, letting the Laplacian
-        # blend them smoothly into real terrain observations beyond the zone.
+        # Ground-under-the-user prior: the equirectangular depth model is unreliable
+        # near the nadir, so cells within the nadir exclusion radius get a synthetic
+        # value rather than a direct sample. Rather than assuming a hard-flat plane
+        # at -camera_height_meters, interpolate inward from the real terrain just
+        # outside the disc via pure Laplacian diffusion (no injected noise, unlike
+        # _interpolate's synthetic multi-octave fill for large gaps) -- this follows
+        # whatever local slope the real surrounding ground actually has, while still
+        # deferring entirely to real data at the boundary. These cells receive a low
+        # fixed certainty so the solver treats them as a soft prior rather than an
+        # observation, letting the Laplacian blend them smoothly into real terrain
+        # observations beyond the zone.
         cell_m = grid_size_meters / grid_resolution
         _x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float32)
         _X_cell, _Z_cell = np.meshgrid(_x_c, _x_c)
@@ -325,9 +456,33 @@ class HeightMapGenerator:
         flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
         if nadir_exclusion_radius > 0:
             flat_prior_mask = _r_cell <= nadir_exclusion_radius
-            height_map[flat_prior_mask] = -camera_height_meters
+
+            # The disc is always centred on the grid; diffuse over a small local
+            # crop around it (padded well past the disc radius to reach real
+            # boundary data) rather than the whole grid -- the disc's resolved
+            # value only depends on its immediate surroundings.
+            radius_cells = nadir_exclusion_radius / cell_m
+            pad = max(int(radius_cells * 6), 64)
+            c0 = grid_resolution // 2
+            lo, hi = max(0, c0 - pad), min(grid_resolution, c0 + pad)
+
+            crop_hm = height_map[lo:hi, lo:hi]
+            crop_disc = flat_prior_mask[lo:hi, lo:hi]
+            crop_known = ~np.isnan(crop_hm) & ~crop_disc
+
+            if crop_known.any():
+                seed = np.where(np.isnan(crop_hm), 0.0, crop_hm).astype(np.float32)
+                diffused = diffuse_heightmap(
+                    seed, crop_known, n_iters=max(200, int(radius_cells) * 8), seed_from='nearest',
+                )
+                height_map[lo:hi, lo:hi] = np.where(crop_disc, diffused, crop_hm)
+            else:
+                # No real terrain nearby yet to interpolate from -- fall back to
+                # the flat assumption.
+                height_map[flat_prior_mask] = -camera_height_meters
+
             # Any measured relief/slope here belonged to a height value we just
-            # discarded in favour of the flat prior -- it's no longer evidence of
+            # discarded in favour of the prior -- it's no longer evidence of
             # anything.
             cell_relief[flat_prior_mask] = 0.0
             cell_slope_deg[flat_prior_mask] = 0.0
@@ -347,12 +502,35 @@ class HeightMapGenerator:
         # Flat-prior cells get a fixed low certainty (flat_zone_certainty).
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
-            observed, grid_size_meters, grid_resolution, certainty_falloff_meters,
+            observed, height_map, grid_size_meters, grid_resolution, certainty_falloff_meters,
             nadir_exclusion_radius=nadir_exclusion_radius,
             nadir_ramp_width=nadir_ramp_width,
+            elevation_distortion_power=elevation_distortion_power,
         )
         if flat_prior_mask.any():
             certainty[flat_prior_mask] = flat_zone_certainty
+
+        # Partial, density-gated blur: single-inverse-mapped-sample cells (not
+        # backed by _forward_project_cell_stats' dense_mask) have no intra-cell
+        # averaging to fall back on, so per-pixel depth-model noise survives as
+        # visible per-cell dither -- not sharp enough for despiking's outlier test
+        # (a cell disagreeing with an otherwise-agreeing neighbourhood), since
+        # neighbouring single-sample cells usually carry similar-magnitude noise
+        # rather than one cell standing out from a clean local median. Blur is
+        # blended in per-cell by (1 - certainty), which by this point already
+        # reflects both distance and projection-distortion trust (see
+        # _build_certainty) -- confident single-sample cells stay close to their
+        # raw value, poorly-conditioned ones lean further toward the local
+        # average. Dense cells are never blurred: they're already a real
+        # multi-sample average, so there's no single-ray noise here to correct.
+        if use_equirectangular and single_sample_blur_sigma > 0:
+            blurred = gaussian_filter(
+                np.where(observed, height_map, 0.0), sigma=single_sample_blur_sigma
+            )
+            blur_weight = np.where(observed & ~dense_mask, 1.0 - certainty, 0.0)
+            height_map = np.where(
+                observed, height_map * (1.0 - blur_weight) + blurred * blur_weight, height_map
+            ).astype(np.float32)
 
         if debug_dir is not None:
             PIL.Image.fromarray((observed * 255).astype(np.uint8), "L").save(
@@ -399,6 +577,38 @@ class HeightMapGenerator:
         return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id
 
     @staticmethod
+    def _ground_valid_mask(
+        region_type_mask: np.ndarray,
+        target_shape: tuple[int, int],
+        closing_iterations: int = 2,
+    ) -> np.ndarray:
+        """
+        Boolean ground-valid mask (see RegionType.ground_valid) from a per-pixel
+        semantic region classification, resized to target_shape with small
+        holes/islands closed.
+
+        Per-pixel semantic segmentation is noisy right at class boundaries
+        (grass vs rock vs vegetation): a single stray pixel misclassified on
+        either side of the boundary otherwise becomes a hole in an
+        otherwise-solid ground region, or a false-positive island inside an
+        otherwise-solid occluded one. Sampled directly (as every caller of this
+        mask does), that shows up as a salt-and-pepper flicker in which cells
+        count as observed -- and since each affected cell has no intra-cell
+        averaging to fall back on, the flicker shows up as visible speckle in
+        the height values themselves, not just the mask. A small binary closing
+        (dilate then erode) removes holes/islands up to its own size while
+        leaving real, multi-pixel occlusion boundaries (an actual patch of
+        vegetation) untouched.
+        """
+        rm = np.round(region_type_mask).astype(np.int32)
+        if rm.shape != target_shape:
+            rm = zoom(rm, (target_shape[0] / rm.shape[0], target_shape[1] / rm.shape[1]), order=0)
+        valid = np.isin(rm, _VALID_REGION_INDICES)
+        if closing_iterations > 0:
+            valid = binary_closing(valid, iterations=closing_iterations)
+        return valid
+
+    @staticmethod
     def _forward_project_cell_stats(
         d: np.ndarray,
         sky_mask: Optional[np.ndarray],
@@ -409,10 +619,11 @@ class HeightMapGenerator:
         ground_y_min: float,
         nadir_exclusion_radius: float,
         min_samples: int,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        region_closing_iterations: int = 2,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Forward-project every panorama pixel (rather than one inverse-mapped ray per
-        output cell) and compute real per-cell statistics wherever enough independent
+        output cell) and compute real per-cell statistics wherever any independent
         samples land in the same cell to support them.
 
         Near the camera, many panorama pixels legitimately land in one fine grid
@@ -420,33 +631,50 @@ class HeightMapGenerator:
         inverse mapping in the equirectangular branch above cannot see. Far from
         the camera the opposite is true (one pixel covers a huge ground area, most
         cells stay empty), which is why inverse mapping is used as the primary
-        projection there. This recovers, wherever a cell is dense enough:
+        projection there. This recovers:
 
-          mean_y    -- per-cell mean elevation from multiple real samples, instead
-                       of a single ray sample.
+          mean_y    -- per-cell mean elevation from real forward-projected samples,
+                       instead of a single assumed-flat-ground ray. Populated for
+                       any cell with >= 1 sample (see any_mask), not just dense
+                       ones: unlike the primary inverse-mapped path (which always
+                       assumes the target lies on a flat ground plane at the
+                       camera's own height, and so can never represent a point
+                       above camera height even when the real sample does), every
+                       forward-projected point is a genuine, correctly-signed and
+                       correctly-positioned 3-D unprojection regardless of count --
+                       it just lacks intra-cell averaging below the dense
+                       threshold, same as the primary path's single sample.
           relief    -- per-cell Y range (max - min); the same intra-cell-relief
                        signal the pinhole branch already produces, previously
-                       always zero here.
+                       always zero here. Also populated for any populated cell
+                       (0 for a lone sample, same as "nothing to measure a range
+                       from").
           slope_deg -- per-cell surface tilt (0 = flat, 90 = vertical) from the
                        smallest-eigenvalue eigenvector of the points' 3x3
                        covariance matrix (a local least-squares plane fit) -- a
                        direct measurement of true 3-D orientation, not a proxy
-                       inferred from a 2-D gradient or a scalar Y range.
+                       inferred from a 2-D gradient or a scalar Y range. Requires
+                       >= min_samples (dense_mask), since a plane fit needs >= 3
+                       points and is noisy just above that.
 
         Grouping is done via a unique-linear-index groupby (np.unique +
         return_inverse) rather than scattering into full (grid_resolution,
         grid_resolution) accumulators, so cost and memory scale with the number
         of valid points / populated cells, not the square of grid_resolution.
 
-        Returns (dense_mask, mean_y, relief, slope_deg), all (grid_resolution,
-        grid_resolution). Only cells with >= min_samples independent forward
-        projections are set in dense_mask; the other three arrays are 0 elsewhere.
+        Returns (dense_mask, mean_y, relief, slope_deg, any_mask), all
+        (grid_resolution, grid_resolution) except any_mask/dense_mask which are
+        bool. any_mask marks every cell with >= 1 forward-projected sample;
+        dense_mask (a subset) marks cells with >= min_samples, the only ones with
+        a real slope_deg. mean_y/relief are populated wherever any_mask is set;
+        slope_deg only wherever dense_mask is set.
         """
         empty = (
             np.zeros((grid_resolution, grid_resolution), dtype=bool),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=bool),
         )
 
         d_masked = d.copy()
@@ -458,16 +686,20 @@ class HeightMapGenerator:
         half = grid_size_meters / 2.0
         valid = (
             np.isfinite(d_masked) & (d_masked > 0)
-            & (Y <= ground_y_max) & (Y >= ground_y_min)
+            & (Y >= ground_y_min)
             & (np.abs(X) <= half) & (np.abs(Z) <= half)
         )
         if nadir_exclusion_radius > 0:
             valid &= np.hypot(X, Z) >= nadir_exclusion_radius
         if region_type_mask is not None:
-            rm = np.round(region_type_mask).astype(np.int32)
-            if rm.shape != d.shape:
-                rm = zoom(rm, (d.shape[0] / rm.shape[0], d.shape[1] / rm.shape[1]), order=0)
-            valid &= np.isin(rm, _VALID_REGION_INDICES)
+            # See the primary equirectangular projection above: a classified
+            # ground/terrain pixel is allowed above the camera's own eye level;
+            # ground_y_max is only a fallback guard when there's no classification.
+            valid &= HeightMapGenerator._ground_valid_mask(
+                region_type_mask, d.shape, closing_iterations=region_closing_iterations
+            )
+        else:
+            valid &= Y <= ground_y_max
 
         Xg, Yg, Zg = X[valid], Y[valid], Z[valid]
         if len(Xg) == 0:
@@ -536,39 +768,140 @@ class HeightMapGenerator:
             slope_1d[dense_idx] = np.degrees(np.arccos(normal_y))
 
         dense_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        any_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
         mean_y_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
         relief_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
         slope_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+
+        zi_all = (uniq_lin // grid_resolution).astype(np.int64)
+        xi_all = (uniq_lin % grid_resolution).astype(np.int64)
+        any_mask[zi_all, xi_all] = True
+        mean_y_grid[zi_all, xi_all] = mean_y.astype(np.float32)
+        relief_grid[zi_all, xi_all] = relief_1d.astype(np.float32)
 
         d_lin = uniq_lin[dense_idx]
         zi_d = (d_lin // grid_resolution).astype(np.int64)
         xi_d = (d_lin % grid_resolution).astype(np.int64)
 
         dense_mask[zi_d, xi_d] = True
-        mean_y_grid[zi_d, xi_d] = mean_y[dense_idx].astype(np.float32)
-        relief_grid[zi_d, xi_d] = relief_1d[dense_idx].astype(np.float32)
         slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
 
-        return dense_mask, mean_y_grid, relief_grid, slope_grid
+        return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask
+
+    @staticmethod
+    def _despike_single_sample_cells(
+        height_map: np.ndarray,
+        protected_mask: np.ndarray,
+        threshold_m: float,
+        window: int,
+        distance_m: Optional[np.ndarray] = None,
+        reference_distance_m: float = 10.0,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Replace isolated height outliers among single-inverse-mapped-sample cells
+        with their local neighbourhood median.
+
+        Single-sample cells (protected_mask is False -- i.e. not backed by
+        _forward_project_cell_stats' dense_mask) have no intra-cell averaging to
+        smooth over source depth-map noise: a "flying pixel" edge where the depth
+        model flickers between two competing surfaces from one equirectangular
+        pixel to the next lands directly as an alternating checkerboard of wildly
+        different heights between immediately adjacent grid cells, instead of the
+        smooth gradient a real slope would produce.
+
+        A cell is only corrected if it diverges from its own window-sized
+        neighbourhood median by more than threshold_m. A genuine, spatially
+        coherent step edge (a real cliff/ridge) moves many neighbouring cells
+        together, so the local median there already reflects the step and isn't
+        flagged; only a cell disagreeing with a neighbourhood that mostly agrees
+        with itself gets touched -- the same principle as a standard median/
+        Hampel despike filter for salt-and-pepper sensor noise. Dense cells
+        (protected_mask) are never candidates, even if their value happens to
+        differ from neighbours, since they're backed by real multi-sample
+        statistics rather than a single noisy ray.
+
+        distance_m (optional): per-cell sampled radial depth (e.g. equirectangular
+        sampled_depth), same shape as height_map. Per-pixel depth-model noise
+        grows with range, and Y = depth * sin(phi) further amplifies it for
+        elevated/steep rays -- a fixed threshold_m tuned for near, roughly-flat
+        ground silently under-catches real noise further out. When given, the
+        effective threshold shrinks below threshold_m (never above it) for cells
+        sampled beyond reference_distance_m, scaled by
+        reference_distance_m / distance_m -- near cells keep the base threshold,
+        far single-sample cells are held to a stricter one.
+
+        Returns (height_map, spike_mask) -- a new array (input is not mutated)
+        and the bool mask of cells that were replaced, so callers can also clear
+        any relief/slope measurement that belonged to the discarded value.
+        """
+        valid = ~np.isnan(height_map)
+        candidates = valid & ~protected_mask
+        empty_spikes = np.zeros_like(valid)
+        if not candidates.any():
+            return height_map, empty_spikes
+
+        # The local median needs a real value at every cell to be meaningful --
+        # fill NaN gaps with their nearest valid neighbour first (cheap,
+        # vectorized) rather than letting missing cells pollute the window.
+        filled = height_map
+        if not valid.all():
+            nearest_idx = distance_transform_edt(~valid, return_distances=False, return_indices=True)
+            filled = height_map[tuple(nearest_idx)]
+
+        local_median = median_filter(filled, size=window)
+
+        if distance_m is not None:
+            scale = np.clip(reference_distance_m / np.maximum(distance_m, 1e-6), 0.0, 1.0)
+            effective_threshold = threshold_m * scale
+        else:
+            effective_threshold = threshold_m
+
+        spike = candidates & (np.abs(height_map - local_median) > effective_threshold)
+        if not spike.any():
+            return height_map, empty_spikes
+
+        despiked = height_map.copy()
+        despiked[spike] = local_median[spike]
+        return despiked, spike
 
     @staticmethod
     def _build_certainty(
         observed: np.ndarray,
+        height_map: np.ndarray,
         grid_size_meters: float,
         grid_resolution: int,
         certainty_falloff_meters: float,
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
+        elevation_distortion_power: float = 1.0,
     ) -> np.ndarray:
         """
         Build a [0, 1] certainty map over the top-down grid.
 
-        Observed cells are scored by distance-decayed certainty (see
-        ground_projection_certainty; falloff_m=certainty_falloff_meters, a
-        depth-model-trust radius, not physical camera height) multiplied by a
-        smooth nadir ramp. The ramp rises from 0 at nadir_exclusion_radius to 1
-        at nadir_exclusion_radius + nadir_ramp_width (squared so it has zero
-        slope at the start, avoiding a visible ring in the solver output).
+        Observed cells are scored by three multiplied factors:
+
+          1. Distance-decayed certainty (see ground_projection_certainty;
+             falloff_m=certainty_falloff_meters, a depth-model-trust radius, not
+             physical camera height).
+          2. A smooth nadir ramp rising from 0 at nadir_exclusion_radius to 1 at
+             nadir_exclusion_radius + nadir_ramp_width (squared so it has zero
+             slope at the start, avoiding a visible ring in the solver output).
+          3. cos(phi)^elevation_distortion_power, phi = the true camera-relative
+             elevation angle to each cell's observed point (arctan2(Y, horizontal
+             distance) -- not the flat-ground-assumed depression angle used
+             elsewhere, since dense forward-projected cells can carry real
+             elevation above the camera). This is the standard equirectangular
+             areal-distortion factor: 1 straight ahead at the horizon (phi=0,
+             least warped, one image pixel ~= one true solid angle), falling to 0
+             at the top and bottom of the panorama (phi -> +-90 deg, zenith/nadir,
+             where equirectangular stretching is worst and a single image pixel
+             represents an increasingly ambiguous/compressed true direction).
+             This is a real, independent degradation from (1): (1) captures how
+             much a given depth error amplifies into ground-position error at
+             grazing incidence; this captures how reliable the raw depth
+             estimate itself tends to be, purely as a function of where in the
+             source image it came from. 0 disables (cos^0 == 1, neutral).
+
         Unobserved cells get 0.
         """
         half = grid_size_meters / 2.0
@@ -581,6 +914,14 @@ class HeightMapGenerator:
             0.0, 1.0,
         ).astype(np.float32) ** 2
         certainty_field = ground_projection_certainty(X_grid, Z_grid, certainty_falloff_meters) * nadir_ramp
+
+        if elevation_distortion_power > 0:
+            phi_true = np.arctan2(
+                np.where(observed, height_map, 0.0).astype(np.float64), np.maximum(r_grid, 1e-6)
+            )
+            distortion = np.clip(np.cos(phi_true), 0.0, 1.0) ** elevation_distortion_power
+            certainty_field = certainty_field * distortion.astype(np.float32)
+
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 
     @staticmethod
@@ -667,6 +1008,7 @@ class HeightMapGenerator:
         camera_height_meters: float,
         region_type_mask: Optional[np.ndarray] = None,
         nadir_exclusion_radius: float = 0.0,
+        region_closing_iterations: int = 2,
     ) -> np.ndarray:
         """
         Fill empty (NaN) grid cells from a 360° equirectangular depth map via inverse
@@ -680,13 +1022,9 @@ class HeightMapGenerator:
         if sky_mask is not None and sky_mask.shape == d_excl.shape:
             d_excl[sky_mask] = np.nan
         if region_type_mask is not None:
-            pd = panorama_depth.depth
-            rm = np.round(region_type_mask).astype(np.int32)
-            if rm.shape != pd.shape:
-                rm = zoom(rm, (pd.shape[0] / rm.shape[0], pd.shape[1] / rm.shape[1]), order=0)
-            valid_region = np.zeros(pd.shape, dtype=bool)
-            for idx in _VALID_REGION_INDICES:
-                valid_region |= (rm == idx)
+            valid_region = HeightMapGenerator._ground_valid_mask(
+                region_type_mask, panorama_depth.depth.shape, closing_iterations=region_closing_iterations
+            )
             d_excl[~valid_region] = np.nan
 
         sampled_depth, _, _, X_grid, Z_grid = inverse_map_panorama_to_grid(
@@ -700,9 +1038,15 @@ class HeightMapGenerator:
 
         pano_valid = (
             np.isfinite(sampled_depth) & (sampled_depth > 0)
-            & (Y_grid >= ground_y_min) & (Y_grid <= ground_y_max)
+            & (Y_grid >= ground_y_min)
             & (r_grid >= nadir_exclusion_radius)
         )
+        if region_type_mask is None:
+            # d_excl above already NaN'd out non-ground-valid pixels when a region
+            # mask was supplied, so classified ground/terrain is already allowed
+            # above the camera's own eye level; ground_y_max is only a fallback
+            # guard for when there's no classification to trust instead.
+            pano_valid &= Y_grid <= ground_y_max
         result = height_map.copy()
         result[missing & pano_valid] = Y_grid[missing & pano_valid]
         return result

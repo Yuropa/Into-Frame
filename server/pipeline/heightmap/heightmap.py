@@ -33,11 +33,17 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
+        elevation_distortion_power: float = 1.0,
         save_point_cloud: bool = True,
         point_cloud_stride: int = 4,
         min_forward_samples: int = 4,
         fill_boundary_falloff_cells: float = 6.0,
         min_component_area_fraction: float = 0.001,
+        despike_threshold_m: float = 0.3,
+        despike_window: int = 5,
+        despike_reference_distance_m: float = 10.0,
+        region_closing_iterations: int = 2,
+        single_sample_blur_sigma: float = 1.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -70,6 +76,14 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # confidence_threshold, or nothing beyond the nadir ramp ever gets Dirichlet-pinned
         # and the whole map beyond a few metres is left to pure interpolation/noise.
         self.certainty_falloff_meters = certainty_falloff_meters
+        # Exponent on cos(phi) (phi = true camera-relative elevation angle to each
+        # observed cell), multiplied into certainty -- the standard equirectangular
+        # areal-distortion factor: 1 straight ahead at the horizon, falling to 0 at
+        # the top/bottom of the source panorama (zenith/nadir), where equirectangular
+        # stretching makes the raw depth estimate itself least reliable, independent
+        # of how far away the ground point is. 0 disables. See
+        # HeightMapGenerator._build_certainty.
+        self.elevation_distortion_power = elevation_distortion_power
         # Debug/inspection artefact: the raw sky-masked panorama depth unprojected to a
         # dense world-space point cloud (every pixel, no ground-plane Y filter, no grid
         # binning) — the full-resolution geometry HeightMapGenerator's single-sample-per-
@@ -99,7 +113,36 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # their own component -- avoids spurious few-cell noise clusters becoming
         # a "formation" downstream. See HeightMapGenerator._label_ground_components.
         self.min_component_area_fraction = min_component_area_fraction
-
+        # Equirectangular mode only: despike single-inverse-mapped-sample cells
+        # (not backed by min_forward_samples' dense statistics) that diverge from
+        # their own despike_window-sized neighbourhood median by more than this
+        # many metres -- source depth-map noise (a "flying pixel" edge flickering
+        # between two competing surfaces) otherwise lands as an alternating
+        # checkerboard of wildly different heights between adjacent grid cells.
+        # 0 disables. See HeightMapGenerator._despike_single_sample_cells.
+        self.despike_threshold_m = despike_threshold_m
+        self.despike_window = despike_window
+        # Per-pixel depth-model noise grows with sampled range (and is further
+        # amplified for elevated/steep rays via Y = depth * sin(phi)), so the
+        # effective despike threshold shrinks below despike_threshold_m -- never
+        # above it -- for cells sampled beyond this distance, scaled by
+        # despike_reference_distance_m / sampled_depth.
+        self.despike_reference_distance_m = despike_reference_distance_m
+        # Binary closing iterations applied to the ground-valid classification
+        # before it gates which pixels count as ground (see
+        # HeightMapGenerator._ground_valid_mask). Per-pixel semantic segmentation
+        # is noisy right at class boundaries; closing removes single-pixel
+        # holes/islands that would otherwise show up as salt-and-pepper speckle
+        # in both the observed mask and the height values sampled from it.
+        # 0 disables.
+        self.region_closing_iterations = region_closing_iterations
+        # Gaussian sigma (grid cells) for a partial blur applied only to single-
+        # inverse-mapped-sample cells (no intra-cell averaging), blended in
+        # per-cell by (1 - certainty) -- dense (multi-sample) cells are never
+        # touched. Targets per-pixel depth-model dither that despiking's outlier
+        # test can't catch. 0 disables. See
+        # HeightMapGenerator._despike_single_sample_cells and _build_certainty.
+        self.single_sample_blur_sigma = single_sample_blur_sigma
 
 class HeightMapStage(PipelineStage):
     """
@@ -202,9 +245,15 @@ class HeightMapStage(PipelineStage):
             nadir_ramp_width=cfg.nadir_ramp_width,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
+            elevation_distortion_power=cfg.elevation_distortion_power,
             min_forward_samples=cfg.min_forward_samples,
             fill_boundary_falloff_cells=cfg.fill_boundary_falloff_cells,
             min_component_area_fraction=cfg.min_component_area_fraction,
+            despike_threshold_m=cfg.despike_threshold_m,
+            despike_window=cfg.despike_window,
+            despike_reference_distance_m=cfg.despike_reference_distance_m,
+            region_closing_iterations=cfg.region_closing_iterations,
+            single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,
         )
         self.advance_progress(task)

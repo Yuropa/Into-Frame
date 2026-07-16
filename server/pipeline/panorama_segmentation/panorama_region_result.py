@@ -64,6 +64,28 @@ def coarse_type_for_label(label_name: str) -> RegionType:
     return RegionType.OTHER
 
 
+# Region types treated as one interchangeable "ground-like" domain for object
+# distribution synthesis: ADE20K segmentation routinely splits a single walkable
+# area into these three labels (grass underfoot vs. a distant hillside vs. a
+# tree's own canopy shadow), even though it's all one contiguous surface a
+# population of objects should scatter across. Everything else (WATER, BUILT,
+# ROAD, TRAIL, SKY, OTHER) is left as an exact self-match only.
+_GROUND_PAINT_GROUP: frozenset[RegionType] = frozenset({
+    RegionType.TERRAIN, RegionType.GROUND, RegionType.VEGETATION,
+})
+
+
+def paintable_region_types(region_type: RegionType) -> frozenset[RegionType]:
+    """Region types eligible to receive a distribution learned from exemplars
+    observed on `region_type` (see DistributionSynthesisStage). Returns the
+    shared ground-like group for TERRAIN/GROUND/VEGETATION, or just
+    `{region_type}` for anything else.
+    """
+    if region_type in _GROUND_PAINT_GROUP:
+        return _GROUND_PAINT_GROUP
+    return frozenset({region_type})
+
+
 REGION_TYPE_COLORS: dict[RegionType, tuple[int, int, int]] = {
     RegionType.SKY:        (135, 206, 235),
     RegionType.WATER:      (30,  144, 255),

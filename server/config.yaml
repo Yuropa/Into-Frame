@@ -33,6 +33,22 @@ stages:
     keys:
       output: panorama_object_depth
 
+  # Moved ahead of Panorama Foreground Inpainting (out of the main Object
+  # processing block below) so tree/forest crops already exist by the time
+  # that stage builds its removal mask — see foreground_distance_m comment
+  # in Panorama Foreground Inpainting for why depth thresholding alone misses
+  # mid-ground vegetation. Object Recognition/Detection/Correlation/
+  # Distribution/Panorama Asset Generation still run in their original later
+  # position and simply see crop_{i}/metadata_{i} as already populated.
+  - name: Object Segmentation
+    stage: SegmentationStage
+
+  - name: Object Classification
+    stage: PanoramaObjectClassificationStage
+
+  - name: Object Typing
+    stage: ObjectTypingStage
+
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
     enabled: false
@@ -70,14 +86,17 @@ stages:
 
   - name: Skybox Inpainting
     stage: SkyboxInpaintingStage
-    # Widened from the previous 1/25 (4% of height) and 40px defaults — the boundary
-    # between FLUX-generated sky and the real photo was reading as harsh/abrupt.
-    shroud_radius_frac: 0.0667  # ~1/15 of panorama height: how far the fill mask buries
+    # Widened again from 1/15 (previously widened from 1/25/40px) — still reading as
+    # too abrupt at the sky/terrain boundary.
+    shroud_radius_frac: 0.1     # ~1/10 of panorama height: how far the fill mask buries
                                 # the real horizon/ridge silhouette before FLUX paints, so
                                 # it has no jagged contour to read. Larger = smoother
                                 # sky-to-real transition, but covers more real photo content.
     seam_heal_width_px: 64      # width (px) of the final content-aware healing band blending
                                 # any residual exposure/colour mismatch at the sky/terrain join.
+    guidance_scale: 5.5         # Pass 2 FLUX's prompt-adherence strength for the sky fill;
+                                # raised from 4.0 for a stronger, more defined cloud/atmosphere
+                                # result instead of hewing close to the muted procedural gradient.
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
@@ -94,6 +113,14 @@ stages:
     # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
     num_bins: 14
     min_samples: 300
+    max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
+                                 # range at this many times the farthest/nearest fitted median
+                                 # metric depth, instead of an unbounded log-space extrapolation —
+                                 # DAP's raw output saturates for both real distant terrain and
+                                 # hard-clamped sky, so a slope fit from a few near-field tail bins
+                                 # and exponentiated over that gap was blowing up to tens of
+                                 # kilometres for ~40% of the panorama, which then got discarded as
+                                 # "out of bounds" downstream instead of read as real terrain.
 
   - name: Height Map
     stage: HeightMapStage
@@ -129,6 +156,13 @@ stages:
                                  # solver/noise. At 20 m, real ground crosses confidence_threshold
                                  # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
                                  # cutoff's assumption that near terrain is already observed.
+    elevation_distortion_power: 1.0 # exponent on cos(phi), phi = true camera-relative elevation
+                                 # angle to each observed cell -- the standard equirectangular
+                                 # areal-distortion factor: 1 straight ahead at the horizon
+                                 # (least warped), falling to 0 at the top/bottom of the source
+                                 # panorama (zenith/nadir), where equirectangular stretching makes
+                                 # the raw depth estimate itself least reliable, independent of how
+                                 # far away the ground point is. 0 disables.
     save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
                                  # panorama depth (no ground-plane Y filter, no grid binning),
                                  # written to <build>/ground_point_cloud.glb
@@ -148,6 +182,34 @@ stages:
                                  # of the grid are folded into the interpolated-gap fallback
                                  # instead of kept as their own component (see
                                  # HEIGHT_MAP_COMPONENT_ID / TerrainMeshStage's formation meshes)
+    despike_threshold_m: 0.3    # single-inverse-mapped-sample cells (below min_forward_samples,
+                                 # so no intra-cell averaging) whose height differs from their own
+                                 # despike_window neighbourhood median by more than this are
+                                 # replaced by that median — a "flying pixel" edge where the depth
+                                 # model flickers between two competing surfaces otherwise lands as
+                                 # an alternating checkerboard of spikes between adjacent cells.
+                                 # 0 disables.
+    despike_window: 5           # odd cell-window size for the local median used above
+    despike_reference_distance_m: 10.0 # depth-model noise grows with sampled range and is
+                                 # further amplified for elevated/steep rays (Y = depth *
+                                 # sin(phi)); the effective despike threshold shrinks below
+                                 # despike_threshold_m (never above it) for cells sampled
+                                 # beyond this distance, scaled by this / sampled_depth.
+    region_closing_iterations: 2 # binary closing passes on the ground-valid classification
+                                 # before it gates which pixels count as ground — per-pixel
+                                 # semantic segmentation is noisy right at class boundaries;
+                                 # closing removes single-pixel holes/islands that would
+                                 # otherwise show up as salt-and-pepper speckle in both the
+                                 # observed mask and the height values sampled from it.
+                                 # 0 disables.
+    single_sample_blur_sigma: 1.5 # Gaussian sigma (grid cells) for a partial blur applied
+                                 # only to single-inverse-mapped-sample cells (no intra-cell
+                                 # averaging), blended in per-cell by (1 - certainty) — dense
+                                 # (multi-sample) cells are never touched. Targets per-pixel
+                                 # depth-model dither that despiking's outlier test can't
+                                 # catch (neighbouring single-sample cells usually carry
+                                 # similar-magnitude noise, so no individual cell stands out
+                                 # from a clean local median). 0 disables.
 
   - name: Region Map
     stage: RegionMapStage
@@ -166,6 +228,19 @@ stages:
                                  # being capped to avoid enlarging an unconstrained flat disc.
     nadir_ramp_width: 5.0       # metres over which flood-fill certainty ramps up from 0.
     certainty_falloff_meters: 20.0 # must match Height Map's value — see that stage's comment.
+    interior_peak_max_range_factor: 2.0 # interior-peak candidates farther than
+                                 # (grid_size_meters/2 * this) are dropped rather than
+                                 # clamped onto the grid boundary — real distant content
+                                 # (a mountain summit kilometres out) isn't representable
+                                 # in this local terrain grid and would otherwise clamp to
+                                 # a meaningless flattened position (see
+                                 # RegionMapGenerator.extract_interior_peaks)
+    interior_peak_min_depth_m: 50.0 # interior-peak candidates nearer than this are
+                                 # excluded — depth_jump_rel is a relative threshold,
+                                 # trivially satisfied by routine close-range ground
+                                 # undulation that isn't a meaningfully elevated feature;
+                                 # near_side's foreground-bias selection would otherwise
+                                 # let near-camera noise dominate the output
 
   - name: Linear Structures
     stage: LinearStructureStage
@@ -393,15 +468,9 @@ stages:
 
   # Object processing: segmentation → classification → typing → recognition → detection → correlation
   # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
-
-  - name: Object Segmentation
-    stage: SegmentationStage
-
-  - name: Object Classification
-    stage: PanoramaObjectClassificationStage
-
-  - name: Object Typing
-    stage: ObjectTypingStage
+  # Segmentation/Classification/Typing now run earlier (see Panorama Foreground Inpainting
+  # section above) — Recognition/Detection/Correlation pick up their crop_{i}/metadata_{i}
+  # output from there, unchanged.
 
   - name: Object Recognition
     stage: RecognizeAnythingStage
