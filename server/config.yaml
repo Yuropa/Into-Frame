@@ -463,6 +463,14 @@ stages:
     enabled: false
     # camera_lora_strength: 0.0   # uncomment to disable the Camera-Control-Static LoRA
 
+  - name: Video Object Extraction
+    stage: VideoObjectExtractionStage
+    enabled: false
+    # Tracks each Object Segmentation crop's mask across the video above (SAM2's video
+    # predictor) and writes one object_video_{i} per detected object, isolated against
+    # a black background. reference_frame_idx defaults to 0, matching Video Generation's
+    # frame-0 conditioning on the same input photo Object Segmentation ran against.
+
   - name: Report
     stage: ReportGenerationStage
     enabled: false

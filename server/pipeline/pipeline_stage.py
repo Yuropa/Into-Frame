@@ -17,6 +17,7 @@ class SemanticKey(StrEnum):
     OBJECT_COUNT = "count"
     DEPTH = "depth"
     PANORAMA = "panorama"
+    VIDEO = "video"
 
 SemanticKeyName: TypeAlias = SemanticKey | str
 
