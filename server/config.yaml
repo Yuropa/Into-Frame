@@ -156,6 +156,13 @@ stages:
                                  # solver/noise. At 20 m, real ground crosses confidence_threshold
                                  # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
                                  # cutoff's assumption that near terrain is already observed.
+    elevation_distortion_power: 1.0 # exponent on cos(phi), phi = true camera-relative elevation
+                                 # angle to each observed cell -- the standard equirectangular
+                                 # areal-distortion factor: 1 straight ahead at the horizon
+                                 # (least warped), falling to 0 at the top/bottom of the source
+                                 # panorama (zenith/nadir), where equirectangular stretching makes
+                                 # the raw depth estimate itself least reliable, independent of how
+                                 # far away the ground point is. 0 disables.
     save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
                                  # panorama depth (no ground-plane Y filter, no grid binning),
                                  # written to <build>/ground_point_cloud.glb
@@ -183,6 +190,18 @@ stages:
                                  # an alternating checkerboard of spikes between adjacent cells.
                                  # 0 disables.
     despike_window: 5           # odd cell-window size for the local median used above
+    despike_reference_distance_m: 10.0 # depth-model noise grows with sampled range and is
+                                 # further amplified for elevated/steep rays (Y = depth *
+                                 # sin(phi)); the effective despike threshold shrinks below
+                                 # despike_threshold_m (never above it) for cells sampled
+                                 # beyond this distance, scaled by this / sampled_depth.
+    region_closing_iterations: 2 # binary closing passes on the ground-valid classification
+                                 # before it gates which pixels count as ground — per-pixel
+                                 # semantic segmentation is noisy right at class boundaries;
+                                 # closing removes single-pixel holes/islands that would
+                                 # otherwise show up as salt-and-pepper speckle in both the
+                                 # observed mask and the height values sampled from it.
+                                 # 0 disables.
 
   - name: Region Map
     stage: RegionMapStage
