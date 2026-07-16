@@ -1,4 +1,8 @@
 import json
+from logging import Logger
+from typing import Any
+
+import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_detection.grounding_dino import GroundingDino
@@ -6,6 +10,26 @@ from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
+
+
+class ObjectDetectionConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        # Same size-filter reasoning as SegmentationConfiguration (see
+        # pipeline/segmentation/segmentation.py) -- Grounding DINO/box-prompted SAM2
+        # crops outside this bounding-box-area range are dropped before being stored.
+        min_area_fraction: float = 0.0003,
+        max_area_fraction: float = 0.20,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.min_area_fraction = min_area_fraction
+        self.max_area_fraction = max_area_fraction
 
 
 class ObjectDetectionStage(PipelineStage):
@@ -24,9 +48,15 @@ class ObjectDetectionStage(PipelineStage):
     Writes: crop_{i} (masked RGBA crop), metadata_{i} (class, score, box, source='grounding_dino')
             for each new detection; updated ContextKey.OBJECT_COUNT
     Debug:  self.output/detections.json — list of new detections with label, box, score
+
+    Config: min_area_fraction/max_area_fraction (see ObjectDetectionConfiguration).
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls) -> type[ObjectDetectionConfiguration]:
+        return ObjectDetectionConfiguration
+
+    def __init__(self, config: ObjectDetectionConfiguration) -> None:
         super().__init__(config)
         self._detector = None
         self._seg = None
@@ -107,6 +137,12 @@ class ObjectDetectionStage(PipelineStage):
 
         next_idx = existing_count
         debug_entries = []
+        filtered = 0
+
+        cfg: ObjectDetectionConfiguration = self.config
+        img_area = img_w * img_h
+        min_area = cfg.min_area_fraction * img_area
+        max_area = cfg.max_area_fraction * img_area
 
         if masks:
             result = SegmentationResult(masks=masks, boxes=clamped_boxes, scores=[d["score"] for d in valid_dets])
@@ -116,6 +152,10 @@ class ObjectDetectionStage(PipelineStage):
                 # box) -- downstream depth sampling and world size/position estimation
                 # key off this box, and it must describe the same pixels as crop.image.
                 x, y, w, h = crop.box
+                if w * h < min_area or w * h > max_area:
+                    filtered += 1
+                    continue
+
                 metadata = {
                     "box": [float(x), float(y), float(w), float(h)],
                     "score": float(det["score"]),
@@ -140,6 +180,8 @@ class ObjectDetectionStage(PipelineStage):
             with open(debug_path, "w") as f:
                 json.dump(debug_entries, f, indent=2)
 
+        if filtered:
+            self.log_info(f"  Filtered {filtered} detection(s) outside size bounds")
         self.log_info(f"Added {added} detections (SAM2: {existing_count}, total: {next_idx})")
         return context
 

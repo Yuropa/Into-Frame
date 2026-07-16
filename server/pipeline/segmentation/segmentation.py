@@ -1,3 +1,7 @@
+from logging import Logger
+from typing import Any
+
+import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.foreground_segmentation import ForegroundSeg
@@ -9,6 +13,37 @@ from util.image_utils import Image
 import numpy as np
 from PIL import Image as PILImage
 from PIL import ImageOps
+
+
+class SegmentationConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        # SAM2's automatic mask generator (points_per_side=64, crop_n_layers=1 in
+        # image_segmentation_imp.py) finds a lot of texture fragments -- individual
+        # leaves, pebbles, bark cracks -- that aren't meaningful discrete objects for
+        # this pipeline's purposes. Reject a crop whose bounding box covers less than
+        # this fraction of the detection source's area. Calibrated against a real
+        # 1200x807 test photo (309 raw SAM2 detections): 0.0003 (~290px² there) removed
+        # ~15% of them, all confirmed by eye to be unrecognisable specks.
+        min_area_fraction: float = 0.0003,
+        # Reject a crop covering MORE than this fraction -- SAM2 sometimes segments
+        # almost the entire scene (a whole meadow, a whole mountain backdrop) as a
+        # single candidate "object" instead of a discrete one. Calibrated against the
+        # same test photo: the largest genuine single object (a full tree) was ~5% of
+        # image area; the smallest whole-scene false positive was ~33% -- 0.20 sits
+        # with wide margin in that gap.
+        max_area_fraction: float = 0.20,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.min_area_fraction = min_area_fraction
+        self.max_area_fraction = max_area_fraction
+
 
 class SegmentationStage(PipelineStage):
     """
@@ -25,9 +60,18 @@ class SegmentationStage(PipelineStage):
     Dynamic context keys per detected object (index i):
       crop_{i}      → Image  (masked object crop)
       metadata_{i}  → object ({"box": [...], "score": float})
+
+    Config: min_area_fraction/max_area_fraction (see SegmentationConfiguration) --
+    raw SAM2 detections outside this bounding-box-area range are dropped before
+    ever being stored, so Classification/Typing/Correlation/Distribution never
+    see them.
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls) -> type[SegmentationConfiguration]:
+        return SegmentationConfiguration
+
+    def __init__(self, config: SegmentationConfiguration) -> None:
         super().__init__(config)
         self._seg = None
         self._foreground_seg = None
@@ -63,13 +107,26 @@ class SegmentationStage(PipelineStage):
         input_image = source.copy()
         total_crops = 0
 
+        cfg: SegmentationConfiguration = self.config
+        img_area = input_image.size[0] * input_image.size[1]
+        min_area = cfg.min_area_fraction * img_area
+        max_area = cfg.max_area_fraction * img_area
+
         def store_segmentation_result(result: SegmentationResult):
             nonlocal total_crops
 
             # Cropping
             cropping_task = self.create_progress(result.length, "Cropping…")
+            filtered = 0
             for idx, crop in enumerate(result.masked_images(input_image)):
                 i = total_crops + idx
+                _, _, w, h = crop.box
+                area = w * h
+                if area < min_area or area > max_area:
+                    filtered += 1
+                    self.advance_progress(cropping_task)
+                    continue
+
                 context.add_image(f"crop_{i}", crop.image)
                 self.log_info(f"  crop_{i}: box={[round(x, 1) for x in crop.box]} score={crop.score:.3f}")
 
@@ -80,6 +137,8 @@ class SegmentationStage(PipelineStage):
                 context.add_object(f"metadata_{i}", metadata)
                 self.advance_progress(cropping_task)
             self.finish_progress(cropping_task)
+            if filtered:
+                self.log_info(f"  Filtered {filtered} crop(s) outside size bounds ({result.length - filtered} kept)")
             total_crops += result.length
 
         # Foreground Segmentation
