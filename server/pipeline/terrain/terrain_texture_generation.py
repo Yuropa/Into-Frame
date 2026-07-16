@@ -126,6 +126,14 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
+        # Flatten each reference patch (_extract_reference_patches) from its own real
+        # depth points (Panorama.unwarp_box) instead of a plain perspective reprojection
+        # -- removes true oblique-view foreshortening (the ground was genuinely
+        # photographed at an angle), not just equirect distortion. Falls back to
+        # perspective_crop automatically per-patch if PANORAMA_DEPTH is unavailable or a
+        # given patch doesn't have enough valid depth points to fit a plane. Set False to
+        # force the old perspective_crop-only behaviour.
+        use_point_cloud_unwarp: bool = True,
         # Caption the real reference crop with Florence-2 (_describe_material) and use that
         # description as the prompt's subject instead of the generic per-region-type phrase
         # in _BASE_PROMPTS -- e.g. "a close-up of cracked, sun-bleached mud" instead of the
@@ -264,6 +272,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
         self.use_photo_reference = use_photo_reference
+        self.use_point_cloud_unwarp = use_point_cloud_unwarp
         self.describe_material = describe_material
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
@@ -344,6 +353,9 @@ class TerrainTextureGenerationStage(PipelineStage):
       ContextKey.PANORAMA_TERRAIN        — real photo, source for the reference crop (optional)
       ContextKey.PANORAMA_REGION_TYPE_MAP — panorama-space per-pixel region type, source for
                                             picking reference crop locations (optional)
+      ContextKey.PANORAMA_DEPTH          — panorama-aligned depth, used to flatten each
+                                            reference crop from its own real 3D points
+                                            (optional; falls back to perspective_crop only)
       ContextKey.HEIGHT_MAP              — for the panorama blend layer's visibility ramp (optional)
       ContextKey.INPUT_CAPTION           — scene caption for prompt context (optional)
 
@@ -453,11 +465,12 @@ class TerrainTextureGenerationStage(PipelineStage):
             for idx, rt in enumerate(present_types):
                 pattern_layer = None
                 if pattern_ctx is not None and reference is not None:
-                    panorama, type_map = reference
+                    panorama, type_map, depth_arr = reference
                     ref_patches = self._extract_reference_patches(
                         panorama, type_map, int(rt),
                         patch_size=cfg.pattern_reference_patch_size,
                         num_patches=cfg.pattern_num_reference_patches,
+                        depth=depth_arr if cfg.use_point_cloud_unwarp else None,
                     )
                     if ref_patches:
                         pattern_layer = self._synthesize_pattern_layer(
@@ -477,12 +490,13 @@ class TerrainTextureGenerationStage(PipelineStage):
                 # FLUX generation path, unchanged.
                 prompt = self._build_prompt(rt, caption)
                 if reference is not None:
-                    panorama, type_map = reference
+                    panorama, type_map, depth_arr = reference
                     tiles[rt.label] = self._generate_tileable_tile_high_fidelity(
                         prompt, cfg, seed_offset=idx,
                         panorama=panorama,
                         type_map=type_map,
                         region_val=int(rt),
+                        depth=depth_arr if cfg.use_point_cloud_unwarp else None,
                         debug_label=rt.label,
                     )
                 else:
@@ -840,27 +854,37 @@ class TerrainTextureGenerationStage(PipelineStage):
         self,
         context: PipelineContext,
         cfg: "TerrainTextureGenerationConfiguration",
-    ) -> Optional[tuple[Panorama, np.ndarray]]:
+    ) -> Optional[tuple[Panorama, np.ndarray, Optional[np.ndarray]]]:
         """
-        Fetch the real photo and its panorama-space region typing, for use as
-        a weak img2img seed per region tile. Returns (panorama, type_map), or
-        None if the source imagery is missing.
+        Fetch the real photo, its panorama-space region typing, and its
+        aligned depth, for use as a weak img2img seed per region tile.
+        Returns (panorama, type_map, depth), or None if the source imagery is
+        missing. depth is None if PANORAMA_DEPTH isn't available (callers
+        fall back to plain perspective_crop for reference patches in that
+        case).
 
-        Deliberately does *not* reproject to a top-down/orthographic grid —
-        that reprojection collapses to a radial/pinwheel singularity right
-        around the camera (the single largest "ground" blob is almost always
-        the area immediately around it) and stretches distant ground into
-        blocky artefacts near the horizon. Reference crops are instead cut
-        straight out of the panorama's own equirectangular pixels
-        (_extract_reference_patches), reprojected per-crop to a perspective
-        view (Panorama.perspective_crop) only to undo the local equirect
-        stretch, never resampled onto a world-space grid.
+        Deliberately does *not* reproject the whole scene to a top-down/
+        orthographic grid — that reprojection collapses to a radial/pinwheel
+        singularity right around the camera (the single largest "ground"
+        blob is almost always the area immediately around it) and stretches
+        distant ground into blocky artefacts near the horizon. Reference
+        crops are instead cut straight out of the panorama's own
+        equirectangular pixels (_extract_reference_patches), then flattened
+        per-crop from that one crop's own real depth points
+        (Panorama.unwarp_box) — local in scope, so it never touches the
+        camera-adjacent singularity that broke the whole-scene version.
         """
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
         type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
         if panorama_terrain is None or type_map_depth is None:
             return None
-        return panorama_terrain, type_map_depth.depth
+        depth_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        depth_arr = (
+            depth_depth.depth
+            if depth_depth is not None and depth_depth.depth.shape == (panorama_terrain.height, panorama_terrain.width)
+            else None
+        )
+        return panorama_terrain, type_map_depth.depth, depth_arr
 
     def _pattern_texture_context(
         self,
@@ -1145,6 +1169,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         panorama: Panorama,
         type_map: np.ndarray,
         region_val: int,
+        depth: Optional[np.ndarray] = None,
         inpainter: Optional[InPainting] = None,
         debug_label: str = "tile",
     ) -> PIL.Image.Image:
@@ -1172,6 +1197,10 @@ class TerrainTextureGenerationStage(PipelineStage):
         type_map: panorama-space per-pixel RegionType index array (see
         ContextKey.PANORAMA_REGION_TYPE_MAP), used to locate crop candidates
         (see _extract_reference_patches).
+        depth: optional panorama-aligned depth (ContextKey.PANORAMA_DEPTH),
+        used to flatten each crop from its own real 3D points
+        (Panorama.unwarp_box) instead of a plain perspective reprojection.
+        None falls back to perspective_crop for every patch.
         inpainter: override the stage's own self._inpainter for Pass 2. Defaults
         to self._inpainter.
         debug_label: filename prefix for step-by-step debug images (see
@@ -1189,6 +1218,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             region_val=region_val,
             patch_size=patch_size,
             num_patches=n,
+            depth=depth,
         )
         if not patches:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
@@ -1504,16 +1534,31 @@ class TerrainTextureGenerationStage(PipelineStage):
         region_val: int,
         patch_size: int,
         num_patches: int = 1,
+        depth: Optional[np.ndarray] = None,
     ) -> list[PIL.Image.Image]:
         """
         Crop up to num_patches squares directly from the most solid, mutually
         distant areas of this region in the panorama's own equirectangular
-        pixels — no top-down/orthographic reprojection. Each crop is
-        reprojected to a perspective (rectilinear) view via
-        Panorama.perspective_crop, which removes the local equirect stretch
-        without ever resampling onto a world-space grid, then resized to
-        patch_size. These are guidance patches pasted into a larger tile
-        canvas (see _build_reference_canvas), not necessarily the full tile.
+        pixels. Each crop's bounding box is picked here in panorama pixel
+        space; the box itself is then flattened one of two ways:
+
+          - depth given (Panorama.unwarp_box): the box's own pixels are
+            unprojected forward into real 3D points, a local plane is fit to
+            that small point cluster, and the box is rasterized onto it —
+            removes true oblique-view foreshortening (the ground here was
+            genuinely photographed at an angle), not just equirect
+            distortion. Falls back to perspective_crop for a given patch if
+            there aren't enough valid depth points in its box (see
+            unwarp_box's min_points) or its points are too close to
+            collinear to fit a plane.
+          - depth is None: Panorama.perspective_crop (rectilinear
+            reprojection) — removes the equirect stretch only, not
+            foreshortening from viewing angle.
+
+        Either way, nothing is ever resampled onto a world-space grid larger
+        than this one box. These are guidance patches pasted into a larger
+        tile canvas (see _build_reference_canvas), not necessarily the full
+        tile.
 
         A patch's bounding box is picked for being deep inside this region,
         but a square box isn't guaranteed to be *entirely* this region right
@@ -1525,16 +1570,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         within the box's own footprint be regenerated instead of hard-
         preserved.
 
-        An earlier version baked the panorama top-down (world-space XZ grid,
-        one sample per grid cell) before cropping. That reprojection
-        collapses to a radial/pinwheel singularity right around the camera —
-        the single largest "ground" blob is almost always the area
-        immediately around it — and stretches distant ground near the
-        horizon into blocky artefacts. Working directly in the panorama's own
-        pixel space avoids both: nothing is resampled onto a grid at all,
-        only the visible-latitude segmentation is used to find good crop
-        locations, and the panorama's own smooth image sampling is all that
-        touches the actual pixels.
+        An earlier version baked the *entire* panorama top-down (one
+        world-space XZ grid spanning the whole terrain, one sample per grid
+        cell) before cropping. That reprojection collapses to a radial/
+        pinwheel singularity right around the camera — the single largest
+        "ground" blob is almost always the area immediately around it — and
+        stretches distant ground near the horizon into blocky artefacts,
+        because a global grid has to back-sample the panorama from every
+        cell, including ones arbitrarily close to that singularity.
+        unwarp_box's local flattening doesn't have this problem even though
+        it also rasterizes onto a grid: its grid only ever spans one already-
+        solid, well-separated box, and it forward-projects that box's own
+        pixels rather than back-sampling toward a singularity.
 
         A version before that scattered many small patches from anywhere in
         the region into a collage. That produced a hard-seamed, visibly
@@ -1576,8 +1623,16 @@ class TerrainTextureGenerationStage(PipelineStage):
             sr0 = int(np.clip(cy - half, 0, H - side))
             sc0 = int(np.clip(cx - half, 0, W - side))
 
-            crop = panorama.perspective_crop([sc0, sr0, side, side], mask=region_mask)
-            patches.append(crop.resize((patch_size, patch_size), PIL.Image.LANCZOS))
+            box = [sc0, sr0, side, side]
+            crop = (
+                panorama.unwarp_box(depth, box, mask=region_mask, out_size=patch_size)
+                if depth is not None else None
+            )
+            if crop is None:
+                crop = panorama.perspective_crop(box, mask=region_mask).resize(
+                    (patch_size, patch_size), PIL.Image.LANCZOS,
+                )
+            patches.append(crop)
 
             # Exclude this area (out to its own safe radius) so the next pick
             # lands somewhere distinct rather than immediately adjacent.
