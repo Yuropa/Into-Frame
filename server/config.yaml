@@ -113,6 +113,14 @@ stages:
     # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
     num_bins: 14
     min_samples: 300
+    max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
+                                 # range at this many times the farthest/nearest fitted median
+                                 # metric depth, instead of an unbounded log-space extrapolation —
+                                 # DAP's raw output saturates for both real distant terrain and
+                                 # hard-clamped sky, so a slope fit from a few near-field tail bins
+                                 # and exponentiated over that gap was blowing up to tens of
+                                 # kilometres for ~40% of the panorama, which then got discarded as
+                                 # "out of bounds" downstream instead of read as real terrain.
 
   - name: Height Map
     stage: HeightMapStage
