@@ -21,7 +21,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from util.seam_repair import heal_seam, heal_wrap_seam
+from util.seam_repair import heal_wrap_seam
 
 
 def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.ndarray:
@@ -186,49 +186,52 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        seam_heal_width_px: int = 64,
-        seam_heal_feather_px: int = 96,
-        seam_heal_method: str = "telea",
-        # Fraction of panorama height the fill mask dilates into the sky before FLUX
-        # generates (see "Pass 2" below) — buries the real jagged horizon/mountain
-        # silhouette so FLUX has no contour to read, at the cost of pushing the
-        # generated/real boundary that much further into the photographed sky.
-        shroud_radius_frac: float = 1 / 15,
-        # Pass 2 FLUX's guidance scale: how strongly the fill follows the time-of-day
-        # sky prompt versus the gradient/haze conditioning image. Higher pushes the
-        # generated clouds/atmosphere further from the muted procedural gradient
-        # toward the prompt's own texture and contrast.
+        # FLUX's guidance scale: how strongly the full-canvas sky generation follows
+        # the time-of-day sky prompt versus the gradient conditioning image. Higher
+        # pushes the generated clouds/atmosphere further from the muted procedural
+        # gradient toward the prompt's own texture and contrast.
         guidance_scale: float = 4.0,
+        # How much Pass 2 denoises from the gradient composite: 1.0 starts from pure
+        # noise (the composite only informs FLUX indirectly), so nothing of the real
+        # photo's sky survives; lower values start from a partially-noised version of
+        # the composite itself, letting its real sky colour/texture blend through
+        # into the result instead of being fully replaced.
+        strength: float = 0.85,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
-        self.seam_heal_width_px = seam_heal_width_px
-        self.seam_heal_feather_px = seam_heal_feather_px
-        self.seam_heal_method = seam_heal_method
-        self.shroud_radius_frac = shroud_radius_frac
         self.guidance_scale = guidance_scale
+        self.strength = strength
 
 
 class SkyboxInpaintingStage(PipelineStage):
     """
-    Fills non-sky regions of the panorama with a three-pass sky:
+    Replaces the whole panorama with a generated sky, in two passes:
 
       1. Procedural solar gradient derived from the real sky pixels and sun
          position estimated from the LuxDiT lighting output (or sky luminance
-         peak as fallback).  Gives the correct time-of-day structure. Used only
+         peak as fallback). Gives the correct time-of-day structure. Used only
          as the conditioning image for pass 2, not part of the final output.
 
-      2. FLUX inpainting (with the FLUX_DEV_PANORAMA_LORA_2 LoRA) on top of the
-         gradient to add cloud and atmospheric detail, prompted with the
-         time-of-day derived from sun elevation. This is the final result —
-         no further blending is applied.
+      2. FLUX inpainting (with the FLUX_DEV_PANORAMA_LORA_2 LoRA) over the
+         *entire* canvas — not just the non-sky region — to add cloud and
+         atmospheric detail, prompted with the time-of-day derived from sun
+         elevation. This is the final result — no further blending is applied.
 
-      3. Seam healing (util.seam_repair.heal_seam): a `seam_heal_width_px`-wide
-         band straddling the sky/terrain boundary is content-aware inpainted
-         (Photoshop Spot Healing Brush-style) and faded in with a feathered
-         alpha (rather than swapped in with a hard cutoff) to smooth over any
-         residual exposure or texture mismatch at the join. The feathered
-         blend mask is saved alongside the other stage outputs as
-         `panorama_sky_seam_blend_mask.png`.
+         Regenerating everything (rather than masking to just the non-sky
+         region) is deliberate: an earlier version only filled the non-sky
+         area, dilating the fill mask into the sky to bury the real horizon's
+         silhouette from FLUX. That buried the photo pixels but not the
+         *shape* — the mask boundary still traced the mountain contour, and
+         FLUX reliably rendered a cloud-top ridge along it, an artifact that
+         "followed the seam" between the kept real sky and the generated
+         fill. Full-canvas regeneration removes that boundary (and thus the
+         artifact) entirely; the gradient composite from pass 1 already
+         carries the real sky's colour and sun position across the whole
+         frame, so the result stays grounded without it.
+
+         `config.strength` (< 1.0) controls how much of that composite —
+         real photographed sky included — survives into the final result
+         versus being replaced by FLUX's own generation.
 
     Reads:
       ContextKey.PANORAMA                — equirectangular source panorama
@@ -349,25 +352,12 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
-        # --- Pass 2: FLUX detail on the non-sky region ---
-        # Dilate the fill mask into the sky region to obliterate the mountain silhouette 
-        # contour line, preventing FLUX from reading the jagged horizon shape.
-        fill_mask = ~sky_mask
-
-        # Dilate the fill area by shroud_radius_frac of image height to bury the ridge silhouettes.
-        shroud_radius = max(4, int(h * self.config.shroud_radius_frac))
-        flux_mask_arr = binary_dilation(fill_mask, iterations=shroud_radius)
-        fill_mask_pil = PILImage.fromarray((flux_mask_arr * 255).astype(np.uint8), mode="L")
-
-        # Even with the dilated shroud, dark tree/ridge silhouettes just past its edge can
-        # still leak enough contrast into the FLUX context image to get reinterpreted as
-        # objects. Flatten a band around the sky boundary (by distance, not a fixed row
-        # cutoff, so it holds regardless of where the horizon actually falls) into a neutral
-        # haze color so FLUX has nothing but sky tones to build clouds from.
-        boundary_band_px = shroud_radius * 4
-        haze_zone = flux_mask_arr & (dist_out < boundary_band_px)
-        haze_color = np.array([215, 230, 245], dtype=np.uint8)  # bright sky-haze color
-        sanitized_gradient = np.where(haze_zone[:, :, None], haze_color, gradient_composite)
+        # --- Pass 2: FLUX detail over the whole panorama ---
+        # Full-canvas mask — see the class docstring for why this replaced the old
+        # non-sky-only fill mask (it was the source of a cloud-ridge artifact tracing
+        # the buried mountain silhouette).
+        full_mask_arr = np.ones((h, w), dtype=bool)
+        fill_mask_pil = PILImage.fromarray((full_mask_arr * 255).astype(np.uint8), mode="L")
 
         # Lead with the FLUX_DEV_PANORAMA_LORA_2 trigger sequence so the LoRA activates its
         # spherical/HDRI generation mode instead of its base perspective-photo bias.
@@ -375,7 +365,7 @@ class SkyboxInpaintingStage(PipelineStage):
         self.log_info(f"FLUX prompt: {prompt!r}")
 
         flux_max = 1536
-        gradient_pil = PILImage.fromarray(sanitized_gradient)
+        gradient_pil = PILImage.fromarray(gradient_composite)
         if w > flux_max or h > flux_max:
             scale = flux_max / max(w, h)
             fw = max(16, (int(w * scale) // 16) * 16)
@@ -403,6 +393,7 @@ class SkyboxInpaintingStage(PipelineStage):
             prompt=prompt,
             num_inference_steps=50,
             guidance_scale=self.config.guidance_scale,
+            strength=self.config.strength,
             seed=self.seed,
         )
 
@@ -417,61 +408,19 @@ class SkyboxInpaintingStage(PipelineStage):
         # FLUX inpainting result is the final output directly — no further
         # blending against the gradient (it only muddied the result with the
         # gradient's coarse angular-bin banding without adding anything FLUX
-        # hadn't already accounted for).
+        # hadn't already accounted for). There's also no separate sky/terrain
+        # seam to heal any more: Pass 2 regenerated the entire canvas, so
+        # there's no kept-vs-generated boundary left over to blend away.
         result_pil = flux_pil
 
-        # --- Pass 3: heal the sky/terrain seam ---
-        # FLUX is conditioned on the real sky right up to its boundary, but its
-        # own exposure/colour grading rarely matches exactly, leaving a visible
-        # ring at the join. Content-aware inpaint a narrow band straddling that
-        # edge (equirect-wrap aware) and fade it in with a wide feather to
-        # blend it away.
-        #
-        # band_width_px is kept small on purpose: cv2.inpaint (Telea) fills by
-        # marching inward in concentric layers from the band's edge, and on
-        # smooth, low-texture content like sky that layering shows up directly
-        # as visible rings/banding once the fill depth gets much past ~20-30px.
-        # seam_heal_feather_px does the actual "wide, soft transition" work
-        # instead, fading the narrow inpainted core into the untouched image
-        # over a much larger radius without asking Telea to hallucinate that
-        # whole radius itself.
-        #
-        # Heal around sky_mask's boundary, not flux_mask_arr's: the shroud
-        # dilation buries the *silhouette* from FLUX's context image, but FLUX
-        # still reconstructs its own ridge line close to the real one (it's
-        # conditioned on the real sky right up to the shroud edge, and mountain
-        # silhouettes are a strong prior) — so the visible join in the actual
-        # output sits at the original horizon, not out at flux_mask_arr's
-        # buried edge. Healing around flux_mask_arr's boundary was centering
-        # the band on a stretch of plain sky well above where the real seam
-        # shows up, leaving the actual join untouched.
-        result_pil = heal_seam(
-            result_pil,
-            sky_mask,
-            band_width_px=self.config.seam_heal_width_px,
-            wrap_horizontal=True,
-            method=self.config.seam_heal_method,
-            feather_px=self.config.seam_heal_feather_px,
-            debug_dir=self.output or self.temp,
-            debug_prefix="panorama_sky_seam",
-            log_fn=self.log_warning,
-        )
-
-        if self.temp is not None:
-            result_pil.save(self.temp / "sky_seam_fixed.png")
-
-        # --- Pass 4: heal the panorama's own left/right wrap seam ---
+        # --- Pass 3: heal the panorama's own left/right wrap seam ---
         # FLUX generated the cloud/atmosphere fill across the whole canvas in
         # one shot, with no explicit awareness that column 0 and column W-1
         # are the same seam in the final 360° view — so they can disagree.
         # Roll the seam to the center of the frame, inpaint across it there,
-        # then roll back. Restricted to flux_mask_arr so only the region we
-        # just generated is touched; real photographed sky pixels near the
-        # column-0 border are left alone. Runs base FLUX (no LoRA) for this
-        # touch-up — the panorama LoRA's geometric bias is for the main
-        # generation, not a small seam patch. Runs after the sky/terrain seam
-        # heal so it also cleans up any residual mismatch that pass left
-        # straddling the wrap edge.
+        # then roll back. Runs base FLUX (no LoRA) for this touch-up — the
+        # panorama LoRA's geometric bias is for the main generation, not a
+        # small seam patch.
         flux.set_lora_enabled(False)
 
         def _sky_seam_inpaint(rolled_img: PILImage.Image, mask_img: PILImage.Image) -> PILImage.Image:
@@ -505,7 +454,8 @@ class SkyboxInpaintingStage(PipelineStage):
             inpaint_fn=_sky_seam_inpaint,
             seam_width_px=256,
             feather_px=32,
-            eligible_mask=flux_mask_arr,
+            # eligible_mask=None: the whole canvas was regenerated in Pass 2, so
+            # every row is eligible (no preserved real-photo pixels to protect).
             # Crop to the band instead of handing FLUX the whole panorama —
             # combined with _sky_seam_inpaint's own flux_max downscale, this
             # means only the seam's actual neighbourhood gets downscaled (if
