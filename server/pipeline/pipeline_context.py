@@ -69,6 +69,7 @@ class ContextKey:
     TERRAIN_MATERIAL = "terrain_material"
     CLIFF_MASK = "cliff_mask"
     GENERATED_VIDEO = "generated_video"
+    OBJECT_VIDEO_COUNT = "object_video_count"
     Type = Literal[
         "input",
         "depth",
@@ -118,6 +119,7 @@ class ContextKey:
         "terrain_material",
         "cliff_mask",
         "generated_video",
+        "object_video_count",
     ]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str

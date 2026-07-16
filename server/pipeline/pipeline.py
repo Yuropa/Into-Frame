@@ -21,6 +21,7 @@ from rich.console import Group as RenderGroup
 from huggingface_hub import snapshot_download
 
 from pipeline.segmentation.segmentation import SegmentationStage
+from pipeline.segmentation.video_object_extraction import VideoObjectExtractionStage
 from pipeline.supersampling.supersampling import SupersamplingStage
 from pipeline.depth.depth import DepthStage
 from pipeline.panorama.panorama import PanoramaStage
@@ -341,6 +342,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "RegionMapRefinementStage": RegionMapRefinementStage,
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
     "VideoGenerationStage": VideoGenerationStage,
+    "VideoObjectExtractionStage": VideoObjectExtractionStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
     "ReportGenerationStage": ReportGenerationStage,
 }

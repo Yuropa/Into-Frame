@@ -498,6 +498,7 @@ run_step "Building Pattern Synthesis Library" \
 setup_sam2() {
     clone_if_needed https://github.com/facebookresearch/sam2.git "$LIB_DIR/sam2"
     conda run --no-capture-output -n frame pip install -e "$LIB_DIR/sam2"
+    conda run --no-capture-output -n frame pip install "eva-decord>=0.6.1"
 }
 
 run_step "Installing SAM 2" \
