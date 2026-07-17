@@ -145,9 +145,9 @@ class SceneGenerationStage(PipelineStage):
 
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in range(object_count):
-                metadata = context.input_object(f"metadata_{idx}")
+                metadata = context.input_object(f"metadata_{idx}") or {}
 
-                cls = (metadata or {}).get("class")
+                cls = metadata.get("class")
                 if cls in _ENV_CATEGORIES or cls == "indeterminate":
                     self.log_info(f"Skipping {cls} object {idx}")
                     self.advance_progress(generation_task)
@@ -162,15 +162,22 @@ class SceneGenerationStage(PipelineStage):
                     position = (syn_x, 0.0, syn_z)
                     width = metadata["world_width"]
                     height = metadata["world_height"]
-                elif panorama_depth is not None and panorama is not None:
-                    result = unproject_bbox_equirect(metadata["box"], panorama.width, panorama.height, pano_depth=panorama_depth, extrinsics=extrinsics)
-                    if result is None:
-                        self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
+                else:
+                    # A missing box here means metadata_{idx} is an incomplete/stale cache
+                    # entry (e.g. a resumed run whose OBJECT_COUNT outran what actually got
+                    # written) rather than a real detection or synthesized point -- skip it
+                    # the same way a failed unprojection below is skipped, instead of
+                    # crashing on a KeyError three stages downstream of the real gap.
+                    box = metadata.get("box")
+                    if not box:
+                        self.log_warning(f"No box for object {idx} (incomplete metadata), skipping")
                         self.advance_progress(generation_task)
                         continue
-                    position, width, height = result
-                else:
-                    result = unproject_bbox(metadata["box"], input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
+
+                    if panorama_depth is not None and panorama is not None:
+                        result = unproject_bbox_equirect(box, panorama.width, panorama.height, pano_depth=panorama_depth, extrinsics=extrinsics)
+                    else:
+                        result = unproject_bbox(box, input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
                     if result is None:
                         self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                         self.advance_progress(generation_task)
