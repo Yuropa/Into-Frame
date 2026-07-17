@@ -132,6 +132,19 @@ stages:
                                  # and exponentiated over that gap was blowing up to tens of
                                  # kilometres for ~40% of the panorama, which then got discarded as
                                  # "out of bounds" downstream instead of read as real terrain.
+    max_depth_m: 100.0          # hard ceiling on the farthest calibrated depth -- must match
+                                 # Height Map's grid_size_meters / 2 below, since nothing farther
+                                 # can ever land inside that grid anyway. Enforced by uniformly
+                                 # scaling the whole depth map down to fit (see _rescale_to_fit),
+                                 # not by clamping outliers, which would collapse every distance
+                                 # beyond the cutoff onto one flat, indistinguishable wall.
+    max_depth_basis_percentile: 95.0 # rescale against this percentile of non-sky depth rather
+                                 # than the literal max -- DAP saturates at the same ceiling for
+                                 # both real distant terrain and sky, so the farthest pixel is
+                                 # usually one member of a wide shared plateau, not a genuine
+                                 # outlier; scaling off it compresses the whole near field far
+                                 # more than the real signal warrants. The rare remaining tail
+                                 # beyond this percentile is hard-clipped to max_depth_m instead.
 
   - name: Height Map
     stage: HeightMapStage
