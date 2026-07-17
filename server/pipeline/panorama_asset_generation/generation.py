@@ -131,6 +131,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 self.log_info(f"  {mesh_key}: {depth:.1f} m → 3D mesh (crop_{idx})")
                 crop = context.input_image(f"crop_{idx}")
                 temp_path = self.temp / mesh_key if self.temp is not None else None
+                if temp_path is not None:
+                    temp_path.mkdir(parents=True, exist_ok=True)
                 super().clean_up()
                 mesh = gen.meshify(crop, temp_path, seed=self.seed)
                 mesh = mesh.repair()
