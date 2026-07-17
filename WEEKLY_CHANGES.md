@@ -4,9 +4,9 @@
 
 | Field | Value |
 |-------|-------|
-| Commit | `3164f3ce285ccf4332008b6b6756def2849ac213` |
-| Message | Merge branch 'object-clear' |
-| Date set | 2026-07-09 |
+| Commit | `ecdd6f72246a66df28a3aa780dd88500bf4a20fe` |
+| Message | Fix crash |
+| Date set | 2026-07-17 |
 
 ---
 
@@ -29,6 +29,20 @@ git rev-parse HEAD  # copy this hash into the Commit field above
 ---
 
 ## Change Log
+
+### Week ending 2026-07-17
+
+*Baseline `3164f3c` (2026-07-09) → `ecdd6f7` (2026-07-17). 84 commits, 67 files changed (+6.5k / -1.1k lines).*
+
+- **Video generation (new)**: new `video_generation` pipeline stage wrapping LTX-2 (`ltx2_client.py`/`ltx2_client_imp.py`) as a remote process to animate a still scene into a short clip — a fixed motion prompt/negative-prompt pair constrains it to a locked-tripod shot with only ambient motion (leaves, water, light), explicitly suppressing cloud drift and lighting time-lapse artifacts seen in early tests. Resolution is rounded to LTX-2's /64 requirement; fp8-cast quantization added so the ~22B checkpoint fits a 32GB card. Several follow-up commits on frame count, hardlinking output, and generation defaults.
+- **Video segmentation (new)**: new `video_object_extraction.py`, `video_segmentation.py`/`_imp.py`/`_result.py` to track and extract objects across the generated video's frames; directory-storage bug fixed shortly after.
+- **Terrain texturing**: major rework of `terrain_texture_generation.py` (~900 lines touched) and new `pattern_texture.py` (375 lines, citing Neyret & Cani's "Pattern-Based Texturing Revisited", SIGGRAPH '99) adding Wang-tile/aperiodic pattern-based texture synthesis; texture angle and blend-strength tuning, cliff/interior-peak cleanup.
+- **Terrain generation**: `heightmap_generator.py` heavily reworked (665 lines), plus `terrain_generator.py`/`terrain_reconstruction.py`/`terrain_noise_refinement.py` updates — point-cloud-based reconstruction, mesh mountain features, height-map bug fixes.
+- **Panorama depth & seams**: `panorama_depth/calibration.py` reworked (247 lines) across several calibration fixes; `util/seam_repair.py` seam-rolling and skybox-seam-boundary fixes; new `util/panorama_projection.py` and `util/panorama_tiling.py` helpers for projection cleanup and segmentation tiling.
+- **Foreground/skybox inpainting**: `panorama_foreground_inpainting/generation.py` (292 lines) and `skybox_inpainting.py` continued fixes; region-map generation and certainty-map calculation updated (`region_map.py`, `region_map_generator.py`).
+- **Object pipeline**: `object_detection.py`/`grounding_dino_imp.py` and `object_correlation.py` updated; `distribution_synthesis.py` sped up and bug-fixed; object-placement bugs fixed; Unity billboard cropping improved with a new `Billboard.mat` material.
+- **New util**: `util/instance_merge.py` (143 lines, new) for merging detected instances.
+- **Infra**: `config.yaml` substantially reorganized (344 lines) plus new config files for foreground-inpainting test, pano video generation, and video generation; `scripts/setup.sh` updated for the video stage; `pipeline_context.py`/`context_value.py` reworked (151 lines); remote connection types tweaked; scene-generation config enabled/tuned; general crash fix.
 
 ### Week ending 2026-07-09
 
