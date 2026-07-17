@@ -210,47 +210,34 @@ class TerrainMeshGenerator:
         vertices = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
 
         # ── Colour / texture ──────────────────────────────────────────────
-        baked_tex = (
-            precomputed_texture
-            or (TerrainMeshGenerator._bake_topdown_texture(panorama, hm, x_half, z_far, sky_mask=sky_mask)
-                if panorama is not None else None)
-        )
-        if baked_tex is not None:
+        if precomputed_texture is not None:
             # UVs scaled by texture_tile_factor so the tile repeats that many
             # times across the full terrain grid. Values > 1 are valid in glTF
             # (default sampler wrap = REPEAT) and give higher texel density.
             # trimesh's GLTF exporter unconditionally flips V on export (assumes OBJ-style
             # V-up input); pre-flip here so the exported glTF V lands at row 0 = image top,
-            # matching how baked_tex/panorama rows are laid out — otherwise the texture
-            # renders upside-down in any spec-conformant glTF viewer (Unity included).
+            # matching how the precomputed texture's rows are laid out — otherwise the
+            # texture renders upside-down in any spec-conformant glTF viewer (Unity included).
             u = ((X_pos + x_half) / (2.0 * x_half) * texture_tile_factor).astype(np.float32)
             v = (1.0 - (Z_pos + z_far) / (2.0 * z_far) * texture_tile_factor).astype(np.float32)
             uv = np.stack([u, v], axis=-1)
-            material = trimesh.visual.material.PBRMaterial(
-                # Splat layer tiles may carry a local micro-height channel packed into
-                # alpha for shader blending (see terrain_texture_generation.py); strip it
-                # here so the GLB preview material doesn't render as partially transparent.
-                baseColorTexture=baked_tex.convert("RGB"),
-                baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-            )
-            visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
-            tri_mesh = trimesh.Trimesh(
-                vertices=vertices, faces=faces, visual=visual, process=False,
-            )
-            _ = tri_mesh.vertex_normals
+            tri_mesh = TerrainMeshGenerator._textured_mesh(vertices, faces, uv, precomputed_texture)
+        elif panorama is not None:
+            # Project the mesh directly onto the panorama's own pixel grid
+            # (Panorama.mesh_uvs) instead of resampling the panorama into a
+            # top-down raster first — no intermediate bake, so no world-space
+            # <-> equirectangular resampling distortion (the old top-down bake
+            # pinwheeled near the origin and went blocky near the horizon; see
+            # Panorama.bake_topdown's docstring for why that approach is now
+            # only kept for a UV0 convention this branch doesn't use).
+            uv = panorama.mesh_uvs(vertices)
+            seam_vertices, seam_faces, seam_uv = TerrainMeshGenerator._fix_uv_seam(vertices, faces, uv)
+            tri_mesh = TerrainMeshGenerator._textured_mesh(seam_vertices, seam_faces, seam_uv, panorama.image)
         elif texture is not None and intrinsics is not None:
             uv = TerrainMeshGenerator._uvs_pinhole(
                 vertices[:, 0], vertices[:, 1], vertices[:, 2], intrinsics
             )
-            material = trimesh.visual.material.PBRMaterial(
-                baseColorTexture=texture.convert("RGB"),
-                baseColorFactor=[1.0, 1.0, 1.0, 1.0],
-            )
-            visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
-            tri_mesh = trimesh.Trimesh(
-                vertices=vertices, faces=faces, visual=visual, process=False,
-            )
-            _ = tri_mesh.vertex_normals
+            tri_mesh = TerrainMeshGenerator._textured_mesh(vertices, faces, uv, texture)
         else:
             tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, process=True)
 
@@ -517,118 +504,78 @@ class TerrainMeshGenerator:
     # ── Colour helpers ────────────────────────────────────────────────────────
 
     @staticmethod
-    def _bake_topdown_texture(
-        panorama,
-        height_map: np.ndarray,
-        x_half: float,
-        z_far: float,
-        tex_size: int = 4096,
-        sky_mask: Optional[np.ndarray] = None,
-    ) -> PIL.Image.Image:
-        """
-        Rasterise the panorama into a top-down orthographic texture.
-
-        For each texel, compute its world XZ position, sample the terrain
-        height there, then call panorama.sample_3d — which already handles
-        near-nadir hole-filling — to get the colour.  The result is a PIL
-        image that can be used as a PBR base-colour texture with simple
-        orthographic UVs (u = (X+x_half)/(2*x_half), v = (Z+z_far)/(2*z_far)).
-        """
-        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        ug, vg = np.meshgrid(us, vs)
-
-        X = (ug.ravel() - 0.5) * (2.0 * x_half)
-        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
-
-        h_hm, w_hm = height_map.shape
-        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
-        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
-        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
-        Y = np.nan_to_num(Y, nan=0.0)
-
-        grid_verts = np.stack([X, Y, Z], axis=-1)
-        rgba = panorama.sample_3d(grid_verts, sky_mask=sky_mask)
-        return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
+    def _textured_mesh(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        uv: np.ndarray,
+        image: PIL.Image.Image,
+    ) -> trimesh.Trimesh:
+        """Shared UV-textured Trimesh construction for every texture-source branch."""
+        material = trimesh.visual.material.PBRMaterial(
+            # Splat layer tiles may carry a local micro-height channel packed into
+            # alpha for shader blending (see terrain_texture_generation.py); strip it
+            # here so the GLB preview material doesn't render as partially transparent.
+            baseColorTexture=image.convert("RGB"),
+            baseColorFactor=[1.0, 1.0, 1.0, 1.0],
+        )
+        visual = trimesh.visual.TextureVisuals(uv=uv, material=material)
+        tri_mesh = trimesh.Trimesh(vertices=vertices, faces=faces, visual=visual, process=False)
+        _ = tri_mesh.vertex_normals
+        return tri_mesh
 
     @staticmethod
-    def bake_topdown_texture_with_certainty(
-        panorama: Panorama,
-        height_map: np.ndarray,
-        x_half: float,
-        z_far: float,
-        tex_size: int = 4096,
-        height_certainty: Optional[np.ndarray] = None,
-        nadir_cutoff_deg: float = -35.0,
-        nadir_fade_deg: float = 10.0,
-        horizon_fade_deg: float = 5.0,
-        sky_mask: Optional[np.ndarray] = None,
-    ) -> tuple[PIL.Image.Image, np.ndarray]:
+    def _fix_uv_seam(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        uv: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """
-        Bake a top-down panorama texture and a per-texel certainty map.
+        Duplicate vertices for triangles whose corners straddle the
+        panorama's longitude seam (u≈0 vs u≈1, directly behind the camera —
+        a full radial wedge from near the origin out to the far boundary,
+        not a small localized patch), so linear UV interpolation across the
+        triangle doesn't smear the texture from one edge of the image to
+        the other.
 
-        Certainty encodes how reliable each texel's colour is, based on the
-        *steepness* of the viewing angle from the camera to that ground point —
-        not its sign. A point sitting slightly above the camera's own height
-        (a rise/hill) is just as visible in the source panorama as one slightly
-        below it; only the two equirectangular projection failure modes matter:
-        the nadir/zenith pole singularity (near-vertical viewing angle) and the
-        horizon band (near-horizontal, where distant rows compress into a
-        handful of panorama pixels). Gating on the sign of the elevation angle
-        instead of its magnitude would zero out real, visible terrain whenever
-        the height map's elevation values don't happen to sit below the
-        camera's zero reference.
-
-          - 0 for the nadir/zenith dead-zone (no reliable equirectangular coverage)
-          - 0 right at the horizon (extreme vertical compression)
-          - Smooth ramp [0→1] over nadir_fade_deg approaching the pole cutoff
-          - Smooth ramp [0→1] over horizon_fade_deg away from the horizon
-          - Multiplied by a binary observation mask derived from height_certainty
-            (0 for cells that were never directly observed — only interpolated)
-
-        Returns (color_image, certainty) where certainty is (tex_size, tex_size)
-        float32 in [0, 1].
+        Any real terrain triangle is far too small in angular extent to
+        legitimately span more than half the panorama's width in
+        longitude, so a corner-to-corner U delta greater than 0.5 can only
+        be seam wraparound — round(delta) gives the number of whole wraps
+        to correct for. Only corners 1 and 2 of each triangle are ever
+        shifted (relative to corner 0, an arbitrary but consistent local
+        reference); shifted corners get a new, duplicated vertex (same
+        XYZ, shifted U) so triangles that don't straddle the seam, and the
+        un-shifted corner of ones that do, keep sharing their original
+        vertices untouched.
         """
-        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        ug, vg = np.meshgrid(us, vs)
+        u = uv[:, 0]
+        u_corner = u[faces]  # (M, 3)
+        shift1 = -np.round(u_corner[:, 1] - u_corner[:, 0])
+        shift2 = -np.round(u_corner[:, 2] - u_corner[:, 0])
 
-        X = (ug.ravel() - 0.5) * (2.0 * x_half)
-        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
+        face_idx1 = np.nonzero(shift1 != 0)[0]
+        face_idx2 = np.nonzero(shift2 != 0)[0]
+        if len(face_idx1) == 0 and len(face_idx2) == 0:
+            return vertices, faces, uv
 
-        h_hm, w_hm = height_map.shape
-        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
-        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
-        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
-        Y = np.nan_to_num(Y, nan=0.0)
+        faces = faces.copy()
+        vertex_chunks = [vertices]
+        uv_chunks = [uv]
+        next_index = len(vertices)
 
-        grid_verts = np.stack([X, Y, Z], axis=-1)
-        rgba = panorama.sample_3d(grid_verts, sky_mask=sky_mask)
-        color = PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
+        for face_idx, corner, shift in ((face_idx1, 1, shift1), (face_idx2, 2, shift2)):
+            if len(face_idx) == 0:
+                continue
+            orig_vertex_idx = faces[face_idx, corner]
+            dup_uv = uv[orig_vertex_idx].copy()
+            dup_uv[:, 0] += shift[face_idx]
+            vertex_chunks.append(vertices[orig_vertex_idx])
+            uv_chunks.append(dup_uv)
+            n = len(face_idx)
+            faces[face_idx, corner] = np.arange(next_index, next_index + n)
+            next_index += n
 
-        # ── Latitude-based certainty (magnitude of viewing angle, not sign) ──────
-        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
-        lat  = np.arctan2(Y.astype(np.float64), r_xz)  # elevation angle, camera at origin
-
-        abs_lat_deg     = np.degrees(np.abs(lat))
-        pole_cutoff_deg = abs(nadir_cutoff_deg)
-
-        # Ramp down to 0 near the pole singularity; ramp down to 0 at the horizon.
-        fade_in  = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
-        fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
-        certainty = np.minimum(fade_in, fade_out).astype(np.float32)
-
-        # ── Zero out unobserved (interpolated) heightmap cells ────────────────
-        if height_certainty is not None:
-            obs = map_coordinates(
-                height_certainty.astype(np.float64),
-                [row_coords, col_coords],
-                order=1,
-                mode="nearest",
-            ).astype(np.float32)
-            certainty *= obs.clip(0.0, 1.0)
-
-        return color, certainty.reshape(tex_size, tex_size)
+        return np.concatenate(vertex_chunks, axis=0), faces, np.concatenate(uv_chunks, axis=0)
 
     @staticmethod
     def _uvs_pinhole(

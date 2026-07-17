@@ -819,8 +819,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         camera (it decays as camera_height / distance) — so nearly the whole
         terrain fell back to synthetic FLUX tiles instead of the real photo.
 
-        Latitude-based weighting (matching bake_topdown_texture_with_certainty's
-        certainty ramp) keeps the real panorama dominant across the terrain.
+        Latitude-based weighting (delegated to Panorama.mesh_visibility_weight,
+        the one shared implementation of this ramp) keeps the real panorama
+        dominant across the terrain.
         It gates on the *magnitude* of the elevation angle from the camera to
         each ground point, not its sign: a point sitting above the camera's
         own height is exactly as visible in the source panorama as one below
@@ -863,15 +864,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         ).reshape(blend_map_size, blend_map_size).astype(np.float32)
         Y = np.nan_to_num(Y, nan=0.0)
 
-        r_xz = np.sqrt(X.astype(np.float64) ** 2 + Z.astype(np.float64) ** 2).clip(1e-6)
-        lat = np.arctan2(Y.astype(np.float64), r_xz)  # elevation angle, camera at origin
-
-        abs_lat_deg     = np.degrees(np.abs(lat))
-        pole_cutoff_deg = abs(nadir_cutoff_deg)
-
-        fade_in  = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
-        fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
-        weight   = np.minimum(fade_in, fade_out).astype(np.float32)
+        grid_verts = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+        weight = Panorama.mesh_visibility_weight(
+            grid_verts,
+            nadir_cutoff_deg=nadir_cutoff_deg,
+            nadir_fade_deg=nadir_fade_deg,
+            horizon_fade_deg=horizon_fade_deg,
+        ).reshape(blend_map_size, blend_map_size)
 
         if observed_mask is not None and observed_mask.shape == height_map.shape:
             # Blur at native resolution before sampling so the observed/

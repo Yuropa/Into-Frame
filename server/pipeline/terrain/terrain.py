@@ -7,6 +7,7 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
+from util.panorama_utils import Panorama
 
 
 class TerrainMeshConfiguration(PipelineStageConfiguration):
@@ -53,10 +54,22 @@ class TerrainMeshStage(PipelineStage):
     Converts the ground-plane height map into a variable-density terrain mesh.
 
     Texture source priority:
-      1. SplatMaterial (TERRAIN_MATERIAL) — UVs are set 0→1 so Unity can sample
-         the blend maps directly; the first layer tile is embedded as a GLB preview.
+      1. SplatMaterial (TERRAIN_MATERIAL) — UVs are set 0→1 (a world-space
+         top-down grid) so Unity can sample the blend maps, and every non-
+         equirect layer, directly at those UV coords. This convention is
+         load-bearing for Unity's real-time multi-layer blending and stays
+         fixed regardless of what layer 0 is. The first layer tile is
+         embedded as a GLB preview: if it's the live panorama layer
+         (equirect=True), a top-down bake of it is embedded instead of the
+         raw equirect image (which would be mismatched under top-down UVs)
+         — Unity's own renderer never reads this embedded preview texture,
+         it recomputes true equirect UVs live from world position for that
+         layer, so this only matters for a generic GLB viewer/debug export.
       2. Pre-baked single texture (TERRAIN_TEXTURE) — tiled at texture_tile_factor.
-      3. Equirectangular panorama — inline bake at UV scale 1.
+      3. Equirectangular panorama — each vertex gets its own UV via a direct
+         projection onto the panorama's own pixel grid (Panorama.mesh_uvs),
+         and the panorama image is used as the texture with no bake step —
+         no world-space<->equirectangular resampling distortion.
       4. Original image via pinhole projection.
       5. Geometry-only (no UVs).
 
@@ -124,6 +137,10 @@ class TerrainMeshStage(PipelineStage):
             or 100.0
         )
 
+        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
+        if isinstance(sky_mask, list):
+            sky_mask = np.array(sky_mask, dtype=bool)
+
         # ── Resolve texture source ─────────────────────────────────────────────
         precomputed_image = None
         panorama_tex = None
@@ -133,10 +150,28 @@ class TerrainMeshStage(PipelineStage):
 
         splat: Optional[SplatMaterial] = context.input_splat_material(ContextKey.TERRAIN_MATERIAL)
         if splat is not None and splat.layers:
-            # UVs 0→1 so Unity samples blend maps directly at vertex UV coords.
-            # Embed the first layer tile as a preview texture so the GLB is not blank.
-            precomputed_image = splat.layers[0].tile
-            tile_factor = 1.0
+            # UVs 0→1 (a world-space top-down grid) so Unity samples blend maps,
+            # and every non-equirect layer, directly at those UV coords — this
+            # stays fixed regardless of what layer 0 is.
+            layer0 = splat.layers[0]
+            if layer0.equirect:
+                # layer0.tile is the raw, unbaked equirect panorama — embedding it
+                # directly under top-down UVs would be mismatched (wrong pixel
+                # layout for that UV convention). Bake a self-consistent top-down
+                # preview instead; Unity's own renderer never reads this embedded
+                # texture (it recomputes true equirect UVs live from world
+                # position for this layer), so this only affects a generic GLB
+                # viewer/debug export.
+                precomputed_image = Panorama(layer0.tile).bake_topdown(
+                    x_half=grid_size / 2.0,
+                    z_far=grid_size / 2.0,
+                    height_map=height_map.depth,
+                    sky_mask=sky_mask,
+                )
+                tile_factor = 1.0
+            else:
+                precomputed_image = layer0.tile
+                tile_factor = layer0.tile_factor
             self.log_info(
                 f"Terrain texture: SplatMaterial ({splat.layer_count} layer(s), "
                 f"{len(splat.blend_maps)} blend map(s)) — UVs 0→1"
@@ -151,7 +186,7 @@ class TerrainMeshStage(PipelineStage):
                 panorama_tex = context.input_panorama(panorama_key)
                 if panorama_tex is not None:
                     tile_factor = 1.0
-                    self.log_info("Terrain texture: equirectangular panorama (inline bake)")
+                    self.log_info("Terrain texture: equirectangular panorama (direct mesh→panorama UV projection)")
                 else:
                     original = context.input_image(ContextKey.INPUT)
                     intrinsics = context.input_intrinsics(intrinsics_key)
@@ -164,9 +199,6 @@ class TerrainMeshStage(PipelineStage):
         region_map = context.input_depth(ContextKey.REGION_MAP)
         observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
         component_id = context.input_depth(ContextKey.HEIGHT_MAP_COMPONENT_ID)
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
         mesh, water_mesh = TerrainMeshGenerator.generate(

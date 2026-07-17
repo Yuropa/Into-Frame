@@ -2,6 +2,7 @@ from __future__ import annotations
 import numpy as np
 import PIL.Image
 from pathlib import Path
+from scipy.ndimage import map_coordinates
 from scipy.spatial import KDTree
 from util.image_utils import Image
 
@@ -17,6 +18,16 @@ class Panorama:
       unproject(depth)                 — instance alias of the above.
       project_3d(vertices)             — 3D world points → panorama pixel (u, v), unrestricted.
       sample_3d(vertices)              — 3D world points → bilinear-sampled RGBA colours.
+      mesh_uvs(vertices)               — 3D world points → normalised [0,1] mesh UVs (this
+                                          panorama's own pixel grid -- "project the mesh back
+                                          onto the panorama"), for texturing a mesh directly
+                                          with this panorama image, no intermediate bake.
+      mesh_visibility_weight(vertices) — 3D world points → per-vertex [0,1] certainty, based
+                                          on viewing-angle steepness (nadir/horizon fade).
+      bake_topdown(...)                — rasterise into a world-space top-down orthographic
+                                          texture. Resamples between mismatched parameteri-
+                                          zations (real distortion); prefer mesh_uvs() unless
+                                          a consumer's UVs are pinned to a top-down grid.
       to_cubemap(face_w)               — equirectangular → CubeMap conversion.
 
     Coordinate convention (Unity / camera space):
@@ -103,19 +114,32 @@ class Panorama:
         """Instance convenience wrapper for equirectangular_unproject."""
         return Panorama.equirectangular_unproject(depth)
 
+    @staticmethod
+    def _lat_lon(vertices: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Elevation (lat) and azimuth (lon) angle from the camera at the world
+        origin to each vertex -- the part of the equirectangular projection
+        that doesn't depend on any particular panorama's own pixel
+        dimensions, split out so callers with no Panorama image on hand
+        (e.g. weighting geometry by viewing angle alone) can still share
+        this math.
+        """
+        X = vertices[:, 0].astype(np.float64)
+        Y = vertices[:, 1].astype(np.float64)
+        Z = vertices[:, 2].astype(np.float64)
+
+        r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
+        lat  = np.arctan2(Y, r_xz)
+        lon  = np.arctan2(X, Z)
+        return lat, lon
+
     def _project_vertices(
         self,
         vertices: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Shared equirectangular projection for project_3d and sample_3d."""
-        X = vertices[:, 0].astype(np.float64)
-        Y = vertices[:, 1].astype(np.float64)
-        Z = vertices[:, 2].astype(np.float64)
+        lat, lon = Panorama._lat_lon(vertices)
         W, H = self.width, self.height
-
-        r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
-        lat  = np.arctan2(Y, r_xz)
-        lon  = np.arctan2(X, Z)
 
         pu = ((lon + np.pi) / (2.0 * np.pi)) * (W - 1)
         pv = (0.5 - lat / np.pi) * (H - 1)
@@ -219,6 +243,140 @@ class Panorama:
             colors[invalid, :3] = colors[valid][nn, :3]
 
         return colors
+
+    def mesh_uvs(self, vertices: np.ndarray, min_lat_deg: float = -35.0) -> np.ndarray:
+        """
+        Project 3D world-space vertices directly onto this panorama's own
+        pixel grid to get their UV coordinates -- i.e. "project the mesh
+        back onto the panorama," instead of resampling the panorama into a
+        separate top-down raster. The panorama image itself can then be
+        used as the mesh's texture with no intermediate bake, so there's no
+        world-space<->equirectangular resampling distortion beyond the
+        projection's own inherent nadir/horizon limits.
+
+        Vertices below min_lat_deg (the nadir dead-zone directly under the
+        camera, where longitude becomes numerically unstable) have no
+        reliable projection of their own; their UV is snapped to their
+        nearest valid neighbour's UV in the XZ plane (same technique
+        sample_3d already uses for its own near-nadir hole-filling), giving
+        a plausible stretched fallback rather than a singular/undefined UV.
+
+        Callers that also need the mesh to stay watertight across the
+        longitude seam (lon = ±π, directly behind the camera) must
+        additionally split/duplicate any triangle whose corners' U values
+        wrap around -- this method only computes the raw per-vertex UV; it
+        has no notion of triangle topology.
+
+        vertices:    (N, 3) float array.
+        min_lat_deg: most-negative latitude still considered a valid
+                     projection of its own (degrees). Matches sample_3d's
+                     own default -- shallower than the ~-85° cutoff used
+                     for continuous certainty blending elsewhere, since a
+                     hard UV assignment has no blending safety net near the
+                     pole singularity.
+        Returns:     (N, 2) float32 UV array. V is pre-flipped to cancel
+                     trimesh's export-time V-flip (row 0 = image top),
+                     matching _uvs_pinhole's convention.
+        """
+        X = vertices[:, 0].astype(np.float64)
+        Z = vertices[:, 2].astype(np.float64)
+        W, H = self.width, self.height
+
+        pu, pv, lat = self._project_vertices(vertices)
+        u = (pu / max(W - 1, 1)).astype(np.float32)
+        v = (1.0 - pv / max(H - 1, 1)).astype(np.float32)
+
+        min_lat_rad = np.radians(min_lat_deg)
+        valid = lat >= min_lat_rad
+        invalid = ~valid
+        if invalid.any() and valid.any():
+            _, nn = KDTree(np.stack([X[valid], Z[valid]], axis=-1)).query(
+                np.stack([X[invalid], Z[invalid]], axis=-1)
+            )
+            u[invalid] = u[valid][nn]
+            v[invalid] = v[valid][nn]
+
+        return np.stack([u, v], axis=-1)
+
+    @staticmethod
+    def mesh_visibility_weight(
+        vertices: np.ndarray,
+        nadir_cutoff_deg: float = -35.0,
+        nadir_fade_deg: float = 10.0,
+        horizon_fade_deg: float = 5.0,
+    ) -> np.ndarray:
+        """
+        Per-vertex certainty in [0, 1] for how reliable an equirectangular
+        panorama's projection is at each vertex, based on the *magnitude*
+        of the viewing angle from a camera at the world origin, not its
+        sign -- a point sitting above the camera's own height (a rise, a
+        hillside) is just as visible in the panorama as one below it; only
+        the equirectangular projection's two failure modes matter:
+          - 0 at/beyond the nadir/zenith pole cutoff (no reliable coverage)
+          - 0 right at the horizon (extreme vertical compression)
+          - a smooth ramp [0, 1] over nadir_fade_deg approaching the cutoff
+          - a smooth ramp [0, 1] over horizon_fade_deg away from the horizon
+
+        Depends only on vertex geometry (viewing angle), not any
+        particular panorama's own pixels -- callable without a Panorama
+        instance (e.g. Panorama.mesh_visibility_weight(vertices, ...)) so
+        callers that only have geometry on hand, not a loaded image, can
+        still share this math. This is the one shared implementation for
+        "how good is this vertex's panorama sample," whether that's gating
+        a hard UV assignment (mesh_uvs) or blending a synthetic fill
+        layer's weight.
+
+        Returns: (N,) float32 array in [0, 1].
+        """
+        lat, _ = Panorama._lat_lon(vertices)
+        abs_lat_deg = np.degrees(np.abs(lat))
+        pole_cutoff_deg = abs(nadir_cutoff_deg)
+
+        fade_in = ((pole_cutoff_deg - abs_lat_deg) / nadir_fade_deg).clip(0.0, 1.0)
+        fade_out = (abs_lat_deg / horizon_fade_deg).clip(0.0, 1.0)
+        return np.minimum(fade_in, fade_out).astype(np.float32)
+
+    def bake_topdown(
+        self,
+        x_half: float,
+        z_far: float,
+        height_map: np.ndarray,
+        tex_size: int = 4096,
+        sky_mask: "np.ndarray | None" = None,
+    ) -> PIL.Image.Image:
+        """
+        Rasterise this panorama into a top-down orthographic texture, laid
+        out with simple orthographic UVs (u=(X+x_half)/(2*x_half),
+        v=(Z+z_far)/(2*z_far)).
+
+        This resamples between two fundamentally mismatched
+        parameterizations (a world-space top-down grid vs. this panorama's
+        own equirectangular one), which causes real distortion: a small
+        area near the camera spreads across a huge range of panorama
+        longitude ("pinwheeling" near the origin), and distant terrain
+        compresses many panorama rows into a handful of world-space cells
+        near the horizon. Kept only for the one case that genuinely needs a
+        texture laid out in this convention -- a mesh whose UV0 is pinned
+        to a top-down grid for other reasons (e.g. shared blend-map
+        sampling). Everywhere else, prefer mesh_uvs() plus this panorama's
+        own image directly, which has none of this resampling distortion.
+        """
+        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
+        ug, vg = np.meshgrid(us, vs)
+
+        X = (ug.ravel() - 0.5) * (2.0 * x_half)
+        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
+
+        h_hm, w_hm = height_map.shape
+        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
+        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
+        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
+        Y = np.nan_to_num(Y, nan=0.0)
+
+        grid_verts = np.stack([X, Y, Z], axis=-1)
+        rgba = self.sample_3d(grid_verts, sky_mask=sky_mask)
+        return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
 
     def perspective_crop(
         self,
