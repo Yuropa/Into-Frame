@@ -118,8 +118,7 @@ class SegmentationStage(PipelineStage):
             # Cropping
             cropping_task = self.create_progress(result.length, "Cropping…")
             filtered = 0
-            for idx, crop in enumerate(result.masked_images(input_image)):
-                i = total_crops + idx
+            for crop in result.masked_images(input_image):
                 _, _, w, h = crop.box
                 area = w * h
                 if area < min_area or area > max_area:
@@ -127,6 +126,10 @@ class SegmentationStage(PipelineStage):
                     self.advance_progress(cropping_task)
                     continue
 
+                # Indices must stay contiguous (no holes for filtered-out crops) --
+                # downstream stages iterate range(OBJECT_COUNT) and assume every
+                # index has a crop_{i}/metadata_{i} pair.
+                i = total_crops
                 context.add_image(f"crop_{i}", crop.image)
                 self.log_info(f"  crop_{i}: box={[round(x, 1) for x in crop.box]} score={crop.score:.3f}")
 
@@ -135,11 +138,11 @@ class SegmentationStage(PipelineStage):
                     "score": float(crop.score)
                 }
                 context.add_object(f"metadata_{i}", metadata)
+                total_crops += 1
                 self.advance_progress(cropping_task)
             self.finish_progress(cropping_task)
             if filtered:
                 self.log_info(f"  Filtered {filtered} crop(s) outside size bounds ({result.length - filtered} kept)")
-            total_crops += result.length
 
         # Foreground Segmentation
         # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting…")
