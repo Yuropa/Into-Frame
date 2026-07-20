@@ -42,7 +42,7 @@ stages:
   # position and simply see crop_{i}/metadata_{i} as already populated.
   - name: Object Segmentation
     stage: SegmentationStage
-    enabled: false
+    enabled: true
     # Detect objects across the full 360° panorama (ContextKey.PANORAMA -- the
     # original, with real objects still in it) instead of just the narrow hero
     # photo, so crop_{i}/metadata_{i} boxes are panorama-pixel-space throughout
