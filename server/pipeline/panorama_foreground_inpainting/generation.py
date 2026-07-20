@@ -217,6 +217,15 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                 ).astype(np.uint8)) * 255
                 mask_pil = PILImage.fromarray(dilated_union, mode="L")
 
+                # Persist the exact dilated removal mask (Image, L mode, 255 = removed/
+                # synthetic) to context -- downstream stages can use it to know which
+                # pixels are ObjectClear's fabrication rather than real photo content
+                # (e.g. a second correction pass, or a depth-domain patch, over just
+                # this region; or a confidence/certainty term). Previously this only
+                # ever reached disk as a debug dump, never as a context value other
+                # stages could read.
+                context.add_image(ContextKey.PANORAMA_FOREGROUND_MASK, Image(mask_pil))
+
                 if self.temp is not None:
                     mask_pil.save(self.temp / "foreground_mask.png")
 

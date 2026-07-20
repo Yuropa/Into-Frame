@@ -1,0 +1,638 @@
+# Terrain-mesh test pipeline -- Approach A: FLUX.1 + panorama-LoRA correction pass
+#
+# Same stage list as config.yaml, from input image through Terrain Mesh, with
+# everything downstream of terrain geometry (texture generation, object
+# placement/distribution, scene generation, video) disabled -- also drops
+# Panorama Lighting / Skybox Inpainting, which only affect the sky/lighting,
+# not terrain geometry. Panorama Foreground Inpainting's ObjectClear removal has
+# no equirectangular awareness (see the "Panorama LoRA Correction" stage's own
+# comment below); this config's experiment is fixing that up in the IMAGE
+# domain, one FLUX.1 + panorama-LoRA img2img pass at reduced strength over just
+# the removed region, before the second Panorama Depth pass re-estimates depth
+# over it.
+#
+# Compare against config_depth_patch_test.yaml, which instead leaves the image
+# alone and patches the resulting DEPTH map directly.
+#
+# Usage:
+#   python main.py run <image> -o <output dir> --config config_lora_correction_test.yaml
+#
+# To re-test a change to just this stage against an existing output dir:
+#   python main.py run <image> -o <output dir> --config config_lora_correction_test.yaml \
+#       --rerun "Panorama LoRA Correction"
+
+stages:
+  - name: Captioning
+    stage: CaptioningStage
+
+  - name: Depth Generation
+    stage: DepthStage
+
+  - name: Panorama
+    stage: PanoramaStage
+    generator_type: WORLDGEN
+
+  - name: Panorama Supersampling
+    stage: SupersamplingStage
+    keys:
+      input: panorama
+      output: panorama
+
+  - name: Panorama Object Depth
+    stage: PanoramaDepthStage
+    keys:
+      output: panorama_object_depth
+
+  # Moved ahead of Panorama Foreground Inpainting (out of the main Object
+  # processing block below) so tree/forest crops already exist by the time
+  # that stage builds its removal mask — see foreground_distance_m comment
+  # in Panorama Foreground Inpainting for why depth thresholding alone misses
+  # mid-ground vegetation. Object Recognition/Detection/Correlation/
+  # Distribution/Panorama Asset Generation still run in their original later
+  # position and simply see crop_{i}/metadata_{i} as already populated.
+  - name: Object Segmentation
+    stage: SegmentationStage
+    enabled: true
+    # Detect objects across the full 360° panorama (ContextKey.PANORAMA -- the
+    # original, with real objects still in it) instead of just the narrow hero
+    # photo, so crop_{i}/metadata_{i} boxes are panorama-pixel-space throughout
+    # the rest of the object pipeline (Correlation/Distribution/Asset Generation/
+    # Scene Generation already assume this -- see Object Recognition/Detection
+    # below for the same change, and image_segmentation_imp.py for the panorama
+    # tiling this now needs to avoid quality loss).
+    keys:
+      input: panorama
+
+  - name: Object Classification
+    stage: PanoramaObjectClassificationStage
+
+  - name: Object Typing
+    stage: ObjectTypingStage
+
+  - name: Panorama Inpainting
+    stage: PanoramaInpaintingStage
+    enabled: false
+    full_panorama: true
+    use_depth_filter: true
+    depth_filter_distance_m: 5.0  # mask kept as foreground if median depth is closer than this (metres)
+    # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
+    # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
+    # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
+    # PanoramaForegroundInpaintingStage already leaves it untouched today. PANORAMA_TERRAIN
+    # (what Panorama Depth → Height Map actually consumes) is written unconditionally either way.
+    keys:
+      output: panorama_foreground_removed
+
+  - name: Panorama Foreground Inpainting
+    stage: PanoramaForegroundInpaintingStage
+    enabled: true
+    foreground_distance_m: 5.0  # mask built directly from depth: pixel is foreground if closer than this (metres)
+    min_region_area_px: 200     # drop connected components smaller than this (denoise depth-model glitches)
+    closing_radius_px: 12       # morphological closing to bridge small real gaps into one solid region
+    mask_dilation_px: 15
+    guidance_scale: 2.5
+    num_inference_steps: 30
+
+  - name: Panorama LoRA Correction
+    stage: PanoramaLoraCorrectionStage
+    enabled: true
+    # Experimental: re-touches the region Panorama Foreground Inpainting just
+    # fabricated with a partial-strength FLUX.1 + panorama-LoRA img2img pass, so
+    # its content is closer to the panorama-projection prior the second Panorama
+    # Depth pass below was actually trained on, instead of looking like an
+    # ordinary flat photo pasted into equirect space (ObjectClear has no
+    # equirectangular awareness at all). Compare against config_depth_patch_test.yaml,
+    # which leaves this content alone and instead patches the resulting depth map
+    # directly. No-ops if Panorama Foreground Inpainting found nothing to remove.
+    strength: 0.35          # img2img denoise strength -- deliberately low: most of
+                             # ObjectClear's output is already a plausible photo, this
+                             # should nudge it toward equirect-consistent projection,
+                             # not regenerate it from scratch. Raise if the corrected
+                             # region still doesn't read as equirect-consistent; lower
+                             # if real detail is visibly being erased.
+    lora_scale: 0.85         # matches Skybox Inpainting's own use of this LoRA
+    guidance_scale: 4.0
+    num_inference_steps: 30
+    max_resolution: 1536
+    mask_extra_dilation_px: 0
+
+  - name: Panorama Regions
+    stage: PanoramaRegionStage
+    nadir_cutoff_deg: -55.0 # degrees elevation: rows at/below this (the tripod/rig, heavily
+                            # warped by the equirectangular projection) are discarded from
+                            # SegFormer's raw output and replaced by the reliable ring above.
+    nadir_band_deg: 15.0    # degrees of ring immediately above the cutoff used for the
+                            # per-column majority vote that replaces the excluded band.
+
+  - name: Panorama Lighting
+    stage: PanoramaLightingStage
+    enabled: false
+
+  - name: Skybox Inpainting
+    stage: SkyboxInpaintingStage
+    enabled: false
+    # FLUX now regenerates the entire panorama (not just the non-sky region) — see
+    # the stage docstring: masking to just the non-sky area left a hard kept/generated
+    # boundary shaped exactly like the buried mountain silhouette, which FLUX reliably
+    # rendered back as a visible cloud-ridge line tracing the seam. Full-canvas
+    # generation removes that boundary (and the artifact) entirely, so
+    # shroud_radius_frac / seam_heal_width_px no longer apply and have been removed.
+    guidance_scale: 5.5         # FLUX's prompt-adherence strength for the sky generation;
+                                # raised from 4.0 for a stronger, more defined cloud/atmosphere
+                                # result instead of hewing close to the muted procedural gradient.
+    strength: 0.85              # how much of the gradient composite (incl. real photographed
+                                # sky) survives Pass 2 vs. being replaced by FLUX's own
+                                # generation. 1.0 = fully overwritten, ignores the input almost
+                                # entirely; lower keeps more of the original sky's colour/texture.
+
+  - name: Panorama Depth
+    stage: PanoramaDepthStage
+    keys:
+      input: panorama_terrain
+
+  - name: Panorama Depth Calibration
+    stage: PanoramaDepthCalibrationStage
+    # Fits a monotonic curve from DAP's raw 0-1 output to real metric depth using the region
+    # where the original hero photo overlaps the panorama (Depth Anything 3's metric depth,
+    # from the "Depth Generation" stage, is real ground truth there), then applies it to the
+    # whole panorama. Replaces DAP's flat, unverified `pred * 100.0` assumption — see
+    # server/pipeline/panorama_depth/pano_depth_imp.py — which otherwise makes distant terrain
+    # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
+    num_bins: 14
+    min_samples: 300
+    max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
+                                 # range at this many times the farthest/nearest fitted median
+                                 # metric depth, instead of an unbounded log-space extrapolation —
+                                 # DAP's raw output saturates for both real distant terrain and
+                                 # hard-clamped sky, so a slope fit from a few near-field tail bins
+                                 # and exponentiated over that gap was blowing up to tens of
+                                 # kilometres for ~40% of the panorama, which then got discarded as
+                                 # "out of bounds" downstream instead of read as real terrain.
+    max_depth_m: 100.0          # hard ceiling on the farthest calibrated depth -- must match
+                                 # Height Map's grid_size_meters / 2 below, since nothing farther
+                                 # can ever land inside that grid anyway. Enforced by uniformly
+                                 # scaling the whole depth map down to fit (see _rescale_to_fit),
+                                 # not by clamping outliers, which would collapse every distance
+                                 # beyond the cutoff onto one flat, indistinguishable wall.
+    max_depth_basis_percentile: 95.0 # rescale against this percentile of non-sky depth rather
+                                 # than the literal max -- DAP saturates at the same ceiling for
+                                 # both real distant terrain and sky, so the farthest pixel is
+                                 # usually one member of a wide shared plateau, not a genuine
+                                 # outlier; scaling off it compresses the whole near field far
+                                 # more than the real signal warrants. The rare remaining tail
+                                 # beyond this percentile is hard-clipped to max_depth_m instead.
+
+  - name: Height Map
+    stage: HeightMapStage
+    # Panorama depth is equirectangular (radial distances); use spherical unprojection.
+    keys:
+      depth: panorama_depth
+      intrinsics: intrinsics
+    grid_size_meters: 200.0      # side length of the output grid in metres
+    grid_resolution: 4096        # grid cells per side → ~4.9 cm/cell over 200 m
+    ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground candidates
+    use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
+    smooth_sigma: 16.0           # distance-weighted smoothing: 0 at centre → this value (px) at corners
+    camera_height_meters: 1.0   # assumed camera height above ground (metres); used to derive the Y
+                                 # floor filter (ground_y_min = -(camera_height + 5.0)) that rejects
+                                 # sky-pixel artefacts near the horizon, and as the flood-fill reference.
+    flood_fill: true             # BFS from grid centre outward; stops at height jumps and sky gaps
+    flood_fill_max_step: 1.5    # max Y change (metres) between adjacent cells in the flood-fill
+    nadir_exclusion_radius: 1.5 # metres: discard near-nadir equirectangular pixels within this
+                                 # radius of the camera; their depth is unreliable and projects
+                                 # directly below the user, creating a spurious bowl/valley.
+                                 # Kept small — this radius (plus nadir_ramp_width below) is
+                                 # entirely unconstrained in the reconstruction solve, so making
+                                 # it larger than necessary directly enlarges the flat disc around
+                                 # the user.
+    nadir_ramp_width: 3.0       # metres over which certainty ramps from 0 (at exclusion boundary)
+                                 # to full geometric certainty; prevents a hard ring artifact.
+    certainty_falloff_meters: 20.0 # distance at which observed-ground certainty decays to 0.5.
+                                 # A depth-model-trust radius, NOT camera_height_meters — using
+                                 # camera height (~1 m) here made certainty collapse to a few
+                                 # percent within 2-3 m, below any usable confidence_threshold in
+                                 # Terrain Reconstruction, so nothing beyond the nadir disc was ever
+                                 # trusted and mid-range terrain was entirely reinvented by the
+                                 # solver/noise. At 20 m, real ground crosses confidence_threshold
+                                 # (0.18) out to ~43 m, matching the ~20 m ridge_min_anchor_distance
+                                 # cutoff's assumption that near terrain is already observed.
+    elevation_distortion_power: 1.0 # exponent on cos(phi), phi = true camera-relative elevation
+                                 # angle to each observed cell -- the standard equirectangular
+                                 # areal-distortion factor: 1 straight ahead at the horizon
+                                 # (least warped), falling to 0 at the top/bottom of the source
+                                 # panorama (zenith/nadir), where equirectangular stretching makes
+                                 # the raw depth estimate itself least reliable, independent of how
+                                 # far away the ground point is. 0 disables.
+    save_point_cloud: true      # debug artefact: dense sky-masked point cloud from the raw
+                                 # panorama depth (no ground-plane Y filter, no grid binning),
+                                 # written to <build>/ground_point_cloud.glb
+    point_cloud_stride: 4       # take every Nth panorama pixel per axis before unprojecting
+    min_forward_samples: 4      # minimum forward-projected panorama pixels landing in one grid
+                                 # cell before its single inverse-mapped sample is overridden by
+                                 # real per-cell mean/relief/slope statistics (near-field only —
+                                 # far cells rarely collect enough samples and keep using the
+                                 # existing inverse-mapped value)
+    fill_boundary_falloff_cells: 6.0 # unobserved-cell fill: how many cells (at each octave's
+                                 # own resolution) beyond a real observation the injected noise
+                                 # needs before reaching full amplitude — fill right next to real
+                                 # data (e.g. the occluded top of a cliff whose base is directly
+                                 # observed) hugs that data's diffused trend instead of drifting
+                                 # via unconstrained randomness
+    min_component_area_fraction: 0.001 # connected ground components smaller than this fraction
+                                 # of the grid are folded into the interpolated-gap fallback
+                                 # instead of kept as their own component (see
+                                 # HEIGHT_MAP_COMPONENT_ID / TerrainMeshStage's formation meshes)
+    despike_threshold_m: 0.3    # single-inverse-mapped-sample cells (below min_forward_samples,
+                                 # so no intra-cell averaging) whose height differs from their own
+                                 # despike_window neighbourhood median by more than this are
+                                 # replaced by that median — a "flying pixel" edge where the depth
+                                 # model flickers between two competing surfaces otherwise lands as
+                                 # an alternating checkerboard of spikes between adjacent cells.
+                                 # 0 disables.
+    despike_window: 5           # odd cell-window size for the local median used above
+    despike_reference_distance_m: 10.0 # depth-model noise grows with sampled range and is
+                                 # further amplified for elevated/steep rays (Y = depth *
+                                 # sin(phi)); the effective despike threshold shrinks below
+                                 # despike_threshold_m (never above it) for cells sampled
+                                 # beyond this distance, scaled by this / sampled_depth.
+    region_closing_iterations: 2 # binary closing passes on the ground-valid classification
+                                 # before it gates which pixels count as ground — per-pixel
+                                 # semantic segmentation is noisy right at class boundaries;
+                                 # closing removes single-pixel holes/islands that would
+                                 # otherwise show up as salt-and-pepper speckle in both the
+                                 # observed mask and the height values sampled from it.
+                                 # 0 disables.
+    single_sample_blur_sigma: 1.5 # Gaussian sigma (grid cells) for a partial blur applied
+                                 # only to single-inverse-mapped-sample cells (no intra-cell
+                                 # averaging), blended in per-cell by (1 - certainty) — dense
+                                 # (multi-sample) cells are never touched. Targets per-pixel
+                                 # depth-model dither that despiking's outlier test can't
+                                 # catch (neighbouring single-sample cells usually carry
+                                 # similar-magnitude noise, so no individual cell stands out
+                                 # from a clean local median). 0 disables.
+
+  - name: Region Map
+    stage: RegionMapStage
+    grid_size_meters: 200.0     # must match Height Map grid extent
+    grid_resolution: 4096       # must match Height Map resolution
+    ground_y_max: -0.5
+    camera_height_meters: 1.0
+    nadir_exclusion_radius: 3.0 # metres: exclude near-nadir cells whose segmentation is
+                                 # unreliable due to equirectangular distortion at the bottom
+                                 # of the panorama; filled inward by the flood fill instead.
+                                 # Deliberately wider than Height Map's own nadir_exclusion_radius:
+                                 # unlike there, widening this has no geometry cost (it only
+                                 # decides which cells seed the type flood-fill vs. borrow their
+                                 # type from the nearest reliable ring), so it can track the
+                                 # segmentation model's actual distorted footprint rather than
+                                 # being capped to avoid enlarging an unconstrained flat disc.
+    nadir_ramp_width: 5.0       # metres over which flood-fill certainty ramps up from 0.
+    certainty_falloff_meters: 20.0 # must match Height Map's value — see that stage's comment.
+    interior_peak_max_range_factor: 2.0 # interior-peak candidates farther than
+                                 # (grid_size_meters/2 * this) are dropped rather than
+                                 # clamped onto the grid boundary — real distant content
+                                 # (a mountain summit kilometres out) isn't representable
+                                 # in this local terrain grid and would otherwise clamp to
+                                 # a meaningless flattened position (see
+                                 # RegionMapGenerator.extract_interior_peaks)
+    interior_peak_min_depth_m: 50.0 # interior-peak candidates nearer than this are
+                                 # excluded — depth_jump_rel is a relative threshold,
+                                 # trivially satisfied by routine close-range ground
+                                 # undulation that isn't a meaningfully elevated feature;
+                                 # near_side's foreground-bias selection would otherwise
+                                 # let near-camera noise dominate the output
+
+  - name: Linear Structures
+    stage: LinearStructureStage
+    enabled: false
+    modify_rivers: false
+    modify_roads: false
+
+  - name: Terrain Reconstruction
+    stage: TerrainReconstructionStage
+    solve_resolution: 512           # downsample to this for the harmonic solve, upsample after
+    # Cells are held fixed at their observed elevation based on HEIGHT_MAP_OBSERVED_MASK
+    # (a genuine direct point-cloud measurement), not HEIGHT_MAP_CERTAINTY -- certainty
+    # decays with distance from camera and would leave most real terrain beyond ~43 m
+    # (with the old 0.18 threshold and 20 m certainty_falloff_meters) unpinned, treated
+    # identically to an unobserved gap. The synthetic nadir flat-ground prior is never
+    # part of the observed mask, so it stays a soft, solver-overridable guess as before.
+    ridge_min_anchor_distance: 0.2  # fraction of grid half-radius; chains closer than this are skipped
+                                     # (assumed already captured by observed terrain — lowered from
+                                     # 0.5 so nearer ridges/hills still anchor the solve instead of
+                                     # being left to pure interpolation).
+    ridge_max_slope_angle_deg: 38.0 # angle of repose for slope envelope below ridge crests (°);
+                                    # ~35° loose talus, ~38° consolidated rock, ~45° hard bedrock.
+                                    # Only applies where cliff_mask is ~0; see cliff_max_slope_angle_deg.
+    river_valley_depth: 0.5         # metres to lower river nodes below observed terrain
+    river_drop_per_segment: 0.05    # additional metres drop per ordered river segment
+    lake_y_range_threshold: 0.3     # Y-range threshold (m) to distinguish flat lakes from sloped water
+    # Cliff mask: combines (a) measured slope on directly-observed terrain (gated on
+    # HEIGHT_MAP_OBSERVED_MASK, not certainty) — real ground truth, strongest close to
+    # the camera — with (b) distant ridge-chain silhouette jaggedness, the only
+    # steepness signal available for mountains beyond depth range. Written to context
+    # as CLIFF_MASK for reuse by Terrain Noise Refinement.
+    cliff_slope_angle_low_deg: 50.0  # measured slope below this → not a cliff (strength 0)
+    cliff_slope_angle_high_deg: 75.0 # measured slope at/above this → fully a cliff (strength 1)
+    cliff_max_slope_angle_deg: 82.0  # slope envelope cap where cliff_mask > 0, vs. the talus
+                                      # angle (ridge_max_slope_angle_deg) elsewhere
+    # Cliff-top shelf: a directly-observed cliff face whose top edge borders occluded
+    # terrain (camera saw the face, never the plateau beyond it) would otherwise be
+    # left as free nodes with no local anchor, letting the harmonic solve ramp that
+    # plateau down toward low ground fixed near the cliff's base. This projects a
+    # shallow shelf outward from each cliff blob's crest instead.
+    cliff_shelf_angle_deg: 8.0        # shallow assumed slope (°) projected outward from the
+                                       # crest into occluded terrain beyond it. 0 disables.
+    cliff_shelf_crest_percentile: 85.0 # within each connected measured-cliff blob, cells at/
+                                        # above this elevation percentile count as the crest
+    cliff_shelf_min_blob_cells: 20    # ignore measured-cliff blobs smaller than this (at solve
+                                       # resolution) to avoid anchoring on stray steep-pixel noise
+
+  - name: Terrain Noise Refinement
+    stage: TerrainNoiseRefinementStage
+    road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
+    road_blur_sigma: 4.0          # pixel radius for softening road mask edges
+    road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
+    noise_scale: 80.0             # fBm base wavelength in pixels
+    noise_octaves: 4              # fractal octave count
+    noise_amplitude: 0.2          # metres of peak noise displacement
+    linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
+    diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
+                                   # Raised from 200 (≈0.9 m) — that was only rounding multi-cell
+                                   # solver artefacts, too short to smooth the kink where the ridge
+                                   # slope envelope (see Terrain Reconstruction) snaps on against the
+                                   # foreground. LinearDiffuser's implicit solve is unconditionally
+                                   # stable, so raising dt alone (rather than K_d) is safe.
+    landlab_resolution: 1024      # downsample to this resolution for Landlab, upsample after
+    peak_sharpness: null          # null = auto-derive spatially from silhouette; explicit float = uniform
+    peak_sharpness_min: 1.0       # auto range lower bound (flat/rolling hills)
+    peak_sharpness_max: 2.5       # auto range upper bound (sharp alpine peaks)
+    peak_sharpness_window_m: 20.0 # sliding window size (metres) for local jaggedness scoring
+    peak_sharpness_spread_m: 15.0 # Gaussian spread radius (metres) from ridge into surrounding terrain
+    hydro_enabled: true           # stream power erosion to carve valleys and channel networks
+    hydro_erodibility: 5.0e-6    # K_sp: erodibility constant (m^(1-2m)/yr); increase to carve deeper
+    hydro_dt: 1000.0              # timestep per erosion step (conceptual years)
+    hydro_n_steps: 10             # number of erosion steps; total time = hydro_dt × hydro_n_steps
+    hydro_resolution: 256         # downsample resolution for flow routing (speed vs. channel detail)
+    cliff_noise_suppression: 0.85 # fraction of fBm noise amplitude suppressed on protected (cliff OR
+                                   # observed-trust, see observed_trust_strength) cells; diffusion and
+                                   # hydro erosion are always fully excluded there (see
+                                   # TerrainReconstructionStage for how CLIFF_MASK is built)
+    observed_trust_strength: 1.0  # how strongly HEIGHT_MAP_CERTAINTY (real point-cloud trust, already
+                                   # decaying smoothly with distance from observed data) additionally
+                                   # protects cells from noise/diffusion/erosion, on top of CLIFF_MASK.
+                                   # 0 = old behaviour (only the literal true_observed boolean, restored
+                                   # at the very end of this stage, is protected -- everything else gets
+                                   # full-strength synthesis no matter how close it is to real data).
+                                   # 1.0 = a certainty=1 cell is fully protected, same as a cliff cell.
+
+  - name: Region Map Refinement
+    stage: RegionMapRefinementStage
+    certainty_threshold: 0.2        # cells below this are candidates for height-based reclassification
+    water_elevation_tolerance: 0.5  # metres; cells within this band of known water surface → WATER
+    water_gradient_threshold: 0.04  # m/m slope; flatter than this is eligible for WATER
+    terrain_gradient_threshold: 0.15 # m/m slope; steeper than this → TERRAIN
+    paint_width: 2                  # grid-cell half-width to dilate painted polylines
+
+  - name: Terrain Mesh
+    stage: TerrainMeshStage
+    inner_min_dist: 0.10    # metres between samples at the origin (10 cm)
+    outer_min_dist: 2.0     # metres between samples at the domain corners
+    n_boundary: 64          # anchor points per edge of the domain rectangle
+    z_far: null
+    noise_amplitude: 0.05   # metres of peak noise displacement
+    noise_blend_floor: 0.15 # minimum noise blend fraction at the camera origin (was 0, which left
+                             # the ground directly under the user perfectly noise-free); ramps up
+                             # to 1.0 at the domain corner as before. Only applies where
+                             # HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on real
+                             # point-cloud geometry get zero added noise regardless of distance.
+    water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
+                             # WATER cells), so an eventually-animated water plane's wave amplitude
+                             # never exposes the terrain underneath it. Also emits a separate flat
+                             # water mesh (WATER_MESH) at the un-depressed water surface elevation.
+    # Non-primary connected ground components (HEIGHT_MAP_COMPONENT_ID -- a separate
+    # landmass, an isolated rock formation, anything real but genuinely disconnected
+    # from the base terrain) each get their own separate mesh instead of being folded
+    # into or discarded from the base terrain. See TERRAIN_FORMATIONS.
+    formation_depression_m: 0.5  # metres the base terrain is carved below each formation's
+                                 # own real height where it sits, mirroring water_depression_m
+    formation_min_dist: 0.5     # metres between samples in a formation's own (uniform-density,
+                                 # unlike the main terrain's near/far falloff) Poisson disc mesh
+    formation_n_boundary: 8     # anchor points per edge of a formation's own bounding rectangle
+    debug_uv_texture: true      # true: embed a synthetic R=U/G=V gradient (with gridlines) as the
+                                 # GLB preview material instead of the real panorama, sampled
+                                 # through the same corrected panorama UV (TEXCOORD_1) as everything
+                                 # else -- lets you read a vertex's UV straight off its colour in a
+                                 # generic viewer. Only affects the embedded preview; Unity's live
+                                 # render never reads it either way.
+
+  - name: Terrain Texture Generation
+    stage: TerrainTextureGenerationStage
+    enabled: false
+    tile_size: 1024             # px per seamless region tile (FLUX generates at this size)
+    blend_map_size: 512         # px for the blend maps
+    blend_sigma: 0.05           # gaussian blend width at region boundaries (fraction of blend_map_size)
+    min_region_fraction: 0.02   # regions smaller than this fraction are skipped
+    inpainting_type: FLUX
+    num_inference_steps: 35
+    guidance_scale: 3.5
+    seam_width_fraction: 0.08   # half-width of seam mask as fraction of tile_size
+    seam_dilation_px: 4         # dilation applied to seam mask before inpainting
+    # Seam fix crops each seam band out, downscales it, inpaints, then upscales/feathers
+    # it back in -- avoids stamping a patch of crisp, full-resolution FLUX noise right on
+    # the seam (same trick as the skybox panorama's own wrap-seam repair).
+    seam_fix_context_px: 64     # real pixels of surrounding context kept around the band
+    seam_fix_max_size: 512      # crop is downscaled to this before FLUX, then upscaled back
+    seam_fix_feather_px: 24.0   # gaussian feather radius blending the fix back into the original
+    # Width (fraction of tile_size) of the ring around all four tile edges that Pass 1
+    # actually has to generate -- reference patches are tiled edge to edge to fill the rest
+    # of the interior (_build_reference_canvas), so this is a real, bounded outpaint of a
+    # thin border rather than extrapolating most of the tile from a small inset patch. 0
+    # disables it (patches fill the whole tile, nothing left to outpaint).
+    outpaint_border_fraction: 0.08
+    # Several real reference crops (_extract_reference_patches) instead of one -- tiled
+    # across the interior grid (_build_reference_canvas), gives Pass 1 more than one real
+    # colour/lighting anchor since generated fill (in the outpaint ring) can drift far from
+    # a single one.
+    num_reference_patches: 1
+    # Each extracted patch's own resolution, as a fraction of tile_size when there's only
+    # one; scaled down by 1/sqrt(num_reference_patches) so total sampled area stays
+    # comparable. Independent of how large it ends up on the tile canvas -- the interior
+    # grid resizes each patch again to fill its own cell regardless of this size.
+    reference_patch_fraction: 0.7
+    # Delight each reference patch with IntrinsicDiffusion (predicted albedo) before it's
+    # used as a Pass 1 guidance seed, instead of the raw photo pixels -- the raw patch's
+    # baked-in sun/shadow/exposure gets stamped across the whole tile at
+    # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
+    # overcast, no directional shadows" prompt.
+    use_intrinsic_delighting: true
+    intrinsic_delight_strength: 0.6 # blend toward the predicted albedo (1.0 = fully delit) --
+                                 # full strength looked unnaturally flat/washed out
+    intrinsic_resolution: 768   # working resolution for the delighting pass
+    intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
+    # Swin2SR 2x each (optionally delit) reference patch, then LANCZOS back down to its own
+    # size, before it's composited onto the Pass 1 canvas -- sharper/denoised source for
+    # both the pasted patch itself and the canvas's own background fill (which stretches a
+    # copy of it up to the full tile), the same "render bigger, downsample for quality"
+    # trick used for Flux fills elsewhere (see supersample_inpaint).
+    use_patch_supersampling: true
+    # Pass 1 extends the patch to fill the whole tile as pure guidance (not hard-preserved):
+    # LAMA = classical texture-completion, no prompt/LoRA/hallucination (recommended — the
+    # LoRA doesn't reliably honour a "keep" mask region since it was never trained on masked
+    # inputs, observed as the patch being replaced with unrelated content). FLUX = ordinary
+    # img2img with this stage's own LoRA temporarily disabled instead.
+    pass1_inpainting_type: LAMA
+    # Temporarily off -- FLUX_SEAMLESS_TEXTURE was producing visible artifacts. Runs plain
+    # FLUX.1-Fill-dev with no LoRA loaded at all until re-enabled.
+    use_lora: false
+    mask_feather_px: 12.0       # Pass-1 mask feather (FLUX option only; LaMa ignores it)
+    reference_strength: 0.60   # img2img strength for Pass 1 (if FLUX) and Pass 2's full-tile
+                               # LoRA repaint over Pass 1 — the only thing anchoring Pass 2
+                               # to Pass 1's real-texture content rather than inventing anew
+    # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
+    # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
+    synthetic_tile_factor: 50.0
+    # Panorama layer coverage: viewing-latitude ramp (camera at world origin) that keeps
+    # the real photo dominant across almost the whole terrain. Synthetic tiles only fill
+    # the narrow nadir hole under the camera and a thin band right at the horizon, where
+    # distant flat ground is compressed into just a few panorama pixel rows -- plus
+    # (automatic, no config knob) anywhere HEIGHT_MAP_OBSERVED_MASK says the height at
+    # that point was interpolated rather than measured, even if the viewing angle looks
+    # safe, since the shader's panorama lookup uses that (possibly fabricated) world
+    # position and would otherwise sample whatever real content happens to sit there.
+    use_panorama_layer: true
+    panorama_blend_power: 1.0   # exponent on the latitude ramp; higher sharpens the fades
+    nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
+    nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
+    horizon_fade_deg: 1.5       # ramp width below the horizon
+    panorama_layer_max_resolution: 4096 # longest-edge cap for the panorama texture layer,
+                                 # decoupled from tile_size (that's a FLUX generation
+                                 # constraint, not relevant to a plain resize of the real
+                                 # photo). Keeps native ~2:1 aspect; only downscales past
+                                 # this cap. Matches ground_point_cloud.glb's color fidelity
+                                 # much more closely than the old square 1024px resize did.
+    # Debug: save every intermediate image of the generation process (reference patch,
+    # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
+    # <temp>/texture_generation/, so each step can be inspected.
+    debug_save_steps: true
+    # Real-material pattern texturing (pipeline/terrain/pattern_texture.py, adapted from
+    # Neyret & Cani's "Pattern-Based Texturing Revisited", SIGGRAPH '99 -- see
+    # resources.bib): tried first for every region type, using the real photo instead of
+    # FLUX hallucination wherever the panorama layer above doesn't already cover it
+    # directly. FLUX generation above is the explicit last-resort fallback when this
+    # returns nothing (no usable real reference for that region type, or the terrain
+    # mesh isn't available yet).
+    use_pattern_texture: true
+    pattern_certainty_threshold: 0.5  # panorama-layer weight below this -> needs synthesis
+    pattern_reference_patch_size: 512 # library samples are small triangular crops, not a
+                                       # whole tile's guidance seed -- smaller than tile_size
+    pattern_num_reference_patches: 4  # library variants per region type
+    pattern_sample_res: 128           # working resolution of one triangular library sample
+    pattern_border_width_frac: 0.45   # fraction of a sample's inradius blended toward the
+                                       # shared border colour -- wide and low-contrast (not a
+                                       # thin flat ring) reads as one continuous material
+                                       # rather than a visibly "faceted" tiling
+    pattern_feather_band_px: 48.0     # image-space feather (px, at pattern_canvas_size)
+                                       # blending the synthesized region back toward real
+                                       # photo content at its boundary with the panorama layer
+    pattern_feather_sigma_px: 8.0
+    pattern_min_coverage_fraction: 0.002 # skip (fall back to FLUX) if a region type's
+                                       # needs-synthesis footprint is smaller than this
+    pattern_canvas_size: 2048         # resolution of the baked layer (tile_factor=1.0, a
+                                       # one-shot world-space bake, not tiled like FLUX layers)
+
+  # Object processing: segmentation → classification → typing → recognition → detection → correlation
+  # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
+  # Segmentation/Classification/Typing now run earlier (see Panorama Foreground Inpainting
+  # section above) — Recognition/Detection/Correlation pick up their crop_{i}/metadata_{i}
+  # output from there, unchanged.
+
+  - name: Object Recognition
+    stage: RecognizeAnythingStage
+    enabled: false
+    keys:
+      input: panorama
+
+  - name: Object Detection
+    stage: ObjectDetectionStage
+    enabled: false
+    keys:
+      input: panorama
+
+  - name: Object Correlation
+    stage: ObjectCorrelationStage
+    enabled: false
+
+  - name: Object Distribution
+    stage: ObjectDistributionStage
+    enabled: false
+    bin_count: 48
+    # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
+
+  - name: Distribution Synthesis
+    stage: DistributionSynthesisStage
+    enabled: false
+    min_blob_area_cells: 64
+    max_candidates_per_tile: 2000
+    max_iters: 400
+    size_jitter: 0.15
+    input_boundary_pad_factor: 1.5
+    # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
+    # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
+                        # default (unset) is os.cpu_count()
+
+  - name: Panorama Asset Generation
+    stage: PanoramaAssetGenerationStage
+    enabled: false
+    billboard_distance_m: 30.0
+    generator_type: SAM3D
+    exclude_categories:
+      - tree
+      - forest
+      - bush
+      - flower
+      - plant
+
+  - name: Tree Mesh Generation
+    stage: TreeMeshGenerationStage
+    enabled: false
+
+  - name: Scene Generation
+    stage: SceneGenerationStage
+    enabled: false
+    keys:
+      panorama: panorama_sky
+    eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
+                              # sent to the client, which pushes the whole scene down to match
+
+  - name: Foreground Inpainting
+    stage: ForegroundInpainting
+    enabled: false
+
+  - name: Panorama Cubemap
+    stage: PanoramaToCubemapStage
+    enabled: false
+
+  - name: Video Generation
+    stage: VideoGenerationStage
+    enabled: false
+    # Animate the full 360° panorama (ContextKey.PANORAMA -- the original, with real
+    # objects still in it, not PANORAMA_TERRAIN/PANORAMA_SKY which have been through
+    # foreground/sky inpainting) instead of just the narrow raw input photo.
+    keys:
+      input: panorama
+    # camera_lora_strength: 0.0   # uncomment to disable the Camera-Control-Static LoRA
+
+  - name: Video Object Extraction
+    stage: VideoObjectExtractionStage
+    enabled: false
+    # Tracks each Object Segmentation crop's mask across the video above (SAM2's video
+    # predictor) and writes one object_video_{i} per detected object, isolated against
+    # a black background. reference_frame_idx defaults to 0, matching Video Generation's
+    # frame-0 conditioning on the same panorama Object Segmentation now ran against.
+    keys:
+      input: panorama
+
+  - name: Report
+    stage: ReportGenerationStage
+    enabled: false
