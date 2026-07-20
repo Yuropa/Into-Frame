@@ -182,7 +182,12 @@ class HeightMapGenerator:
                             surfaces from one equirectangular pixel to the next
                             otherwise lands as an alternating checkerboard of
                             wildly different heights between adjacent grid cells.
-                            0 disables. See _despike_single_sample_cells.
+                            0 disables. See _despike_single_sample_cells. Also
+                            reused, unscaled, as _forward_project_cell_stats'
+                            outlier_threshold_m -- the analogous per-point outlier
+                            rejection for dense (multi-sample) cells, which pool a
+                            mean/relief/slope from raw forward-projected samples
+                            with no such protection otherwise.
         despike_window: odd cell-window size for the local median used above.
         despike_reference_distance_m: equirectangular mode only. Per-pixel depth-
                             model noise grows with sampled radial range, and is
@@ -281,7 +286,7 @@ class HeightMapGenerator:
                 HeightMapGenerator._forward_project_cell_stats(
                     d, sky_mask, region_type_mask, grid_size_meters, grid_resolution,
                     ground_y_max, ground_y_min, nadir_exclusion_radius, min_forward_samples,
-                    region_closing_iterations,
+                    region_closing_iterations, outlier_threshold_m=despike_threshold_m,
                 )
             )
             if dense_mask.any():
@@ -675,6 +680,7 @@ class HeightMapGenerator:
         nadir_exclusion_radius: float,
         min_samples: int,
         region_closing_iterations: int = 2,
+        outlier_threshold_m: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Forward-project every panorama pixel (rather than one inverse-mapped ray per
@@ -717,12 +723,33 @@ class HeightMapGenerator:
         grid_resolution) accumulators, so cost and memory scale with the number
         of valid points / populated cells, not the square of grid_resolution.
 
+        outlier_threshold_m: cells with >= min_samples raw points are pooled
+                       straight into mean_y/relief/slope_deg with no outlier
+                       rejection -- unlike the single-sample path, which is
+                       protected by _despike_single_sample_cells downstream (see
+                       HeightMapGenerator.generate), nothing here catches a lone
+                       flying-pixel sample skewing a dense cell's mean enough to
+                       trip _label_ground_components' walkability step check,
+                       fragmenting otherwise-continuous ground into spurious
+                       components that get discarded and replaced by
+                       _interpolate's synthetic fill. When > 0, points in an
+                       initially-dense cell that disagree with that cell's own
+                       preliminary mean by more than this (metres) are dropped
+                       before the real mean/relief/slope are computed -- unless
+                       every one of the cell's points would be dropped, in which
+                       case the cell keeps its original, unfiltered points rather
+                       than losing its data entirely. A cell whose surviving
+                       point count then falls below min_samples is demoted out of
+                       dense_mask (but keeps its filtered mean_y via any_mask).
+                       0 disables (matches prior behaviour exactly).
+
         Returns (dense_mask, mean_y, relief, slope_deg, any_mask), all
         (grid_resolution, grid_resolution) except any_mask/dense_mask which are
         bool. any_mask marks every cell with >= 1 forward-projected sample;
-        dense_mask (a subset) marks cells with >= min_samples, the only ones with
-        a real slope_deg. mean_y/relief are populated wherever any_mask is set;
-        slope_deg only wherever dense_mask is set.
+        dense_mask (a subset) marks cells with >= min_samples (post outlier-
+        rejection) surviving points, the only ones with a real slope_deg.
+        mean_y/relief are populated wherever any_mask is set; slope_deg only
+        wherever dense_mask is set.
         """
         empty = (
             np.zeros((grid_resolution, grid_resolution), dtype=bool),
@@ -779,6 +806,40 @@ class HeightMapGenerator:
             np.add.at(out, inverse, vals.astype(np.float64))
             return out
 
+        if outlier_threshold_m > 0:
+            dense0 = counts >= max(3, min_samples)
+            if dense0.any():
+                # The preliminary centre must be robust to the very outliers it's
+                # being used to detect -- a plain mean is itself dragged toward a
+                # single flying-pixel sample (e.g. 5 clean points near 10.0 plus
+                # one at 15.0 pulls the mean to ~10.8, which is then *closer* to
+                # the outlier than to the clean points, so a tight threshold
+                # rejects the good points too and trips the zero-survivors
+                # fallback below -- silently keeping the outlier instead of
+                # dropping it). A per-cell median tolerates up to just under half
+                # the group being contaminated instead of being skewed by it.
+                order = np.lexsort((Yg, inverse))
+                sorted_inverse, sorted_Yg = inverse[order], Yg[order]
+                n_int = counts.astype(np.int64)
+                group_starts = np.searchsorted(sorted_inverse, np.arange(len(uniq_lin)), side='left')
+                mid_lo = group_starts + (n_int - 1) // 2
+                mid_hi = group_starts + n_int // 2
+                median_y = (sorted_Yg[mid_lo] + sorted_Yg[mid_hi]) / 2.0
+
+                is_dense_point = dense0[inverse]
+                residual = np.abs(Yg - median_y[inverse])
+                candidate_inlier = ~is_dense_point | (residual <= outlier_threshold_m)
+                candidate_counts = np.bincount(inverse[candidate_inlier], minlength=len(uniq_lin))
+                # A dense cell that loses every point to the threshold (every
+                # sample disagrees with the group median by more than it) keeps
+                # its original, unfiltered points rather than losing its data
+                # entirely.
+                zero_survivors = dense0 & (candidate_counts == 0)
+                inlier = candidate_inlier | zero_survivors[inverse]
+                if not inlier.all():
+                    Xg, Yg, Zg, inverse = Xg[inlier], Yg[inlier], Zg[inlier], inverse[inlier]
+                    n = np.bincount(inverse, minlength=len(uniq_lin)).astype(np.float64)
+
         sum_x, sum_y, sum_z = scatter_sum(Xg), scatter_sum(Yg), scatter_sum(Zg)
         sum_xx, sum_yy, sum_zz = scatter_sum(Xg * Xg), scatter_sum(Yg * Yg), scatter_sum(Zg * Zg)
         sum_xy, sum_xz, sum_yz = scatter_sum(Xg * Yg), scatter_sum(Xg * Zg), scatter_sum(Yg * Zg)
@@ -793,8 +854,11 @@ class HeightMapGenerator:
 
         # Need >= 3 points for a well-defined plane; min_samples is expected to
         # already be at least that (see HeightMapConfiguration), but never trust
-        # a caller-supplied value below the mathematical minimum.
-        dense = counts >= max(3, min_samples)
+        # a caller-supplied value below the mathematical minimum. Computed from n
+        # (post outlier-rejection above, identical to counts when disabled), so a
+        # cell whose quorum turned out to be mostly outliers no longer qualifies
+        # once its bad samples are dropped.
+        dense = n >= max(3, min_samples)
         dense_idx = np.nonzero(dense)[0]
 
         slope_1d = np.zeros(len(uniq_lin), dtype=np.float64)
