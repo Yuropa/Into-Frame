@@ -19,6 +19,13 @@ def confidence_flood_fill(
     multiplies confidence by confidence_decay, so proximity to a
     high-confidence source beats proximity to a distant low-confidence one.
 
+    Uses 8-connectivity with a decay exponent scaled by physical hop
+    distance (diagonal hops cover sqrt(2) the distance of orthogonal ones).
+    Plain 4-connectivity measures reachability in Manhattan distance, which
+    grows a diamond/star from any seed regardless of the actual terrain --
+    purely a grid-connectivity artifact; the scaled 8-connectivity front
+    approximates a circular ball instead.
+
     Parameters
     ----------
     grid           : (H, W) array of discrete values; filled cells hold their
@@ -36,10 +43,18 @@ def confidence_flood_fill(
         return grid
 
     import heapq
+    import math
 
     gh, gw = grid.shape
     result = grid.copy()
     filled = has_data.copy()
+
+    orth_decay = confidence_decay
+    diag_decay = confidence_decay ** math.sqrt(2)
+    neighbors = (
+        (-1, 0, orth_decay), (1, 0, orth_decay), (0, -1, orth_decay), (0, 1, orth_decay),
+        (-1, -1, diag_decay), (-1, 1, diag_decay), (1, -1, diag_decay), (1, 1, diag_decay),
+    )
 
     heap: list = []
     rows, cols = np.where(has_data)
@@ -49,13 +64,13 @@ def confidence_flood_fill(
 
     while heap:
         neg_conf, r, c = heapq.heappop(heap)
-        child_conf = -neg_conf * confidence_decay
+        conf = -neg_conf
         value = result[r, c]
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        for dr, dc, decay in neighbors:
             nr, nc = r + dr, c + dc
             if 0 <= nr < gh and 0 <= nc < gw and not filled[nr, nc]:
                 filled[nr, nc] = True
                 result[nr, nc] = value
-                heapq.heappush(heap, (-child_conf, nr, nc))
+                heapq.heappush(heap, (-(conf * decay), nr, nc))
 
     return result
