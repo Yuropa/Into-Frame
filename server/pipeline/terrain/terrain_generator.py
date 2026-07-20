@@ -166,11 +166,19 @@ class TerrainMeshGenerator:
                 and pano_uv_u.depth.shape == hm.shape and pano_uv_v.depth.shape == hm.shape
                 and observed_weight is not None
             ):
+                # order=0 (nearest), not bilinear: U wraps around (it's derived
+                # from longitude), so linearly blending stored U values straddling
+                # that wrap averages two opposite-side values into one nonsense
+                # one in the middle -- e.g. 0.99 and 0.01 blend to ~0.5, the wrong
+                # side of the panorama entirely. Nearest-neighbour never blends
+                # across the seam; at this grid's resolution (~5 cm/cell) picking
+                # one side's exact stored value instead of an interpolated one
+                # between neighbours is not a visible tradeoff.
                 obs_u = map_coordinates(
-                    pano_uv_u.depth, [row_coords, col_coords], order=1, mode="nearest",
+                    pano_uv_u.depth, [row_coords, col_coords], order=0, mode="nearest",
                 ).astype(np.float32)
                 obs_v = map_coordinates(
-                    pano_uv_v.depth, [row_coords, col_coords], order=1, mode="nearest",
+                    pano_uv_v.depth, [row_coords, col_coords], order=0, mode="nearest",
                 ).astype(np.float32)
                 use_stored = (observed_weight > 0.5) & np.isfinite(obs_u) & np.isfinite(obs_v)
                 if use_stored.any():

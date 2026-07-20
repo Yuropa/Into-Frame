@@ -155,7 +155,21 @@ def inject_texcoord1(
             if target_accessor_idx is None:
                 # Build the accessor/bufferView once; every matching primitive
                 # (there's normally exactly one) can share it.
-                uv_bytes = np.asarray(uv2, dtype="<f4").tobytes()
+                #
+                # V must be flipped before writing. uv2's V (Panorama.mesh_uvs'
+                # convention) is *pre*-flipped specifically so that trimesh's own
+                # exporter's internal flip (file_v = 1 - v, applied when it writes
+                # TEXCOORD_0) cancels out and the file ends up holding the
+                # natural, row-0-is-top value glTF's spec expects. Since this
+                # function writes TEXCOORD_1 directly, bypassing that exporter
+                # entirely, nothing ever performs the second half of that
+                # cancellation -- writing uv2 unmodified leaves the file holding
+                # the pre-flipped value verbatim, upside down relative to what
+                # every glTF-spec-compliant consumer (a generic viewer, GLTFast)
+                # will assume V=0 means.
+                uv2 = np.asarray(uv2, dtype="<f4").copy()
+                uv2[:, 1] = 1.0 - uv2[:, 1]
+                uv_bytes = uv2.tobytes()
                 padded_bin = _pad(bin_data, 4, b"\x00")
                 byte_offset = len(padded_bin)
                 bin_data = padded_bin + uv_bytes
