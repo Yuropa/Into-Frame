@@ -148,23 +148,38 @@ Shader "IntoFrame/TerrainSplat"
                 float3 normalWS   : TEXCOORD1;
                 float2 uv         : TEXCOORD2;
                 float  fogFactor  : TEXCOORD3;
+                float3 positionOS : TEXCOORD4;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
             // ── Helpers ────────────────────────────────────────────────────
 
-            // Equirectangular UV from world position relative to camera.
+            // Equirectangular UV from object-space position.
             // Matches the server-side convention:
             //   U = atan2(X, Z) / (2π) + 0.5
             //   V = 0.5 − φ / π   where φ = atan2(Y, √(X²+Z²))
             // Terrain below the camera has φ < 0, so V > 0.5 (lower half of panorama).
-            float2 EquirectUV(float3 posWS)
+            //
+            // Deliberately object-space, not world-space-relative-to-the-live-camera:
+            // the panorama was captured once from a single fixed point, and the server's
+            // whole terrain pipeline (server/util/panorama_utils.py) expresses every mesh
+            // vertex relative to that fixed capture point -- the mesh's own local origin
+            // *is* the capture point by construction, not wherever the XR headset happens
+            // to be this frame. Using GetCameraPositionWS() here silently substitutes the
+            // live, moving head pose for that fixed point, which is only correct at the
+            // instant the viewer stands exactly at the original capture position -- any
+            // offset is a real parallax error that grows for nearby geometry and shrinks
+            // for distant geometry (this is what caused close-up terrain facing the viewer
+            // to look badly stretched while distant/occluded terrain looked fine: the same
+            // absolute head offset is a much larger angular error up close). Object space
+            // sidesteps this entirely and needs no camera/anchor uniform at all, provided
+            // the terrain's own transform has identity rotation and uniform scale (true by
+            // construction -- see SceneObjectManager's terrain instantiation).
+            float2 EquirectUV(float3 posOS)
             {
-                float3 camPos = GetCameraPositionWS();
-                float3 dir    = posWS - camPos;
-                float  theta  = atan2(dir.x, dir.z);
-                float  r_xz   = max(length(dir.xz), 0.001);
-                float  phi    = atan2(dir.y, r_xz);
+                float  theta  = atan2(posOS.x, posOS.z);
+                float  r_xz   = max(length(posOS.xz), 0.001);
+                float  phi    = atan2(posOS.y, r_xz);
                 return float2(
                     theta / TWO_PI + 0.5,
                     0.5 - phi / PI
@@ -172,10 +187,10 @@ Shader "IntoFrame/TerrainSplat"
             }
 
             // Per-layer UV: equirect projection for panorama layers, tiled planar for synthetic.
-            float2 LayerUV(float2 meshUV, float3 posWS, float tileRepeat, int layerBit)
+            float2 LayerUV(float2 meshUV, float3 posOS, float tileRepeat, int layerBit)
             {
                 if (layerBit != 0)
-                    return EquirectUV(posWS);
+                    return EquirectUV(posOS);
                 return meshUV * tileRepeat;
             }
 
@@ -194,6 +209,7 @@ Shader "IntoFrame/TerrainSplat"
                 OUT.normalWS   = normalInputs.normalWS;
                 OUT.uv         = IN.uv;
                 OUT.fogFactor  = ComputeFogFactor(posInputs.positionCS.z);
+                OUT.positionOS = IN.positionOS.xyz;
                 return OUT;
             }
 
@@ -209,14 +225,14 @@ Shader "IntoFrame/TerrainSplat"
                 half4 blend1 = SAMPLE_TEXTURE2D(_BlendMap1, sampler_BlendMap1, uv);
 
                 // Per-layer UV — equirect for panorama layers, tiled planar for synthetic
-                float2 uv0 = LayerUV(uv, IN.positionWS, _Layer0TileRepeat, (_EquirectLayers >> 0) & 1);
-                float2 uv1 = LayerUV(uv, IN.positionWS, _Layer1TileRepeat, (_EquirectLayers >> 1) & 1);
-                float2 uv2 = LayerUV(uv, IN.positionWS, _Layer2TileRepeat, (_EquirectLayers >> 2) & 1);
-                float2 uv3 = LayerUV(uv, IN.positionWS, _Layer3TileRepeat, (_EquirectLayers >> 3) & 1);
-                float2 uv4 = LayerUV(uv, IN.positionWS, _Layer4TileRepeat, (_EquirectLayers >> 4) & 1);
-                float2 uv5 = LayerUV(uv, IN.positionWS, _Layer5TileRepeat, (_EquirectLayers >> 5) & 1);
-                float2 uv6 = LayerUV(uv, IN.positionWS, _Layer6TileRepeat, (_EquirectLayers >> 6) & 1);
-                float2 uv7 = LayerUV(uv, IN.positionWS, _Layer7TileRepeat, (_EquirectLayers >> 7) & 1);
+                float2 uv0 = LayerUV(uv, IN.positionOS, _Layer0TileRepeat, (_EquirectLayers >> 0) & 1);
+                float2 uv1 = LayerUV(uv, IN.positionOS, _Layer1TileRepeat, (_EquirectLayers >> 1) & 1);
+                float2 uv2 = LayerUV(uv, IN.positionOS, _Layer2TileRepeat, (_EquirectLayers >> 2) & 1);
+                float2 uv3 = LayerUV(uv, IN.positionOS, _Layer3TileRepeat, (_EquirectLayers >> 3) & 1);
+                float2 uv4 = LayerUV(uv, IN.positionOS, _Layer4TileRepeat, (_EquirectLayers >> 4) & 1);
+                float2 uv5 = LayerUV(uv, IN.positionOS, _Layer5TileRepeat, (_EquirectLayers >> 5) & 1);
+                float2 uv6 = LayerUV(uv, IN.positionOS, _Layer6TileRepeat, (_EquirectLayers >> 6) & 1);
+                float2 uv7 = LayerUV(uv, IN.positionOS, _Layer7TileRepeat, (_EquirectLayers >> 7) & 1);
 
                 // Layer tiles — alpha carries a local micro-height map (server-baked from
                 // the tile's own high-frequency detail) used for height-biased blending below.

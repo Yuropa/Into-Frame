@@ -343,6 +343,7 @@ class Panorama:
         height_map: np.ndarray,
         tex_size: int = 4096,
         sky_mask: "np.ndarray | None" = None,
+        supersample: int = 4,
     ) -> PIL.Image.Image:
         """
         Rasterise this panorama into a top-down orthographic texture, laid
@@ -360,23 +361,50 @@ class Panorama:
         to a top-down grid for other reasons (e.g. shared blend-map
         sampling). Everywhere else, prefer mesh_uvs() plus this panorama's
         own image directly, which has none of this resampling distortion.
+
+        supersample: each output texel is the average of supersample² point
+        samples rather than one. Near the origin, one output texel's world-
+        space footprint can span a huge range of panorama longitude (the
+        "pinwheeling" above) -- many genuinely different panorama pixels
+        collapsing into one texel. A single point sample there just picks
+        one of them, which is what reads as stretching/noise on close-up
+        geometry; averaging properly integrates over the footprint instead
+        of aliasing it. Doesn't help the horizon-compression case (that's
+        the opposite problem -- too few source pixels, not too many).
+        Processed in row chunks so peak memory is bounded by tex_size alone,
+        not tex_size² · supersample².
         """
-        us = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        vs = np.linspace(0.0, 1.0, tex_size, dtype=np.float32)
-        ug, vg = np.meshgrid(us, vs)
-
-        X = (ug.ravel() - 0.5) * (2.0 * x_half)
-        Z = (vg.ravel() - 0.5) * (2.0 * z_far)
-
+        ss = max(1, int(supersample))
+        hi_size = tex_size * ss
         h_hm, w_hm = height_map.shape
-        row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
-        col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
-        Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
-        Y = np.nan_to_num(Y, nan=0.0)
 
-        grid_verts = np.stack([X, Y, Z], axis=-1)
-        rgba = self.sample_3d(grid_verts, sky_mask=sky_mask)
-        return PIL.Image.fromarray(rgba[:, :3].reshape(tex_size, tex_size, 3), "RGB")
+        out = np.empty((tex_size, tex_size, 3), dtype=np.float32)
+        Xs_full = ((np.arange(hi_size, dtype=np.float32) + 0.5) / hi_size - 0.5) * (2.0 * x_half)
+
+        # Bound each chunk to a few million samples regardless of tex_size/supersample.
+        chunk_rows = max(1, min(tex_size, 4_000_000 // max(ss * hi_size, 1)))
+        for row0 in range(0, tex_size, chunk_rows):
+            rows = min(chunk_rows, tex_size - row0)
+            vs_hi = (np.arange(row0 * ss, (row0 + rows) * ss, dtype=np.float32) + 0.5) / hi_size
+            Zs = (vs_hi - 0.5) * (2.0 * z_far)
+
+            ug, vg = np.meshgrid(Xs_full, Zs)  # (rows*ss, hi_size)
+            X = ug.ravel()
+            Z = vg.ravel()
+
+            row_coords = ((Z + z_far)  / (2.0 * z_far)  * (h_hm - 1)).clip(0, h_hm - 1)
+            col_coords = ((X + x_half) / (2.0 * x_half) * (w_hm - 1)).clip(0, w_hm - 1)
+            Y = map_coordinates(height_map, [row_coords, col_coords], order=1, mode="nearest").astype(np.float32)
+            Y = np.nan_to_num(Y, nan=0.0)
+
+            grid_verts = np.stack([X, Y, Z], axis=-1)
+            rgba = self.sample_3d(grid_verts, sky_mask=sky_mask)
+            hi_chunk = rgba[:, :3].reshape(rows * ss, hi_size, 3).astype(np.float32)
+
+            # Box downsample (area-average) ss×ss -> 1.
+            out[row0:row0 + rows] = hi_chunk.reshape(rows, ss, tex_size, ss, 3).mean(axis=(1, 3))
+
+        return PIL.Image.fromarray(out.clip(0, 255).astype(np.uint8), "RGB")
 
     def perspective_crop(
         self,
