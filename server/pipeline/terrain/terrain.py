@@ -2,12 +2,12 @@ from typing import Any, Optional
 from logging import Logger
 
 import numpy as np
+import PIL.Image
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
-from util.panorama_utils import Panorama
 
 
 class TerrainMeshConfiguration(PipelineStageConfiguration):
@@ -143,12 +143,17 @@ class TerrainMeshStage(PipelineStage):
 
         # ── Resolve texture source ─────────────────────────────────────────────
         precomputed_image = None
-        panorama_tex = None
         pinhole_texture = None
         intrinsics = None
         tile_factor = 1.0
 
         splat: Optional[SplatMaterial] = context.input_splat_material(ContextKey.TERRAIN_MATERIAL)
+        # Fetched unconditionally -- needed below for the panorama UV (TEXCOORD_1)
+        # regardless of which branch wins for UV0/the embedded preview texture.
+        # Unity's live shader and the GLB preview material both depend on it
+        # whenever a panorama exists, not just in the no-SplatMaterial fallback
+        # branch further down that historically was the only place this got read.
+        panorama_tex = context.input_panorama(panorama_key)
         if splat is not None and splat.layers:
             # UVs 0→1 (a world-space top-down grid) so Unity samples blend maps,
             # and every non-equirect layer, directly at those UV coords — this
@@ -157,17 +162,17 @@ class TerrainMeshStage(PipelineStage):
             if layer0.equirect:
                 # layer0.tile is the raw, unbaked equirect panorama — embedding it
                 # directly under top-down UVs would be mismatched (wrong pixel
-                # layout for that UV convention). Bake a self-consistent top-down
-                # preview instead; Unity's own renderer never reads this embedded
-                # texture (it recomputes true equirect UVs live from world
-                # position for this layer), so this only affects a generic GLB
-                # viewer/debug export.
-                precomputed_image = Panorama(layer0.tile).bake_topdown(
-                    x_half=grid_size / 2.0,
-                    z_far=grid_size / 2.0,
-                    height_map=height_map.depth,
-                    sky_mask=sky_mask,
-                )
+                # layout for that UV convention), and Unity's own renderer never
+                # reads this embedded texture anyway (it samples the panorama
+                # layer via TEXCOORD_1/panoUV -- see TerrainSplat.shader). The
+                # actual GLB preview gets swapped in further down (mesh.preview_image,
+                # sampled via that same corrected UV) whenever a panorama is
+                # available, so this only needs to be a cheap placeholder that
+                # keeps UV0 pinned to the world-space top-down grid Unity's blend
+                # maps need -- not a real bake of the panorama into that grid
+                # (used to be Panorama.bake_topdown; removed since nothing ever
+                # looks at its output anymore).
+                precomputed_image = PIL.Image.new("RGB", (2, 2))
                 tile_factor = 1.0
             else:
                 precomputed_image = layer0.tile
@@ -183,7 +188,6 @@ class TerrainMeshStage(PipelineStage):
                 tile_factor = cfg.texture_tile_factor
                 self.log_info("Terrain texture: pre-baked single texture")
             else:
-                panorama_tex = context.input_panorama(panorama_key)
                 if panorama_tex is not None:
                     tile_factor = 1.0
                     self.log_info("Terrain texture: equirectangular panorama (direct mesh→panorama UV projection)")
@@ -234,6 +238,14 @@ class TerrainMeshStage(PipelineStage):
         # recomputing an equirect projection from world position every frame
         # (see TerrainSplat.shader). None whenever no panorama was available.
         mesh.extra_uv = pano_uv
+        # Also swap in as the GLB's own embedded preview material (sampled via
+        # that same TEXCOORD_1) whenever there's a real panorama to show --
+        # regardless of which branch above won for the embedded texture/UV0
+        # (e.g. the SplatMaterial branch's cheap placeholder above). Unity
+        # itself never reads this embedded material for the panorama layer,
+        # so overwriting it here has no effect on the live render.
+        if panorama_tex is not None and pano_uv is not None:
+            mesh.preview_image = panorama_tex.image
 
         context.add_mesh(output_key, mesh)
 

@@ -303,10 +303,10 @@ class TerrainMeshGenerator:
             # vertex/face set) projects the mesh directly onto the panorama's
             # own pixel grid instead of resampling the panorama into a
             # top-down raster first — no intermediate bake, so no world-space
-            # <-> equirectangular resampling distortion (the old top-down bake
-            # pinwheeled near the origin and went blocky near the horizon; see
-            # Panorama.bake_topdown's docstring for why that approach is now
-            # only kept for a UV0 convention this branch doesn't use).
+            # <-> equirectangular resampling distortion (an earlier top-down
+            # bake pinwheeled near the origin and went blocky near the
+            # horizon; removed entirely now that every panorama-textured
+            # branch goes through this same corrected per-vertex UV instead).
             tri_mesh = TerrainMeshGenerator._textured_mesh(vertices, faces, pano_uv, panorama.image)
         elif texture is not None and intrinsics is not None:
             uv = TerrainMeshGenerator._uvs_pinhole(

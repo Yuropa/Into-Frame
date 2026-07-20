@@ -24,11 +24,16 @@ adds one bufferView + accessor describing it, and points the mesh
 primitive's `TEXCOORD_1` attribute at that new accessor.
 """
 from __future__ import annotations
+import io
 import json
 import struct
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from PIL import Image as PILImage
 
 _MAGIC = b"glTF"
 _VERSION = 2
@@ -84,17 +89,36 @@ def _write_glb(path: Path, tree: dict, bin_data: bytes) -> None:
             f.write(bin_chunk)
 
 
-def inject_texcoord1(path: "str | Path", uv2: np.ndarray) -> bool:
+def inject_texcoord1(
+    path: "str | Path",
+    uv2: np.ndarray,
+    preview_image: "PILImage.Image | None" = None,
+) -> bool:
     """
     Add `uv2` ((N, 2) float array) to the GLB at `path` as glTF TEXCOORD_1,
     on whichever mesh primitive's POSITION accessor has N vertices.
 
+    preview_image: when given, also embeds this image and repoints that same
+    primitive's material to sample it via TEXCOORD_1 (baseColorTexture.texCoord
+    = 1), replacing whatever texture/UV0 combination the exporter originally
+    embedded. This exists because the mesh's own TEXCOORD_0 is load-bearing
+    for Unity's terrain shader (a fixed world-space grid it needs for blend-
+    map sampling -- see TerrainMeshStage) and can't be repointed at the
+    corrected panorama UV without breaking that; but a *generic* GLB viewer
+    just shows whatever TEXCOORD_0 + the embedded material happen to be,
+    which for a SplatMaterial-backed terrain is only ever a cheap placeholder
+    now (see TerrainMeshStage) -- never the actual fix applied to
+    TEXCOORD_1/uv2. Since Unity's own renderer never reads this embedded
+    material for the panorama layer either way (it uses the separately-
+    transmitted SplatMaterialData instead), overwriting it to show the real
+    panorama through the corrected UV costs nothing there and makes a
+    standalone GLB preview finally show what the fix actually did.
+
     Returns True if injection succeeded, False if the file's structure didn't
     match what trimesh is expected to produce (single embedded buffer, no
     external URI) -- callers should treat False as "left the file alone, not
-    a hard error", since the file is still perfectly valid without the extra
-    UV set; only the live Unity panorama-UV path degrades to its own
-    position-based fallback.
+    a hard error": the file is still perfectly valid without the extra UV
+    set/preview texture, just not improved by either.
     """
     path = Path(path)
     tree, bin_data = _read_glb(path.read_bytes())
@@ -107,9 +131,19 @@ def inject_texcoord1(path: "str | Path", uv2: np.ndarray) -> bool:
 
     accessors = tree.setdefault("accessors", [])
     buffer_views = tree.setdefault("bufferViews", [])
+    materials = tree.setdefault("materials", [])
+    images = tree.setdefault("images", [])
+    textures = tree.setdefault("textures", [])
+
+    preview_png: bytes | None = None
+    if preview_image is not None:
+        buf = io.BytesIO()
+        preview_image.convert("RGB").save(buf, format="PNG")
+        preview_png = buf.getvalue()
 
     n = len(uv2)
     target_accessor_idx = None
+    preview_texture_idx = None
     for mesh in tree.get("meshes", []):
         for prim in mesh.get("primitives", []):
             attrs = prim.get("attributes", {})
@@ -138,7 +172,27 @@ def inject_texcoord1(path: "str | Path", uv2: np.ndarray) -> bool:
                     "type": "VEC2",
                 })
                 target_accessor_idx = len(accessors) - 1
+
+                if preview_png is not None:
+                    padded_bin = _pad(bin_data, 4, b"\x00")
+                    img_byte_offset = len(padded_bin)
+                    bin_data = padded_bin + preview_png
+                    buffer_views.append({
+                        "buffer": 0,
+                        "byteOffset": img_byte_offset,
+                        "byteLength": len(preview_png),
+                    })
+                    images.append({"bufferView": len(buffer_views) - 1, "mimeType": "image/png"})
+                    textures.append({"source": len(images) - 1})
+                    preview_texture_idx = len(textures) - 1
             attrs["TEXCOORD_1"] = target_accessor_idx
+
+            if preview_texture_idx is not None:
+                mat_idx = prim.get("material")
+                if mat_idx is not None and 0 <= mat_idx < len(materials):
+                    pbr = materials[mat_idx].setdefault("pbrMetallicRoughness", {})
+                    pbr["baseColorTexture"] = {"index": preview_texture_idx, "texCoord": 1}
+                    pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
 
     if target_accessor_idx is None:
         return False

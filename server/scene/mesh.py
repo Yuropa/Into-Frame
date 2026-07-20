@@ -17,6 +17,12 @@ class Mesh:
         # glTF TEXCOORD_1 (trimesh's own TextureVisuals only supports one UV
         # set natively, so this can't just be handed to it directly).
         self.extra_uv: "np.ndarray | None" = None
+        # Optional replacement for whatever texture/UV0 combination got
+        # embedded as this mesh's own material -- sampled via extra_uv
+        # (TEXCOORD_1) instead. See util.gltf_uv2.inject_texcoord1's own
+        # docstring for why the embedded material can need this even when
+        # extra_uv's live consumer (Unity) never looks at it.
+        self.preview_image: "PILImage.Image | None" = None
 
     @property
     def vertex_count(self) -> int:
@@ -133,7 +139,7 @@ class Mesh:
         self.mesh.export(str(path), include_normals=True)
         if self.extra_uv is not None and str(path).lower().endswith(".glb"):
             from util.gltf_uv2 import inject_texcoord1
-            inject_texcoord1(path, self.extra_uv)
+            inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image)
 
     @classmethod
     def load(cls, path) -> Self:
