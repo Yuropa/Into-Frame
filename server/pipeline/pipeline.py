@@ -574,8 +574,13 @@ class Pipeline:
         if self.config.output is not None and self.config.output.exists():
             self.log_info("Loading cached content")
             stage_order = [stage.name for stage in self.stages]
+            # Full declared order, including currently-disabled stages -- lets
+            # load() place a disabled-but-still-cached stage's data at its true
+            # relative position instead of wherever filesystem iteration finds it
+            # (see PipelineContext.load / _insert_in_declared_order).
+            full_stage_order = [entry["name"] for entry in self.config.stages_yaml]
             output = self._create_output_directories()
-            context.load(output, stage_order)
+            context.load(output, stage_order, full_stage_order)
 
             orig_input_image = context.image(ContextKey.INPUT)
             if not input_image == orig_input_image:

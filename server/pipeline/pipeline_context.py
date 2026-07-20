@@ -2,6 +2,9 @@ from pipeline.context_value import ContextValue, ValueKeys
 from pathlib import Path
 from typing import Literal, TypeAlias, Optional, Any
 import logging
+from util.json_utils import write_json, parse_json
+
+_STAGE_ORDER_FILE = "_stage_order.json"
 
 _log = logging.getLogger("pipeline")
 from scene.mesh import Mesh
@@ -425,16 +428,76 @@ class PipelineContext():
             stage_path.mkdir(parents=True, exist_ok=True)
             for name in dirty_keys:
                 self._stage_state[stage_name][name].write(stage_path)
-        self._dirty_stage_state.clear()                 
+        self._dirty_stage_state.clear()
+
+        # Persist the true, as-run stage order alongside the cached data itself.
+        # load() needs this to correctly place a stage that's since been disabled
+        # (or dropped from config.yaml) but still has stale cached output on disk.
+        # Without it, load() has no record of where that stage actually ran and
+        # falls back to appending its directory wherever filesystem iteration
+        # happens to encounter it (alphabetically) -- which can shuffle an early
+        # stage's data to the very end of the search order. Every downstream
+        # input_*() lookup for that stage's keys then silently comes back empty,
+        # which reads as "nothing cached" and forces every stage after it to
+        # rerun, even though nothing relevant to them actually changed.
+        with (path / _STAGE_ORDER_FILE).open("w") as f:
+            write_json(self._stage_order, f)
 
     def save_object(self, name: ContextKeyName, path: Path) -> Path:
-        path.mkdir(parents=True, exist_ok=True) 
+        path.mkdir(parents=True, exist_ok=True)
         return self._value(name).write(path=path)
 
-    def load(self, path: Path, stage_order: list[str]):
+    def _insert_in_declared_order(self, name: str, full_stage_order: Optional[list[str]]):
+        """
+        Add `name` to self._stage_order, placed at its correct relative position
+        rather than always at the end.
+
+        Used for a stage whose data is found on disk but that isn't already in
+        self._stage_order (e.g. a stage disabled/removed since the cache was
+        written, on a cache old enough to have no persisted _stage_order.json at
+        all -- see load() below). Blindly appending in that case would put an
+        early stage's data after every other stage's, making every later stage's
+        input_*() lookups for its keys silently come back empty -- read as
+        "nothing cached", forcing an unwanted full rerun of everything after it.
+        full_stage_order (config.yaml's complete, declared stage list, including
+        disabled entries) gives us a true reference order to place it by; without
+        one, there's no way to do better than appending at the end.
+        """
+        if not full_stage_order or name not in full_stage_order:
+            self._stage_order.append(name)
+            return
+        target = full_stage_order.index(name)
+        insert_pos = len(self._stage_order)
+        for i, existing in enumerate(self._stage_order):
+            existing_idx = full_stage_order.index(existing) if existing in full_stage_order else None
+            if existing_idx is not None and existing_idx > target:
+                insert_pos = i
+                break
+        self._stage_order.insert(insert_pos, name)
+
+    def load(self, path: Path, stage_order: list[str], full_stage_order: Optional[list[str]] = None):
         if not path.exists():
             return
-        self._stage_order = stage_order
+
+        order_file = path / _STAGE_ORDER_FILE
+        if order_file.exists():
+            # The order stages actually ran in, last time this was saved, takes
+            # precedence over the current config's order -- a stage disabled (or
+            # removed) since then must keep its original position rather than be
+            # treated as unrecognised and appended at the end (see save() above).
+            # Any stage the saved order never saw (newly added to config.yaml) is
+            # appended after it, in the current config's order.
+            self._stage_order = list(parse_json(order_file.read_text()))
+            for name in stage_order:
+                if name not in self._stage_order:
+                    self._stage_order.append(name)
+        else:
+            # No saved order (cache predates this fix). Best effort: use the
+            # currently-enabled order as a base, then place anything unrecognised
+            # (found on disk below) by its position in the full declared config
+            # instead of wherever filesystem iteration happens to encounter it.
+            self._stage_order = list(stage_order)
+
         self._load_directory(path, self._state)
         for stage_path in sorted(path.iterdir()):
             if stage_path.is_dir():
@@ -442,7 +505,7 @@ class PipelineContext():
                 if stage_name not in self._stage_state:
                     self._stage_state[stage_name] = {}
                 if stage_name not in self._stage_order:
-                    self._stage_order.append(stage_name)
+                    self._insert_in_declared_order(stage_name, full_stage_order)
                 self._load_directory(stage_path, self._stage_state[stage_name])
 
     def _load_directory(self, path: Path, target: dict):
