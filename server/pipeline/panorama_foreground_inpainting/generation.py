@@ -17,6 +17,20 @@ from scipy.ndimage import binary_dilation, binary_closing, label
 # scatter of tiny holes rather than one solid region.
 _FOREGROUND_VEGETATION_CATEGORIES = frozenset({"tree", "forest"})
 
+# Built structures with the same property: large, solid, non-terrain vertical
+# features (a tower, a distant building, a monument) that can sit well beyond
+# foreground_distance_m and still occlude the ground behind them, and whose SAM2
+# crop is itself one coherent region rather than the small-blob scatter that
+# rules out routing e.g. street furniture through this path. Deliberately
+# excludes small OBJECT_CATEGORIES entries (sign, streetlight, fire_hydrant,
+# bench, trash_bin, ...) -- those are small enough that if they're really
+# occluding the ground they're already caught by foreground_distance_m, and
+# unioning them in here would reintroduce the fragmentation problem.
+_FOREGROUND_STRUCTURE_CATEGORIES = frozenset({
+    "building", "skyscraper", "tower", "monument", "landmark", "statue",
+    "lighthouse", "gazebo", "fountain", "wind_turbine", "bridge", "dock",
+})
+
 
 class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     """
@@ -39,15 +53,18 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         near-field region. Requires PANORAMA_OBJECT_DEPTH (or PANORAMA_DEPTH)
         in context; the stage no-ops without it.
 
-        Separately, crops already classified as "tree" or "forest" (by the
-        Object Segmentation/Classification/Typing stages, which now run before
-        this one specifically to feed it) are unioned in regardless of
-        foreground_distance_m — a mid-ground tree well beyond the near-field
-        cutoff still occludes the terrain behind it, and unlike flowers/grass
-        a whole classified tree crop is large and coherent enough that folding
-        it in doesn't reintroduce the small-blob fragmentation problem above.
-        Their per-pixel masks are projected from the source perspective photo
-        into equirectangular panorama space using CameraIntrinsics.
+        Separately, crops already classified as one of
+        _FOREGROUND_VEGETATION_CATEGORIES ("tree", "forest") or
+        _FOREGROUND_STRUCTURE_CATEGORIES ("building", "skyscraper", "tower",
+        "monument", "landmark", "statue", "lighthouse", "gazebo", "fountain",
+        "wind_turbine", "bridge", "dock") — by the Object Segmentation/
+        Classification/Typing stages, which now run before this one
+        specifically to feed it — are unioned in regardless of
+        foreground_distance_m. A mid-ground tree, tower, or building well
+        beyond the near-field cutoff still occludes the terrain behind it, and
+        unlike flowers/grass/street-furniture a whole classified crop for one
+        of these is large and coherent enough that folding it in doesn't
+        reintroduce the small-blob fragmentation problem above.
 
     min_region_area_px (int, default 200):
         Connected components of the raw depth-threshold mask smaller than this
@@ -168,8 +185,9 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
 
             # Denoise the depth-threshold mask alone: drop connected components too
             # small to be a real occluder (stray depth-model glitches). Classified
-            # tree/forest crops below are unioned in afterward, since they've
-            # already been validated by SAM2 + CLIP and don't need this filter.
+            # vegetation/structure crops below are unioned in afterward, since
+            # they've already been validated by SAM2 + CLIP and don't need this
+            # filter.
             if near_mask.any():
                 labeled, num_labels = label(near_mask)
                 if num_labels > 0:
@@ -178,9 +196,9 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                     if small_labels.size:
                         near_mask &= ~np.isin(labeled, small_labels)
 
-            vegetation_mask = self._vegetation_mask(context, h, w)
-            if vegetation_mask is not None:
-                near_mask = near_mask | vegetation_mask
+            extracted_mask = self._extracted_object_mask(context, h, w)
+            if extracted_mask is not None:
+                near_mask = near_mask | extracted_mask
 
             if not near_mask.any():
                 self.log_info("Nothing within foreground distance, skipping removal")
@@ -251,10 +269,12 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         context.add_panorama(output_key, Panorama(terrain_pil))
         return context
 
-    def _vegetation_mask(self, context: PipelineContext, pano_h: int, pano_w: int) -> np.ndarray | None:
-        """Union of tree/forest crop masks (from Object Segmentation/Classification/
-        Typing, which run earlier specifically to feed this), pasted directly at
-        each crop's own box position in panorama pixel space.
+    def _extracted_object_mask(self, context: PipelineContext, pano_h: int, pano_w: int) -> np.ndarray | None:
+        """Union of vegetation + non-terrain structure crop masks (from Object
+        Segmentation/Classification/Typing, which run earlier specifically to
+        feed this), pasted directly at each crop's own box position in panorama
+        pixel space. See _FOREGROUND_VEGETATION_CATEGORIES and
+        _FOREGROUND_STRUCTURE_CATEGORIES for the exact class list.
 
         Object Segmentation/Detection now run directly on the panorama (see
         config.yaml's `keys: input: panorama`), so metadata_{i}["box"] is already
@@ -263,7 +283,7 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         util.panorama_projection.project_mask_to_pano, which needed intrinsics).
 
         Returns None if there's nothing to add (no objects, or no crop classified
-        as tree/forest), so callers can skip the union cheaply.
+        into one of the unioned categories), so callers can skip the union cheaply.
         """
         object_count = context.input_object(ContextKey.OBJECT_COUNT)
         if not object_count:
@@ -273,7 +293,11 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         found = False
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
-            if metadata.get("class") not in _FOREGROUND_VEGETATION_CATEGORIES:
+            object_class = metadata.get("class")
+            if (
+                object_class not in _FOREGROUND_VEGETATION_CATEGORIES
+                and object_class not in _FOREGROUND_STRUCTURE_CATEGORIES
+            ):
                 continue
 
             box = metadata.get("box")
