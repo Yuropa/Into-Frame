@@ -384,6 +384,12 @@ stages:
     formation_min_dist: 0.5     # metres between samples in a formation's own (uniform-density,
                                  # unlike the main terrain's near/far falloff) Poisson disc mesh
     formation_n_boundary: 8     # anchor points per edge of a formation's own bounding rectangle
+    debug_uv_texture: true      # true: embed a synthetic R=U/G=V gradient (with gridlines) as the
+                                 # GLB preview material instead of the real panorama, sampled
+                                 # through the same corrected panorama UV (TEXCOORD_1) as everything
+                                 # else -- lets you read a vertex's UV straight off its colour in a
+                                 # generic viewer. Only affects the embedded preview; Unity's live
+                                 # render never reads it either way.
 
   - name: Terrain Texture Generation
     stage: TerrainTextureGenerationStage

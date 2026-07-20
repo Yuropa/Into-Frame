@@ -10,6 +10,31 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 
 
+def _uv_debug_texture(size: int = 512, divisions: int = 10) -> PIL.Image.Image:
+    """
+    R = U (0 -> 1, left to right), G = V (0 -> 1, top to bottom), B = 0, with
+    thin white gridlines every 1/divisions so wraps, seams, and the scale of a
+    UV region are all visible at a glance instead of just a smooth gradient.
+
+    Sampling this through a mesh's UV lets you read a vertex's own UV
+    coordinate straight off its rendered colour: (R, G) / 255 ≈ (U, V).
+    """
+    coords = (np.arange(size, dtype=np.float32) + 0.5) / size
+    uu, vv = np.meshgrid(coords, coords)
+    img = np.stack([
+        (uu * 255.0).clip(0, 255).astype(np.uint8),
+        (vv * 255.0).clip(0, 255).astype(np.uint8),
+        np.zeros((size, size), dtype=np.uint8),
+    ], axis=-1)
+
+    line_px = max(1, size // 256)
+    cell = size / divisions
+    u_px = np.arange(size)
+    on_grid = ((u_px[None, :] % cell) < line_px) | ((u_px[:, None] % cell) < line_px)
+    img[on_grid] = 255
+    return PIL.Image.fromarray(img, "RGB")
+
+
 class TerrainMeshConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -34,6 +59,17 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         formation_depression_m: float = 0.5,
         formation_min_dist: float = 0.5,
         formation_n_boundary: int = 8,
+        # Debug aid: replace the GLB's embedded preview material with a
+        # synthetic R=U/G=V gradient (see _uv_debug_texture) instead of the
+        # real panorama, sampled through the exact same corrected panorama UV
+        # (TEXCOORD_1) everything else in this stage produces. Lets you read
+        # a vertex's UV coordinate straight off its colour in a generic
+        # viewer -- e.g. spot wraps, seams, or the observed/computed boundary
+        # at a glance -- without needing a real photo or Unity. Only affects
+        # the embedded preview material; the mesh's real UV data (and Unity's
+        # live render, which never reads this embedded material) are
+        # unchanged either way.
+        debug_uv_texture: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.inner_min_dist = inner_min_dist
@@ -47,6 +83,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.formation_depression_m = formation_depression_m
         self.formation_min_dist = formation_min_dist
         self.formation_n_boundary = formation_n_boundary
+        self.debug_uv_texture = debug_uv_texture
 
 
 class TerrainMeshStage(PipelineStage):
@@ -245,7 +282,7 @@ class TerrainMeshStage(PipelineStage):
         # itself never reads this embedded material for the panorama layer,
         # so overwriting it here has no effect on the live render.
         if panorama_tex is not None and pano_uv is not None:
-            mesh.preview_image = panorama_tex.image
+            mesh.preview_image = _uv_debug_texture() if cfg.debug_uv_texture else panorama_tex.image
 
         context.add_mesh(output_key, mesh)
 
