@@ -98,7 +98,13 @@ class ObjectTypingStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
-            return False
+            # See PanoramaObjectClassificationStage.has_expected_output's own
+            # comment -- no OBJECT_COUNT anywhere upstream means Object
+            # Segmentation is disabled (a permanent state, not "pending"), so
+            # there's nothing to type and never will be. Treating that as a
+            # cache miss forces this stage -- and everything after it, via
+            # the dirty cascade -- to rerun on every single invocation.
+            return True
         return all(context.has_stage_output(f"metadata_{i}") for i in range(count))
 
     def model_names(self) -> list[str]:

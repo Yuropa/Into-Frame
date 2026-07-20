@@ -145,8 +145,16 @@ class SeedConfiguration:
         global_seed: Optional[int] = None,
         stage_seeds: Optional[dict[str, int]] = None,
     ):
+        # Tracked separately from the resolved values below so a resumed run
+        # against an existing cache (see Pipeline._run_pipeline) can tell "the
+        # caller actually asked for this seed" apart from "nothing was passed,
+        # so a fresh one got minted here to keep this run reproducible" --
+        # only the former should ever be compared against a cached seed.json
+        # to decide a stage is dirty.
+        self.explicit_global_seed = global_seed is not None
+        self.explicit_stage_seeds: set[str] = set((stage_seeds or {}).keys())
         self.global_seed = global_seed if global_seed is not None else random.randint(0, 2**32 - 1)
-        self.stage_seeds: dict[str, int] = stage_seeds or {}
+        self.stage_seeds: dict[str, int] = dict(stage_seeds or {})
 
     def seed_for(self, stage_name: str) -> int:
         return self.stage_seeds.get(stage_name, self.global_seed)
@@ -559,6 +567,21 @@ class Pipeline:
                     old_seed_data = parse_json(f.read())
                 cached_global_seed = old_seed_data.get("global_seed")
                 cached_stage_seeds = old_seed_data.get("stage_seeds", {})
+
+        # Adopt the cached seed for anything the caller didn't explicitly ask a
+        # seed for -- otherwise every run with no --seed flag mints a fresh
+        # random global_seed (see SeedConfiguration.__init__), which will
+        # essentially never equal cached_global_seed above, so the "seed
+        # changed" check a few lines below would fire for the very first
+        # stage checked and cascade a forced rerun of the *entire* rest of
+        # the pipeline on every single invocation -- regardless of --rerun,
+        # regardless of whether anything actually changed. Only a seed the
+        # caller genuinely requested should ever be compared against cache.
+        if not self.config.seeds.explicit_global_seed and cached_global_seed is not None:
+            self.config.seeds.global_seed = cached_global_seed
+        for stage_name, cached_seed_value in cached_stage_seeds.items():
+            if stage_name not in self.config.seeds.explicit_stage_seeds:
+                self.config.seeds.stage_seeds[stage_name] = cached_seed_value
 
         if output is not None:
             seed_data = {

@@ -98,7 +98,11 @@ class TreeMeshGenerationStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
-            return False
+            # No OBJECT_COUNT anywhere upstream means Object Segmentation is
+            # disabled (permanent, not "pending") -- nothing to generate tree
+            # meshes for and never will be; see the identical reasoning in
+            # PanoramaObjectClassificationStage.has_expected_output.
+            return True
         for idx in range(count):
             metadata = context.object(f"metadata_{idx}")
             if metadata is None:

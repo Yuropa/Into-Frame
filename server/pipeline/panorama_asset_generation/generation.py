@@ -193,7 +193,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
-            return False
+            # No OBJECT_COUNT anywhere upstream means Object Segmentation is
+            # disabled (permanent, not "pending") -- nothing to generate
+            # assets for and never will be. Matches what count == 0 would
+            # already return below (the loop is simply skipped); treating
+            # None differently forced this stage, and everything after it via
+            # the dirty cascade, to rerun on every single invocation.
+            return True
         panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         panorama = context.input_panorama(ContextKey.PANORAMA)
         pano_w = panorama.width if panorama is not None else None

@@ -126,7 +126,19 @@ class PanoramaObjectClassificationStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.input_object(ContextKey.OBJECT_COUNT)
         if count is None:
-            return False
+            # No object count anywhere upstream -- either Object Segmentation
+            # is disabled (permanently the case, not "not yet run"; see
+            # config.yaml's enabled: false) or a genuinely fresh pipeline with
+            # nothing cached yet. The latter never actually reaches this
+            # return value: _run_pipeline's dirty flag is already forced True
+            # from the very first stage on a truly empty cache, which makes
+            # this method's result irrelevant (force short-circuits it). So
+            # in every case this return value actually matters, there is
+            # nothing to classify and nothing ever will be -- treat that as a
+            # satisfied, cacheable steady state rather than a permanent cache
+            # miss that reruns this stage (and, via the dirty cascade, every
+            # stage after it) on every single invocation.
+            return True
         return all(
             (context.object(f"metadata_{i}") or {}).get("class") is not None
             for i in range(count)

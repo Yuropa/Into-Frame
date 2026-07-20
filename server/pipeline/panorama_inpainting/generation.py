@@ -682,11 +682,17 @@ class PanoramaInpaintingStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         count = context.object(ContextKey.OBJECT_COUNT)
         if count is None:
-            return False
-        all_classified = all(
-            (context.object(f"metadata_{i}") or {}).get("class") is not None
-            for i in range(count)
-        )
+            # No OBJECT_COUNT anywhere upstream means Object Segmentation is
+            # disabled (permanent, not "pending") -- nothing to classify and
+            # never will be; see the identical reasoning in
+            # PanoramaObjectClassificationStage.has_expected_output. Still
+            # gated on terrain_ready below, which is unrelated to object count.
+            all_classified = True
+        else:
+            all_classified = all(
+                (context.object(f"metadata_{i}") or {}).get("class") is not None
+                for i in range(count)
+            )
         terrain_ready = context.panorama(ContextKey.PANORAMA_TERRAIN) is not None
         return all_classified and terrain_ready
 
