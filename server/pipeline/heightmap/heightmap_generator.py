@@ -437,6 +437,25 @@ class HeightMapGenerator:
         # use to decide "is this a real point" rather than "how much do we trust it."
         true_observed = ~np.isnan(height_map)
 
+        # Each observed cell's own panorama UV, captured now from this cell's own
+        # (X, height, Z) -- before Terrain Reconstruction's DEM solve, Terrain
+        # Noise Refinement, single_sample_blur_sigma below, _smooth_edge_preserving,
+        # or the mesh generator's own Poisson-resampling/vertex noise get anywhere
+        # near this value. All of those exist to make the *visual*/geometric height
+        # look better and are fine to perturb Y by a few centimetres -- but right
+        # where a slope's incline happens to match the current viewing angle to it,
+        # equirectangular elevation angle is nearly insensitive to distance walked
+        # up-slope, which makes the *inverse* -- how much the sampled panorama row
+        # shifts per unit of height error -- blow up. Any of those downstream
+        # perturbations would otherwise get amplified into a visible mismatch
+        # between the mesh's own silhouette and the photographed ridge line right
+        # there. Recomputing UV from Y at that point instead of here inherits that
+        # amplification; storing it now, from the height as actually measured,
+        # avoids it entirely for any cell true_observed marks as real.
+        pano_uv_u, pano_uv_v = HeightMapGenerator._panorama_uv_from_height(
+            height_map, grid_size_meters, grid_resolution,
+        )
+
         # Ground-under-the-user prior: the equirectangular depth model is unreliable
         # near the nadir, so cells within the nadir exclusion radius get a synthetic
         # value rather than a direct sample. Rather than assuming a hard-flat plane
@@ -574,7 +593,43 @@ class HeightMapGenerator:
                 viz = (component_id.astype(np.float32) / max(n_components, 1) * 255).astype(np.uint8)
                 PIL.Image.fromarray(viz, "L").save(debug_dir / "heightmap_component_id.png")
 
-        return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id
+        return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id, pano_uv_u, pano_uv_v
+
+    @staticmethod
+    def _panorama_uv_from_height(
+        height_map: np.ndarray,
+        grid_size_meters: float,
+        grid_resolution: int,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Per-cell normalised [0, 1] panorama UV from each grid cell's own (X,
+        height, Z) -- the exact same projection Panorama.mesh_uvs/_lat_lon uses
+        per-vertex (same u = (lon+pi)/(2*pi), v = 0.5 + lat/pi, matching the
+        V-flip convention mesh_uvs already applies for glTF export), just
+        evaluated once here at native grid resolution against this cell's own
+        raw height, so it can be cached and reused verbatim wherever a cell is
+        genuinely observed (HEIGHT_MAP_OBSERVED_MASK) instead of being re-
+        derived later from whatever geometry-only-motivated smoothing/noise
+        stages happen to leave in Y by then (see the call site's comment).
+
+        NaN height produces NaN UV -- callers must gate on the observed mask
+        (or otherwise treat NaN as "no reasonable UV yet") before using this;
+        there is no defensible UV for a height that hasn't been measured.
+
+        Returns (u, v), each (grid_resolution, grid_resolution) float32.
+        """
+        half = grid_size_meters / 2.0
+        cell_m = grid_size_meters / grid_resolution
+        x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float64)
+        X_grid, Z_grid = np.meshgrid(x_c, x_c)  # rows = Z, cols = X -- same convention as height_map
+
+        lon = np.arctan2(X_grid, Z_grid)
+        r_xz = np.sqrt(X_grid ** 2 + Z_grid ** 2).clip(1e-6)
+        lat = np.arctan2(height_map.astype(np.float64), r_xz)
+
+        u = ((lon + np.pi) / (2.0 * np.pi)).astype(np.float32)
+        v = (0.5 + lat / np.pi).astype(np.float32)
+        return u, v
 
     @staticmethod
     def _ground_valid_mask(

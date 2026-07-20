@@ -64,6 +64,8 @@ class ContextKey:
     HEIGHT_MAP_CELL_SLOPE = "height_map_cell_slope"
     HEIGHT_MAP_OBSERVED_MASK = "height_map_observed_mask"
     HEIGHT_MAP_COMPONENT_ID = "height_map_component_id"
+    HEIGHT_MAP_PANO_U = "height_map_pano_u"
+    HEIGHT_MAP_PANO_V = "height_map_pano_v"
     REGION_MAP_CERTAINTY = "region_map_certainty"
     TERRAIN_TEXTURE = "terrain_texture"
     TERRAIN_TEXTURE_CERTAINTY = "terrain_texture_certainty"
@@ -114,6 +116,8 @@ class ContextKey:
         "height_map_cell_relief",
         "height_map_observed_mask",
         "height_map_component_id",
+        "height_map_pano_u",
+        "height_map_pano_v",
         "region_map_certainty",
         "terrain_texture",
         "terrain_texture_certainty",

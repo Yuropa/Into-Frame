@@ -9,6 +9,14 @@ class Mesh:
     def __init__(self, mesh: trimesh.Trimesh) -> None:
         # trimesh.Trimesh
         self.mesh = mesh
+        # Optional second UV set, e.g. a panorama-projection UV distinct from
+        # whatever this mesh's own primary UV0 is (see
+        # TerrainMeshGenerator.generate's panorama_uv return value) -- (N, 2),
+        # aligned 1:1 with self.mesh.vertices. None (the default) exports a
+        # perfectly normal single-UV mesh; set it to have save() inject it as
+        # glTF TEXCOORD_1 (trimesh's own TextureVisuals only supports one UV
+        # set natively, so this can't just be handed to it directly).
+        self.extra_uv: "np.ndarray | None" = None
 
     @property
     def vertex_count(self) -> int:
@@ -123,6 +131,9 @@ class Mesh:
 
     def save(self, path):
         self.mesh.export(str(path), include_normals=True)
+        if self.extra_uv is not None and str(path).lower().endswith(".glb"):
+            from util.gltf_uv2 import inject_texcoord1
+            inject_texcoord1(path, self.extra_uv)
 
     @classmethod
     def load(cls, path) -> Self:

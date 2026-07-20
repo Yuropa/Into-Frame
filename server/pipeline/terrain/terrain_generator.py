@@ -36,7 +36,9 @@ class TerrainMeshGenerator:
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
         sky_mask: Optional[np.ndarray] = None,
-    ) -> tuple[Mesh, Optional[Mesh]]:
+        pano_uv_u: Optional[Depth] = None,
+        pano_uv_v: Optional[Depth] = None,
+    ) -> tuple[Mesh, Optional[Mesh], Optional[np.ndarray]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
         disc sampling and Delaunay triangulation.
@@ -81,9 +83,20 @@ class TerrainMeshGenerator:
                     bake (Panorama.sample_3d) so real terrain above the horizon
                     (a mountain slope, easily above the camera's own height) is
                     sampled directly instead of being treated as sky.
+        pano_uv_u, pano_uv_v: optional HEIGHT_MAP_PANO_U/_V (same grid as
+                    height_map; see HeightMapGenerator._panorama_uv_from_height).
+                    Each observed vertex's own true panorama UV, preferred over
+                    re-deriving UV from this stage's own (noised/reconstructed)
+                    Y_pos -- see the panorama-UV block below for why that
+                    matters. No effect unless panorama is also supplied.
 
-        Returns (terrain_mesh, water_mesh). water_mesh is None when region_map is
-        not supplied or the panorama has no detected water.
+        Returns (terrain_mesh, water_mesh, panorama_uv). water_mesh is None
+        when region_map is not supplied or the panorama has no detected water.
+        panorama_uv is the final per-vertex panorama UV (None unless panorama
+        is supplied) aligned 1:1 with terrain_mesh's own (possibly seam-
+        duplicated) vertices -- intended for embedding as a second UV channel
+        so Unity's live shader can sample it directly instead of recomputing
+        an equirect projection from world position every frame.
         """
         z_far  = z_far if z_far is not None else grid_size_meters / 2.0
         x_half = grid_size_meters / 2.0
@@ -115,6 +128,75 @@ class TerrainMeshGenerator:
             hm, [row_coords, col_coords], order=1, mode="nearest",
         ).astype(np.float32)
         Y_pos = np.nan_to_num(Y_pos, nan=0.0)
+
+        # ── Per-vertex observed weight ──────────────────────────────────────
+        # Reused below for both panorama-UV selection (prefer each observed
+        # vertex's own true UV) and noise suppression (don't add cosmetic
+        # relief on top of real point-cloud geometry).
+        observed_field = None
+        observed_weight = None
+        if observed_mask is not None and observed_mask.depth.shape == hm.shape:
+            # sigma=1 matches the feather TerrainReconstructionStage/
+            # TerrainNoiseRefinementStage already use when restoring observed
+            # cells, so the transition doesn't leave a sudden seam.
+            observed_field = gaussian_filter(observed_mask.depth.astype(np.float64), sigma=1.0)
+            observed_weight = map_coordinates(
+                observed_field, [row_coords, col_coords], order=1, mode="nearest",
+            ).astype(np.float32).clip(0.0, 1.0)
+
+        # ── Panorama UV ──────────────────────────────────────────────────────
+        # This -- not the embedded-preview texture branch further down -- is
+        # what Unity's terrain shader actually samples live for the panorama
+        # layer, so it has to be right regardless of which texture ends up
+        # embedded as the GLB preview. Prefer each observed vertex's own true
+        # panorama UV (HeightMapGenerator._panorama_uv_from_height, captured
+        # from the height as actually measured, before Terrain Reconstruction/
+        # Noise Refinement/this function's own noise below could perturb it --
+        # see that function's docstring for why re-deriving UV from a possibly-
+        # perturbed Y instead amplifies tiny height errors into a visible
+        # mismatch between the mesh's own silhouette and the photographed
+        # ridge line) over re-deriving UV from this stage's own Y_pos, which
+        # has no such guarantee. Unobserved (interpolated/synthetic) vertices
+        # have no true UV to prefer, so they keep the position-derived one.
+        pano_uv = None
+        if panorama is not None:
+            pano_uv = panorama.mesh_uvs(np.stack([X_pos, Y_pos, Z_pos], axis=-1))
+            if (
+                pano_uv_u is not None and pano_uv_v is not None
+                and pano_uv_u.depth.shape == hm.shape and pano_uv_v.depth.shape == hm.shape
+                and observed_weight is not None
+            ):
+                obs_u = map_coordinates(
+                    pano_uv_u.depth, [row_coords, col_coords], order=1, mode="nearest",
+                ).astype(np.float32)
+                obs_v = map_coordinates(
+                    pano_uv_v.depth, [row_coords, col_coords], order=1, mode="nearest",
+                ).astype(np.float32)
+                use_stored = (observed_weight > 0.5) & np.isfinite(obs_u) & np.isfinite(obs_v)
+                if use_stored.any():
+                    pano_uv = pano_uv.copy()
+                    pano_uv[use_stored, 0] = obs_u[use_stored]
+                    pano_uv[use_stored, 1] = obs_v[use_stored]
+
+            # Seam-fix now (not in the texture branch below) so every
+            # per-vertex array computed after this point -- water/formation
+            # masks, noise, the final UV0 branch -- naturally operates on the
+            # right (possibly larger) vertex/face set. Everything below here
+            # resamples height_map/region_map/component_id fresh from each
+            # vertex's own (X, Z), so duplicated vertices need no special
+            # handling beyond X_pos/Y_pos/Z_pos/faces/row_coords/col_coords
+            # themselves being refreshed to match.
+            vertices_seam = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
+            vertices_seam, faces, pano_uv = TerrainMeshGenerator._fix_uv_seam(
+                vertices_seam, faces, pano_uv,
+            )
+            X_pos, Y_pos, Z_pos = vertices_seam[:, 0], vertices_seam[:, 1], vertices_seam[:, 2]
+            row_coords = ((Z_pos + z_far)  / (2.0 * z_far)   * (h_hm - 1)).clip(0, h_hm - 1)
+            col_coords = ((X_pos + x_half) / grid_size_meters * (w_hm - 1)).clip(0, w_hm - 1)
+            if observed_field is not None:
+                observed_weight = map_coordinates(
+                    observed_field, [row_coords, col_coords], order=1, mode="nearest",
+                ).astype(np.float32).clip(0.0, 1.0)
 
         # ── Water mask ──────────────────────────────────────────────────────
         # Sampled from the same reconstructed grid the DEM solve already pinned
@@ -167,16 +249,10 @@ class TerrainMeshGenerator:
         blend = noise_blend_floor + (1.0 - noise_blend_floor) * (np.hypot(X_pos, Z_pos) / r_end).clip(0.0, 1.0)
         noise_add = noise_vals * noise_amplitude * blend
 
-        if observed_mask is not None and observed_mask.depth.shape == hm.shape:
-            # Suppress noise on vertices sitting on real point-cloud geometry —
-            # sigma=1 matches the feather TerrainReconstructionStage/
-            # TerrainNoiseRefinementStage already use when restoring observed
-            # cells, so the transition doesn't leave a sudden seam in vertex
-            # noise right at the observed/interpolated boundary.
-            observed_field = gaussian_filter(observed_mask.depth.astype(np.float64), sigma=1.0)
-            observed_weight = map_coordinates(
-                observed_field, [row_coords, col_coords], order=1, mode="nearest",
-            ).astype(np.float32).clip(0.0, 1.0)
+        if observed_weight is not None:
+            # Suppress noise on vertices sitting on real point-cloud geometry --
+            # observed_weight already reflects the (possibly seam-duplicated)
+            # vertex set computed above.
             noise_add *= (1.0 - observed_weight)
 
         if is_water is not None:
@@ -223,16 +299,15 @@ class TerrainMeshGenerator:
             uv = np.stack([u, v], axis=-1)
             tri_mesh = TerrainMeshGenerator._textured_mesh(vertices, faces, uv, precomputed_texture)
         elif panorama is not None:
-            # Project the mesh directly onto the panorama's own pixel grid
-            # (Panorama.mesh_uvs) instead of resampling the panorama into a
+            # pano_uv (computed above, already seam-fixed against the final
+            # vertex/face set) projects the mesh directly onto the panorama's
+            # own pixel grid instead of resampling the panorama into a
             # top-down raster first — no intermediate bake, so no world-space
             # <-> equirectangular resampling distortion (the old top-down bake
             # pinwheeled near the origin and went blocky near the horizon; see
             # Panorama.bake_topdown's docstring for why that approach is now
             # only kept for a UV0 convention this branch doesn't use).
-            uv = panorama.mesh_uvs(vertices)
-            seam_vertices, seam_faces, seam_uv = TerrainMeshGenerator._fix_uv_seam(vertices, faces, uv)
-            tri_mesh = TerrainMeshGenerator._textured_mesh(seam_vertices, seam_faces, seam_uv, panorama.image)
+            tri_mesh = TerrainMeshGenerator._textured_mesh(vertices, faces, pano_uv, panorama.image)
         elif texture is not None and intrinsics is not None:
             uv = TerrainMeshGenerator._uvs_pinhole(
                 vertices[:, 0], vertices[:, 1], vertices[:, 2], intrinsics
@@ -267,7 +342,7 @@ class TerrainMeshGenerator:
                 water_tri_mesh.remove_unreferenced_vertices()
                 water_mesh = Mesh(water_tri_mesh)
 
-        return Mesh(tri_mesh), water_mesh
+        return Mesh(tri_mesh), water_mesh, pano_uv
 
     # ── Component (formation) meshes ────────────────────────────────────────────
 

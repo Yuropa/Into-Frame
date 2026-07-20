@@ -199,9 +199,11 @@ class TerrainMeshStage(PipelineStage):
         region_map = context.input_depth(ContextKey.REGION_MAP)
         observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
         component_id = context.input_depth(ContextKey.HEIGHT_MAP_COMPONENT_ID)
+        pano_uv_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
+        pano_uv_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
-        mesh, water_mesh = TerrainMeshGenerator.generate(
+        mesh, water_mesh, pano_uv = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
             inner_min_dist=cfg.inner_min_dist,
@@ -222,8 +224,16 @@ class TerrainMeshStage(PipelineStage):
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,
             sky_mask=sky_mask,
+            pano_uv_u=pano_uv_u,
+            pano_uv_v=pano_uv_v,
         )
         self.advance_progress(task)
+
+        # Carried through to Mesh.save() as glTF TEXCOORD_1 -- Unity's terrain
+        # shader samples it directly for the panorama layer instead of
+        # recomputing an equirect projection from world position every frame
+        # (see TerrainSplat.shader). None whenever no panorama was available.
+        mesh.extra_uv = pano_uv
 
         context.add_mesh(output_key, mesh)
 
