@@ -83,6 +83,33 @@ stages:
     guidance_scale: 2.5
     num_inference_steps: 30
 
+  - name: Panorama LoRA Correction
+    stage: PanoramaLoraCorrectionStage
+    enabled: true
+    # Panorama Foreground Inpainting's ObjectClear pass has no equirectangular
+    # awareness at all (no wrap padding, no pole/nadir curvature handling), so
+    # the content it fabricates inside the removal mask looks like an ordinary
+    # flat photo pasted into equirect space -- and the second Panorama Depth
+    # pass below (a panorama-specialized model) then runs out-of-distribution
+    # exactly there, corrupting depth right where objects were removed. This
+    # re-touches just that region with a partial-strength FLUX.1 +
+    # panorama-LoRA img2img pass first, nudging it toward the equirect-
+    # projection prior the depth model actually expects. Validated against
+    # config_depth_patch_test.yaml's alternative (patch the depth map directly
+    # instead) — this image-domain correction won out. No-ops if Panorama
+    # Foreground Inpainting found nothing to remove.
+    strength: 0.35          # img2img denoise strength -- deliberately low: most of
+                             # ObjectClear's output is already a plausible photo, this
+                             # should nudge it toward equirect-consistent projection,
+                             # not regenerate it from scratch. Raise if the corrected
+                             # region still doesn't read as equirect-consistent; lower
+                             # if real detail is visibly being erased.
+    lora_scale: 0.85         # matches Skybox Inpainting's own use of this LoRA
+    guidance_scale: 4.0
+    num_inference_steps: 30
+    max_resolution: 1536
+    mask_extra_dilation_px: 0
+
   - name: Panorama Regions
     stage: PanoramaRegionStage
     nadir_cutoff_deg: -55.0 # degrees elevation: rows at/below this (the tripod/rig, heavily
