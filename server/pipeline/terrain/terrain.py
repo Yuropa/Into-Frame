@@ -59,15 +59,16 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         formation_depression_m: float = 0.5,
         formation_min_dist: float = 0.5,
         formation_n_boundary: int = 8,
-        # Debug aid: replace the GLB's embedded preview material with a
-        # synthetic R=U/G=V gradient (see _uv_debug_texture) instead of the
-        # real panorama, sampled through the exact same corrected panorama UV
-        # (TEXCOORD_1) everything else in this stage produces. Lets you read
-        # a vertex's UV coordinate straight off its colour in a generic
-        # viewer -- e.g. spot wraps, seams, or the observed/computed boundary
-        # at a glance -- without needing a real photo or Unity. Only affects
-        # the embedded preview material; the mesh's real UV data (and Unity's
-        # live render, which never reads this embedded material) are
+        # Debug aid: also export terrain_uv_debug.glb alongside terrain.glb,
+        # with its embedded preview material swapped for a synthetic R=U/G=V
+        # gradient (see _uv_debug_texture) instead of the real panorama,
+        # sampled through the exact same corrected panorama UV (TEXCOORD_1)
+        # everything else in this stage produces. Lets you read a vertex's UV
+        # coordinate straight off its colour in a generic viewer -- e.g. spot
+        # wraps, seams, or the observed/computed boundary at a glance --
+        # without needing a real photo or Unity. terrain.glb itself always
+        # keeps the real panorama preview; the mesh's real UV data (and
+        # Unity's live render, which never reads either embedded material) are
         # unchanged either way.
         debug_uv_texture: bool = False,
     ):
@@ -282,7 +283,7 @@ class TerrainMeshStage(PipelineStage):
         # itself never reads this embedded material for the panorama layer,
         # so overwriting it here has no effect on the live render.
         if panorama_tex is not None and pano_uv is not None:
-            mesh.preview_image = _uv_debug_texture() if cfg.debug_uv_texture else panorama_tex.image
+            mesh.preview_image = panorama_tex.image
 
         context.add_mesh(output_key, mesh)
 
@@ -331,6 +332,14 @@ class TerrainMeshStage(PipelineStage):
 
         if self.temp is not None:
             mesh.save(self.temp / "terrain.glb")
+            if cfg.debug_uv_texture and pano_uv is not None:
+                # Swap the embedded preview to the synthetic UV grid and save
+                # under its own filename -- terrain.glb (and the real panorama
+                # texture Unity/other viewers expect from it) is left untouched.
+                real_preview = mesh.preview_image
+                mesh.preview_image = _uv_debug_texture()
+                mesh.save(self.temp / "terrain_uv_debug.glb")
+                mesh.preview_image = real_preview
 
         if water_mesh is not None:
             context.add_mesh(ContextKey.WATER_MESH, water_mesh)
