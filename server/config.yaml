@@ -594,11 +594,22 @@ stages:
 
   - name: Object Distribution
     stage: ObjectDistributionStage
+    enabled: false          # see Distribution Synthesis below for why
     bin_count: 48
     # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
 
   - name: Distribution Synthesis
     stage: DistributionSynthesisStage
+    enabled: false          # Real detected instances, unprojected straight from
+                             # PANORAMA_OBJECT_DEPTH (the original, with-objects
+                             # panorama), already place well -- scattering extra
+                             # synthetic instances from a fitted spatial-statistics
+                             # model was adding density the real detections don't
+                             # support. SceneGenerationStage places every surviving
+                             # metadata_{i} regardless of this stage's on/off state,
+                             # so disabling it just means "only the real ones."
+                             # ObjectDistributionStage is disabled alongside it since
+                             # nothing else reads ContextKey.OBJECT_DISTRIBUTION.
     min_blob_area_cells: 64
     max_candidates_per_tile: 2000
     max_iters: 400
