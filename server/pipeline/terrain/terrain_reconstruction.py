@@ -515,6 +515,25 @@ class TerrainReconstructionStage(PipelineStage):
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 
+        # Publish a ridge-override-aware trust mask, DISTINCT from
+        # HEIGHT_MAP_OBSERVED_MASK, for TerrainMeshGenerator.generate()'s
+        # per-vertex panorama-UV selection specifically. Deliberately not
+        # overwriting HEIGHT_MAP_OBSERVED_MASK itself: TerrainNoiseRefinementStage's
+        # final hard-restore and terrain_texture_generation.py's panorama-
+        # visibility weighting both still want ridge-overridden cells treated as
+        # trustworthy real data (the ridge envelope is a legitimate, silhouette-
+        # derived correction, not a fabricated gap-fill) -- narrowing that shared
+        # mask would wrongly let noise/diffusion/erosion reshape corrected peaks
+        # and would wrongly cede those texels to synthetic FLUX texture.
+        # TerrainMeshGenerator's cached-UV decision is the one place a
+        # ridge-overridden cell must NOT be trusted: its UV was cached by
+        # HeightMapGenerator._panorama_uv_from_height from the ORIGINAL
+        # (pre-override, often badly wrong at range) height, while its geometry
+        # has since moved to match the ridge envelope -- producing a
+        # geometry/texture mismatch (stretching) confined to exactly the
+        # distant-mountain cells the ridge override was introduced to correct.
+        context.add_depth(ContextKey.HEIGHT_MAP_PANO_UV_TRUST_MASK, Depth(restore_mask.astype(np.float32)))
+
         if self.temp is not None:
             Depth(new_hm).save_debug_image(self.temp / "heightmap_reconstructed.png")
             diff = np.abs(new_hm - heightmap)
