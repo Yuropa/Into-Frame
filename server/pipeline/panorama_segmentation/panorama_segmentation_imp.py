@@ -53,21 +53,38 @@ def _feather_window(h: int, w: int) -> np.ndarray:
     return np.clip(window, 0.05, 1.0)
 
 
-def _paste_tile(
-    label_canvas: np.ndarray,
+def _paste_tiles(
+    canvases: list[np.ndarray],
+    tile_values: list[np.ndarray],
     weight_canvas: np.ndarray,
-    tile_label: np.ndarray,
     tile_weight: np.ndarray,
     tile: _Tile,
 ) -> None:
-    width = label_canvas.shape[1]
+    """
+    Paste one or more per-tile value canvases (label, confidence, runner-up
+    label, ...) into their matching full-resolution canvases, all under the
+    same per-pixel "does this tile beat what's already there" mask.
+
+    Every canvas for a given tile must be pasted in one call here: `better`
+    is computed from weight_canvas before any of it is mutated, and
+    weight_canvas itself is only updated afterwards -- so all canvases stay
+    mutually consistent about which tile won each pixel. Calling this
+    against the same weight_canvas a second time for a different value would
+    silently drop that value wherever an earlier call already won (the
+    second call's `better` would compare against weight_canvas already
+    holding the winning tile's own weight).
+    """
+    width = weight_canvas.shape[1]
     cols = np.arange(tile.x0, tile.x0 + tile.w) % width
     rows = np.arange(tile.y0, tile.y0 + tile.h)
     row_grid, col_grid = np.meshgrid(rows, cols, indexing="ij")
 
     current_weight = weight_canvas[row_grid, col_grid]
     better = tile_weight > current_weight
-    label_canvas[row_grid, col_grid] = np.where(better, tile_label, label_canvas[row_grid, col_grid])
+
+    for canvas, tile_value in zip(canvases, tile_values):
+        canvas[row_grid, col_grid] = np.where(better, tile_value, canvas[row_grid, col_grid])
+
     weight_canvas[row_grid, col_grid] = np.where(better, tile_weight, current_weight)
 
 
@@ -91,6 +108,14 @@ class PanoramaSegmentationServer(RemoteServer):
         self.report_progress(0.05, f"Segmenting {len(tiles)} tile(s)…")
 
         label_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
+        # Top-1 softmax confidence and top-2 (runner-up) class id per pixel --
+        # kept alongside the argmax label so downstream stages can tell a
+        # confident, unambiguous call apart from a close one, and know what
+        # the model's second-best guess was (see PanoramaRegionStage /
+        # panorama_region_result.is_ambiguous_label for how this is used to
+        # catch e.g. "wall" called on what's actually a cliff face).
+        confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
+        runnerup_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
         weight_canvas = np.full((orig_h, orig_w), -1.0, dtype=np.float32)
 
         for batch_start in range(0, len(tiles), _MAX_BATCH):
@@ -111,9 +136,20 @@ class PanoramaSegmentationServer(RemoteServer):
                     mode="bilinear",
                     align_corners=False,
                 )
-                tile_label = tile_logits.argmax(dim=1).squeeze(0).cpu().numpy().astype(np.int16)
+                # top-2 subsumes plain argmax: index 0 of the topk is exactly
+                # the argmax label, so this is no extra work over what the
+                # label alone already cost.
+                probs = torch.softmax(tile_logits, dim=1)
+                top2_val, top2_idx = probs.topk(2, dim=1)
+                tile_label = top2_idx[:, 0].squeeze(0).cpu().numpy().astype(np.int16)
+                tile_confidence = top2_val[:, 0].squeeze(0).cpu().numpy().astype(np.float32)
+                tile_runnerup = top2_idx[:, 1].squeeze(0).cpu().numpy().astype(np.int16)
                 tile_weight = _feather_window(tile.h, tile.w)
-                _paste_tile(label_canvas, weight_canvas, tile_label, tile_weight, tile)
+                _paste_tiles(
+                    [label_canvas, confidence_canvas, runnerup_canvas],
+                    [tile_label, tile_confidence, tile_runnerup],
+                    weight_canvas, tile_weight, tile,
+                )
 
             done = min(len(tiles), batch_start + len(batch))
             self.report_progress(0.05 + 0.85 * done / len(tiles), f"Segmenting tiles… ({done}/{len(tiles)})")
@@ -123,6 +159,11 @@ class PanoramaSegmentationServer(RemoteServer):
         id2label = self.model.config.id2label
         return {
             "label_map": label_canvas.tolist(),
+            # Raw ndarrays (not .tolist()): RemoteObject.encode auto-spills
+            # these to a temp .npy file instead of inlining them as JSON,
+            # which matters at full panorama resolution.
+            "confidence_map": confidence_canvas,
+            "runnerup_label_map": runnerup_canvas,
             "id2label": {str(k): v for k, v in id2label.items()},
             "width": orig_w,
             "height": orig_h,

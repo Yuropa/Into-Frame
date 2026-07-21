@@ -38,6 +38,8 @@ class HeightMapGenerator:
         flood_fill_max_step: float = 1.5,
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
+        region_ambiguous_mask: Optional[np.ndarray] = None,
+        reclaimed_certainty_factor: float = 0.5,
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
         flat_zone_certainty: float = 0.15,
@@ -118,6 +120,21 @@ class HeightMapGenerator:
         sky_mask: optional bool (H, W) array from the depth model where True = sky.
                   Sky pixels are excluded before projection, preventing the horizon
                   artefacts that come from sky pixels being assigned far depth values.
+        region_ambiguous_mask: equirectangular mode only. Optional bool (h, w) panorama-
+                  space array (see ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK) marking
+                  pixels PanoramaRegionStage resolved from an uncorroborated ambiguous
+                  label (e.g. ADE20K's "wall" firing on a sunlit cliff face, with no
+                  independent unambiguous built evidence anywhere else in the panorama)
+                  to a ground-valid runner-up type. region_type_mask already reflects
+                  that resolution -- the same gating logic passes these cells through
+                  unchanged -- so this mask's only effect is on certainty (see
+                  reclaimed_certainty_factor / _build_certainty): these cells came from
+                  an inference, not a direct classification, and the solver should trust
+                  them a bit less. None disables (no cells get the reduced factor).
+        reclaimed_certainty_factor: multiplier applied to certainty for cells flagged by
+                  region_ambiguous_mask. Fixed rather than scaled by the (distrusted)
+                  original label's own confidence -- a confidently-wrong original call
+                  should not suppress the reclaim.
         flood_fill: if True, label connected walkable-ground components (see
                     _label_ground_components) and keep every one large enough to
                     qualify, instead of every cell in the grid; stops at height
@@ -228,6 +245,11 @@ class HeightMapGenerator:
         h, w = d.shape
         half = grid_size_meters / 2.0
         ground_y_min = -(camera_height_meters + 5.0)
+        # Grid-space cells whose ground validity came from an uncorroborated-
+        # ambiguous-label reclaim (see region_ambiguous_mask docstring above) --
+        # only ever populated in the equirectangular path below; None elsewhere,
+        # which _build_certainty treats as "no reclaimed cells".
+        reclaimed_grid = None
 
         if use_equirectangular:
             # Inverse mapping: for each grid cell, look up the panorama pixel that
@@ -254,6 +276,17 @@ class HeightMapGenerator:
                 )
                 region_valid = nearest_sample_grid(
                     ground_valid_pano.astype(np.uint8), pano_u, pano_v
+                ).astype(bool)
+
+            # Same resample as region_valid above, for cells whose ground validity
+            # came from an uncorroborated-ambiguous-label reclaim rather than a
+            # direct classification (see region_ambiguous_mask docstring) -- used
+            # below to scale certainty down for exactly those cells, regardless of
+            # which sub-path (primary single-sample or dense forward-projected)
+            # ends up producing the cell's final height.
+            if region_ambiguous_mask is not None and region_ambiguous_mask.shape == d.shape:
+                reclaimed_grid = nearest_sample_grid(
+                    region_ambiguous_mask.astype(np.uint8), pano_u, pano_v
                 ).astype(bool)
 
             valid = np.isfinite(sampled_depth) & (sampled_depth > 0) & (Y_grid >= ground_y_min)
@@ -530,6 +563,8 @@ class HeightMapGenerator:
             nadir_exclusion_radius=nadir_exclusion_radius,
             nadir_ramp_width=nadir_ramp_width,
             elevation_distortion_power=elevation_distortion_power,
+            reclaimed_mask=reclaimed_grid,
+            reclaimed_certainty_factor=reclaimed_certainty_factor,
         )
         if flat_prior_mask.any():
             certainty[flat_prior_mask] = flat_zone_certainty
@@ -993,11 +1028,14 @@ class HeightMapGenerator:
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
         elevation_distortion_power: float = 1.0,
+        reclaimed_mask: Optional[np.ndarray] = None,
+        reclaimed_certainty_factor: float = 0.5,
     ) -> np.ndarray:
         """
         Build a [0, 1] certainty map over the top-down grid.
 
-        Observed cells are scored by three multiplied factors:
+        Observed cells are scored by three multiplied factors, plus a fourth
+        applied only where reclaimed_mask is set:
 
           1. Distance-decayed certainty (see ground_projection_certainty;
              falloff_m=certainty_falloff_meters, a depth-model-trust radius, not
@@ -1020,6 +1058,13 @@ class HeightMapGenerator:
              grazing incidence; this captures how reliable the raw depth
              estimate itself tends to be, purely as a function of where in the
              source image it came from. 0 disables (cos^0 == 1, neutral).
+          4. reclaimed_certainty_factor, wherever reclaimed_mask is set -- these
+             cells passed ground-validity via PANORAMA_REGION_AMBIGUOUS_MASK
+             (an uncorroborated ambiguous label, e.g. "wall" on a cliff face,
+             resolved to a ground-valid runner-up type) rather than a direct
+             classification, so they're an inference rather than an
+             observation and get trusted less regardless of how confident the
+             original (distrusted) label happened to be.
 
         Unobserved cells get 0.
         """
@@ -1040,6 +1085,9 @@ class HeightMapGenerator:
             )
             distortion = np.clip(np.cos(phi_true), 0.0, 1.0) ** elevation_distortion_power
             certainty_field = certainty_field * distortion.astype(np.float32)
+
+        if reclaimed_mask is not None:
+            certainty_field = np.where(reclaimed_mask, certainty_field * reclaimed_certainty_factor, certainty_field)
 
         return np.where(observed, certainty_field, 0.0).astype(np.float32)
 

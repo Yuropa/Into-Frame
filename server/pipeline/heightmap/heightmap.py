@@ -44,6 +44,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         despike_reference_distance_m: float = 10.0,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
+        reclaimed_certainty_factor: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -143,6 +144,15 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # test can't catch. 0 disables. See
         # HeightMapGenerator._despike_single_sample_cells and _build_certainty.
         self.single_sample_blur_sigma = single_sample_blur_sigma
+        # Equirectangular mode only: certainty multiplier for cells whose
+        # ground validity came from PANORAMA_REGION_AMBIGUOUS_MASK -- pixels
+        # PanoramaRegionStage resolved from an uncorroborated ambiguous label
+        # (e.g. "wall") to a ground-valid runner-up type, rather than a
+        # direct classification. A fixed, conservative factor rather than one
+        # scaled by the (distrusted) original label's own confidence, since a
+        # confidently-wrong original call should not suppress the reclaim.
+        # See HeightMapGenerator._build_certainty.
+        self.reclaimed_certainty_factor = reclaimed_certainty_factor
 
 class HeightMapStage(PipelineStage):
     """
@@ -189,6 +199,10 @@ class HeightMapStage(PipelineStage):
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
         region_type_mask = region_type_depth.depth if region_type_depth is not None else None
+        region_ambiguous_depth = context.input_depth(ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK)
+        region_ambiguous_mask = (
+            region_ambiguous_depth.depth.astype(bool) if region_ambiguous_depth is not None else None
+        )
         self.advance_progress(task)
 
         if depth is None:
@@ -244,6 +258,8 @@ class HeightMapStage(PipelineStage):
             flood_fill_max_step=cfg.flood_fill_max_step,
             panorama_depth=fill_panorama_depth,
             region_type_mask=region_type_mask,
+            region_ambiguous_mask=region_ambiguous_mask,
+            reclaimed_certainty_factor=cfg.reclaimed_certainty_factor,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
             flat_zone_certainty=cfg.flat_zone_certainty,

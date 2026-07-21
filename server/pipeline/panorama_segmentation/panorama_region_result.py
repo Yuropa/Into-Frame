@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Self
+from typing import NamedTuple, Self
 
 import numpy as np
 
@@ -40,28 +40,53 @@ class RegionType(IntEnum):
         return cls[s.upper()]
 
 
+class _LabelRule(NamedTuple):
+    keywords: tuple[str, ...]
+    region_type: RegionType
+    # True for keyword groups that are routinely confused with a *different*
+    # plausible coarse type in natural/outdoor scenes (e.g. a segmentation
+    # model calling a sunlit cliff face "wall"). A region matching an
+    # ambiguous rule is only trusted downstream if a different, unambiguous
+    # rule of the same region_type is independently present elsewhere in the
+    # same panorama (see PanoramaRegion.well_supported / _build_result) --
+    # otherwise it's resolved to its runner-up classification instead.
+    ambiguous: bool = False
+
+
 # Keyword substrings that map ADE20K label names to coarse region types.
 # Checked in order; first match wins.
-_LABEL_RULES: list[tuple[tuple[str, ...], RegionType]] = [
-    (("sky",), RegionType.SKY),
-    (("water", "sea", "ocean", "river", "lake", "pool", "waterfall", "fountain", "swamp"), RegionType.WATER),
-    (("mountain", "hill", "cliff", "rock", "stone", "boulder", "land"), RegionType.TERRAIN),
-    (("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION),
-    (("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
-    (("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT),
-    (("road", "pavement", "runway"), RegionType.ROAD),
-    (("sidewalk", "path", "trail"), RegionType.TRAIL),
-    (("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
+_LABEL_RULES: list[_LabelRule] = [
+    _LabelRule(("sky",), RegionType.SKY),
+    _LabelRule(("water", "sea", "ocean", "river", "lake", "pool", "waterfall", "fountain", "swamp"), RegionType.WATER),
+    _LabelRule(("mountain", "hill", "cliff", "rock", "stone", "boulder", "land"), RegionType.TERRAIN),
+    _LabelRule(("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION),
+    _LabelRule(("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
+    # Commonly confused with natural rock/cliff faces (large, evenly-lit,
+    # texture-rich vertical surfaces) by ADE20K-trained segmentation models,
+    # whose "wall" class is dominated by indoor/urban training data.
+    _LabelRule(("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT, ambiguous=True),
+    _LabelRule(("road", "pavement", "runway"), RegionType.ROAD),
+    _LabelRule(("sidewalk", "path", "trail"), RegionType.TRAIL),
+    _LabelRule(("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
       "floor", "snow", "ice"), RegionType.GROUND),
 ]
 
 
 def coarse_type_for_label(label_name: str) -> RegionType:
     name = label_name.lower()
-    for keywords, region_type in _LABEL_RULES:
-        if any(kw in name for kw in keywords):
-            return region_type
+    for rule in _LABEL_RULES:
+        if any(kw in name for kw in rule.keywords):
+            return rule.region_type
     return RegionType.OTHER
+
+
+def is_ambiguous_label(label_name: str) -> bool:
+    """True if label_name matched a rule flagged `ambiguous` (see _LabelRule)."""
+    name = label_name.lower()
+    for rule in _LABEL_RULES:
+        if any(kw in name for kw in rule.keywords):
+            return rule.ambiguous
+    return False
 
 
 # Region types treated as one interchangeable "ground-like" domain for object
@@ -125,6 +150,20 @@ class PanoramaRegion:
     area_fraction: float
     bbox: tuple[int, int, int, int]  # (x, y, w, h) in panorama pixels
     centroid: tuple[float, float]    # (cx, cy) in panorama pixels
+    # Mean top-1 softmax confidence of the segmentation model over this
+    # region's pixels. 1.0 (neutral/unknown) when confidence wasn't computed
+    # (e.g. decoded from an older saved result).
+    mean_confidence: float = 1.0
+    # True if label_name matched an ambiguous _LabelRule (see is_ambiguous_label)
+    # -- a keyword group routinely confused with a different plausible coarse
+    # type in natural scenes (e.g. "wall" vs. a cliff face).
+    ambiguous_label: bool = False
+    # Only meaningful when ambiguous_label is True: whether a *different*,
+    # unambiguous region of the same region_type is independently present
+    # elsewhere in the panorama. False means this region's classification is
+    # uncorroborated and has been resolved to its runner-up type in
+    # PANORAMA_REGION_TYPE_MAP (see PanoramaRegionStage._build_result).
+    well_supported: bool = True
 
     def encode(self) -> dict:
         return {
@@ -133,6 +172,9 @@ class PanoramaRegion:
             "area_fraction": self.area_fraction,
             "bbox": list(self.bbox),
             "centroid": list(self.centroid),
+            "mean_confidence": self.mean_confidence,
+            "ambiguous_label": self.ambiguous_label,
+            "well_supported": self.well_supported,
         }
 
     @classmethod
@@ -143,6 +185,9 @@ class PanoramaRegion:
             area_fraction=float(data["area_fraction"]),
             bbox=tuple(data["bbox"]),
             centroid=tuple(data["centroid"]),
+            mean_confidence=float(data.get("mean_confidence", 1.0)),
+            ambiguous_label=bool(data.get("ambiguous_label", False)),
+            well_supported=bool(data.get("well_supported", True)),
         )
 
 

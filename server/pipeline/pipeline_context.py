@@ -51,6 +51,10 @@ class ContextKey:
     LINEAR_GRAPH = "linear_graph"
     PANORAMA_REGIONS = "panorama_regions"
     PANORAMA_REGION_TYPE_MAP = "panorama_region_type_map"
+    PANORAMA_REGION_TYPE_MAP_RAW = "panorama_region_type_map_raw"
+    PANORAMA_REGION_CONFIDENCE_MAP = "panorama_region_confidence_map"
+    PANORAMA_REGION_RUNNERUP_TYPE_MAP = "panorama_region_runnerup_type_map"
+    PANORAMA_REGION_AMBIGUOUS_MASK = "panorama_region_ambiguous_mask"
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
     MOUNTAIN_RIDGE_CHAINS = "mountain_ridge_chains"
@@ -105,6 +109,10 @@ class ContextKey:
         "linear_graph",
         "panorama_regions",
         "panorama_region_type_map",
+        "panorama_region_type_map_raw",
+        "panorama_region_confidence_map",
+        "panorama_region_runnerup_type_map",
+        "panorama_region_ambiguous_mask",
         "region_map",
         "mountain_silhouette",
         "mountain_ridge_chains",
