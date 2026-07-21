@@ -18,6 +18,15 @@ class SemanticKey(StrEnum):
     DEPTH = "depth"
     PANORAMA = "panorama"
     VIDEO = "video"
+    # PanoramaRegionStage's five secondary outputs -- needed so config.yaml can
+    # redirect all of them per-instance (see "Panorama Regions (Terrain)"),
+    # mirroring the OUTPUT/DEPTH pattern for a stage with more than one output.
+    REGIONS = "regions"
+    TYPE_MAP = "type_map"
+    TYPE_MAP_RAW = "type_map_raw"
+    CONFIDENCE_MAP = "confidence_map"
+    RUNNERUP_TYPE_MAP = "runnerup_type_map"
+    AMBIGUOUS_MASK = "ambiguous_mask"
 
 SemanticKeyName: TypeAlias = SemanticKey | str
 

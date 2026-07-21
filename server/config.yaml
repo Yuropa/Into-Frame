@@ -117,6 +117,33 @@ stages:
                             # SegFormer's raw output and replaced by the reliable ring above.
     nadir_band_deg: 15.0    # degrees of ring immediately above the cutoff used for the
                             # per-column majority vote that replaces the excluded band.
+    # Default keys (ContextKey.PANORAMA, ContextKey.PANORAMA_REGION_TYPE_MAP, ...)
+    # -- classifies the ORIGINAL, with-objects panorama. Object detection/
+    # distribution and skybox inpainting need this version: they care what was
+    # actually photographed, objects included. Terrain generation does not --
+    # see "Panorama Regions (Terrain)" below.
+
+  - name: Panorama Regions (Terrain)
+    stage: PanoramaRegionStage
+    nadir_cutoff_deg: -55.0
+    nadir_band_deg: 15.0
+    # Same model, same settings, run a second time against the object-removed +
+    # LoRA-corrected panorama instead of the original -- mirrors how Panorama
+    # Depth below is itself a second pass over PANORAMA_OBJECT_DEPTH's own
+    # earlier "Panorama Object Depth" run. RegionMapStage (ridge/water/interior-
+    # peak/road/trail extraction), HeightMapStage, and TerrainTextureGeneration
+    # all read the _terrain keys, so a tree or other object that Panorama
+    # Foreground Inpainting removed no longer shows up as VEGETATION/BUILT and
+    # can't punch a hole in the ridgeline, get anchored as a fake crest, or get
+    # picked as a texture reference crop.
+    keys:
+      input: panorama_terrain
+      regions: panorama_regions_terrain
+      type_map: panorama_region_type_map_terrain
+      type_map_raw: panorama_region_type_map_raw_terrain
+      confidence_map: panorama_region_confidence_map_terrain
+      runnerup_type_map: panorama_region_runnerup_type_map_terrain
+      ambiguous_mask: panorama_region_ambiguous_mask_terrain
 
   - name: Panorama Lighting
     stage: PanoramaLightingStage

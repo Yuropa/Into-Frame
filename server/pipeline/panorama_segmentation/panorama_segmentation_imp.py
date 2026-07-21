@@ -108,14 +108,17 @@ class PanoramaSegmentationServer(RemoteServer):
         self.report_progress(0.05, f"Segmenting {len(tiles)} tile(s)…")
 
         label_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
-        # Top-1 softmax confidence and top-2 (runner-up) class id per pixel --
-        # kept alongside the argmax label so downstream stages can tell a
-        # confident, unambiguous call apart from a close one, and know what
-        # the model's second-best guess was (see PanoramaRegionStage /
-        # panorama_region_result.is_ambiguous_label for how this is used to
-        # catch e.g. "wall" called on what's actually a cliff face).
+        # Top-1/top-2 softmax confidence and top-2 (runner-up) class id per
+        # pixel -- kept alongside the argmax label so downstream stages can
+        # tell a confident, unambiguous call apart from a close one (their
+        # difference is the margin), and know what the model's second-best
+        # guess was (see PanoramaRegionStage / panorama_region_result's
+        # ambiguity_strategy_for_label for how this is used to catch e.g.
+        # "wall" called on what's actually a cliff face, or "tree" called on
+        # dark, mottled rock texture).
         confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
         runnerup_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
+        runnerup_confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
         weight_canvas = np.full((orig_h, orig_w), -1.0, dtype=np.float32)
 
         for batch_start in range(0, len(tiles), _MAX_BATCH):
@@ -144,10 +147,11 @@ class PanoramaSegmentationServer(RemoteServer):
                 tile_label = top2_idx[:, 0].squeeze(0).cpu().numpy().astype(np.int16)
                 tile_confidence = top2_val[:, 0].squeeze(0).cpu().numpy().astype(np.float32)
                 tile_runnerup = top2_idx[:, 1].squeeze(0).cpu().numpy().astype(np.int16)
+                tile_runnerup_confidence = top2_val[:, 1].squeeze(0).cpu().numpy().astype(np.float32)
                 tile_weight = _feather_window(tile.h, tile.w)
                 _paste_tiles(
-                    [label_canvas, confidence_canvas, runnerup_canvas],
-                    [tile_label, tile_confidence, tile_runnerup],
+                    [label_canvas, confidence_canvas, runnerup_canvas, runnerup_confidence_canvas],
+                    [tile_label, tile_confidence, tile_runnerup, tile_runnerup_confidence],
                     weight_canvas, tile_weight, tile,
                 )
 
@@ -164,6 +168,7 @@ class PanoramaSegmentationServer(RemoteServer):
             # which matters at full panorama resolution.
             "confidence_map": confidence_canvas,
             "runnerup_label_map": runnerup_canvas,
+            "runnerup_confidence_map": runnerup_confidence_canvas,
             "id2label": {str(k): v for k, v in id2label.items()},
             "width": orig_w,
             "height": orig_h,

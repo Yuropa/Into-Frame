@@ -55,6 +55,20 @@ class ContextKey:
     PANORAMA_REGION_CONFIDENCE_MAP = "panorama_region_confidence_map"
     PANORAMA_REGION_RUNNERUP_TYPE_MAP = "panorama_region_runnerup_type_map"
     PANORAMA_REGION_AMBIGUOUS_MASK = "panorama_region_ambiguous_mask"
+    # Terrain-scoped mirror of the five keys above: same PanoramaRegionStage,
+    # run a second time against ContextKey.PANORAMA_TERRAIN (object-removed +
+    # LoRA-corrected) instead of the original ContextKey.PANORAMA, exactly like
+    # PANORAMA_DEPTH already mirrors PANORAMA_OBJECT_DEPTH. Anything that shapes
+    # or textures the terrain itself (RegionMapStage, HeightMapStage,
+    # TerrainTextureGenerationStage) should read these, not the originals --
+    # object clutter that was removed from the photo shouldn't still be
+    # classified as ridge/vegetation/etc. in the map that shapes the mesh.
+    PANORAMA_REGIONS_TERRAIN = "panorama_regions_terrain"
+    PANORAMA_REGION_TYPE_MAP_TERRAIN = "panorama_region_type_map_terrain"
+    PANORAMA_REGION_TYPE_MAP_RAW_TERRAIN = "panorama_region_type_map_raw_terrain"
+    PANORAMA_REGION_CONFIDENCE_MAP_TERRAIN = "panorama_region_confidence_map_terrain"
+    PANORAMA_REGION_RUNNERUP_TYPE_MAP_TERRAIN = "panorama_region_runnerup_type_map_terrain"
+    PANORAMA_REGION_AMBIGUOUS_MASK_TERRAIN = "panorama_region_ambiguous_mask_terrain"
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
     MOUNTAIN_RIDGE_CHAINS = "mountain_ridge_chains"

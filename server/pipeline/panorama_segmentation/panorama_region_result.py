@@ -1,6 +1,6 @@
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import NamedTuple, Self
+from typing import NamedTuple, Optional, Self
 
 import numpy as np
 
@@ -40,17 +40,45 @@ class RegionType(IntEnum):
         return cls[s.upper()]
 
 
+# A rule's ambiguity resolution strategy -- how downstream code decides
+# whether to trust a region matching this rule, when its coarse type isn't
+# RegionType.ground_valid (see PanoramaRegion.well_supported / _build_result):
+#
+#   None            -- never questioned. The default for every rule that
+#                       isn't routinely confused with something else.
+#   "corroboration" -- trusted only if a *different*, unambiguous region of
+#                       the same coarse type is independently present
+#                       elsewhere in the panorama. Safe when real instances
+#                       of this coarse type are rare in outdoor photography
+#                       (e.g. BUILT structures) -- their total absence
+#                       elsewhere is itself strong evidence. Unsafe for a
+#                       coarse type that's ubiquitous and unremarkable in
+#                       nature photos: two separate real-looking regions
+#                       don't corroborate each other if the *whole coarse
+#                       type* is prone to the same confusion (this is why
+#                       VEGETATION doesn't use this strategy -- see
+#                       "confidence" below).
+#   "confidence"    -- trusted unless BOTH this region's own mean
+#                       top1-vs-runner-up softmax margin is low (a
+#                       genuinely close call for the model, not a
+#                       comfortable one) AND its dominant runner-up type is
+#                       itself ground-valid (there's a plausible resolution
+#                       to fall back to). Used where corroboration-by-
+#                       absence is unsafe because real instances of this
+#                       rule's coarse type are common in outdoor photography
+#                       (e.g. VEGETATION -- almost every nature photo has
+#                       some legitimate bush or tree, so "no other
+#                       vegetation elsewhere" says nothing about any one
+#                       region), but a confused, low-margin call against a
+#                       plausible ground-valid alternative still does.
+AMBIGUITY_CORROBORATION = "corroboration"
+AMBIGUITY_CONFIDENCE = "confidence"
+
+
 class _LabelRule(NamedTuple):
     keywords: tuple[str, ...]
     region_type: RegionType
-    # True for keyword groups that are routinely confused with a *different*
-    # plausible coarse type in natural/outdoor scenes (e.g. a segmentation
-    # model calling a sunlit cliff face "wall"). A region matching an
-    # ambiguous rule is only trusted downstream if a different, unambiguous
-    # rule of the same region_type is independently present elsewhere in the
-    # same panorama (see PanoramaRegion.well_supported / _build_result) --
-    # otherwise it's resolved to its runner-up classification instead.
-    ambiguous: bool = False
+    ambiguity: Optional[str] = None
 
 
 # Keyword substrings that map ADE20K label names to coarse region types.
@@ -59,12 +87,21 @@ _LABEL_RULES: list[_LabelRule] = [
     _LabelRule(("sky",), RegionType.SKY),
     _LabelRule(("water", "sea", "ocean", "river", "lake", "pool", "waterfall", "fountain", "swamp"), RegionType.WATER),
     _LabelRule(("mountain", "hill", "cliff", "rock", "stone", "boulder", "land"), RegionType.TERRAIN),
-    _LabelRule(("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION),
+    # Commonly confused with dark/mottled natural rock/cliff faces (a dense,
+    # high-frequency, clump-like texture, especially in shadow) by
+    # ADE20K-trained segmentation models. Unlike "wall" below, real instances
+    # of this coarse type are common and unremarkable in outdoor photography,
+    # so "confidence" (not "corroboration") is the safe strategy here -- see
+    # the strategy docstring above.
+    _LabelRule(("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION, ambiguity=AMBIGUITY_CONFIDENCE),
     _LabelRule(("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
-    # Commonly confused with natural rock/cliff faces (large, evenly-lit,
-    # texture-rich vertical surfaces) by ADE20K-trained segmentation models,
-    # whose "wall" class is dominated by indoor/urban training data.
-    _LabelRule(("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT, ambiguous=True),
+    # Commonly confused with sunlit natural rock/cliff faces (large, evenly-
+    # lit, texture-rich vertical surfaces) by ADE20K-trained segmentation
+    # models, whose "wall" class is dominated by indoor/urban training data.
+    # Real BUILT structures are rare and remarkable in outdoor/nature
+    # photography, so "corroboration" (not "confidence") is the safe
+    # strategy here -- see the strategy docstring above.
+    _LabelRule(("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT, ambiguity=AMBIGUITY_CORROBORATION),
     _LabelRule(("road", "pavement", "runway"), RegionType.ROAD),
     _LabelRule(("sidewalk", "path", "trail"), RegionType.TRAIL),
     _LabelRule(("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
@@ -80,13 +117,15 @@ def coarse_type_for_label(label_name: str) -> RegionType:
     return RegionType.OTHER
 
 
-def is_ambiguous_label(label_name: str) -> bool:
-    """True if label_name matched a rule flagged `ambiguous` (see _LabelRule)."""
+def ambiguity_strategy_for_label(label_name: str) -> Optional[str]:
+    """The matching rule's ambiguity resolution strategy (see _LabelRule /
+    AMBIGUITY_CORROBORATION / AMBIGUITY_CONFIDENCE), or None if this label
+    is never questioned."""
     name = label_name.lower()
     for rule in _LABEL_RULES:
         if any(kw in name for kw in rule.keywords):
-            return rule.ambiguous
-    return False
+            return rule.ambiguity
+    return None
 
 
 # Region types treated as one interchangeable "ground-like" domain for object
@@ -154,15 +193,18 @@ class PanoramaRegion:
     # region's pixels. 1.0 (neutral/unknown) when confidence wasn't computed
     # (e.g. decoded from an older saved result).
     mean_confidence: float = 1.0
-    # True if label_name matched an ambiguous _LabelRule (see is_ambiguous_label)
-    # -- a keyword group routinely confused with a different plausible coarse
-    # type in natural scenes (e.g. "wall" vs. a cliff face).
-    ambiguous_label: bool = False
-    # Only meaningful when ambiguous_label is True: whether a *different*,
-    # unambiguous region of the same region_type is independently present
-    # elsewhere in the panorama. False means this region's classification is
-    # uncorroborated and has been resolved to its runner-up type in
-    # PANORAMA_REGION_TYPE_MAP (see PanoramaRegionStage._build_result).
+    # Mean top1-vs-runner-up softmax margin over this region's pixels (see
+    # AMBIGUITY_CONFIDENCE). 1.0 (neutral/unknown, maximally confident) when
+    # not computed.
+    mean_margin: float = 1.0
+    # The ambiguity_strategy_for_label result for this region's label_name --
+    # None if this label is never questioned, otherwise which mechanism
+    # decided well_supported below (see _LabelRule / _build_result).
+    ambiguity_strategy: Optional[str] = None
+    # Only meaningful when ambiguity_strategy is not None: whether this
+    # region's classification held up under that strategy. False means it
+    # didn't, and every pixel in it has been resolved to its own runner-up
+    # coarse type in PANORAMA_REGION_TYPE_MAP (see PanoramaRegionStage._build_result).
     well_supported: bool = True
 
     def encode(self) -> dict:
@@ -173,7 +215,8 @@ class PanoramaRegion:
             "bbox": list(self.bbox),
             "centroid": list(self.centroid),
             "mean_confidence": self.mean_confidence,
-            "ambiguous_label": self.ambiguous_label,
+            "mean_margin": self.mean_margin,
+            "ambiguity_strategy": self.ambiguity_strategy,
             "well_supported": self.well_supported,
         }
 
@@ -186,7 +229,8 @@ class PanoramaRegion:
             bbox=tuple(data["bbox"]),
             centroid=tuple(data["centroid"]),
             mean_confidence=float(data.get("mean_confidence", 1.0)),
-            ambiguous_label=bool(data.get("ambiguous_label", False)),
+            mean_margin=float(data.get("mean_margin", 1.0)),
+            ambiguity_strategy=data.get("ambiguity_strategy"),
             well_supported=bool(data.get("well_supported", True)),
         )
 

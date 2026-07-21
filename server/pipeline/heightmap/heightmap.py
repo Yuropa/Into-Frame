@@ -197,9 +197,13 @@ class HeightMapStage(PipelineStage):
         if isinstance(sky_mask, list):
             sky_mask = np.array(sky_mask, dtype=bool)
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
-        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        # _TERRAIN: classified from panorama_terrain (object-removed + LoRA-
+        # corrected), matching panorama_depth above -- not the original-panorama
+        # PANORAMA_REGION_TYPE_MAP, which would still show a removed object as
+        # VEGETATION/BUILT and let it gate ground-plane validity here.
+        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
         region_type_mask = region_type_depth.depth if region_type_depth is not None else None
-        region_ambiguous_depth = context.input_depth(ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK)
+        region_ambiguous_depth = context.input_depth(ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK_TERRAIN)
         region_ambiguous_mask = (
             region_ambiguous_depth.depth.astype(bool) if region_ambiguous_depth is not None else None
         )

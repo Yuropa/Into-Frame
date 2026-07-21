@@ -80,14 +80,27 @@ class RegionMapStage(PipelineStage):
     ground, vegetation, built, other) among all ground-plane panorama pixels that project
     into it.  Empty cells are filled by nearest-neighbour propagation.
 
-    Reads:  ContextKey.PANORAMA_OBJECT_DEPTH      (equirectangular depth on the ORIGINAL
-                                                   panorama, metres — not PANORAMA_DEPTH,
-                                                   which is computed on the foreground-
-                                                   inpainted panorama_terrain and is reserved
-                                                   for height/terrain-mesh generation)
-            ContextKey.PANORAMA_REGION_TYPE_MAP   (per-pixel uint8 type indices from
-                                                   PanoramaRegionStage)
-            ContextKey.PANORAMA_SKY_MASK          (optional bool sky mask)
+    Reads:  ContextKey.PANORAMA_DEPTH                     (equirectangular depth on the
+                                                           object-removed + LoRA-corrected
+                                                           panorama_terrain, metres — not
+                                                           PANORAMA_OBJECT_DEPTH, which is
+                                                           computed on the ORIGINAL panorama
+                                                           and is for object detection/
+                                                           distribution instead, which need
+                                                           to know what was really there)
+            ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN   (per-pixel uint8 type indices from
+                                                           the terrain-scoped PanoramaRegionStage
+                                                           pass, i.e. also on panorama_terrain --
+                                                           an object PanoramaForegroundInpainting
+                                                           removed must not still show up as
+                                                           VEGETATION/BUILT here and get read as
+                                                           part of the ridgeline/water/interior
+                                                           peaks)
+            ContextKey.PANORAMA_SKY_MASK                  (optional bool sky mask; already
+                                                           panorama_terrain-derived by this point
+                                                           -- PanoramaDepthStage's terrain-scoped
+                                                           instance runs after the object-scoped
+                                                           one and overwrites this same key)
     Writes: ContextKey.REGION_MAP                (Depth wrapping a float32 type-index
                                                    grid, grid_resolution²)
     Debug:  self.temp / "region_map.png" etc.    (colorized top-down views of each
@@ -106,7 +119,7 @@ class RegionMapStage(PipelineStage):
 
     def _resolved_keys(self):
         return self.keys({
-            SemanticKey.DEPTH: ContextKey.PANORAMA_OBJECT_DEPTH,
+            SemanticKey.DEPTH: ContextKey.PANORAMA_DEPTH,
             SemanticKey.OUTPUT: ContextKey.REGION_MAP,
         })
 
@@ -117,20 +130,21 @@ class RegionMapStage(PipelineStage):
         task = self.create_progress(6, "Region Map…")
 
         panorama_depth = context.input_depth(depth_key)
-        type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
         sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
         if isinstance(sky_mask, list):
             sky_mask = np.array(sky_mask, dtype=bool)
 
         # Source photo for the panorama-space debug overlays below (see "Debug:
         # project extracted features back onto the source panorama"). Matches
-        # what panorama_depth was itself computed from (ContextKey.PANORAMA —
-        # the ORIGINAL panorama, not the foreground-inpainted panorama_terrain;
-        # see this stage's docstring), so features stay correctly aligned when
-        # projected back. The grid→panorama pixel map is the same for every
-        # grid-space feature this stage extracts, so it's computed once here
-        # rather than per debug image.
-        panorama_source = context.input_panorama(ContextKey.PANORAMA)
+        # what panorama_depth/type_idx_depth were themselves computed from
+        # (ContextKey.PANORAMA_TERRAIN — object-removed + LoRA-corrected, not
+        # the original ContextKey.PANORAMA; see this stage's docstring), so
+        # features stay correctly aligned when projected back. The
+        # grid→panorama pixel map is the same for every grid-space feature
+        # this stage extracts, so it's computed once here rather than per
+        # debug image.
+        panorama_source = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
         panorama_source_rgb = None
         _grid_pano_u = _grid_pano_v = None
         if self.temp is not None and panorama_source is not None:
@@ -256,7 +270,10 @@ class RegionMapStage(PipelineStage):
 
         # Interior peaks — depth jumps + Canny/corners on RGB to find elevated
         # terrain features that appear against background terrain, not against sky.
-        panorama_img = context.input_image(ContextKey.PANORAMA)
+        # PANORAMA_TERRAIN (object-removed + LoRA-corrected), matching panorama_depth/
+        # type_idx_map above -- an un-removed object's own edges/texture would
+        # otherwise trip the Canny/corner heuristic same as it would the ridgeline.
+        panorama_img = context.input_image(ContextKey.PANORAMA_TERRAIN)
         panorama_rgb = np.array(panorama_img.rgb()) if panorama_img is not None else None
         if self.temp is not None and panorama_rgb is not None:
             h_pano, w_pano = panorama_rgb.shape[:2]

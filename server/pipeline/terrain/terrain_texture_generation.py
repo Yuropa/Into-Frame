@@ -337,7 +337,7 @@ class TerrainTextureGenerationStage(PipelineStage):
     Generates high-quality tileable region textures and packages them as a SplatMaterial.
 
     For each ground region type present in the REGION_MAP (above min_region_fraction):
-      1. If a real photo is available (PANORAMA_TERRAIN + PANORAMA_REGION_TYPE_MAP),
+      1. If a real photo is available (PANORAMA_TERRAIN + PANORAMA_REGION_TYPE_MAP_TERRAIN),
          crop num_reference_patches squares directly from the most solid,
          mutually distant locations of that region in the panorama's own
          pixels (_extract_reference_patches), reprojected to a perspective
@@ -390,8 +390,10 @@ class TerrainTextureGenerationStage(PipelineStage):
     Reads:
       ContextKey.REGION_MAP              — top-down region type grid (optional)
       ContextKey.PANORAMA_TERRAIN        — real photo, source for the reference crop (optional)
-      ContextKey.PANORAMA_REGION_TYPE_MAP — panorama-space per-pixel region type, source for
-                                            picking reference crop locations (optional)
+      ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN — panorama-space per-pixel region type,
+                                            classified from the same panorama_terrain (not the
+                                            original-panorama PANORAMA_REGION_TYPE_MAP), source
+                                            for picking reference crop locations (optional)
       ContextKey.PANORAMA_DEPTH          — panorama-aligned depth, used to flatten each
                                             reference crop from its own real 3D points
                                             (optional; falls back to perspective_crop only)
@@ -913,7 +915,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         camera-adjacent singularity that broke the whole-scene version.
         """
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
-        type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
         if panorama_terrain is None or type_map_depth is None:
             return None
         depth_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
@@ -1241,7 +1243,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         Falls back to plain text generation if the region has no pixels at all.
 
         type_map: panorama-space per-pixel RegionType index array (see
-        ContextKey.PANORAMA_REGION_TYPE_MAP), used to locate crop candidates
+        ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN), used to locate crop candidates
         (see _extract_reference_patches).
         depth: optional panorama-aligned depth (ContextKey.PANORAMA_DEPTH),
         used to flatten each crop from its own real 3D points

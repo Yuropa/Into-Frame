@@ -14,7 +14,9 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     PanoramaRegion,
     RegionType,
     coarse_type_for_label,
-    is_ambiguous_label,
+    ambiguity_strategy_for_label,
+    AMBIGUITY_CORROBORATION,
+    AMBIGUITY_CONFIDENCE,
     build_type_idx_map,
     colorize_region_type_map,
 )
@@ -56,13 +58,18 @@ class _SegmentationResult(NamedTuple):
     ambiguous_mask: np.ndarray          # bool; True where resolved_type_idx_map differs from type_idx_map
 
 
-def _build_result(raw: dict) -> _SegmentationResult:
+def _build_result(raw: dict, confidence_margin_threshold: float = 0.2) -> _SegmentationResult:
     label_map = np.array(raw["label_map"], dtype=np.int16)
     confidence_map = np.asarray(raw["confidence_map"], dtype=np.float32)
     runnerup_label_map = np.asarray(raw["runnerup_label_map"], dtype=np.int16)
+    runnerup_confidence_map = np.asarray(raw["runnerup_confidence_map"], dtype=np.float32)
     id2label: dict[int, str] = {int(k): v for k, v in raw["id2label"].items()}
     h, w = label_map.shape
     total_pixels = h * w
+    n_types = len(RegionType)
+
+    # top1 >= top2 by construction (topk), so this is never negative.
+    margin_map = confidence_map - runnerup_confidence_map
 
     type_idx_map = build_type_idx_map(label_map, id2label)
     runnerup_type_idx_map = build_type_idx_map(runnerup_label_map, id2label)
@@ -96,8 +103,8 @@ def _build_result(raw: dict) -> _SegmentationResult:
         # dominant label (previously computed once from the whole
         # type_mask and shared across every component of this type, which
         # would silently blend a real, unambiguous component's identity
-        # into a nearby ambiguous one's; the corroboration check below needs
-        # each component's true, individual label to mean anything).
+        # into a nearby ambiguous one's; the checks below need each
+        # component's true, individual stats to mean anything).
         comp_labels, n_comps = _connected_components(type_mask)
         components: list[dict] = []
         for comp_id in range(1, n_comps + 1):
@@ -109,28 +116,55 @@ def _build_result(raw: dict) -> _SegmentationResult:
 
             dominant_label_name = _dominant_label_name(label_map, comp_mask, class_ids, id2label)
             ys, xs = np.where(comp_mask)
+            runnerup_counts = np.bincount(
+                runnerup_type_idx_map[comp_mask].astype(np.int64), minlength=n_types
+            )
             components.append({
                 "mask": comp_mask,
                 "label_name": dominant_label_name,
-                "ambiguous": is_ambiguous_label(dominant_label_name),
+                "strategy": ambiguity_strategy_for_label(dominant_label_name),
                 "area_fraction": area_fraction,
                 "bbox": (int(xs.min()), int(ys.min()), int(xs.max()) - int(xs.min()) + 1, int(ys.max()) - int(ys.min()) + 1),
                 "centroid": (float(xs.mean()), float(ys.mean())),
                 "mean_confidence": float(confidence_map[comp_mask].mean()),
+                "mean_margin": float(margin_map[comp_mask].mean()),
+                # Majority vote of this component's own pixels' runner-up
+                # type, not just the single dominant pixel's -- a component-
+                # level summary for AMBIGUITY_CONFIDENCE's ground-valid check
+                # below. Per-pixel resolution below still uses the full
+                # per-pixel runnerup_type_idx_map, not this summary.
+                "dominant_runnerup_type": RegionType(int(np.argmax(runnerup_counts))),
             })
 
-        # Second pass: an ambiguous component is well_supported only if a
-        # *different* component of this same coarse type has an unambiguous
-        # label -- corroboration has to come from an independent,
-        # less-confusable observation. Two separate components that both
-        # happen to be the same confusable call (e.g. two "wall"-labeled
-        # cliff faces) don't corroborate each other. Every component
-        # remaining here already cleared _MIN_REGION_FRACTION, so this needs
-        # no extra size check.
-        unambiguous_present = any(not c["ambiguous"] for c in components)
+        # Corroboration support: is a *different* component of this same
+        # coarse type present with no ambiguity strategy at all (i.e. an
+        # unquestionable label)? Only consulted by AMBIGUITY_CORROBORATION
+        # components below -- see that strategy's docstring in
+        # panorama_region_result.py. Every component remaining here already
+        # cleared _MIN_REGION_FRACTION, so this needs no extra size check.
+        unambiguous_present = any(c["strategy"] is None for c in components)
+
         for c in components:
-            well_supported = (not c["ambiguous"]) or unambiguous_present
-            if c["ambiguous"] and not well_supported:
+            strategy = c["strategy"]
+            if strategy == AMBIGUITY_CORROBORATION:
+                # Two components that are each the same confusable call (e.g.
+                # two "wall"-labeled cliff faces) don't corroborate each
+                # other -- corroboration has to come from a component with no
+                # ambiguity strategy at all.
+                well_supported = unambiguous_present
+            elif strategy == AMBIGUITY_CONFIDENCE:
+                # Only distrust a genuinely close call (low margin) against a
+                # plausible ground-valid alternative -- a confidently-called
+                # region, or one whose only alternative isn't ground-valid
+                # either, is left alone.
+                well_supported = (
+                    c["mean_margin"] >= confidence_margin_threshold
+                    or not c["dominant_runnerup_type"].ground_valid
+                )
+            else:
+                well_supported = True
+
+            if strategy is not None and not well_supported:
                 ambiguous_mask[c["mask"]] = True
                 resolved_type_idx_map[c["mask"]] = runnerup_type_idx_map[c["mask"]]
 
@@ -142,7 +176,8 @@ def _build_result(raw: dict) -> _SegmentationResult:
                     bbox=c["bbox"],
                     centroid=(round(c["centroid"][0], 1), round(c["centroid"][1], 1)),
                     mean_confidence=round(c["mean_confidence"], 4),
-                    ambiguous_label=c["ambiguous"],
+                    mean_margin=round(c["mean_margin"], 4),
+                    ambiguity_strategy=strategy,
                     well_supported=well_supported,
                 )
             )
@@ -243,10 +278,19 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         nadir_cutoff_deg: float = -55.0,
         nadir_band_deg: float = 15.0,
+        confidence_margin_threshold: float = 0.2,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_band_deg = nadir_band_deg
+        # AMBIGUITY_CONFIDENCE threshold (see panorama_region_result.py):
+        # below this top1-vs-runner-up softmax margin, a region using that
+        # strategy (currently VEGETATION) is considered a genuinely close
+        # call rather than a comfortable one. Untuned against real model
+        # output as of introduction -- couldn't run the model locally to
+        # calibrate (broken scipy in the local dev env); revisit once this
+        # has run against real captures.
+        self.confidence_margin_threshold = confidence_margin_threshold
 
 
 class PanoramaRegionStage(PipelineStage):
@@ -263,33 +307,53 @@ class PanoramaRegionStage(PipelineStage):
     the equirectangular projection) are excluded from SegFormer's raw output and
     replaced via _clean_nadir_band — see that function's docstring.
 
-    Per-pixel top-1 confidence and the model's runner-up class are also kept
-    (see panorama_segmentation_imp.py's _segment). A region whose dominant
-    label matches an "ambiguous" _LABEL_RULES entry (a keyword group
-    routinely confused with a different plausible coarse type in natural
-    scenes -- e.g. ADE20K's "wall" class firing on a sunlit cliff face) is
-    only trusted if a *different*, unambiguous region of the same coarse
-    type is independently present elsewhere in the panorama (see
-    _build_result, PanoramaRegion.well_supported); otherwise every pixel in
-    it is resolved to its own runner-up coarse type instead. This corrected
-    map -- not the raw argmax output -- is what's written to
-    PANORAMA_REGION_TYPE_MAP, so every existing consumer of that key
-    (HeightMapGenerator, RegionMapGenerator, skybox inpainting, terrain
-    texture generation) benefits automatically without any change on their
-    end.
+    Per-pixel top-1/top-2 confidence and the model's runner-up class are also
+    kept (see panorama_segmentation_imp.py's _segment). A region whose
+    dominant label matches a rule with an ambiguity strategy in
+    panorama_region_result.py's _LABEL_RULES (a keyword group routinely
+    confused with a different plausible coarse type in natural scenes -- e.g.
+    ADE20K's "wall" class firing on a sunlit cliff face, or "tree" firing on
+    dark, mottled rock texture) is only trusted if that strategy's own check
+    passes: AMBIGUITY_CORROBORATION requires a *different*, unambiguous
+    region of the same coarse type elsewhere in the panorama (safe for BUILT,
+    which is rare in nature photography, so total absence elsewhere is
+    itself strong evidence); AMBIGUITY_CONFIDENCE requires either a
+    comfortable top1-vs-runner-up margin or a runner-up that isn't
+    ground-valid either (used for VEGETATION instead, since real vegetation
+    is common and unremarkable outdoors -- absence elsewhere proves nothing,
+    but a genuinely close call against a plausible ground-valid alternative
+    still does). See both strategies' docstrings for the full reasoning.
+    Regions that fail their check have every pixel resolved to their own
+    runner-up coarse type instead (see _build_result, PanoramaRegion.
+    well_supported). This corrected map -- not the raw argmax output -- is
+    what's written to the type-map output key, so every existing consumer of
+    that key (HeightMapGenerator, RegionMapGenerator, skybox inpainting,
+    terrain texture generation) benefits automatically without any change on
+    their end.
 
-    Reads:  ContextKey.PANORAMA
-    Writes: ContextKey.PANORAMA_REGIONS               (PanoramaRegionResult)
-            ContextKey.PANORAMA_REGION_TYPE_MAP        (resolved, nadir-cleaned)
-            ContextKey.PANORAMA_REGION_TYPE_MAP_RAW    (raw argmax output, not nadir-cleaned)
-            ContextKey.PANORAMA_REGION_CONFIDENCE_MAP  (per-pixel top-1 softmax confidence)
-            ContextKey.PANORAMA_REGION_RUNNERUP_TYPE_MAP (per-pixel coarse type of the 2nd-best class)
-            ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK  (bool; True where the raw and resolved maps differ)
+    Input and all five output keys are overridable via config (keys: input,
+    regions, type_map, type_map_raw, confidence_map, runnerup_type_map,
+    ambiguous_mask), the same pattern PanoramaDepthStage uses for
+    PANORAMA_DEPTH vs PANORAMA_OBJECT_DEPTH -- this stage is run twice in
+    config.yaml, once (default keys) on ContextKey.PANORAMA for anything that
+    needs to know what was really photographed (object detection/
+    distribution, skybox inpainting), and once more (keys: input:
+    panorama_terrain, ... _terrain output keys) on the object-removed +
+    LoRA-corrected panorama for anything that shapes or textures the terrain
+    itself, which should never see objects that were deliberately removed.
+
+    Reads:  ContextKey.PANORAMA                       (default; overridable via keys.input)
+    Writes: ContextKey.PANORAMA_REGIONS               (PanoramaRegionResult; keys.regions)
+            ContextKey.PANORAMA_REGION_TYPE_MAP        (resolved, nadir-cleaned; keys.type_map)
+            ContextKey.PANORAMA_REGION_TYPE_MAP_RAW    (raw argmax output, not nadir-cleaned; keys.type_map_raw)
+            ContextKey.PANORAMA_REGION_CONFIDENCE_MAP  (per-pixel top-1 softmax confidence; keys.confidence_map)
+            ContextKey.PANORAMA_REGION_RUNNERUP_TYPE_MAP (per-pixel coarse type of the 2nd-best class; keys.runnerup_type_map)
+            ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK  (bool; True where the raw and resolved maps differ; keys.ambiguous_mask)
     Debug:  self.output/regions.json               (reflects SegFormer's raw output —
                                                      not nadir-cleaned)
             self.output/label_overlay.png           (raw, not nadir-cleaned or resolved)
-            self.output/label_overlay_resolved.png  (nadir-cleaned + ambiguity-resolved -- matches PANORAMA_REGION_TYPE_MAP)
-            self.output/ambiguous_mask.png          (pixels resolved from an uncorroborated ambiguous label)
+            self.output/label_overlay_resolved.png  (nadir-cleaned + ambiguity-resolved -- matches the type-map output)
+            self.output/ambiguous_mask.png          (pixels resolved from a failed ambiguity check)
     """
 
     @classmethod
@@ -300,8 +364,24 @@ class PanoramaRegionStage(PipelineStage):
         super().__init__(config)
         self._client: PanoramaSegmentationClient | None = None
 
+    def _resolved_keys(self):
+        return self.keys({
+            SemanticKey.INPUT: ContextKey.PANORAMA,
+            SemanticKey.REGIONS: ContextKey.PANORAMA_REGIONS,
+            SemanticKey.TYPE_MAP: ContextKey.PANORAMA_REGION_TYPE_MAP,
+            SemanticKey.TYPE_MAP_RAW: ContextKey.PANORAMA_REGION_TYPE_MAP_RAW,
+            SemanticKey.CONFIDENCE_MAP: ContextKey.PANORAMA_REGION_CONFIDENCE_MAP,
+            SemanticKey.RUNNERUP_TYPE_MAP: ContextKey.PANORAMA_REGION_RUNNERUP_TYPE_MAP,
+            SemanticKey.AMBIGUOUS_MASK: ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK,
+        })
+
     def run(self, context: PipelineContext) -> PipelineContext:
-        panorama = context.input_panorama(ContextKey.PANORAMA)
+        (
+            input_key, regions_key, type_map_key, type_map_raw_key,
+            confidence_key, runnerup_key, ambiguous_key,
+        ) = self._resolved_keys()
+
+        panorama = context.input_panorama(input_key)
         if panorama is None:
             self.log_info("No panorama in context, skipping")
             return context
@@ -316,28 +396,28 @@ class PanoramaRegionStage(PipelineStage):
         raw = self._client.segment(panorama.rgb(), self.temp)
         self.advance_progress(task)
 
-        seg = _build_result(raw)
+        seg = _build_result(raw, confidence_margin_threshold=cfg.confidence_margin_threshold)
         result = seg.result
         # Nadir cleanup only needs to run on the map that actually becomes the
         # canonical output; the raw map is kept purely for debugging (see
-        # PANORAMA_REGION_TYPE_MAP_RAW / regions.json, both intentionally
-        # left un-nadir-cleaned, matching this stage's existing convention).
+        # the type_map_raw output / regions.json, both intentionally left
+        # un-nadir-cleaned, matching this stage's existing convention).
         resolved_type_idx_map = _clean_nadir_band(
             seg.resolved_type_idx_map, cfg.nadir_cutoff_deg, cfg.nadir_band_deg
         )
-        context.add_panorama_regions(ContextKey.PANORAMA_REGIONS, result)
-        context.add_depth(ContextKey.PANORAMA_REGION_TYPE_MAP, resolved_type_idx_map.astype(np.float32))
-        context.add_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_RAW, seg.type_idx_map.astype(np.float32))
-        context.add_depth(ContextKey.PANORAMA_REGION_CONFIDENCE_MAP, seg.confidence_map)
-        context.add_depth(ContextKey.PANORAMA_REGION_RUNNERUP_TYPE_MAP, seg.runnerup_type_idx_map.astype(np.float32))
-        context.add_depth(ContextKey.PANORAMA_REGION_AMBIGUOUS_MASK, seg.ambiguous_mask.astype(np.float32))
+        context.add_panorama_regions(regions_key, result)
+        context.add_depth(type_map_key, resolved_type_idx_map.astype(np.float32))
+        context.add_depth(type_map_raw_key, seg.type_idx_map.astype(np.float32))
+        context.add_depth(confidence_key, seg.confidence_map)
+        context.add_depth(runnerup_key, seg.runnerup_type_idx_map.astype(np.float32))
+        context.add_depth(ambiguous_key, seg.ambiguous_mask.astype(np.float32))
 
         n_ambiguous = int(seg.ambiguous_mask.sum())
         if n_ambiguous > 0:
             frac = n_ambiguous / seg.ambiguous_mask.size
             self.log_info(
-                f"  Resolved {frac * 100:.2f}% of panorama from an uncorroborated "
-                f"ambiguous label to its runner-up type"
+                f"  Resolved {frac * 100:.2f}% of panorama from a failed ambiguity "
+                f"check (corroboration or confidence) to its runner-up type"
             )
 
         for region_type in result.present_types:
@@ -385,7 +465,13 @@ class PanoramaRegionStage(PipelineStage):
             )
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        return context.panorama_regions(ContextKey.PANORAMA_REGIONS) is not None
+        # Resolved, not the hardcoded default -- this stage runs twice (see
+        # class docstring), and checking the literal default key here would
+        # make the terrain-scoped instance falsely report cached output
+        # already present as soon as the first (original-panorama) instance
+        # has run, skipping it entirely.
+        _, regions_key, *_ = self._resolved_keys()
+        return context.panorama_regions(regions_key) is not None
 
     def model_names(self) -> list[str]:
         return PanoramaSegmentationClient.model_names()
