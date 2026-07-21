@@ -47,6 +47,20 @@ _MERGE_MASK_IOU = 0.3
 # Context margin around each box in _segment_boxes' panorama-scale path, as a
 # fraction of the box's own width/height on each side.
 _BOX_CROP_MARGIN_FRAC = 0.5
+# SAM2's own per-tile region-area floor (pixels, not a fraction -- this runs
+# before any of our own area-fraction filtering, which happens later in
+# pipeline/segmentation/segmentation.py's SegmentationStage.run() against the
+# *merged, panorama-space* box). A raw 50px floor lets an enormous amount of
+# texture/shadow noise (a crack, a mottled patch, a shadow sliver on a cliff
+# face) survive as a candidate mask on every one of the ~64x64 point-grid
+# probes across every tile -- each of which then has to be scored, NMS'd, and
+# fed into the O(n^2) cross-tile merge in util/instance_merge.py, so this
+# floor has an outsized effect on both result quality and wall-clock time.
+# 0.0003 matches SegmentationConfiguration.min_area_fraction's own real-photo
+# calibration (see its docstring), applied to one tile's area (_TILE_SIZE^2)
+# rather than 50 raw pixels -- consistent with the *intent* of that existing,
+# already-validated calibration instead of an arbitrary round number.
+_MIN_MASK_REGION_AREA_PX = int(0.0003 * _TILE_SIZE * _TILE_SIZE)
 
 
 class ImageSegServer(RemoteServer):
@@ -60,7 +74,7 @@ class ImageSegServer(RemoteServer):
             points_per_side=64,
             pred_iou_thresh=0.7,
             stability_score_thresh=0.80,
-            min_mask_region_area=50,
+            min_mask_region_area=_MIN_MASK_REGION_AREA_PX,
             box_nms_thresh=0.7,
             crop_n_layers=1,
             crop_overlap_ratio=0.5,

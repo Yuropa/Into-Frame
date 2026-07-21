@@ -14,6 +14,10 @@ import numpy as np
 from PIL import Image as PILImage
 from PIL import ImageOps
 
+# Must match image_segmentation_imp.py's own _TILE_SIZE -- see its use in
+# SegmentationStage.run() below for why.
+_TILE_SIZE = 1024
+
 
 class SegmentationConfiguration(PipelineStageConfiguration):
     def __init__(
@@ -108,7 +112,22 @@ class SegmentationStage(PipelineStage):
         total_crops = 0
 
         cfg: SegmentationConfiguration = self.config
-        img_area = input_image.size[0] * input_image.size[1]
+        # min_area_fraction/max_area_fraction (see their own comments above)
+        # were calibrated against a single ~1200x807 hero photo -- i.e.
+        # roughly one _TILE_SIZE tile's worth of view (image_segmentation_imp.py
+        # tiles anything panorama-scale into 1024x1024 crops before detecting
+        # anything). Using the actual source image's area as the fraction's
+        # denominator silently breaks that calibration once this stage is
+        # pointed at a full 360° panorama instead of a hero photo (see
+        # config.yaml's "Object Segmentation": keys.input: panorama) -- 20% of
+        # an entire panorama is a much larger absolute area, and a much less
+        # object-shaped extent, than 20% of one tile, so a whole cliff face or
+        # hillside comfortably survives a filter meant to catch exactly that.
+        # Capping the reference area at one tile's worth restores the original
+        # calibration regardless of how large the source image actually is; a
+        # source smaller than one tile (the non-panoramic case this was
+        # calibrated against) is unaffected since the cap never binds there.
+        img_area = min(input_image.size[0] * input_image.size[1], _TILE_SIZE * _TILE_SIZE)
         min_area = cfg.min_area_fraction * img_area
         max_area = cfg.max_area_fraction * img_area
 
