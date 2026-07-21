@@ -565,11 +565,12 @@ stages:
     pattern_canvas_size: 2048         # resolution of the baked layer (tile_factor=1.0, a
                                        # one-shot world-space bake, not tiled like FLUX layers)
 
-  # Object processing: segmentation → classification → typing → recognition → detection → correlation
-  # All six stages must be enabled together; PanoramaAssetGeneration consumes their output.
+  # Object processing: segmentation → classification → typing → recognition → detection →
+  # instance refinement → correlation
+  # All stages must be enabled together; PanoramaAssetGeneration consumes their output.
   # Segmentation/Classification/Typing now run earlier (see Panorama Foreground Inpainting
-  # section above) — Recognition/Detection/Correlation pick up their crop_{i}/metadata_{i}
-  # output from there, unchanged.
+  # section above) — Recognition/Detection/Instance Refinement/Correlation pick up their
+  # crop_{i}/metadata_{i} output from there, unchanged.
 
   - name: Object Recognition
     stage: RecognizeAnythingStage
@@ -580,6 +581,13 @@ stages:
     stage: ObjectDetectionStage
     keys:
       input: panorama
+
+  - name: Object Instance Refinement
+    stage: ObjectInstanceRefinementStage
+    keys:
+      input: panorama
+    coalesce_touch_dilation_px: 15
+    split_outlier_area_multiplier: 2.75
 
   - name: Object Correlation
     stage: ObjectCorrelationStage
