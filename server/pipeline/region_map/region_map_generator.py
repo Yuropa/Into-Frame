@@ -125,6 +125,9 @@ class RegionMapGenerator:
         connect_radius_px: int = 30,
         chain_smooth_window: int = 15,
         max_col_gap_frac: float = 0.01,
+        max_hole_cols: int = 12,
+        hole_stitch_max_col_gap: int = 12,
+        hole_stitch_max_dist_px: int = 90,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column, sample depth just below it,
@@ -149,17 +152,36 @@ class RegionMapGenerator:
         would silently jump straight across the excluded gap and draw an
         interpolated ridge segment through the water instead of leaving a break.
 
+        Any column containing so much as one water pixel (water_present_column) is
+        permanently off-limits to the two gap-closing mechanisms below
+        (max_hole_cols, hole_stitch_*) — checked directly from the panorama's own
+        water mask, not inferred from anything upstream, so a real water break can
+        never be closed regardless of how small it happens to look.
+
         For each panorama column, finds the first non-sky row below sky, then
         samples depth depth_offset_rows below that boundary (where depth estimators
-        are more reliable than at the exact edge). NaN depth values are interpolated
-        from neighboring columns. Each valid column is unprojected to XYZ and placed
-        in the grid — close mountains land near the centre, distant ones near the edge.
+        are more reliable than at the exact edge). Columns with no non-sky pixel at
+        all are usually a short classification glitch, not a real absence — real
+        terrain is obviously present just past it on both sides — so they get a
+        synthetic boundary row circularly interpolated from their nearest real
+        neighbours, but only for runs up to max_hole_cols columns wide; wider runs
+        are left as a genuine gap rather than fabricating a long stretch of invented
+        ridge. NaN/invalid depth values (at both real and synthesised-row columns)
+        are then interpolated from neighbouring columns, wrapping at the 360° seam.
+        Each valid column is unprojected to XYZ and placed in the grid — close
+        mountains land near the centre, distant ones near the edge.
 
         Projected points are chained via greedy nearest-neighbour search within
         connect_radius_px grid cells, then smoothed with a moving average of width
         chain_smooth_window, and finally rasterised with filled line segments so the
         result is a continuous ridge rather than isolated scattered pixels.
-        Disconnected ridge segments produce separate chains.
+        Disconnected ridge segments produce separate chains — except where two
+        chains' nearest endpoints are within hole_stitch_max_col_gap columns and
+        hole_stitch_max_dist_px grid cells of each other with no water between
+        them, in which case they're stitched into one chain. This closes holes
+        created by chaining noise (a depth glitch nudging one column's point just
+        outside connect_radius_px) without loosening connect_radius_px/
+        max_col_gap_frac themselves, which is what actually protects water breaks.
 
         Returns (grid, chains) where:
           grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).
@@ -170,6 +192,10 @@ class RegionMapGenerator:
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
         water_mask = type_idx_map == water_idx
+        # Any water pixel anywhere in a column, not just at the boundary itself —
+        # the simplest, strictest signal for "never let a gap-closing mechanism
+        # touch this column," independent of how/why its boundary is missing.
+        water_present_column = water_mask.any(axis=0)                # (W,) bool
 
         above_is_sky = np.zeros((h, w), dtype=bool)
         above_is_sky[1:, :] = sky_mask[:-1, :]
@@ -177,24 +203,68 @@ class RegionMapGenerator:
         silhouette = (~sky_mask) & (~water_mask) & above_is_sky
 
         has_silhouette = silhouette.any(axis=0)                      # (W,) bool
-        boundary_row = silhouette.argmax(axis=0)                     # (W,) int
-        sample_rows = np.clip(boundary_row + depth_offset_rows, 0, h - 1)
+        boundary_row = silhouette.argmax(axis=0).astype(np.float64)  # (W,) float
+
+        cols = np.arange(w)
+
+        def _circular_fill(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
+            """Replace invalid entries of a column-indexed 1D signal with linear
+            interpolation from the nearest valid neighbours, wrapping at the
+            panorama's 0/w seam so a gap straddling due-north still interpolates
+            from its true neighbours instead of extrapolating off one edge."""
+            if valid.all() or not valid.any():
+                return values
+            valid_cols = cols[valid].astype(np.float64)
+            valid_vals = values[valid].astype(np.float64)
+            ext_cols = np.concatenate([valid_cols - w, valid_cols, valid_cols + w])
+            ext_vals = np.tile(valid_vals, 3)
+            interpolated = np.interp(cols.astype(np.float64), ext_cols, ext_vals)
+            out = values.copy()
+            out[~valid] = interpolated[~valid]
+            return out
+
+        # ── Fill small no-boundary holes caused by detection noise ────────────
+        # A column with no non-sky pixel at all is either a real, deliberate water
+        # break (never filled — water_present_column excludes it unconditionally)
+        # or a short classification glitch with real terrain obviously on both
+        # sides. Runs wider than max_hole_cols are left alone either way — past
+        # that width we no longer trust that both sides are the same feature.
+        noise_hole_column = (~has_silhouette) & (~water_present_column)
+        if noise_hole_column.any() and has_silhouette.any() and max_hole_cols > 0:
+            from scipy.ndimage import label as _label
+            pad = max(max_hole_cols, 1)
+            padded = np.concatenate([
+                noise_hole_column[-pad:], noise_hole_column, noise_hole_column[:pad],
+            ])
+            labels, n_labels = _label(padded)
+            fillable = np.zeros(w, dtype=bool)
+            for lbl in range(1, n_labels + 1):
+                idxs = np.where(labels == lbl)[0]
+                if len(idxs) == 0 or len(idxs) > max_hole_cols:
+                    continue
+                # A run touching the padded window's own edge may be a truncated
+                # copy of a larger run wrapped around — its true width isn't
+                # knowable from this window, so leave it as a real gap rather
+                # than risk under-counting a wide hole as fillable.
+                if idxs[0] == 0 or idxs[-1] == len(padded) - 1:
+                    continue
+                orig_idxs = (idxs - pad) % w
+                fillable[orig_idxs] = True
+
+            if fillable.any():
+                boundary_row = _circular_fill(boundary_row, has_silhouette)
+                has_silhouette = has_silhouette | fillable
+
+        sample_rows = np.clip(np.round(boundary_row).astype(np.int64) + depth_offset_rows, 0, h - 1)
 
         d = panorama_depth.depth.astype(np.float32)
-        cols = np.arange(w)
         depths = np.where(has_silhouette, d[sample_rows, cols], np.nan)
 
-        # Interpolate NaN depths horizontally so depth gaps don't leave holes.
+        # Interpolate NaN/invalid depths (circularly) so depth gaps don't leave holes.
         nan_mask = ~np.isfinite(depths) | (depths <= 0)
         valid_for_interp = has_silhouette & ~nan_mask
-        if valid_for_interp.any() and nan_mask.any():
-            valid_cols = cols[valid_for_interp].astype(np.float64)
-            valid_depths = depths[valid_for_interp]
-            depths = np.where(
-                has_silhouette,
-                np.interp(cols.astype(np.float64), valid_cols, valid_depths),
-                np.nan,
-            )
+        if valid_for_interp.any() and (~valid_for_interp).any():
+            depths = _circular_fill(depths, valid_for_interp)
 
         # Suppress single-column depth spikes before projecting to XZ.
         if depth_smooth_width > 1 and np.any(np.isfinite(depths)):
@@ -248,7 +318,7 @@ class RegionMapGenerator:
             d = abs(int(a) - int(b))
             return min(d, w - d)
 
-        all_chains_data: list[tuple[np.ndarray, np.ndarray]] = []
+        all_chains_raw: list[list[int]] = []
         remaining = set(range(len(pts)))
 
         while remaining:
@@ -270,7 +340,68 @@ class RegionMapGenerator:
                 chain.append(nxt)
                 remaining.discard(nxt)
 
-            if len(chain) < 3:
+            all_chains_raw.append(chain)
+
+        # ── Stitch small noise-scale gaps between chain fragments ─────────────
+        # connect_radius_px/max_col_gap_frac above intentionally refuse to bridge
+        # large gaps — most importantly water. But the same thresholds also
+        # fragment a real, continuous boundary wherever depth or classification
+        # noise nudges one column's projected point just outside them. Re-close
+        # only genuinely small (noise-scale) gaps, on much tighter tolerances than
+        # the main walk, and never across a column range containing any water.
+        if hole_stitch_max_col_gap > 0 and len(all_chains_raw) > 1:
+            stitch_dist_m = hole_stitch_max_dist_px * cell_m
+
+            def _cols_between(a: int, b: int) -> np.ndarray:
+                """Columns strictly between a and b along the shorter circular arc."""
+                d_fwd = (b - a) % w
+                d_bwd = (a - b) % w
+                if d_fwd <= d_bwd:
+                    return (a + np.arange(1, d_fwd)) % w
+                return (b + np.arange(1, d_bwd)) % w
+
+            def _try_stitch(chain_a: list[int], chain_b: list[int]) -> Optional[list[int]]:
+                # Try all four ways two chains' endpoints can meet: a-end/b-start,
+                # a-end/b-end, a-start/b-start, a-start/b-end (equivalently
+                # b-end/a-start) — reversing whichever side is needed so the
+                # result concatenates into one spatially continuous chain.
+                for left, right in (
+                    (chain_a, chain_b),
+                    (chain_a, chain_b[::-1]),
+                    (chain_a[::-1], chain_b),
+                    (chain_b, chain_a),
+                ):
+                    col_l, col_r = cols_valid[left[-1]], cols_valid[right[0]]
+                    if _col_gap(col_l, col_r) > hole_stitch_max_col_gap:
+                        continue
+                    if np.linalg.norm(pts[left[-1]] - pts[right[0]]) > stitch_dist_m:
+                        continue
+                    between = _cols_between(col_l, col_r)
+                    if len(between) > 0 and water_present_column[between].any():
+                        continue
+                    return left + right
+                return None
+
+            merged = True
+            while merged and len(all_chains_raw) > 1:
+                merged = False
+                for i in range(len(all_chains_raw)):
+                    for j in range(i + 1, len(all_chains_raw)):
+                        combined = _try_stitch(all_chains_raw[i], all_chains_raw[j])
+                        if combined is not None:
+                            all_chains_raw[i] = combined
+                            del all_chains_raw[j]
+                            merged = True
+                            break
+                    if merged:
+                        break
+
+        # Reconstruction (TerrainReconstructionStage) itself already discards any
+        # chain shorter than 2 points, so that — not 3 — is the real floor; a
+        # 2-point fragment that survived stitching is still a legitimate anchor.
+        all_chains_data: list[tuple[np.ndarray, np.ndarray]] = []
+        for chain in all_chains_raw:
+            if len(chain) < 2:
                 continue
 
             chain_xz  = pts[chain].copy()
