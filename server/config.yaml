@@ -66,10 +66,12 @@ stages:
     use_depth_filter: true
     depth_filter_distance_m: 5.0  # mask kept as foreground if median depth is closer than this (metres)
     # Redirect the "objects removed, environment kept" output away from ContextKey.PANORAMA
-    # (its normal default) — Panorama Regions / Skybox Inpainting / object detection all read
-    # ContextKey.PANORAMA later and need the ORIGINAL (with-objects) panorama, exactly like
-    # PanoramaForegroundInpaintingStage already leaves it untouched today. PANORAMA_TERRAIN
-    # (what Panorama Depth → Height Map actually consumes) is written unconditionally either way.
+    # (its normal default) — Panorama Regions (the original-panorama instance) / object
+    # detection / distribution later read ContextKey.PANORAMA and need the ORIGINAL
+    # (with-objects) panorama, exactly like PanoramaForegroundInpaintingStage already leaves
+    # it untouched today. PANORAMA_TERRAIN (what Panorama Depth, Panorama Regions (Terrain),
+    # Skybox Inpainting, Height Map, Region Map, and Terrain Texture Generation all actually
+    # consume) is written unconditionally either way.
     keys:
       output: panorama_foreground_removed
 

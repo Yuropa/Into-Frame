@@ -234,8 +234,16 @@ class SkyboxInpaintingStage(PipelineStage):
          versus being replaced by FLUX's own generation.
 
     Reads:
-      ContextKey.PANORAMA                — equirectangular source panorama
-      ContextKey.PANORAMA_REGION_TYPE_MAP — per-pixel RegionType indices (float32)
+      ContextKey.PANORAMA_TERRAIN         — equirectangular source panorama, object-removed +
+                                            LoRA-corrected (not the original ContextKey.PANORAMA
+                                            -- an un-removed object silhouetted against the sky
+                                            would otherwise get excluded from "kept real sky" and
+                                            leave a generation artifact right where it stood, and
+                                            the sky/terrain split here would disagree with the one
+                                            RegionMapStage/HeightMapStage now use for the same
+                                            horizon)
+      ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN — per-pixel RegionType indices (float32),
+                                            classified from that same panorama_terrain
       ContextKey.LIGHTING                — SceneLighting from PanoramaLightingStage
                                            (optional; falls back to sky-pixel estimate)
 
@@ -254,7 +262,7 @@ class SkyboxInpaintingStage(PipelineStage):
 
     def _resolved_keys(self):
         return self.keys({
-            SemanticKey.PANORAMA: ContextKey.PANORAMA,
+            SemanticKey.PANORAMA: ContextKey.PANORAMA_TERRAIN,
             SemanticKey.OUTPUT: ContextKey.PANORAMA_SKY,
         })
 
@@ -266,7 +274,7 @@ class SkyboxInpaintingStage(PipelineStage):
             self.log_warning("No panorama in context, skipping")
             return context
 
-        type_map = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        type_map = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
         if type_map is None:
             self.log_warning("No region type map in context — run PanoramaRegionStage first")
             return context
