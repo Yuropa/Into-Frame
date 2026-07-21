@@ -79,10 +79,14 @@ class TerrainMeshGenerator:
                     any gap of its own could be seen through.
         formation_depression_m: how far below its real height the base terrain
                     is carved wherever a separate component's own mesh covers it.
-        sky_mask: optional PANORAMA_SKY_MASK, forwarded to the inline panorama
-                    bake (Panorama.sample_3d) so real terrain above the horizon
-                    (a mountain slope, easily above the camera's own height) is
-                    sampled directly instead of being treated as sky.
+        sky_mask: optional PANORAMA_SKY_MASK, forwarded to the panorama UV
+                    projection (Panorama.mesh_uvs) so a vertex whose
+                    reconstructed elevation angle overshoots into the sky --
+                    e.g. a mountainside vertex sitting on a heuristic slope
+                    envelope rather than real measured geometry -- gets
+                    snapped back down to the nearest real (non-sky) content
+                    in the same panorama column instead of literally
+                    texturing sky onto the mesh.
         pano_uv_u, pano_uv_v: optional HEIGHT_MAP_PANO_U/_V (same grid as
                     height_map; see HeightMapGenerator._panorama_uv_from_height).
                     Each observed vertex's own true panorama UV, preferred over
@@ -160,7 +164,9 @@ class TerrainMeshGenerator:
         # have no true UV to prefer, so they keep the position-derived one.
         pano_uv = None
         if panorama is not None:
-            pano_uv = panorama.mesh_uvs(np.stack([X_pos, Y_pos, Z_pos], axis=-1))
+            pano_uv = panorama.mesh_uvs(
+                np.stack([X_pos, Y_pos, Z_pos], axis=-1), sky_mask=sky_mask,
+            )
             if (
                 pano_uv_u is not None and pano_uv_v is not None
                 and pano_uv_u.depth.shape == hm.shape and pano_uv_v.depth.shape == hm.shape

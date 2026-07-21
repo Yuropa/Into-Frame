@@ -239,7 +239,10 @@ class Panorama:
 
         return colors
 
-    def mesh_uvs(self, vertices: np.ndarray, min_lat_deg: float = -35.0) -> np.ndarray:
+    def mesh_uvs(
+        self, vertices: np.ndarray, min_lat_deg: float = -35.0,
+        sky_mask: "np.ndarray | None" = None,
+    ) -> np.ndarray:
         """
         Project 3D world-space vertices directly onto this panorama's own
         pixel grid to get their UV coordinates -- i.e. "project the mesh
@@ -255,6 +258,21 @@ class Panorama:
         nearest valid neighbour's UV in the XZ plane (same technique
         sample_3d already uses for its own near-nadir hole-filling), giving
         a plausible stretched fallback rather than a singular/undefined UV.
+
+        sky_mask (optional, (h, w) bool, True = sky): a vertex's world
+        position is only ever a reconstructed/interpolated estimate of the
+        real surface (harmonic solve, slope envelopes, noise) -- it is never
+        guaranteed to sit at exactly the elevation angle the camera actually
+        photographed at that azimuth. Wherever the naive projection above
+        lands on a sky pixel, that mismatch is guaranteed wrong (a real
+        mesh vertex is solid ground, never literally the sky), so the pixel
+        is walked straight down its own column (same azimuth/U, only V
+        adjusted) to the nearest non-sky content below it and that's used
+        instead -- a small, local nudge back onto real photographed
+        content, rather than the nearest-XZ-neighbour fallback below (which
+        can jump to a totally different part of the mesh and is reserved
+        for the near-nadir singularity, a different failure mode).
+        Resampled to this panorama's own size first if its shape differs.
 
         Callers that also need the mesh to stay watertight across the
         longitude seam (lon = ±π, directly behind the camera) must
@@ -278,6 +296,29 @@ class Panorama:
         W, H = self.width, self.height
 
         pu, pv, lat = self._project_vertices(vertices)
+
+        if sky_mask is not None:
+            sky_arr = np.asarray(sky_mask, dtype=bool)
+            if sky_arr.shape != (H, W):
+                sky_img = PIL.Image.fromarray((sky_arr * 255).astype(np.uint8)).resize(
+                    (W, H), PIL.Image.NEAREST
+                )
+                sky_arr = np.asarray(sky_img) > 127
+            pu_i = np.clip(np.round(pu).astype(np.int64), 0, W - 1)
+            pv_i = np.clip(np.round(pv).astype(np.int64), 0, H - 1)
+            if sky_arr[pv_i, pu_i].any():
+                # nearest_nonsky_row[r, c]: smallest row >= r in column c that
+                # is not sky (H = sentinel "none below" -- column is sky all
+                # the way to the bottom edge, left unchanged since there's
+                # nothing real to snap to). Sky only ever sits above real
+                # content in an equirectangular panorama, so walking down
+                # (increasing row) is the only direction that makes sense.
+                row_if_nonsky = np.where(~sky_arr, np.arange(H)[:, None], H)
+                nearest_nonsky_row = np.minimum.accumulate(row_if_nonsky[::-1], axis=0)[::-1]
+                target_row = nearest_nonsky_row[pv_i, pu_i]
+                snap = sky_arr[pv_i, pu_i] & (target_row < H)
+                pv = np.where(snap, target_row.astype(np.float64), pv)
+
         u = (pu / max(W - 1, 1)).astype(np.float32)
         v = (1.0 - pv / max(H - 1, 1)).astype(np.float32)
 

@@ -376,7 +376,10 @@ stages:
     road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
     noise_scale: 80.0             # fBm base wavelength in pixels
     noise_octaves: 4              # fractal octave count
-    noise_amplitude: 0.2          # metres of peak noise displacement
+    noise_amplitude: 0.6          # metres of peak noise displacement (raised from 0.2 -- real geometry
+                                   # only exists in a tiny, ~1 m-relief sliver right around the camera;
+                                   # everything beyond it is the harmonic solve's smoothest-possible
+                                   # fill, which reads as visibly flat with no texture on top of it)
     linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
     diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
                                    # Raised from 200 (≈0.9 m) — that was only rounding multi-cell
@@ -391,7 +394,7 @@ stages:
     peak_sharpness_window_m: 20.0 # sliding window size (metres) for local jaggedness scoring
     peak_sharpness_spread_m: 15.0 # Gaussian spread radius (metres) from ridge into surrounding terrain
     hydro_enabled: true           # stream power erosion to carve valleys and channel networks
-    hydro_erodibility: 5.0e-6    # K_sp: erodibility constant (m^(1-2m)/yr); increase to carve deeper
+    hydro_erodibility: 1.5e-5    # K_sp: erodibility constant (m^(1-2m)/yr); increase to carve deeper
     hydro_dt: 1000.0              # timestep per erosion step (conceptual years)
     hydro_n_steps: 10             # number of erosion steps; total time = hydro_dt × hydro_n_steps
     hydro_resolution: 256         # downsample resolution for flow routing (speed vs. channel detail)
@@ -421,7 +424,8 @@ stages:
     outer_min_dist: 2.0     # metres between samples at the domain corners
     n_boundary: 64          # anchor points per edge of the domain rectangle
     z_far: null
-    noise_amplitude: 0.05   # metres of peak noise displacement
+    noise_amplitude: 0.15   # metres of peak noise displacement (raised from 0.05, alongside Terrain
+                             # Noise Refinement's own increase -- same "ground is too flat" reasoning)
     noise_blend_floor: 0.15 # minimum noise blend fraction at the camera origin (was 0, which left
                              # the ground directly under the user perfectly noise-free); ramps up
                              # to 1.0 at the domain corner as before. Only applies where
