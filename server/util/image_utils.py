@@ -112,7 +112,7 @@ class Image:
 
     def __init__(self, obj):
         if isinstance(obj, str):
-            self.image = PIL.Image.open(obj).convert("RGB")
+            self.image = self._open_preserving_alpha(obj)
         elif isinstance(obj, Image):
             self.image = obj.image
         elif isinstance(obj, PIL.Image.Image):
@@ -120,7 +120,7 @@ class Image:
         elif isinstance(obj, np.ndarray):
             self.image = PIL.Image.fromarray(obj).convert("RGB")
         elif isinstance(obj, Path):
-            self.image = PIL.Image.open(str(obj)).convert("RGB")
+            self.image = self._open_preserving_alpha(str(obj))
         else:
             raise TypeError(f"Unsupported type: {type(obj)}")
         
@@ -128,6 +128,18 @@ class Image:
         self._rgb = None
         self._rgba = None
         self._L = None
+
+    @staticmethod
+    def _open_preserving_alpha(path: str) -> PIL.Image.Image:
+        """Load from disk without flattening masked crops (RGBA) to opaque
+        RGB -- forcing RGB here silently turns a tight-alpha object cutout
+        back into a solid rectangle the next time it's reloaded (e.g. when a
+        persisted pipeline context is re-served to a client), so only plain
+        photos without any alpha info get normalized to RGB."""
+        img = PIL.Image.open(path)
+        if img.mode in ("RGBA", "LA") or "transparency" in img.info:
+            return img.convert("RGBA")
+        return img.convert("RGB")
 
     @classmethod
     def load(cls, path: Path) -> Image:
