@@ -6,7 +6,7 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
-from pipeline.scene_generation.projection import mesh_y_at, unproject_bbox, unproject_bbox_equirect
+from pipeline.scene_generation.projection import mesh_y_at, terrain_local_xz, unproject_bbox, unproject_bbox_equirect
 from scene.scene import Scene
 from scene.object import Object3D
 import numpy as np
@@ -196,9 +196,22 @@ class SceneGenerationStage(PipelineStage):
                 # billboard (scaled exactly to `height`) and category-mesh (scaled
                 # uniformly to `mesh_scale`) branches below — so it's resolved per
                 # branch rather than once here.
+                #
+                # position[0]/position[2] are in WORLD space (extrinsics.rotation is
+                # already baked in by unproject_bbox/unproject_bbox_equirect above),
+                # but terrain_mesh's own vertices are stored in its native, unrotated
+                # frame (+Z = panorama theta 0) — the same yaw compensation applied to
+                # the terrain Object3D's own rotation (see scene.skybox_rotation
+                # above) has to be undone here before raycasting, or the query lands
+                # at the wrong point whenever that yaw isn't ~0: near the finite
+                # terrain grid's edges this misses the mesh outright (silently
+                # falling back to the object's raw unprojected Y below — the floating/
+                # sinking objects this was reported as), and even where it still hits
+                # the mesh, it samples the wrong patch of terrain relief.
                 terrain_y = None
                 if terrain_mesh is not None:
-                    terrain_y = mesh_y_at(position[0], position[2], terrain_mesh)
+                    local_x, local_z = terrain_local_xz(position[0], position[2], scene.skybox_rotation)
+                    terrain_y = mesh_y_at(local_x, local_z, terrain_mesh)
 
                 place_y = terrain_y + height / 2.0 if terrain_y is not None else position[1]
 
@@ -254,10 +267,23 @@ class SceneGenerationStage(PipelineStage):
 
             self.finish_progress(generation_task)
 
+        # Terrain/water/formation vertices were built directly in the panorama's
+        # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --
+        # not the camera's actual world orientation, which the extrinsics rotation
+        # may yaw away from +Z by an arbitrary amount (see scene.skybox_rotation
+        # above). Detected objects don't need this: unproject_bbox/
+        # unproject_bbox_equirect already bake extrinsics.rotation into their
+        # world_position. Terrain/water/formations get no such per-vertex
+        # transform, so without applying the same yaw here they'd disagree with
+        # the skybox (and every detected object) on which way is "forward"
+        # whenever extrinsics.rotation isn't ~identity.
+        ground_rotation = (0.0, scene.skybox_rotation, 0.0)
+
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
         if terrain_mesh is not None:
             self.log_info("Adding terrain mesh to scene")
             terrain = Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0)
+            terrain.set_rotation(*ground_rotation)
             terrain.name = "terrain"
             scene.add_object(terrain)
 
@@ -265,6 +291,7 @@ class SceneGenerationStage(PipelineStage):
         if water_mesh is not None:
             self.log_info("Adding water mesh to scene")
             water = Object3D.mesh(ContextKey.WATER_MESH, x=0.0, y=0.0, z=0.0)
+            water.set_rotation(*ground_rotation)
             water.name = "water"
             scene.add_object(water)
 
@@ -288,6 +315,7 @@ class SceneGenerationStage(PipelineStage):
                 continue
             self.log_info(f"Adding formation mesh {formation['id']} to scene")
             formation_obj = Object3D.mesh(formation["mesh_key"], x=0.0, y=0.0, z=0.0)
+            formation_obj.set_rotation(*ground_rotation)
             formation_obj.name = f"formation_{formation['id']}"
             scene.add_object(formation_obj)
 

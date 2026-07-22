@@ -203,6 +203,11 @@ class TerrainReconstructionStage(PipelineStage):
         # unpinned, treated identically to an unobserved gap.
         fixed_elev = hm_s.copy()
         fixed_mask = TerrainReconstructionStage._downsample_observed_max(true_observed, H_s, W_s)
+        # Snapshot of "was this cell trusted as observed ground truth" before ridge
+        # anchors/overrides start mutating fixed_mask below -- needed so the ridge
+        # override step (see "Ridge override of observed data") can tell an
+        # originally-observed cell apart from one a ridge anchor pins directly.
+        observed_fixed_mask_s = fixed_mask.copy()
 
         x_half = z_half = grid_size / 2.0
 
@@ -301,6 +306,33 @@ class TerrainReconstructionStage(PipelineStage):
                 # cap even though the crest pixel itself may be tame.
                 profile = nearest_elev - dist_m * max_slope_tan_map
                 profile_best = np.maximum(profile_best, profile)
+
+        # ── Ridge override of observed data ───────────────────────────────────
+        # Distant mountain ridge chains come from the sky-terrain silhouette, a
+        # completely different (and, at range, more reliable) signal than the
+        # monocular/point-cloud depth that produced the height map -- depth
+        # estimation is at its weakest exactly out where ridge_min_anchor_distance
+        # requires a chain to be before it's used at all. true_observed's binary
+        # "was there a real sample here" carries no distance/certainty decay, so a
+        # noisy far-range depth reading can otherwise sit as an unmovable Dirichlet
+        # BC even when the ridge envelope says this location should be much higher
+        # (e.g. a false valley cut into what the silhouette confirms is a
+        # mountainside). Captured as its own snapshot (pre-shelf) so only the ridge
+        # envelope -- not the cliff-shelf mechanism below, which targets
+        # near-camera measured cliffs and should keep protecting observed data --
+        # gets this authority to override real depth samples.
+        ridge_profile_only = profile_best.copy()
+        observed_override = (
+            observed_fixed_mask_s
+            & (ridge_profile_only > fixed_elev + 0.1)
+            & np.isfinite(ridge_profile_only)
+        )
+        if observed_override.any():
+            fixed_elev[observed_override] = ridge_profile_only[observed_override]
+        self.log_info(
+            f"Ridge override: {int(observed_override.sum())} observed node(s) "
+            f"overwritten by mountain ridge envelope (trusted over raw depth)"
+        )
 
         # ── Cliff-top shelf ────────────────────────────────────────────────────
         # A directly-observed cliff face (measured_cliff) whose top edge borders
@@ -413,6 +445,17 @@ class TerrainReconstructionStage(PipelineStage):
         )
         self.advance_progress(task)
 
+        # Native-resolution footprint of cells the ridge envelope overrode, so the
+        # "Restore observed data" step below can exclude them -- otherwise it would
+        # simply splice the raw (overridden) depth value straight back in, undoing
+        # the override above unconditionally.
+        observed_override_native = np.zeros((H, W), dtype=bool)
+        if observed_override.any():
+            observed_override_native = (
+                nd_zoom(observed_override.astype(np.float64), (H / H_s, W / W_s), order=0) > 0.5
+                if (H_s, W_s) != (H, W) else observed_override
+            )
+
         # ── Solve: harmonic interpolation ─────────────────────────────────────
         new_hm_s = TerrainReconstructionStage._landlab_harmonic_solve(
             fixed_elev, fixed_mask, cell_size_m,
@@ -455,17 +498,41 @@ class TerrainReconstructionStage(PipelineStage):
         # observed gate, plus a steepness requirement). Feathering only softens the
         # transition right at the observed/gap boundary -- cells deep inside real
         # regions stay at ~full restore weight.
-        if true_observed.any():
-            restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0).astype(np.float32)
+        # Cells the ridge envelope overrode above are deliberately excluded here --
+        # restoring them would silently splice the raw (untrusted) depth value
+        # back in and undo that override.
+        restore_mask = true_observed & ~observed_override_native
+        if restore_mask.any():
+            restore_weight = gaussian_filter(restore_mask.astype(np.float64), sigma=1.0).astype(np.float32)
             new_hm = (
                 new_hm * (1.0 - restore_weight) + heightmap.astype(np.float32) * restore_weight
             ).astype(np.float32)
             self.log_info(
-                f"Observed-data restoration: {int(true_observed.sum())} px reverted "
-                f"to measured elevation"
+                f"Observed-data restoration: {int(restore_mask.sum())} px reverted "
+                f"to measured elevation "
+                f"({int(observed_override_native.sum())} px excluded as ridge-overridden)"
             )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
+
+        # Publish a ridge-override-aware trust mask, DISTINCT from
+        # HEIGHT_MAP_OBSERVED_MASK, for TerrainMeshGenerator.generate()'s
+        # per-vertex panorama-UV selection specifically. Deliberately not
+        # overwriting HEIGHT_MAP_OBSERVED_MASK itself: TerrainNoiseRefinementStage's
+        # final hard-restore and terrain_texture_generation.py's panorama-
+        # visibility weighting both still want ridge-overridden cells treated as
+        # trustworthy real data (the ridge envelope is a legitimate, silhouette-
+        # derived correction, not a fabricated gap-fill) -- narrowing that shared
+        # mask would wrongly let noise/diffusion/erosion reshape corrected peaks
+        # and would wrongly cede those texels to synthetic FLUX texture.
+        # TerrainMeshGenerator's cached-UV decision is the one place a
+        # ridge-overridden cell must NOT be trusted: its UV was cached by
+        # HeightMapGenerator._panorama_uv_from_height from the ORIGINAL
+        # (pre-override, often badly wrong at range) height, while its geometry
+        # has since moved to match the ridge envelope -- producing a
+        # geometry/texture mismatch (stretching) confined to exactly the
+        # distant-mountain cells the ridge override was introduced to correct.
+        context.add_depth(ContextKey.HEIGHT_MAP_PANO_UV_TRUST_MASK, Depth(restore_mask.astype(np.float32)))
 
         if self.temp is not None:
             Depth(new_hm).save_debug_image(self.temp / "heightmap_reconstructed.png")

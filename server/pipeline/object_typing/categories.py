@@ -4,6 +4,21 @@ VEGETATION_CATEGORIES: Final[frozenset[str]] = frozenset({
     "tree", "forest", "bush", "flower", "plant"
 })
 
+# Structures that SAM2/Grounding DINO frequently fragment into multiple
+# overlapping or adjacent same-category detections that are really one
+# physical object (a wall split at a doorway/gap, a building segmented per
+# facade/wing, a rock face broken into several boulder-looking regions, a
+# fence fragmented at each post gap). ObjectInstanceRefinementStage merges
+# same-category detections in this set when they are adjacent/overlapping,
+# using a looser containment/touching test than a strict same-object IoU
+# threshold. Deliberately disjoint from VEGETATION_CATEGORIES (the opposite
+# problem -- one blob mask that should split into several instances) and from
+# UNIQUE_CATEGORIES below (already collapsed to one instance by
+# ObjectDistributionStage's population-scatter skip, not by geometric merge).
+COALESCE_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "building", "skyscraper", "wall", "fence", "rock", "barrier",
+})
+
 # Each category maps to CLIP text prompts; best per-category similarity is used.
 OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "person":       ["a photo of a person", "a photo of a man or woman walking", "a photo of people"],

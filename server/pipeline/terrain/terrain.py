@@ -239,7 +239,17 @@ class TerrainMeshStage(PipelineStage):
                         self.log_warning("No texture source — geometry-only terrain mesh")
 
         region_map = context.input_depth(ContextKey.REGION_MAP)
-        observed_mask = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+        # Ridge-override-aware, not the plain HEIGHT_MAP_OBSERVED_MASK: a cell
+        # the mountain-ridge envelope overrode in TerrainReconstructionStage
+        # has moved to a corrected position its cached panorama UV no longer
+        # matches, so it must NOT be treated as "trust the cached UV" here even
+        # though it's still perfectly good real data to every other consumer of
+        # HEIGHT_MAP_OBSERVED_MASK. Falls back to the plain mask if the solve
+        # never ran (e.g. TerrainReconstructionStage disabled).
+        observed_mask = (
+            context.input_depth(ContextKey.HEIGHT_MAP_PANO_UV_TRUST_MASK)
+            or context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+        )
         component_id = context.input_depth(ContextKey.HEIGHT_MAP_COMPONENT_ID)
         pano_uv_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
         pano_uv_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)

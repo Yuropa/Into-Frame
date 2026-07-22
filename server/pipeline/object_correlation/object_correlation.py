@@ -69,7 +69,9 @@ class ObjectCorrelationStage(PipelineStage):
         sam2_meta = {}
         gdino_meta = {}
         for idx in range(object_count):
-            metadata = context.input_object(f"metadata_{idx}") or {}
+            metadata = context.input_object(f"metadata_{idx}")
+            if metadata is None:
+                continue
             if metadata.get("source") == "grounding_dino":
                 gdino_meta[idx] = metadata
             else:

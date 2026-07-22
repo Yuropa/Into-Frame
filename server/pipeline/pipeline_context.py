@@ -82,6 +82,14 @@ class ContextKey:
     HEIGHT_MAP_CELL_RELIEF = "height_map_cell_relief"
     HEIGHT_MAP_CELL_SLOPE = "height_map_cell_slope"
     HEIGHT_MAP_OBSERVED_MASK = "height_map_observed_mask"
+    # Narrower than HEIGHT_MAP_OBSERVED_MASK: excludes cells the mountain-ridge
+    # envelope overrode in TerrainReconstructionStage. Written by that stage,
+    # consumed only by TerrainMeshStage/TerrainMeshGenerator.generate() to
+    # decide whether a vertex's cached pre-reconstruction panorama UV is still
+    # trustworthy -- see the write site in terrain_reconstruction.py for why
+    # this must stay separate from HEIGHT_MAP_OBSERVED_MASK rather than
+    # replacing it.
+    HEIGHT_MAP_PANO_UV_TRUST_MASK = "height_map_pano_uv_trust_mask"
     HEIGHT_MAP_COMPONENT_ID = "height_map_component_id"
     HEIGHT_MAP_PANO_U = "height_map_pano_u"
     HEIGHT_MAP_PANO_V = "height_map_pano_v"
@@ -139,6 +147,7 @@ class ContextKey:
         "height_map_certainty",
         "height_map_cell_relief",
         "height_map_observed_mask",
+        "height_map_pano_uv_trust_mask",
         "height_map_component_id",
         "height_map_pano_u",
         "height_map_pano_v",

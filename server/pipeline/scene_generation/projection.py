@@ -17,6 +17,27 @@ def mesh_y_at(world_x: float, world_z: float, terrain_mesh) -> float | None:
     return float(locs[:, 1].max())
 
 
+def terrain_local_xz(world_x: float, world_z: float, yaw_degrees: float) -> tuple[float, float]:
+    """Undo the yaw SceneGenerationStage sends to the client as scene.skybox_rotation
+    (and applies to the terrain/water/formation Object3Ds) to map an object's WORLD-
+    space (x, z) -- produced by unproject_bbox/unproject_bbox_equirect, which bake the
+    full extrinsics rotation into position -- back into the terrain mesh's own native
+    frame (+Z = panorama theta 0, no rotation applied), which is the frame terrain_mesh's
+    raw vertices are actually stored in.
+
+    Without this, mesh_y_at(world_x, world_z, terrain_mesh) raycasts against the
+    terrain at the wrong (rotated-away) location whenever yaw_degrees != 0 -- missing
+    the mesh's finite footprint entirely near its edges (silently falling back to the
+    object's raw unprojected Y, i.e. floating/sinking) or hitting an unrelated part of
+    the terrain otherwise. Y is unaffected by a yaw rotation, so mesh_y_at's return
+    value needs no corresponding correction back the other way.
+    """
+    theta = np.radians(yaw_degrees)
+    local_x = world_x * np.cos(theta) - world_z * np.sin(theta)
+    local_z = world_x * np.sin(theta) + world_z * np.cos(theta)
+    return local_x, local_z
+
+
 def unproject_bbox(bbox, image_width, image_height, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
     bx, by, bw, bh = bbox
     x1, y1, x2, y2 = bx, by, bx + bw, by + bh
