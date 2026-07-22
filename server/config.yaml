@@ -58,6 +58,14 @@ stages:
 
   - name: Object Typing
     stage: ObjectTypingStage
+    # Tune both against typing_debug.json's per-crop top_candidates/object_margin:
+    object_margin_threshold: 0.08     # required gap between the winning and runner-up
+                                       # object label (large crops only) before a specific
+                                       # label is trusted; below this -> indeterminate
+                                       # (or the scene-prior-corroborated runner-up)
+    min_confident_area_fraction: 0.01 # crop bbox area / panorama area below which the
+                                       # margin gate above is skipped -- small crops just
+                                       # take CLIP's best-effort guess
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
@@ -591,9 +599,27 @@ stages:
       input: panorama
     coalesce_touch_dilation_px: 15
     split_outlier_area_multiplier: 2.75
+    split_max_components: 12          # cap on pieces one blob can split into --
+                                       # keeps individual trees/bushes, drops
+                                       # leaf/twig-level over-splitting; tune
+                                       # against debug_before.png/debug_after.png
+    absorb_containment_threshold: 0.85 # a non-structural detection this contained
+                                        # within a building/wall/rock/etc. detection
+                                        # is dropped as a spurious sub-part (e.g. a
+                                        # door pulled out of a building) rather than
+                                        # kept as its own object
 
   - name: Object Correlation
     stage: ObjectCorrelationStage
+
+  - name: Object Category Clustering
+    stage: ObjectCategoryClusteringStage
+    # Sub-clusters each class's detections by visual similarity (DINOv2
+    # embeddings, agglomerative clustering) into 'bucket' groups -- e.g.
+    # splitting one "flower" population into distinct color/species variants.
+    # Tune against this stage's debug_panorama.png / clustering_debug.json.
+    embedding_model_name: facebook/dinov2-base
+    cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
 
   - name: Object Distribution
     stage: ObjectDistributionStage
@@ -625,6 +651,7 @@ stages:
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
     billboard_distance_m: 30.0
+    billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
 
   - name: Scene Generation
@@ -633,6 +660,9 @@ stages:
       panorama: panorama_sky
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
+    mesh_lod_distance_m: 30.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
+                               # Panorama Asset Generation's billboard_distance_m above (kept
+                               # in sync manually; each stage parses its own isolated config)
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting

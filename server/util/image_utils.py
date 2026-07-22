@@ -51,6 +51,30 @@ def make_context_composite(
     composite.paste(crop_panel, (0, half))
     return composite
 
+def flatten_alpha_with_mean_fill(image: "Image") -> PIL.Image.Image:
+    """Convert to RGB, filling transparent pixels with the mean opaque color.
+
+    PIL's default RGBA→RGB conversion fills alpha=0 areas with black, which
+    creates a dark silhouette of whatever was masked out. For a sky crop whose
+    mask has a tower-shaped hole, that silhouette triggers CLIP's "tower"
+    classification even though the actual content is sky. Using the mean opaque
+    color as the fill makes the hole blend into the dominant content instead.
+    Shared by every model that classifies/embeds masked object crops (CLIP
+    zero-shot typing, DINOv2 clustering embeddings) so the fix only lives in
+    one place."""
+    pil = image.image
+    if pil.mode != "RGBA":
+        return image.rgb()
+    arr = np.array(pil).astype(np.float32)
+    alpha = arr[..., 3:4] / 255.0
+    rgb = arr[..., :3]
+    opaque = arr[..., 3] > 128
+    mean_color = rgb[opaque].mean(axis=0) if opaque.any() else np.array([128.0, 128.0, 128.0])
+    background = np.ones_like(rgb) * mean_color
+    composited = (rgb * alpha + background * (1.0 - alpha)).astype(np.uint8)
+    return PIL.Image.fromarray(composited, mode="RGB")
+
+
 def lab_color_transfer(
     source: PIL.Image.Image,
     target: PIL.Image.Image,

@@ -22,11 +22,21 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         eye_height_meters: float = 1.8,
+        mesh_lod_distance_m: float = 30.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
+        # Bake-time mesh-vs-billboard cutoff: an instance closer than this to
+        # the camera uses its bucket's 3D mesh, farther instances use a
+        # billboard. Deliberately mirrors Panorama Asset Generation's
+        # billboard_distance_m (meshes only exist for groups with an instance
+        # within that same distance) -- each stage parses its own isolated
+        # config, so keep the two in sync manually if either changes. A static
+        # bake-time cutoff (vs. runtime client-side LOD) is fine here since
+        # expected player movement is small (~2 m).
+        self.mesh_lod_distance_m = mesh_lod_distance_m
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -48,9 +58,17 @@ class SceneGenerationStage(PipelineStage):
       SemanticKey.OBJECT_COUNT → ContextKey.OBJECT_COUNT   (int)
 
     Dynamic context keys per object (index i):
-      crop_{i}      → Image   (object texture)
-      mesh_{i}      → Mesh    (optional; falls back to billboard if absent)
-      metadata_{i}  → object  ({"box": [...], "score": float})
+      crop_{i}                            → Image  (object texture)
+      metadata_{i}                        → object ({"box": [...], "score": float,
+                                                       "class": str, "bucket": int})
+      category_mesh_{class}_{bucket}      → Mesh   (optional, from Panorama Asset
+                                                       Generation; used when this
+                                                       instance is within
+                                                       mesh_lod_distance_m of the
+                                                       camera, billboard otherwise)
+      "billboard_pools" (generic object)  → {"{class}::{bucket}": [crop idx, ...]}
+                                             (curated top-K pool per bucket, from
+                                             Panorama Asset Generation)
 
     Optional:
       ContextKey.TERRAIN_MESH        → Mesh        (placed at origin if present)
@@ -128,18 +146,15 @@ class SceneGenerationStage(PipelineStage):
             scene.skybox = panorama_key
 
         if object_count is not None:
-            # Build category → list of crop indices so billboards can be drawn
-            # from the full pool for a category rather than only the per-object crop.
-            # Synthetic (DistributionSynthesisStage) entries never get their own
-            # crop_{idx} image, so they must be excluded here -- otherwise a
-            # synthetic point can be chosen as another object's billboard texture,
-            # pointing at a crop image that was never created.
-            class_to_crop_indices: dict[str, list[int]] = {}
-            for idx in range(object_count):
-                meta = context.input_object(f"metadata_{idx}") or {}
-                cls = meta.get("class")
-                if cls and cls not in _ENV_CATEGORIES and cls != "indeterminate" and not meta.get("synthetic"):
-                    class_to_crop_indices.setdefault(cls, []).append(idx)
+            # Curated per-(class, bucket) billboard pools from Panorama Asset
+            # Generation -- top-K crops by quality score, usable at any
+            # distance, not just "every crop in the class" (which included
+            # poorly-scored/occluded crops with no ranking).
+            billboard_pools: dict[str, list[int]] = context.input_object("billboard_pools") or {}
+
+            camera_position = (
+                np.array(extrinsics.translation, dtype=float) if extrinsics is not None else np.zeros(3)
+            )
 
             rng = np.random.default_rng(self.seed)
 
@@ -222,9 +237,26 @@ class SceneGenerationStage(PipelineStage):
                     "world_height": float(height),
                 })
 
-                category_mesh = context.input_mesh(f"category_mesh_{cls}")
-                if category_mesh is not None and rng.integers(2) == 0:
-                    # Use the shared category mesh with a random Y rotation.
+                bucket = int(metadata.get("bucket") or 0)
+                mesh_key = f"category_mesh_{cls}_{bucket}"
+                pool_key = f"{cls}::{bucket}"
+                category_mesh = context.input_mesh(mesh_key)
+
+                # Bake-time distance-based LOD: mesh if this instance is close
+                # enough to the camera AND its bucket actually has one (a
+                # bucket only gets a mesh if some instance of it qualified
+                # during Panorama Asset Generation -- this instance itself may
+                # still be farther than the mesh distance even when a
+                # sibling instance in the same bucket was close enough to
+                # trigger meshing). Static since expected player movement is
+                # small (~2 m) -- see mesh_lod_distance_m.
+                camera_distance = float(np.linalg.norm(
+                    np.array((position[0], place_y, position[2]), dtype=float) - camera_position
+                ))
+                use_mesh = category_mesh is not None and camera_distance <= self.config.mesh_lod_distance_m
+
+                if use_mesh:
+                    # Use the shared bucket mesh with a random Y rotation.
                     # Mesh.fit_to_box recenters on the mesh's centroid, not its bounding-box
                     # center, so the mesh's lowest vertex is not reliably at -extent/2 --
                     # for a bottom-heavy shape (e.g. a tree trunk) the centroid sits below
@@ -243,24 +275,24 @@ class SceneGenerationStage(PipelineStage):
                     mesh_scale = float(max(width, height))
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
-                    mesh_key = f"category_mesh_{cls}"
-                    self.log_info(f"Creating mesh for {idx} ({cls})")
+                    self.log_info(f"Creating mesh for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m)")
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
                     mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(mesh_scale, mesh_scale, mesh_scale)
                     mesh_obj.name = mesh_key
                     scene.add_object(mesh_obj)
                 else:
-                    # Pick a random billboard crop from this category's pool. Synthetic
-                    # points have no crop of their own, so they must draw from a real
-                    # detection's pool; if none exists there's nothing to render.
-                    crop_pool = class_to_crop_indices.get(cls, [] if metadata.get("synthetic") else [idx])
+                    # Pick a random billboard crop from this bucket's curated pool.
+                    # Synthetic points have no crop of their own, so they must draw
+                    # from a real detection's pool; if none exists there's nothing
+                    # to render.
+                    crop_pool = billboard_pools.get(pool_key) or ([] if metadata.get("synthetic") else [idx])
                     if not crop_pool:
                         self.log_warning(f"No billboard crop available for synthetic object {idx} ({cls}), skipping")
                         self.advance_progress(generation_task)
                         continue
                     chosen_idx = int(rng.choice(crop_pool))
-                    self.log_info(f"Creating billboard for {idx} ({cls}) using crop_{chosen_idx}")
+                    self.log_info(f"Creating billboard for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m) using crop_{chosen_idx}")
                     billboard = Object3D.billboard(
                         f"crop_{chosen_idx}",
                         width=width,

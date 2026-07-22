@@ -14,7 +14,7 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import COALESCE_CATEGORIES, VEGETATION_CATEGORIES
+from pipeline.object_typing.categories import COALESCE_CATEGORIES, VEGETATION_CATEGORIES, ABSORB_EXEMPT_CATEGORIES
 from util.image_utils import Image
 from util.instance_merge import (
     cluster_indices,
@@ -40,10 +40,13 @@ class ObjectInstanceRefinementConfiguration(PipelineStageConfiguration):
         coalesce_touch_dilation_px: int = 15,
         # split (vegetation) tuning -- VEGETATION_CATEGORIES
         split_min_component_px: int = 400,
-        split_min_component_fraction: float = 0.03,
+        split_min_component_fraction: float = 0.05,
         split_outlier_area_multiplier: float = 2.75,
         split_watershed_min_peak_distance_fraction: float = 0.18,
-        split_watershed_min_component_fraction: float = 0.08,
+        split_watershed_min_component_fraction: float = 0.12,
+        split_max_components: int = 12,
+        # absorb (drop structural sub-parts) tuning -- COALESCE_CATEGORIES parents
+        absorb_containment_threshold: float = 0.85,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.coalesce_box_iou_threshold = coalesce_box_iou_threshold
@@ -54,11 +57,13 @@ class ObjectInstanceRefinementConfiguration(PipelineStageConfiguration):
         self.split_outlier_area_multiplier = split_outlier_area_multiplier
         self.split_watershed_min_peak_distance_fraction = split_watershed_min_peak_distance_fraction
         self.split_watershed_min_component_fraction = split_watershed_min_component_fraction
+        self.split_max_components = split_max_components
+        self.absorb_containment_threshold = absorb_containment_threshold
 
 
 class ObjectInstanceRefinementStage(PipelineStage):
     """
-    Sits between Object Detection and Object Correlation. Two independent,
+    Sits between Object Detection and Object Correlation. Three independent,
     taxonomy-driven passes over the current crop_{i}/metadata_{i} set:
 
       1. Coalesce (COALESCE_CATEGORIES): same-category fragments of one
@@ -70,19 +75,28 @@ class ObjectInstanceRefinementStage(PipelineStage):
          nearby trees) is split into multiple crop_{i}/metadata_{i} entries --
          connected components first (cheap, unambiguous), then watershed
          (gated to statistical size-outliers only) for touching canopy that
-         forms one connected mask.
+         forms one connected mask. Capped at split_max_components pieces so
+         one blob can't explode into leaf/twig-level fragments.
+      3. Absorb (COALESCE_CATEGORIES parents, any-category children): a small
+         detection heavily contained within a larger structural detection's
+         box -- e.g. a door or window typed differently than its building, so
+         the same-class-only coalesce pass above can't reach it -- is dropped
+         entirely rather than kept as a spurious separate object. Exempts
+         ABSORB_EXEMPT_CATEGORIES (person/car/etc.), which can legitimately
+         overlap a structure's box without being part of it.
 
     Reads:  ContextKey.OBJECT_COUNT, metadata_{i}, crop_{i}, SemanticKey.INPUT
             (default ContextKey.PANORAMA -- needed to rebuild merged crops'
             RGBA pixels for the union footprint; the split path only ever
             subsets an existing crop's own pixels/mask, no re-read needed)
-    Writes: metadata_{i} (merged in place, or nulled for merged-away slots),
-            crop_{i} (merged crop written at the surviving/canonical index;
-            new crop_{i} appended for each split sub-instance),
+    Writes: metadata_{i} (merged in place, or nulled for merged-away/absorbed
+            slots), crop_{i} (merged crop written at the surviving/canonical
+            index; new crop_{i} appended for each split sub-instance),
             ContextKey.OBJECT_COUNT (bumped for split-added slots only --
-            merges never grow or shrink the visible count, they just null gaps)
+            merges/absorptions never grow or shrink the visible count, they
+            just null gaps)
     Debug:  self.output/refinement_debug.json -- before/after counts, merges,
-            splits, thresholds used
+            splits, absorptions, thresholds used
             self.output/debug_before.png / debug_after.png -- panorama with
             colored boxes per category, before vs after this stage
     """
@@ -135,12 +149,19 @@ class ObjectInstanceRefinementStage(PipelineStage):
         if pano_w is not None:
             splits, next_idx = self._split_pass(context, working, next_idx)
 
+        absorptions = []
+        if pano_w is not None:
+            absorptions = self._absorb_pass(context, working, pano_w)
+
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
         context.add_object("refinement_complete", True)
 
-        self.log_info(f"  {len(merges)} coalesce merge(s), {len(splits)} split(s); count {object_count} -> {next_idx}")
+        self.log_info(
+            f"  {len(merges)} coalesce merge(s), {len(splits)} split(s), "
+            f"{len(absorptions)} absorption(s); count {object_count} -> {next_idx}"
+        )
 
-        self._write_debug(context, source_image, pano_w, before_snapshot, working, merges, splits, object_count, next_idx)
+        self._write_debug(context, source_image, pano_w, before_snapshot, working, merges, splits, absorptions, object_count, next_idx)
         return context
 
     # ------------------------------------------------------------------
@@ -292,7 +313,10 @@ class ObjectInstanceRefinementStage(PipelineStage):
             if not sub_masks or len(sub_masks) < 2:
                 continue
 
-            sub_masks = sorted(sub_masks, key=lambda m: m.sum(), reverse=True)
+            # Cap to the biggest split_max_components pieces -- keeps genuinely
+            # distinct sub-trees/bushes while dropping the leaf/twig-scale tail
+            # a noisy mask can otherwise explode into.
+            sub_masks = sorted(sub_masks, key=lambda m: m.sum(), reverse=True)[:self.config.split_max_components]
             box = entry["metadata"]["box"]
             crop = context.input_image(f"crop_{idx}")
             parent_rgba = np.asarray(crop.image)
@@ -318,10 +342,57 @@ class ObjectInstanceRefinementStage(PipelineStage):
         return splits, next_idx
 
     # ------------------------------------------------------------------
+    # Absorb pass
+    # ------------------------------------------------------------------
+
+    def _absorb_pass(self, context: PipelineContext, working: dict[int, dict], pano_w: int) -> list[dict]:
+        """Drop small detections heavily contained within a larger
+        COALESCE_CATEGORIES detection's box, regardless of class -- catches
+        structural sub-parts (a door/window typed differently than its
+        building) that the same-class-only coalesce pass above can't reach,
+        without discarding legitimately independent foreground objects
+        (ABSORB_EXEMPT_CATEGORIES) that just happen to overlap a structure's
+        box."""
+        structural = [
+            idx for idx, entry in working.items()
+            if entry["metadata"].get("class") in COALESCE_CATEGORIES and entry["box"] is not None
+        ]
+        if not structural:
+            return []
+
+        absorbed = []
+        for idx in list(working.keys()):
+            if idx in structural:
+                continue
+            entry = working[idx]
+            cls = entry["metadata"].get("class")
+            box = entry["box"]
+            if box is None or cls in ABSORB_EXEMPT_CATEGORIES:
+                continue
+
+            for parent_idx in structural:
+                parent_box = working[parent_idx]["box"]
+                containment = wrap_aware_containment(box, parent_box, pano_w)
+                if containment >= self.config.absorb_containment_threshold:
+                    self.log_info(
+                        f"  crop_{idx} ({cls}) absorbed into crop_{parent_idx} "
+                        f"({working[parent_idx]['metadata'].get('class')}), containment {containment:.2f}"
+                    )
+                    context.add_object(f"metadata_{idx}", None)
+                    del working[idx]
+                    absorbed.append({
+                        "idx": idx, "class": cls, "absorbed_into": parent_idx,
+                        "containment": round(containment, 3),
+                    })
+                    break
+
+        return absorbed
+
+    # ------------------------------------------------------------------
     # Debug
     # ------------------------------------------------------------------
 
-    def _write_debug(self, context, source_image, pano_w, before_snapshot, working, merges, splits, before_count, after_count):
+    def _write_debug(self, context, source_image, pano_w, before_snapshot, working, merges, splits, absorptions, before_count, after_count):
         if self.output is None:
             return
 
@@ -330,11 +401,14 @@ class ObjectInstanceRefinementStage(PipelineStage):
             "after_count": after_count,
             "merges": merges,
             "splits": splits,
+            "absorptions": absorptions,
             "config": {
                 "coalesce_box_iou_threshold": self.config.coalesce_box_iou_threshold,
                 "coalesce_containment_threshold": self.config.coalesce_containment_threshold,
                 "coalesce_touch_dilation_px": self.config.coalesce_touch_dilation_px,
                 "split_outlier_area_multiplier": self.config.split_outlier_area_multiplier,
+                "split_max_components": self.config.split_max_components,
+                "absorb_containment_threshold": self.config.absorb_containment_threshold,
             },
         }
         with open(self.output / "refinement_debug.json", "w") as f:
