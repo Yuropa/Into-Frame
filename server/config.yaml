@@ -674,7 +674,7 @@ stages:
 
   - name: Video Generation
     stage: VideoGenerationStage
-    enabled: false
+    enabled: true
     # Animate the full 360° panorama (ContextKey.PANORAMA -- the original, with real
     # objects still in it, not PANORAMA_TERRAIN/PANORAMA_SKY which have been through
     # foreground/sky inpainting) instead of just the narrow raw input photo.
