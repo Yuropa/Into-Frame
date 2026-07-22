@@ -1,7 +1,29 @@
 import json
+from logging import Logger
+from typing import Any
+import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
 from pipeline.pipeline_context import PipelineContext, ContextKey
+
+
+class ObjectTypingConfiguration(PipelineStageConfiguration):
+    def __init__(
+        self,
+        name: str,
+        device: torch.device,
+        torch_dtype: Any,
+        log: Logger,
+        keys=None,
+        seed: int = 0,
+        confidence_threshold: float = 0.1,
+        object_margin_threshold: float = 0.08,
+        min_confident_area_fraction: float = 0.01,
+    ):
+        super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.confidence_threshold = confidence_threshold
+        self.object_margin_threshold = object_margin_threshold
+        self.min_confident_area_fraction = min_confident_area_fraction
 
 
 class ObjectTypingStage(PipelineStage):
@@ -12,18 +34,34 @@ class ObjectTypingStage(PipelineStage):
     environment categories so all crops get a meaningful class regardless of what the
     upstream classification stage decided.
 
+    Each crop is classified as a scene-context composite (panorama thumbnail with the
+    crop's box highlighted, plus the crop itself — see make_context_composite) rather
+    than the bare crop, and gated by both an object-vs-environment confidence check and
+    a margin check between the winning and runner-up object labels (see
+    ImageClipClassifier._sims_to_result) — the margin check is skipped for crops below
+    `min_confident_area_fraction` of the panorama, since a handful of pixels can't earn
+    a specific label either way; they just take CLIP's best-effort guess. Ambiguous
+    large-crop ties are broken using a scene-level category prior (labels the earlier
+    BLIP+keyword pass found anywhere else in the scene).
+
     Text embeddings for all categories are computed once at load time;
     per-image cost is a single forward pass plus cosine similarity.
 
     Each run writes typing_debug.json to the stage output directory with per-crop
-    CLIP scores and top candidates for every indeterminate result.
+    CLIP scores, object-margin, and top candidates for every crop.
 
-    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}, ContextKey.INPUT (scene context)
+    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}, ContextKey.PANORAMA (scene context)
     Writes: metadata_{i} (updates 'class' and 'confidence' fields)
     Debug:  typing_debug.json
+    Config: confidence_threshold (default 0.1), object_margin_threshold (default 0.08),
+            min_confident_area_fraction (default 0.01)
     """
 
-    def __init__(self, config: PipelineStageConfiguration) -> None:
+    @classmethod
+    def config_class(cls):
+        return ObjectTypingConfiguration
+
+    def __init__(self, config: ObjectTypingConfiguration) -> None:
         super().__init__(config)
         self._classifier = None
 
@@ -35,8 +73,28 @@ class ObjectTypingStage(PipelineStage):
 
         typing_task = self.create_progress(object_count + 1, "Typing objects…")
         if self._classifier is None:
-            self._classifier = ImageClipClassifier(self.device)
+            self._classifier = ImageClipClassifier(
+                self.device,
+                confidence_threshold=self.config.confidence_threshold,
+                object_margin_threshold=self.config.object_margin_threshold,
+                min_confident_area_fraction=self.config.min_confident_area_fraction,
+            )
         self.advance_progress(typing_task)
+
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        pano_area = float(panorama.width * panorama.height) if panorama is not None else None
+
+        # Scene-level category prior: labels PanoramaObjectClassificationStage's
+        # BLIP+keyword pass already found *somewhere* in this scene, before this
+        # stage's own CLIP pass overwrites 'class' below. Used only to break
+        # large-crop margin-ties (see ImageClipClassifier._sims_to_result) --
+        # it's what stops a single oddly-shaped crop from becoming the scene's
+        # only "statue" when nothing else in the panorama supports it.
+        scene_category_prior = frozenset(
+            cls
+            for idx in range(object_count)
+            if (cls := (context.input_object(f"metadata_{idx}") or {}).get("class")) not in (None, "indeterminate")
+        )
 
         debug_entries = []
         for idx in range(object_count):
@@ -47,11 +105,24 @@ class ObjectTypingStage(PipelineStage):
                 self.advance_progress(typing_task)
                 continue
 
-            obj_type, confidence, top, criteria = self._classifier.classify_with_details(crop)
+            box = metadata.get("box")
+            area_fraction = (box[2] * box[3]) / pano_area if box is not None and pano_area else None
+
+            obj_type, confidence, top, criteria = self._classifier.classify_with_details(
+                crop,
+                scene_image=panorama,
+                box=box,
+                area_fraction=area_fraction,
+                scene_category_prior=scene_category_prior,
+            )
             caption = metadata.get("caption", "")
             caption_fallback = False
             if obj_type == "indeterminate" and caption:
-                obj_type, confidence, top, criteria = self._classifier.classify_from_caption(caption)
+                obj_type, confidence, top, criteria = self._classifier.classify_from_caption(
+                    caption,
+                    area_fraction=area_fraction,
+                    scene_category_prior=scene_category_prior,
+                )
                 caption_fallback = True
 
             # Don't clobber a valid prior classification with indeterminate — keep

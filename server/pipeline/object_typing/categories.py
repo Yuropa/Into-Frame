@@ -19,6 +19,17 @@ COALESCE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "building", "skyscraper", "wall", "fence", "rock", "barrier",
 })
 
+# Free-standing objects that can legitimately overlap a COALESCE_CATEGORIES
+# structure's bounding box without being part of it -- a person standing in
+# front of a building, a car parked against a wall. ObjectInstanceRefinementStage's
+# absorb pass drops any OTHER small detection heavily contained within a
+# structural detection's box (a door or window fragment typed differently than
+# its building, a spurious sub-region), since those are almost always a
+# sub-part of the structure rather than a genuinely separate object.
+ABSORB_EXEMPT_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "person", "car", "truck", "bus", "motorcycle", "bicycle", "animal",
+})
+
 # Each category maps to CLIP text prompts; best per-category similarity is used.
 OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "person":       ["a photo of a person", "a photo of a man or woman walking", "a photo of people"],

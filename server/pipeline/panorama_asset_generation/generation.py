@@ -9,6 +9,7 @@ from pipeline.model_generation.model_generation import ModelGenerator, ModelGene
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter
 from util.device_utils import DeviceStrategy, preferred_device
+from util.crop_scoring import composite_score, occlusion_score
 
 
 class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
@@ -24,6 +25,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         generator_type: str = "TRELLIS",
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
+        billboard_top_k: int = 4,
         score_weight_confidence: float = 0.35,
         score_weight_fill_ratio: float = 0.25,
         score_weight_depth: float = 0.25,
@@ -36,6 +38,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         self.billboard_distance_m = float(billboard_distance_m)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
+        self.billboard_top_k = billboard_top_k
         self.score_weight_confidence = score_weight_confidence
         self.score_weight_fill_ratio = score_weight_fill_ratio
         self.score_weight_depth = score_weight_depth
@@ -47,17 +50,23 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
 
 class PanoramaAssetGenerationStage(PipelineStage):
     """
-    For each object category present in the scene, meshifies one representative
-    crop (the closest instance to the camera) and stores it as category_mesh_{class}.
-    Categories where every instance is farther than billboard_distance_m are left
-    as billboards; SceneGenerationStage will draw from the category's crop pool for
-    those.
+    For each (class, bucket) visual-similarity group present in the scene (see
+    ObjectCategoryClusteringStage -- bucket sub-divides a class into visually
+    distinct variants, e.g. flower colors), curates a top-K billboard crop pool
+    (billboard_top_k, ranked by the same composite score regardless of
+    distance -- SceneGenerationStage draws from this pool at ANY distance) and,
+    if any instance of the group is closer than billboard_distance_m, meshifies
+    its best-scoring eligible instance as category_mesh_{class}_{bucket}.
+    Groups where every instance is farther than billboard_distance_m stay
+    billboard-only.
 
-    Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class' and 'box'),
+    Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class', 'bucket', 'box'),
             crop_{i}, ContextKey.PANORAMA_OBJECT_DEPTH (depth on the ORIGINAL panorama,
             matching what objects were detected against), ContextKey.PANORAMA
-    Writes: category_mesh_{class} for each qualifying category
-    Config: billboard_distance_m (default 10.0 m), generator_type (default TRELLIS)
+    Writes: category_mesh_{class}_{bucket} for each qualifying group,
+            "billboard_pools" ({"{class}::{bucket}": [idx, ...]}) for every group
+    Config: billboard_distance_m (default 10.0 m), billboard_top_k (default 4),
+            generator_type (default TRELLIS)
     """
 
     @classmethod
@@ -79,24 +88,25 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
-        category_best, skipped_debug, billboard_debug, disqualified_debug = self._select_representatives(
+        group_best, billboard_pools, skipped_debug, disqualified_debug = self._curate(
             object_count, context.input_object, context.input_image, panorama_depth, pano_w, pano_h,
         )
 
-        self._write_debug(skipped_debug, billboard_debug, category_best, disqualified_debug)
+        context.add_object("billboard_pools", billboard_pools)
+        self._write_debug(skipped_debug, group_best, disqualified_debug, billboard_pools)
 
-        if not category_best:
+        if not group_best:
             self.log_info("No objects within 3D generation distance")
             return context
 
-        # Second pass: generate one mesh per qualifying category.
-        asset_task = self.create_progress(len(category_best), "Generating 3D assets…")
+        # Second pass: generate one mesh per qualifying (class, bucket) group.
+        asset_task = self.create_progress(len(group_best), "Generating 3D assets…")
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
 
         try:
-            for obj_class, (idx, depth, score) in category_best.items():
-                mesh_key = f"category_mesh_{obj_class}"
+            for (obj_class, bucket), (idx, depth, score) in group_best.items():
+                mesh_key = f"category_mesh_{obj_class}_{bucket}"
 
                 cached = context.mesh(mesh_key)
                 if cached is not None:
@@ -122,26 +132,25 @@ class PanoramaAssetGenerationStage(PipelineStage):
         self.finish_progress(asset_task)
         return context
 
-    def _select_representatives(
+    def _curate(
         self, object_count: int, get_metadata, get_image, panorama_depth, pano_w, pano_h,
-    ) -> tuple[dict[str, tuple[int, float, float]], list, list, list]:
+    ) -> tuple[dict[tuple[str, int], tuple[int, float, float]], dict[str, list[int]], list, list]:
         """Shared by run() and has_expected_output() (callers pass either the
         input_* accessors to see state as of the previous stage, or the plain
         accessors to see this stage's own already-cached output).
 
-        Returns (category_best, skipped_debug, billboard_debug, disqualified_debug).
-        category_best: class -> (idx, depth, score) of the winning representative.
-        A candidate whose box is heavily covered by another, nearer instance
-        (any class) is disqualified in favor of the next-best-scoring
-        candidate in that category; if every candidate for a category is
-        disqualified, the least-bad one is kept anyway rather than silently
-        dropping the category.
+        Returns (group_best, billboard_pools, skipped_debug, disqualified_debug).
+        group_best: (class, bucket) -> (idx, depth, score) of the winning mesh
+        representative, only for groups with at least one instance closer than
+        billboard_distance_m. billboard_pools: "{class}::{bucket}" -> top-K
+        crop indices by score, for EVERY (class, bucket) group regardless of
+        distance -- a group's billboard pool must stay usable even when no
+        instance qualified for meshing.
         """
         threshold = self.config.billboard_distance_m
         skipped_debug = []
-        billboard_debug = []
         depth_by_idx: dict[int, tuple[list, float]] = {}
-        candidates_by_class: dict[str, list[dict]] = {}
+        candidates_by_group: dict[tuple[str, int], list[dict]] = {}
 
         for idx in range(object_count):
             metadata = get_metadata(f"metadata_{idx}")
@@ -169,118 +178,78 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 })
                 continue
 
-            if depth is None or depth >= threshold:
-                billboard_debug.append({
-                    "idx": idx,
-                    "class": obj_class,
-                    "depth_m": round(depth, 2) if depth is not None else None,
-                    "threshold_m": threshold,
-                })
-                continue
-
-            candidates_by_class.setdefault(obj_class, []).append({
+            bucket = metadata.get("bucket") or 0
+            key = (obj_class, int(bucket))
+            candidates_by_group.setdefault(key, []).append({
                 "idx": idx, "box": box, "depth": depth, "metadata": metadata,
             })
 
-        category_best: dict[str, tuple[int, float, float]] = {}
+        group_best: dict[tuple[str, int], tuple[int, float, float]] = {}
+        billboard_pools: dict[str, list[int]] = {}
         disqualified_debug = []
-        for obj_class, candidates in candidates_by_class.items():
+        for (obj_class, bucket), candidates in candidates_by_group.items():
             scored = []
             for candidate in candidates:
-                occlusion = self._occlusion_score(candidate["idx"], candidate["box"], candidate["depth"], depth_by_idx)
+                # A candidate whose depth couldn't be sampled still belongs in
+                # the billboard pool (it just can't be scored on depth or
+                # compared for occlusion) -- treat it as "far" rather than
+                # dropping it, so a bad depth sample doesn't silently shrink
+                # the billboard pool.
+                depth = candidate["depth"] if candidate["depth"] is not None else threshold * 10.0
+                occlusion = occlusion_score(
+                    candidate["idx"], candidate["box"], depth, depth_by_idx, self.config.occlusion_depth_margin,
+                )
                 crop = get_image(f"crop_{candidate['idx']}")
-                score = self._composite_score(candidate["metadata"], crop, candidate["depth"], occlusion, threshold)
+                score = composite_score(
+                    candidate["metadata"], crop, depth, occlusion, threshold,
+                    self.config.score_weight_confidence, self.config.score_weight_fill_ratio,
+                    self.config.score_weight_depth, self.config.score_weight_occlusion,
+                    self.config.occlusion_covered_fraction_threshold,
+                )
                 disqualified = occlusion >= self.config.occlusion_disqualify_fraction
-                scored.append({**candidate, "occlusion": occlusion, "score": score, "disqualified": disqualified})
+                scored.append({**candidate, "depth": depth, "occlusion": occlusion, "score": score, "disqualified": disqualified})
 
-            eligible = [s for s in scored if not s["disqualified"]] or scored
+            scored_by_rank = sorted(scored, key=lambda s: s["score"], reverse=True)
+            pool_key = f"{obj_class}::{bucket}"
+            billboard_pools[pool_key] = [s["idx"] for s in scored_by_rank[: self.config.billboard_top_k]]
+
+            within_threshold = [s for s in scored if s["depth"] < threshold]
+            if not within_threshold:
+                continue  # nothing close enough to mesh -- billboard-only group
+
+            eligible = [s for s in within_threshold if not s["disqualified"]] or within_threshold
             winner = max(eligible, key=lambda s: s["score"])
-            category_best[obj_class] = (winner["idx"], winner["depth"], winner["score"])
-            for s in scored:
+            group_best[(obj_class, bucket)] = (winner["idx"], winner["depth"], winner["score"])
+            for s in within_threshold:
                 if s["disqualified"]:
                     disqualified_debug.append({
                         "idx": s["idx"],
                         "class": obj_class,
+                        "bucket": bucket,
                         "occlusion": round(s["occlusion"], 3),
                         "chosen_anyway": s["idx"] == winner["idx"],
                     })
 
-        return category_best, skipped_debug, billboard_debug, disqualified_debug
+        return group_best, billboard_pools, skipped_debug, disqualified_debug
 
-    @staticmethod
-    def _mask_fill_ratio(crop) -> float | None:
-        """crop_i.image is already cropped tight to its own bbox, so fill
-        ratio is just alpha-nonzero-px / (crop.width * crop.height) -- a
-        proxy for 'clean single-object segmentation' vs a partial/broken crop."""
-        if crop is None or crop.image.mode != "RGBA":
-            return None
-        alpha = np.asarray(crop.image.getchannel("A"))
-        return float((alpha > 0).sum()) / float(alpha.size) if alpha.size else None
-
-    @staticmethod
-    def _covered_fraction(box_i: list[float], box_j: list[float]) -> float:
-        """Fraction of box_i's area covered by box_j -- containment-style
-        overlap, not symmetric IoU, since an occluder can be much larger or
-        smaller than the thing it's occluding."""
-        ax1, ay1 = box_i[0], box_i[1]
-        ax2, ay2 = box_i[0] + box_i[2], box_i[1] + box_i[3]
-        bx1, by1 = box_j[0], box_j[1]
-        bx2, by2 = box_j[0] + box_j[2], box_j[1] + box_j[3]
-        ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-        ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-        if ix2 <= ix1 or iy2 <= iy1:
-            return 0.0
-        inter = (ix2 - ix1) * (iy2 - iy1)
-        area_i = box_i[2] * box_i[3]
-        return inter / area_i if area_i > 0 else 0.0
-
-    def _occlusion_score(self, idx: int, box, depth: float, depth_by_idx: dict[int, tuple[list, float]]) -> float:
-        """Max covered_fraction among all OTHER instances (any class, any
-        filter status -- an occluder that's itself excluded from asset
-        generation, e.g. a bush, still visually cuts off what's behind it)
-        whose sampled depth is nearer than this candidate's by more than
-        occlusion_depth_margin."""
-        if box is None:
-            return 0.0
-        best = 0.0
-        for j, (jbox, jdepth) in depth_by_idx.items():
-            if j == idx:
-                continue
-            if jdepth < depth * (1.0 - self.config.occlusion_depth_margin):
-                best = max(best, self._covered_fraction(box, jbox))
-        return best
-
-    def _composite_score(self, metadata, crop, depth: float, occlusion: float, threshold: float) -> float:
-        cfg = self.config
-        confidence = metadata.get("confidence", 0.5)
-        fill_ratio = self._mask_fill_ratio(crop)
-        fill_ratio = fill_ratio if fill_ratio is not None else 0.5
-        depth_score = max(0.0, 1.0 - depth / threshold) if threshold else 0.0
-        occlusion_penalty = occlusion if occlusion >= cfg.occlusion_covered_fraction_threshold else 0.0
-        return (
-            cfg.score_weight_confidence * confidence
-            + cfg.score_weight_fill_ratio * fill_ratio
-            + cfg.score_weight_depth * depth_score
-            - cfg.score_weight_occlusion * occlusion_penalty
-        )
-
-    def _write_debug(self, skipped: list, billboards: list, category_best: dict, disqualified: list):
+    def _write_debug(self, skipped: list, group_best: dict, disqualified: list, billboard_pools: dict):
         if self.output is None:
             return
         payload = {
             "billboard_distance_m": self.config.billboard_distance_m,
+            "billboard_top_k": self.config.billboard_top_k,
             "summary": {
                 "skipped_env_or_filtered": len(skipped),
-                "billboard_only": len(billboards),
-                "categories_meshified": len(category_best),
+                "groups_billboard_only": len(billboard_pools) - len(group_best),
+                "groups_meshified": len(group_best),
             },
             "skipped": skipped,
-            "billboard": billboards,
             "occlusion_disqualified": disqualified,
-            "categories": [
-                {"class": cls, "representative_idx": idx, "depth_m": round(depth, 2), "score": round(score, 3)}
-                for cls, (idx, depth, score) in category_best.items()
+            "groups": [
+                {"class": cls, "bucket": bucket, "representative_idx": idx, "depth_m": round(depth, 2), "score": round(score, 3)}
+                for (cls, bucket), (idx, depth, score) in group_best.items()
             ],
+            "billboard_pools": billboard_pools,
         }
         with open(self.output / "asset_debug.json", "w") as f:
             json.dump(payload, f, indent=2)
@@ -319,16 +288,18 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # None differently forced this stage, and everything after it via
             # the dirty cascade, to rerun on every single invocation.
             return True
+        if context.object("billboard_pools") is None:
+            return False
         panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
         panorama = context.input_panorama(ContextKey.PANORAMA)
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
-        category_best, _, _, _ = self._select_representatives(
+        group_best, _, _, _ = self._curate(
             count, context.object, context.image, panorama_depth, pano_w, pano_h,
         )
-        for obj_class in category_best:
-            if context.mesh(f"category_mesh_{obj_class}") is None:
+        for obj_class, bucket in group_best:
+            if context.mesh(f"category_mesh_{obj_class}_{bucket}") is None:
                 return False
         return True
 
@@ -341,7 +312,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         if count is None or count == 0:
             return None
 
-        seen_classes: set[str] = set()
+        seen_groups: set[tuple[str, int]] = set()
         images = []
         total_verts = 0
         total_faces = 0
@@ -349,22 +320,24 @@ class PanoramaAssetGenerationStage(PipelineStage):
         for i in range(count):
             meta = context.object(f"metadata_{i}") or {}
             obj_class = meta.get("class", f"Object {i + 1}")
-            mesh_key = f"category_mesh_{obj_class}"
+            bucket = int(meta.get("bucket") or 0)
+            group = (obj_class, bucket)
+            mesh_key = f"category_mesh_{obj_class}_{bucket}"
             mesh = context.mesh(mesh_key)
             crop = context.image(f"crop_{i}")
 
-            if obj_class not in seen_classes:
-                seen_classes.add(obj_class)
+            if group not in seen_groups:
+                seen_groups.add(group)
                 if mesh is not None:
                     total_verts += mesh.vertex_count
                     total_faces += mesh.face_count
                 if crop is not None and len(images) < 6:
-                    label = obj_class
+                    label = f"{obj_class} #{bucket}" if bucket else obj_class
                     if mesh is not None:
                         label += f" ({mesh.vertex_count:,}v)"
                     images.append((crop.image, label))
 
-        reconstructed = len(seen_classes)
+        reconstructed = len(seen_groups)
         stats = {"Categories reconstructed": str(reconstructed)}
         if reconstructed > 0:
             stats["Total vertices"] = f"{total_verts:,}"
@@ -374,12 +347,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
             stage_name=self.name,
             title="3D Object Reconstruction",
             body=(
-                "One 3D mesh is generated per object category using the closest "
-                f"instance as the representative crop. The {self.config.generator_type.name} "
-                "model reconstructs a textured mesh, which is normalised to a 1 m "
-                "canonical box. At scene placement each instance randomly uses the "
-                "category mesh (with a random rotation) or a billboard drawn from "
-                "the category's crop pool."
+                "One 3D mesh is generated per visual-similarity bucket within each object "
+                "category, using the closest instance in that bucket as the representative "
+                f"crop. The {self.config.generator_type.name} model reconstructs a textured "
+                "mesh, which is normalised to a 1 m canonical box. At scene placement, "
+                "instances closer than the mesh distance threshold use the bucket's mesh "
+                "(with a random rotation); farther instances use a billboard drawn from the "
+                "bucket's curated crop pool."
             ),
             images=images,
             stats=stats,
