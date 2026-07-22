@@ -102,6 +102,9 @@ class ContextKey:
     CLIFF_MASK = "cliff_mask"
     GENERATED_VIDEO = "generated_video"
     OBJECT_VIDEO_COUNT = "object_video_count"
+    OBJECT_MOTION_COUNT = "object_motion_count"
+    CATEGORY_MESH_RIGGING_COUNT = "category_mesh_rigging_count"
+    SCENE_ANIMATION_COUNT = "scene_animation_count"
     Type = Literal[
         "input",
         "depth",
@@ -160,6 +163,9 @@ class ContextKey:
         "cliff_mask",
         "generated_video",
         "object_video_count",
+        "object_motion_count",
+        "category_mesh_rigging_count",
+        "scene_animation_count",
     ]
 
 ContextKeyName: TypeAlias = ContextKey.Type | str

@@ -220,6 +220,24 @@ public class SceneClient : MonoBehaviour
 public class Vec3 { public float x, y, z; }
 
 [Serializable]
+public class SwayData
+{
+    public float amplitude;    // fraction of the object's own footprint, ~[0,1]
+    public float frequencyHz;
+    public float phase;        // radians, randomized per instance server-side
+    public float axisDegrees;  // shared per scene -- the wind's own lean direction
+}
+
+[Serializable]
+public class PhysicsData
+{
+    public Vec3   velocity;      // m/s, world space, applied once at spawn
+    public Vec3   acceleration;  // m/s^2, applied once at spawn as a single kick
+    public string colliderShape; // "box" | "capsule"
+    public Vec3   colliderSize;  // box: full extents; capsule: (width, height, depth) -- see PhysicsHandoff
+}
+
+[Serializable]
 public class SceneObject
 {
     public string id;
@@ -230,6 +248,17 @@ public class SceneObject
     public Vec3   position;
     public Vec3   rotation;
     public Vec3   scale;
+
+    // Animated billboard: an object's extracted clip, split into a color video and
+    // a grayscale matte (see server VideoObjectExtractionStage) -- set together or
+    // not at all. Empty/null -> render `texture` as a static billboard as before.
+    public string videoColor;
+    public string videoAlpha;
+
+    // Gentle procedural sway (stationary mesh instances only) or rigid-body physics
+    // handoff (moving objects, billboard or mesh) -- at most one of these is set.
+    public SwayData    sway;
+    public PhysicsData physics;
 }
 
 [Serializable]

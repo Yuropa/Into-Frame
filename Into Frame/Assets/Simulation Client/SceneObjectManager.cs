@@ -212,27 +212,46 @@ public class SceneObjectManager : MonoBehaviour
 
         var go = Instantiate(billboardPrefab);
         go.name = $"[billboard] {data.id[..6]}";
+
+        GameObject root = go;
+        if (data.physics != null)
+        {
+            // A physics-driven billboard tumbles with its own Rigidbody instead of
+            // always facing camera (see Billboard.cs) -- the visible quad becomes a
+            // child at identity local transform so it inherits that rotation, while
+            // this wrapper carries the actual position/rotation/collider/Rigidbody.
+            root = new GameObject($"[billboard-physics] {data.id[..6]}");
+            go.transform.SetParent(root.transform, worldPositionStays: false);
+            go.transform.localPosition = Vector3.zero;
+            go.transform.localRotation = Quaternion.identity;
+        }
+
         // Positions from the server are relative to sceneRoot (which the client may
         // shift vertically to place the whole scene) — parent first, worldPositionStays:
         // false, then set local transform directly so we don't depend on sceneRoot's
         // current offset at spawn time.
         if (sceneRoot != null)
-            go.transform.SetParent(sceneRoot.transform, worldPositionStays: false);
-        go.transform.localPosition = ToVec3(data.position);
-        go.transform.localRotation = ToQuat(data.rotation);
-        go.transform.localScale    = ToVec3(data.scale);
-        go.AddComponent<ServerObjectTag>().serverId = data.id;
+            root.transform.SetParent(sceneRoot.transform, worldPositionStays: false);
+        root.transform.localPosition = ToVec3(data.position);
+        root.transform.localRotation = ToQuat(data.rotation);
+        go.transform.localScale      = ToVec3(data.scale);
+        root.AddComponent<ServerObjectTag>().serverId = data.id;
 
         _tracked[data.id] = new TrackedObject
         {
-            go        = go,
+            go        = root,
             data      = data,
             targetPos = ToVec3(data.position),
             targetRot = ToQuat(data.rotation),
         };
 
-        if (!string.IsNullOrEmpty(data.texture))
+        if (!string.IsNullOrEmpty(data.videoColor) && !string.IsNullOrEmpty(data.videoAlpha))
+            go.AddComponent<AnimatedBillboardVideo>().Play(assetServer().assetBaseUrl, data.videoColor, data.videoAlpha);
+        else if (!string.IsNullOrEmpty(data.texture))
             StartCoroutine(ApplyTexture(go, data.texture));
+
+        if (data.physics != null)
+            root.AddComponent<PhysicsHandoff>().Apply(data.physics);
     }
 
     private void SpawnMeshImmediate(SceneObject data)
@@ -261,6 +280,12 @@ public class SceneObjectManager : MonoBehaviour
         var capturedMesh = data.mesh;
         var capturedGeneration = _queueGeneration;
         EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
+
+        if (data.sway != null)
+            container.AddComponent<WindSway>().Apply(data.sway);
+
+        if (data.physics != null)
+            container.AddComponent<PhysicsHandoff>().Apply(data.physics);
     }
 
     private IEnumerator ReloadMesh(TrackedObject tracked, string meshId)

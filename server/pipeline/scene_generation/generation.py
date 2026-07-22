@@ -249,6 +249,7 @@ class SceneGenerationStage(PipelineStage):
                     mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(mesh_scale, mesh_scale, mesh_scale)
                     mesh_obj.name = mesh_key
+                    mesh_obj.source_index = idx
                     scene.add_object(mesh_obj)
                 else:
                     # Pick a random billboard crop from this category's pool. Synthetic
@@ -270,6 +271,7 @@ class SceneGenerationStage(PipelineStage):
                         z=position[2],
                     )
                     billboard.name = f"billboard_{idx}"
+                    billboard.source_index = idx
                     scene.add_object(billboard)
                 self.advance_progress(generation_task)
 

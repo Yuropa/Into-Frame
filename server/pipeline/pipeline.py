@@ -56,6 +56,9 @@ from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, 
 from pipeline.terrain.terrain_noise_refinement import TerrainNoiseRefinementStage
 from pipeline.tree_generation.tree_generation import TreeMeshGenerationStage
 from pipeline.video_generation.video_generation import VideoGenerationStage
+from pipeline.motion_classification.motion_classification import ObjectMotionClassificationStage
+from pipeline.motion_classification.category_mesh_rigging import CategoryMeshRiggingStage
+from pipeline.motion_classification.scene_animation import SceneAnimationStage
 from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
 from pipeline.report.report import ReportGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
@@ -353,6 +356,9 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "TreeMeshGenerationStage": TreeMeshGenerationStage,
     "VideoGenerationStage": VideoGenerationStage,
     "VideoObjectExtractionStage": VideoObjectExtractionStage,
+    "ObjectMotionClassificationStage": ObjectMotionClassificationStage,
+    "CategoryMeshRiggingStage": CategoryMeshRiggingStage,
+    "SceneAnimationStage": SceneAnimationStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
     "ReportGenerationStage": ReportGenerationStage,
 }

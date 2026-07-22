@@ -23,6 +23,13 @@ class Mesh:
         # docstring for why the embedded material can need this even when
         # extra_uv's live consumer (Unity) never looks at it.
         self.preview_image: "PILImage.Image | None" = None
+        # Optional vertical bone chain (world/mesh-local Y heights, base-to-tip)
+        # for a gentle procedural sway animation -- see util.gltf_skin.inject_skin's
+        # own docstring for the glTF skin (joints/weights/inverseBindMatrices) this
+        # injects into the GLB at save() time. None (the default) exports a plain
+        # unskinned mesh, same as today.
+        self.skin_bone_heights: "list[float] | None" = None
+        self.skin_bone_names: "list[str] | None" = None
 
     @property
     def vertex_count(self) -> int:
@@ -140,6 +147,9 @@ class Mesh:
         if self.extra_uv is not None and str(path).lower().endswith(".glb"):
             from util.gltf_uv2 import inject_texcoord1
             inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image)
+        if self.skin_bone_heights is not None and str(path).lower().endswith(".glb"):
+            from util.gltf_skin import inject_skin
+            inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
 
     @classmethod
     def load(cls, path) -> Self:

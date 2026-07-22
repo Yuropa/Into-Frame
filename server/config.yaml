@@ -661,6 +661,25 @@ stages:
     keys:
       input: panorama
 
+  - name: Object Motion Classification
+    stage: ObjectMotionClassificationStage
+    # Classifies each object_video_{i} as stationary (gentle in-place motion -- wind,
+    # ripples) or moving (a rigid body translating through frame), from its own 2D
+    # centroid trajectory. No-ops per object when Video Generation/Extraction above
+    # produced nothing for it.
+
+  - name: Category Mesh Rigging
+    stage: CategoryMeshRiggingStage
+    # Bakes a 3-bone sway skeleton into each shared category_mesh_{cls} (Panorama
+    # Asset Generation) that has at least one stationary instance, for Scene
+    # Animation's per-instance sway params to drive at runtime.
+
+  - name: Scene Animation
+    stage: SceneAnimationStage
+    # Final pass: annotates Scene Generation's already-placed objects with animated-
+    # billboard video, sway parameters, or rigid-body physics handoff, based on the
+    # classification above. Purely additive -- placement itself is unchanged.
+
   - name: Report
     stage: ReportGenerationStage
     enabled: false

@@ -53,7 +53,21 @@ class VideoObjectExtractionStage(PipelineStage):
     Output key     (SemanticKey.OUTPUT)        -> ContextKey.OBJECT_VIDEO_COUNT (int)
 
     Reads:  crop_{i} (Image, RGBA masked crop), metadata_{i} ({"box": [x, y, w, h], ...})
-    Writes: object_video_{i} (Video) for every object whose mask survives tracking
+    Writes: object_video_{i} (Video) for every object whose mask survives tracking —
+              color frames, background blacked out, for use as an animated billboard.
+            object_video_alpha_{i} (Video) — a matching grayscale matte video (mask
+              value repeated across RGB), so a billboard shader can composite
+              transparency without keying on black (which clips dark object pixels
+              and bleeds at compressed edges).
+            object_motion_{i} (object) — {"fps", "width", "height", "centroids":
+              [[x,y], ...], "bboxes": [[x,y,w,h], ...]} per-frame stats in
+              video-pixel space (width/height are that space's frame size, needed
+              to unproject centroids with the same depth/intrinsics utilities
+              SceneGenerationStage uses), derived from the same per-frame masks
+              used to write the videos above.
+              A zero bbox/centroid marks a frame where the object's mask was empty
+              (occluded/off-screen) — downstream consumers should skip those frames
+              rather than treat them as a real position sample.
 
     Config: reference_frame_idx — video frame that lines up with the reference image's
       masks (default 0, matching VideoGenerationStage's frame-0 conditioning).
@@ -136,20 +150,49 @@ class VideoObjectExtractionStage(PipelineStage):
             frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
         return frames, fps
 
-    def _write_masked_video(self, path: Path, frames: list[np.ndarray], masks: np.ndarray, fps: float):
-        height, width = frames[0].shape[:2]
+    def _encode_h264(self, path: Path, width: int, height: int, fps: float, rgb_frames):
         with av.open(str(path), mode="w") as out_container:
             stream = out_container.add_stream("h264", rate=max(1, round(fps)))
             stream.width = width
             stream.height = height
             stream.pix_fmt = "yuv420p"
-            for frame, mask in zip(frames, masks):
-                masked = (frame * mask[..., None]).astype(np.uint8)
-                video_frame = av.VideoFrame.from_ndarray(masked, format="rgb24")
+            for frame in rgb_frames:
+                video_frame = av.VideoFrame.from_ndarray(frame, format="rgb24")
                 for packet in stream.encode(video_frame):
                     out_container.mux(packet)
             for packet in stream.encode():
                 out_container.mux(packet)
+
+    def _write_masked_video(self, path: Path, frames: list[np.ndarray], masks: np.ndarray, fps: float):
+        height, width = frames[0].shape[:2]
+        rgb_frames = ((frame * mask[..., None]).astype(np.uint8) for frame, mask in zip(frames, masks))
+        self._encode_h264(path, width, height, fps, rgb_frames)
+
+    def _write_alpha_video(self, path: Path, masks: np.ndarray, fps: float):
+        """Grayscale matte video (mask value repeated across RGB) matching a
+        _write_masked_video color video frame-for-frame — see class docstring's
+        object_video_alpha_{i} entry for why a separate matte beats black-keying."""
+        height, width = masks[0].shape
+        rgb_frames = (np.repeat((mask.astype(np.uint8) * 255)[..., None], 3, axis=2) for mask in masks)
+        self._encode_h264(path, width, height, fps, rgb_frames)
+
+    def _frame_stats(self, masks: np.ndarray) -> dict:
+        """Per-frame centroid + tight bbox (video-pixel space) from each frame's mask.
+        A frame with an empty mask gets an all-zero entry -- callers must treat
+        that as "no sample" rather than a real position at the origin."""
+        centroids: list[list[float]] = []
+        bboxes: list[list[float]] = []
+        for mask in masks:
+            ys, xs = np.nonzero(mask)
+            if len(xs) == 0:
+                centroids.append([0.0, 0.0])
+                bboxes.append([0.0, 0.0, 0.0, 0.0])
+                continue
+            x0, x1 = float(xs.min()), float(xs.max())
+            y0, y1 = float(ys.min()), float(ys.max())
+            centroids.append([float(xs.mean()), float(ys.mean())])
+            bboxes.append([x0, y0, x1 - x0, y1 - y0])
+        return {"centroids": centroids, "bboxes": bboxes}
 
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, video_key, count_key, output_key = self._resolved_keys()
@@ -178,9 +221,12 @@ class VideoObjectExtractionStage(PipelineStage):
         extraction_task = self.create_progress(object_count, "Extracting per-object videos…")
         for idx in range(object_count):
             out_key = f"object_video_{idx}"
+            alpha_key = f"object_video_alpha_{idx}"
+            motion_key = f"object_motion_{idx}"
 
-            cached = context.video(out_key)
-            if cached is not None:
+            if (context.video(out_key) is not None
+                    and context.video(alpha_key) is not None
+                    and context.object(motion_key) is not None):
                 self.log_info(f"  {out_key}: cached")
                 extracted += 1
                 self.advance_progress(extraction_task)
@@ -204,10 +250,23 @@ class VideoObjectExtractionStage(PipelineStage):
             )
 
             num_frames = min(len(frames), result.num_frames)
-            out_path = (temp_path or self.temp) / "object.mp4"
-            self._write_masked_video(out_path, frames[:num_frames], result.masks[:num_frames], fps)
+            frame_masks = result.masks[:num_frames]
 
+            out_path = (temp_path or self.temp) / "object.mp4"
+            self._write_masked_video(out_path, frames[:num_frames], frame_masks, fps)
             context.add_video(out_key, Video(out_path, fps=fps, num_frames=num_frames))
+
+            alpha_path = (temp_path or self.temp) / "object_alpha.mp4"
+            self._write_alpha_video(alpha_path, frame_masks, fps)
+            context.add_video(alpha_key, Video(alpha_path, fps=fps, num_frames=num_frames))
+
+            context.add_object(motion_key, {
+                "fps": fps,
+                "width": video_w,
+                "height": video_h,
+                **self._frame_stats(frame_masks),
+            })
+
             self.log_info(f"  {out_key}: {num_frames} frames @ {fps:.1f}fps")
             extracted += 1
             self.advance_progress(extraction_task)
