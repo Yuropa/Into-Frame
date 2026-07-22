@@ -319,8 +319,13 @@ def handle_run(args):
                 )
                 if config.debug_archive:
                     progress.update(task, description="Writing debug archive…")
+                    contexts = [
+                        (item, item_context_dir)
+                        for item, item_context_dir in runner.processed
+                        if item_context_dir and item_context_dir.exists()
+                    ]
                     debug_archive = create_debug_frame_archive(
-                        context_dir=context_dir,
+                        contexts=contexts,
                         input_path=Path(args.input),
                         output_dir=Path(args.output),
                         stage_order=stage_order,

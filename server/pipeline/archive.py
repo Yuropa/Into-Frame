@@ -5,9 +5,11 @@ import tarfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Sequence
 
 from PIL import Image as PILImage
 from pipeline.pipeline_context import PipelineContext
+from pipeline.pipeline_input import PipelineInputItem
 
 EXTENSION = ".frame"
 DEBUG_EXTENSION = ".debug.frame"
@@ -91,12 +93,13 @@ def create_frame_archive(
 
 
 def create_debug_frame_archive(
-    context_dir: Path,
+    contexts: Sequence[tuple[PipelineInputItem, Path]],
     input_path: Path,
     output_dir: Path,
     stage_order: list[str],
 ) -> Path:
-    """Package a pipeline context directory including build/ debug files into a .debug.frame archive."""
+    """Package every processed sample's context directory (including build/ debug files)
+    into a single .debug.frame archive, nested as context/<sample-uuid>/... per sample."""
     stem = Path(input_path).stem
     archive_path = output_dir / f"{stem}{DEBUG_EXTENSION}"
 
@@ -105,6 +108,10 @@ def create_debug_frame_archive(
         "created_at": datetime.now(timezone.utc).isoformat(),
         "stages": stage_order,
         "debug": True,
+        "samples": [
+            {"uuid": item.uuid_string(), "source_path": str(item.source_path)}
+            for item, _ in contexts
+        ],
     }
     manifest_bytes = json.dumps(manifest, indent=2).encode()
 
@@ -112,7 +119,8 @@ def create_debug_frame_archive(
         info = tarfile.TarInfo(name="manifest.json")
         info.size = len(manifest_bytes)
         tar.addfile(info, io.BytesIO(manifest_bytes))
-        _add_dir(tar, context_dir, arcname="context", filter_fn=lambda t: t)
+        for item, context_dir in contexts:
+            _add_dir(tar, context_dir, arcname=f"context/{item.uuid_string()}", filter_fn=lambda t: t)
 
     return archive_path
 
