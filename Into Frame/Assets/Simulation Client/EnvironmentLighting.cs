@@ -20,9 +20,17 @@ public class EnvironmentLighting : MonoBehaviour
 
     public void Apply(SceneLightingData data)
     {
-        if (data == null || string.IsNullOrEmpty(data.ldr)) return;
-        if (gameObject.activeInHierarchy)
-            StartCoroutine(ApplyCoroutine(data));
+        if (data == null || string.IsNullOrEmpty(data.ldr))
+        {
+            Debug.LogWarning("[EnvironmentLighting] No lighting data from server (data null or ldr empty) — ambient probe left at its current/baked value");
+            return;
+        }
+        if (!gameObject.activeInHierarchy)
+        {
+            Debug.LogWarning("[EnvironmentLighting] GameObject inactive — skipping ambient probe update");
+            return;
+        }
+        StartCoroutine(ApplyCoroutine(data));
     }
 
     private IEnumerator ApplyCoroutine(SceneLightingData data)
