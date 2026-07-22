@@ -232,7 +232,15 @@ class SceneGenerationStage(PipelineStage):
                     # the terrain. Sample the mesh's actual lowest vertex (bounds[0][1])
                     # and offset by exactly that, so the true bottom -- not an assumed one
                     # -- lands on terrain_y.
-                    mesh_scale = float(min(width, height))
+                    # max(), not min(): fit_to_box(1.0, 1.0) preserved the mesh's own
+                    # aspect ratio, so a single uniform scalar can only match one of the
+                    # two estimated real-world dimensions exactly. Using the smaller one
+                    # (e.g. a person's width) left every taller-than-wide object -- people,
+                    # trees, poles, lampposts -- scaled down to a fraction of their real
+                    # height instead. Using the larger one can let the mesh's other axis
+                    # overflow its detected footprint slightly, which reads far better than
+                    # an undersized object.
+                    mesh_scale = float(max(width, height))
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
                     mesh_key = f"category_mesh_{cls}"
