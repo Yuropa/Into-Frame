@@ -376,10 +376,11 @@ stages:
     road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
     noise_scale: 80.0             # fBm base wavelength in pixels
     noise_octaves: 4              # fractal octave count
-    noise_amplitude: 0.6          # metres of peak noise displacement (raised from 0.2 -- real geometry
-                                   # only exists in a tiny, ~1 m-relief sliver right around the camera;
-                                   # everything beyond it is the harmonic solve's smoothest-possible
-                                   # fill, which reads as visibly flat with no texture on top of it)
+    noise_amplitude: 0.2          # metres of peak noise displacement. Was briefly raised to 0.6 to
+                                   # texture the harmonic solve's smooth fill farther from the camera,
+                                   # but combined with the low certainty of the synthetic nadir prior
+                                   # right at the grid center, that read as spiky noise directly under
+                                   # the camera -- reverted back to the original value.
     linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
     diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
                                    # Raised from 200 (≈0.9 m) — that was only rounding multi-cell
@@ -424,13 +425,15 @@ stages:
     outer_min_dist: 2.0     # metres between samples at the domain corners
     n_boundary: 64          # anchor points per edge of the domain rectangle
     z_far: null
-    noise_amplitude: 0.15   # metres of peak noise displacement (raised from 0.05, alongside Terrain
-                             # Noise Refinement's own increase -- same "ground is too flat" reasoning)
-    noise_blend_floor: 0.15 # minimum noise blend fraction at the camera origin (was 0, which left
-                             # the ground directly under the user perfectly noise-free); ramps up
-                             # to 1.0 at the domain corner as before. Only applies where
-                             # HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on real
-                             # point-cloud geometry get zero added noise regardless of distance.
+    noise_amplitude: 0.05   # metres of peak noise displacement. Was briefly raised to 0.15 alongside
+                             # Terrain Noise Refinement's own increase, but reverted for the same
+                             # reason -- see that stage's noise_amplitude comment.
+    noise_blend_floor: 0    # minimum noise blend fraction at the camera origin. Was briefly raised
+                             # to 0.15 to avoid a perfectly noise-free spot directly under the user,
+                             # but that landed as visible spikiness right at the grid center instead
+                             # -- reverted to 0. Ramps up to 1.0 at the domain corner as before. Only
+                             # applies where HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on
+                             # real point-cloud geometry get zero added noise regardless of distance.
     water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
                              # WATER cells), so an eventually-animated water plane's wave amplitude
                              # never exposes the terrain underneath it. Also emits a separate flat
