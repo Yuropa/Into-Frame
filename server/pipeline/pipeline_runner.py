@@ -1,15 +1,19 @@
 import queue
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional, Tuple
 from pipeline.pipeline import Pipeline, PipelineContext
 from pipeline.pipeline_input import PipelineInputItem, PipelineInput
 
 class PipelineRunner:
     def __init__(self, pipeline: Pipeline):
         self.pipeline = pipeline
+        # (item, context_dir) for every sample processed by the most recent run() call.
+        self.processed: List[Tuple[PipelineInputItem, Optional[Path]]] = []
 
     def run(self, input: PipelineInput, progress_queue: Optional[queue.SimpleQueue] = None) -> Optional[PipelineContext]:
         total = input.count()
         last_context = None
+        self.processed = []
 
         for i, item in enumerate(input.all_images()):
             if progress_queue is not None:
@@ -29,5 +33,7 @@ class PipelineRunner:
                 forward_progress()
             else:
                 last_context = self.pipeline.run(item, None)
+
+            self.processed.append((item, self.pipeline.context_path()))
 
         return last_context
