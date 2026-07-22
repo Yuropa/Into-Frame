@@ -4,6 +4,7 @@ from typing import Any
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import VEGETATION_CATEGORIES
+from scene.object import ObjectType
 
 _BONE_NAMES = ["SwayBone_0", "SwayBone_1", "SwayBone_2"]
 
@@ -27,24 +28,35 @@ class CategoryMeshRiggingConfiguration(PipelineStageConfiguration):
 
 class CategoryMeshRiggingStage(PipelineStage):
     """
-    Bakes a 3-bone vertical sway skeleton into each shared category mesh
-    (PanoramaAssetGenerationStage's category_mesh_{cls}) that has at least one
-    stationary placed instance -- once per category, since every instance of
-    that category renders the same shared mesh asset. Per-instance sway timing
-    (amplitude/frequency/phase) is attached separately, to each instance's own
-    Object3D, by SceneAnimationStage; this stage only bakes the shared geometry's
-    skin (joints/weights/inverseBindMatrices), not any animation values.
+    Bakes a 3-bone vertical sway skeleton into each shared bucket mesh
+    (PanoramaAssetGenerationStage's category_mesh_{class}_{bucket}, one visual-
+    similarity variant within a class -- see ObjectCategoryClusteringStage) that
+    has at least one stationary placed instance rendering it as a mesh -- once per
+    mesh asset, since every instance sharing that bucket renders the same GLB.
+    Per-instance sway timing (amplitude/frequency/phase) is attached separately, to
+    each instance's own Object3D, by SceneAnimationStage; this stage only bakes the
+    shared geometry's skin (joints/weights/inverseBindMatrices), not any animation
+    values.
+
+    Reads the already-built Scene rather than re-deriving which (class, bucket)
+    groups exist and re-guessing their mesh key -- Object3D.mesh already names
+    exactly the asset a MESH-type placement uses, however that key is built
+    upstream, and Object3D.source_index already says which detection it is. This
+    also naturally skips a bucket that clustering/LOD decided to render as a
+    billboard everywhere in this scene (its mesh, if one even exists, never shows
+    up as any placed Object3D.mesh here, so nothing rigs it).
 
     See util.gltf_skin.inject_skin for the actual GLB skin injection -- it runs
     lazily, inside Mesh.save(), whenever Mesh.skin_bone_heights is set (mirroring
     how Mesh.extra_uv/inject_texcoord1 already works), not here directly: the
-    GLB file for a category mesh doesn't get exported until something actually
-    asks to serve or cache that asset, long after this stage returns.
+    GLB file for a mesh asset doesn't get exported until something actually asks
+    to serve or cache it, long after this stage returns.
 
-    Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (needs "class" and, from
-            ObjectMotionClassificationStage, "stationary"), category_mesh_{cls}
-    Writes: category_mesh_{cls} (Mesh, with skin_bone_heights/skin_bone_names set)
-            for every qualifying category
+    Reads:  ContextKey.SCENE (to find which mesh assets are actually placed and by
+            which detection), metadata_{i} (needs "class" and, from
+            ObjectMotionClassificationStage, "stationary")
+    Writes: <mesh asset> (Mesh, with skin_bone_heights/skin_bone_names set) for
+            every qualifying mesh asset
     Output key (SemanticKey.OUTPUT) -> ContextKey.CATEGORY_MESH_RIGGING_COUNT (int)
     """
 
@@ -53,27 +65,27 @@ class CategoryMeshRiggingStage(PipelineStage):
         return CategoryMeshRiggingConfiguration
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        object_count = context.input_object(ContextKey.OBJECT_COUNT)
-        if not object_count:
-            self.log_info("No objects, skipping")
+        scene = context.input_scene(ContextKey.SCENE)
+        if scene is None or not scene.objects:
+            self.log_info("No scene, skipping")
             return context
 
-        categories_to_rig: set[str] = set()
-        for idx in range(object_count):
-            metadata = context.input_object(f"metadata_{idx}") or {}
-            cls = metadata.get("class")
-            if cls in self.config.rig_categories and metadata.get("stationary"):
-                categories_to_rig.add(cls)
+        mesh_keys_to_rig: set[str] = set()
+        for obj in scene.objects:
+            if obj.type != ObjectType.MESH or obj.source_index is None:
+                continue
+            metadata = context.input_object(f"metadata_{obj.source_index}") or {}
+            if metadata.get("class") in self.config.rig_categories and metadata.get("stationary"):
+                mesh_keys_to_rig.add(obj.mesh)
 
-        if not categories_to_rig:
+        if not mesh_keys_to_rig:
             self.log_info("No stationary vegetation instances to rig")
             context.add_object(ContextKey.CATEGORY_MESH_RIGGING_COUNT, 0)
             return context
 
         rigged = 0
-        task = self.create_progress(len(categories_to_rig), "Rigging category meshes…")
-        for cls in sorted(categories_to_rig):
-            mesh_key = f"category_mesh_{cls}"
+        task = self.create_progress(len(mesh_keys_to_rig), "Rigging category meshes…")
+        for mesh_key in sorted(mesh_keys_to_rig):
             mesh = context.input_mesh(mesh_key)
             if mesh is None:
                 self.advance_progress(task)
@@ -110,11 +122,11 @@ class CategoryMeshRiggingStage(PipelineStage):
             stage_name=self.name,
             title="Category Mesh Rigging",
             body=(
-                "Shared category meshes with at least one stationary placed instance "
+                "Shared bucket meshes with at least one stationary placed instance "
                 "got a 3-bone vertical sway skeleton baked into their GLB, driven "
                 "procedurally at runtime rather than a baked animation clip -- the "
-                "same mesh asset is reused by every instance of that category, each "
+                "same mesh asset is reused by every instance of that bucket, each "
                 "with its own sway timing."
             ),
-            stats={"Category meshes rigged": str(count)},
+            stats={"Meshes rigged": str(count)},
         )

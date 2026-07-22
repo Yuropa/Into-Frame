@@ -52,7 +52,18 @@ class VideoObjectExtractionStage(PipelineStage):
     Object count   (SemanticKey.OBJECT_COUNT)  -> ContextKey.OBJECT_COUNT     (int)
     Output key     (SemanticKey.OUTPUT)        -> ContextKey.OBJECT_VIDEO_COUNT (int)
 
-    Reads:  crop_{i} (Image, RGBA masked crop), metadata_{i} ({"box": [x, y, w, h], ...})
+    Scene generation already ran by this point (see config.yaml stage order) and
+    decides -- per category/bucket curation, LOD distance, size limits, etc. -- which
+    detections actually become a placed Object3D; everything else (environment/
+    indeterminate classes, filtered categories, oversized/unprojectable detections,
+    a synthetic distribution point with no crop of its own) never appears in the
+    scene at all. Extraction only tracks/encodes objects whose index shows up as
+    some Object3D.source_index in ContextKey.SCENE, since SAM2 video tracking is by
+    far the most expensive step here and there's no point paying it for a detection
+    nothing will ever render.
+
+    Reads:  ContextKey.SCENE (Scene, to know which detections were actually placed),
+            crop_{i} (Image, RGBA masked crop), metadata_{i} ({"box": [x, y, w, h], ...})
     Writes: object_video_{i} (Video) for every object whose mask survives tracking —
               color frames, background blacked out, for use as an animated billboard.
             object_video_alpha_{i} (Video) — a matching grayscale matte video (mask
@@ -205,6 +216,15 @@ class VideoObjectExtractionStage(PipelineStage):
             self.log_info("No video or no detected objects, skipping")
             return context
 
+        scene = context.input_scene(ContextKey.SCENE)
+        if scene is None:
+            self.log_info("No scene yet, skipping (nothing placed = nothing valid to extract)")
+            return context
+        placed_indices = {obj.source_index for obj in scene.objects if obj.source_index is not None}
+        if not placed_indices:
+            self.log_info("Scene has no detections placed, skipping")
+            return context
+
         frames, fps = self._read_frames(video.path)
         if not frames:
             self.log_info(f"  {video_key}: no decodable frames, skipping")
@@ -220,6 +240,10 @@ class VideoObjectExtractionStage(PipelineStage):
         extracted = 0
         extraction_task = self.create_progress(object_count, "Extracting per-object videos…")
         for idx in range(object_count):
+            if idx not in placed_indices:
+                self.advance_progress(extraction_task)
+                continue
+
             out_key = f"object_video_{idx}"
             alpha_key = f"object_video_alpha_{idx}"
             motion_key = f"object_motion_{idx}"

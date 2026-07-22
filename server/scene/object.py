@@ -26,7 +26,7 @@ class Object3D():
         # Exists so a later pass (SceneAnimationStage) can look up that detection's
         # own object_motion_{idx}/metadata_{idx} even when several instances share
         # one rendered mesh asset (see PanoramaAssetGenerationStage's
-        # category_mesh_{cls}). Not used by the Unity client, but still encoded --
+        # category_mesh_{class}_{bucket}). Not used by the Unity client, but still encoded --
         # a cached/resumed run reloads Scene Generation's output from its persisted
         # JSON (Object3D.decode()) rather than keeping the live Python objects
         # around, so this has to round-trip through JSON or a resumed run would
