@@ -50,6 +50,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         solve_resolution: int = 512,
         ridge_min_anchor_distance: float = 0.5,
         ridge_max_slope_angle_deg: float = 38.0,
+        ridge_override_min_distance_m: float = 30.0,
+        ridge_override_feather_m: float = 15.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         lake_y_range_threshold: float = 0.3,
@@ -82,6 +84,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.solve_resolution = solve_resolution
         self.ridge_min_anchor_distance = ridge_min_anchor_distance
         self.ridge_max_slope_angle_deg = ridge_max_slope_angle_deg
+        self.ridge_override_min_distance_m = ridge_override_min_distance_m
+        self.ridge_override_feather_m = ridge_override_feather_m
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.lake_y_range_threshold = lake_y_range_threshold
@@ -217,6 +221,13 @@ class TerrainReconstructionStage(PipelineStage):
             row = np.clip((xyz[:, 2] + z_half) / grid_size * (H_s - 1), 0, H_s - 1)
             return row.round().astype(np.int32), col.round().astype(np.int32)
 
+        # Per-cell horizontal distance from the camera (grid origin), used to keep
+        # the ridge override below from reaching into near-camera real geometry --
+        # see "Ridge override of observed data".
+        _grid_x = np.linspace(-x_half, x_half, W_s)
+        _grid_z = np.linspace(-z_half, z_half, H_s)
+        camera_dist_m = np.hypot(_grid_x[None, :], _grid_z[:, None])
+
         # ── Ridge anchors: distant mountain chains ────────────────────────────
         # Foreground chains (close to camera) are already captured by the high-
         # confidence observed terrain; anchoring them would conflict with the
@@ -321,17 +332,47 @@ class TerrainReconstructionStage(PipelineStage):
         # envelope -- not the cliff-shelf mechanism below, which targets
         # near-camera measured cliffs and should keep protecting observed data --
         # gets this authority to override real depth samples.
+        #
+        # Gated on ridge_override_min_distance_m: the linear talus cone from a
+        # tall/close ridge anchor is still large at short range (e.g. a crest
+        # anchored right at the lowered ridge_min_anchor_distance and multiple
+        # competing ridge directions around a 360° panorama can together push the
+        # envelope well above real ground for tens of metres around the camera),
+        # so without a floor here the override reaches in and overwrites good
+        # near-camera measured terrain -- surfacing as unrealistic elevation
+        # spikes and mismatched crossing seams close to the user. The override is
+        # only meant to correct far terrain depth estimation is weak on, so cells
+        # nearer than this stay on real observed data no matter what the envelope
+        # implies.
+        #
+        # ridge_override_feather_m ramps the override in linearly over the band
+        # [ridge_override_min_distance_m, +feather] instead of switching it on at
+        # full strength right at the distance floor -- a hard on/off still leaves
+        # a visible step where real ground jumps straight to the envelope's
+        # value at that one radius. Cells at/beyond min_distance + feather get
+        # the full override, same as before; cells inside min_distance never do.
         ridge_profile_only = profile_best.copy()
         observed_override = (
             observed_fixed_mask_s
             & (ridge_profile_only > fixed_elev + 0.1)
             & np.isfinite(ridge_profile_only)
+            & (camera_dist_m >= cfg.ridge_override_min_distance_m)
         )
         if observed_override.any():
-            fixed_elev[observed_override] = ridge_profile_only[observed_override]
+            feather_m = max(cfg.ridge_override_feather_m, 1e-6)
+            blend_weight = np.clip(
+                (camera_dist_m - cfg.ridge_override_min_distance_m) / feather_m, 0.0, 1.0
+            )
+            w = blend_weight[observed_override]
+            fixed_elev[observed_override] = (
+                fixed_elev[observed_override] * (1.0 - w) + ridge_profile_only[observed_override] * w
+            )
         self.log_info(
             f"Ridge override: {int(observed_override.sum())} observed node(s) "
-            f"overwritten by mountain ridge envelope (trusted over raw depth)"
+            f"blended toward the mountain ridge envelope over "
+            f"{cfg.ridge_override_min_distance_m:.0f}–"
+            f"{cfg.ridge_override_min_distance_m + cfg.ridge_override_feather_m:.0f} m "
+            f"(trusted over raw depth beyond that)"
         )
 
         # ── Cliff-top shelf ────────────────────────────────────────────────────

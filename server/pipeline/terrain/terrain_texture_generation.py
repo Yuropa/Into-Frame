@@ -397,6 +397,10 @@ class TerrainTextureGenerationStage(PipelineStage):
       ContextKey.PANORAMA_DEPTH          — panorama-aligned depth, used to flatten each
                                             reference crop from its own real 3D points
                                             (optional; falls back to perspective_crop only)
+      ContextKey.PANORAMA_FOREGROUND_MASK — ObjectClear's dilated foreground-removal mask;
+                                            excluded from reference-crop candidates so fabricated
+                                            fill in PANORAMA_TERRAIN is never picked as a "real"
+                                            texture source (optional)
       ContextKey.HEIGHT_MAP              — for the panorama blend layer's visibility ramp (optional)
       ContextKey.INPUT_CAPTION           — scene caption for prompt context (optional)
 
@@ -506,12 +510,13 @@ class TerrainTextureGenerationStage(PipelineStage):
             for idx, rt in enumerate(present_types):
                 pattern_layer = None
                 if pattern_ctx is not None and reference is not None:
-                    panorama, type_map, depth_arr = reference
+                    panorama, type_map, depth_arr, exclude_mask = reference
                     ref_patches = self._extract_reference_patches(
                         panorama, type_map, int(rt),
                         patch_size=cfg.pattern_reference_patch_size,
                         num_patches=cfg.pattern_num_reference_patches,
                         depth=depth_arr if cfg.use_point_cloud_unwarp else None,
+                        exclude_mask=exclude_mask,
                     )
                     if ref_patches:
                         pattern_layer = self._synthesize_pattern_layer(
@@ -531,13 +536,14 @@ class TerrainTextureGenerationStage(PipelineStage):
                 # FLUX generation path, unchanged.
                 prompt = self._build_prompt(rt, caption)
                 if reference is not None:
-                    panorama, type_map, depth_arr = reference
+                    panorama, type_map, depth_arr, exclude_mask = reference
                     tiles[rt.label] = self._generate_tileable_tile_high_fidelity(
                         prompt, cfg, seed_offset=idx,
                         panorama=panorama,
                         type_map=type_map,
                         region_val=int(rt),
                         depth=depth_arr if cfg.use_point_cloud_unwarp else None,
+                        exclude_mask=exclude_mask,
                         debug_label=rt.label,
                     )
                 else:
@@ -894,14 +900,29 @@ class TerrainTextureGenerationStage(PipelineStage):
         self,
         context: PipelineContext,
         cfg: "TerrainTextureGenerationConfiguration",
-    ) -> Optional[tuple[Panorama, np.ndarray, Optional[np.ndarray]]]:
+    ) -> Optional[tuple[Panorama, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]]:
         """
         Fetch the real photo, its panorama-space region typing, and its
         aligned depth, for use as a weak img2img seed per region tile.
-        Returns (panorama, type_map, depth), or None if the source imagery is
-        missing. depth is None if PANORAMA_DEPTH isn't available (callers
-        fall back to plain perspective_crop for reference patches in that
-        case).
+        Returns (panorama, type_map, depth, exclude_mask), or None if the
+        source imagery is missing. depth is None if PANORAMA_DEPTH isn't
+        available (callers fall back to plain perspective_crop for reference
+        patches in that case).
+
+        exclude_mask (bool, True = don't crop reference patches from here) is
+        PANORAMA_FOREGROUND_MASK — ObjectClear's own dilated removal mask —
+        resized onto panorama_terrain's grid. panorama_terrain has that same
+        region filled in with fabricated (if plausible) content, not a real
+        photograph; it's there so the *region classification and geometry*
+        chain has a with-objects-removed version to work from, not so that
+        fill can stand in as ground truth. Left unfiltered, that fabricated
+        region is often the single most homogeneous ("solid") patch of
+        whatever it got inpainted as, so _extract_reference_patches's own
+        distance-transform peak search would preferentially pick it over
+        genuine, more textured real photo content elsewhere in the same
+        region type — the exact way a real wildflower meadow removed as
+        foreground ended up replaced by flat inpainted dirt as the terrain's
+        actual reference texture.
 
         Deliberately does *not* reproject the whole scene to a top-down/
         orthographic grid — that reprojection collapses to a radial/pinwheel
@@ -924,7 +945,21 @@ class TerrainTextureGenerationStage(PipelineStage):
             if depth_depth is not None and depth_depth.depth.shape == (panorama_terrain.height, panorama_terrain.width)
             else None
         )
-        return panorama_terrain, type_map_depth.depth, depth_arr
+
+        exclude_mask = None
+        foreground_mask_img = context.input_image(ContextKey.PANORAMA_FOREGROUND_MASK)
+        if foreground_mask_img is not None:
+            mask_arr = np.array(foreground_mask_img.image.convert("L"))
+            if mask_arr.shape != type_map_depth.depth.shape:
+                mask_arr = np.array(
+                    PIL.Image.fromarray(mask_arr).resize(
+                        (type_map_depth.depth.shape[1], type_map_depth.depth.shape[0]),
+                        PIL.Image.NEAREST,
+                    )
+                )
+            exclude_mask = mask_arr > 127
+
+        return panorama_terrain, type_map_depth.depth, depth_arr, exclude_mask
 
     def _pattern_texture_context(
         self,
@@ -1217,6 +1252,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         type_map: np.ndarray,
         region_val: int,
         depth: Optional[np.ndarray] = None,
+        exclude_mask: Optional[np.ndarray] = None,
         inpainter: Optional[InPainting] = None,
         debug_label: str = "tile",
     ) -> PIL.Image.Image:
@@ -1267,6 +1303,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             patch_size=patch_size,
             num_patches=n,
             depth=depth,
+            exclude_mask=exclude_mask,
         )
         if not patches:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
@@ -1646,6 +1683,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         patch_size: int,
         num_patches: int = 1,
         depth: Optional[np.ndarray] = None,
+        exclude_mask: Optional[np.ndarray] = None,
     ) -> list[PIL.Image.Image]:
         """
         Crop up to num_patches squares directly from the most solid, mutually
@@ -1715,10 +1753,19 @@ class TerrainTextureGenerationStage(PipelineStage):
         Returns fewer than num_patches (down to an empty list) if there isn't
         enough distinct material of this type — the caller falls back to
         plain text-to-image generation if the list ends up empty.
+
+        exclude_mask (bool, True = never pick from here — see _bake_reference):
+        typically ObjectClear's own foreground-removal mask. Applied before the
+        search starts, not just as a tie-breaker — a fabricated-fill region is
+        often the most homogeneous ("solid") blob of its type in the whole
+        panorama, so left unfiltered it would consistently win the distance-
+        transform peak search over genuine, more textured real photo content.
         """
         H, W = type_map.shape
         region_mask = (type_map == region_val).astype(np.float32)
         remaining = region_mask > 0.5
+        if exclude_mask is not None:
+            remaining &= ~exclude_mask
         patches: list[PIL.Image.Image] = []
 
         for _ in range(max(1, num_patches)):
