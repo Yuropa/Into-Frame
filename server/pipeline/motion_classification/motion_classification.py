@@ -73,7 +73,22 @@ class ObjectMotionClassificationStage(PipelineStage):
         for idx in range(object_count):
             motion = context.input_object(f"object_motion_{idx}")
             metadata = context.input_object(f"metadata_{idx}") or {}
-            if motion is None or metadata.get("synthetic"):
+            if metadata.get("synthetic"):
+                # Synthetic distribution points (DistributionSynthesisStage) are
+                # procedurally scattered decorative fill, never individually
+                # tracked in the generated video -- there's no per-instance
+                # drift signal to classify from. They're inherently non-moving,
+                # so mark them stationary with no measured "sway": when this
+                # instance renders as a MESH sharing a bucket some real sibling
+                # got rigged for, SceneAnimationStage already falls back to
+                # generic amplitude/frequency defaults for exactly this case
+                # (absent "sway"), rather than leaving it un-animated while its
+                # rigged mesh siblings sway.
+                context.add_object(f"metadata_{idx}", {**metadata, "stationary": True})
+                processed += 1
+                self.advance_progress(task)
+                continue
+            if motion is None:
                 self.advance_progress(task)
                 continue
 

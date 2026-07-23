@@ -254,6 +254,20 @@ public class SceneObjectManager : MonoBehaviour
             root.AddComponent<PhysicsHandoff>().Apply(data.physics);
     }
 
+    // Terrain/water/formation meshes (see server scene_generation.py) are never meant
+    // to get sway or physics -- the server already guards this by leaving their
+    // source_index unset, but a stale cached scene.json from before that guard
+    // existed (or a future regression) would otherwise silently drop a Rigidbody
+    // straight onto the ground mesh: gravity pulls it away with nothing underneath,
+    // and a collider sized for a detected object induces a spin as it falls out of
+    // view. Belt-and-suspenders: refuse on the client too, by the same name
+    // convention TerrainMaterialManager/scene_generation.py already use.
+    private static bool IsEnvironmentMesh(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        return name == "terrain" || name == "water" || name.StartsWith("formation_");
+    }
+
     private void SpawnMeshImmediate(SceneObject data)
     {
         var container = new GameObject($"[mesh] {data.id[..6]} ({data.name})");
@@ -281,11 +295,19 @@ public class SceneObjectManager : MonoBehaviour
         var capturedGeneration = _queueGeneration;
         EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
 
-        if (data.sway != null)
-            container.AddComponent<WindSway>().Apply(data.sway);
+        if (IsEnvironmentMesh(data.name))
+        {
+            if (data.sway != null || data.physics != null)
+                Debug.LogWarning($"[SceneObjectManager] Ignoring sway/physics sent for environment mesh '{data.name}' ({data.id[..6]}) -- likely a stale cached scene.json.");
+        }
+        else
+        {
+            if (data.sway != null)
+                container.AddComponent<WindSway>().Apply(data.sway);
 
-        if (data.physics != null)
-            container.AddComponent<PhysicsHandoff>().Apply(data.physics);
+            if (data.physics != null)
+                container.AddComponent<PhysicsHandoff>().Apply(data.physics);
+        }
     }
 
     private IEnumerator ReloadMesh(TrackedObject tracked, string meshId)
