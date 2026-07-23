@@ -28,7 +28,10 @@ _HERE = Path(__file__).resolve().parent
 # regardless of how tight the points are, so degenerate (near-collinear) point sets
 # still produce a usable polygon.
 _MIN_PAD_M = 0.5
-_EXEMPLAR_DOMAIN_TARGET = 400
+# Floor on the exemplar candidate grid's point count -- the grid itself is now sized
+# to match tile_domain's own density (1/spacing^2, see the loop below), not a fixed
+# count; this only guards against a degenerate near-zero-area input boundary.
+_MIN_EXEMPLAR_DOMAIN = 16
 
 # OBJECT_COUNT and metadata_{idx} are both inherited from earlier stages, so neither
 # can serve as a "did this stage actually run" marker for has_expected_output — an
@@ -297,8 +300,23 @@ class DistributionSynthesisStage(PipelineStage):
             input_boundary = _padded_hull_polygon(
                 dist.points, pad=max(spacing * cfg.input_boundary_pad_factor, _MIN_PAD_M)
             )
+            # synthesize_pattern infers how many points to paint from the RATIO of
+            # candidates that fall inside the input vs. output boundary, as a proxy
+            # for the ratio of their real areal densities (see synthesis_core.cpp).
+            # That proxy only holds if both candidate grids are built at the same
+            # points-per-area rate. tile_domain below is deliberately sized to
+            # 1/spacing^2 (matching the exemplar's own nearest-neighbour spacing) --
+            # mirror that here instead of a fixed point count, or a small/sparse
+            # exemplar cluster (the common case -- most groups have well under a few
+            # hundred real instances) makes this grid far denser than the tile grid,
+            # which silently divides the inferred output count by that mismatch and
+            # paints far sparser than the real exemplar density.
+            input_area = float(np.prod(np.maximum(
+                input_boundary.max(axis=0) - input_boundary.min(axis=0), 1e-6
+            )))
+            exemplar_domain_target = max(_MIN_EXEMPLAR_DOMAIN, int(round(input_area / (spacing ** 2))))
             exemplar_domain = _local_grid(
-                input_boundary.min(axis=0), input_boundary.max(axis=0), _EXEMPLAR_DOMAIN_TARGET
+                input_boundary.min(axis=0), input_boundary.max(axis=0), exemplar_domain_target
             )
 
             # Tile side length in grid cells: pick a tile candidate resolution (points

@@ -142,6 +142,12 @@ class ObjectDistributionStage(PipelineStage):
                 "pcf_cli binary not found — build pattern-synthesis first "
                 "(cmake .. && make pcf_cli). Skipping distribution stage."
             )
+            # Still write an (empty) result -- has_expected_output() only checks
+            # presence, and leaving OBJECT_DISTRIBUTION unset here makes this stage
+            # (and everything downstream, via the dirty cascade) look permanently
+            # incomplete and rerun on every single invocation even when the binary
+            # genuinely isn't going to appear.
+            context.add_object_distribution(ContextKey.OBJECT_DISTRIBUTION, ObjectDistributionResult())
             return context
 
         region_map_depth = context.input_depth(ContextKey.REGION_MAP)
