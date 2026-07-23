@@ -246,6 +246,7 @@ class TerrainReconstructionStage(PipelineStage):
         min_anchor_m = cfg.ridge_min_anchor_distance * z_half
         n_anchored, n_skipped = 0, 0
 
+        n_points_dropped = 0
         for raw_chain in ridge_chains:
             chain = np.asarray(raw_chain, dtype=np.float32)
             if len(chain) < 2:
@@ -254,6 +255,20 @@ class TerrainReconstructionStage(PipelineStage):
             if float(np.median(horiz)) < min_anchor_m:
                 n_skipped += 1
                 continue
+            # A chain can clear the median-distance qualification above while
+            # still dipping past individual points close to the camera (noisy
+            # silhouette tracing) -- anchoring those as hard Dirichlet BCs pins
+            # near-camera terrain to a far-away chain's elevation, producing the
+            # same near-camera spike failure mode ridge_override_min_distance_m
+            # guards against below. Drop just the close points; the rest of the
+            # chain still anchors normally.
+            near_camera = horiz < cfg.ridge_override_min_distance_m
+            if near_camera.any():
+                n_points_dropped += int(near_camera.sum())
+                chain = chain[~near_camera]
+                if len(chain) == 0:
+                    n_skipped += 1
+                    continue
             rows_c, cols_c = world_to_grid(chain)
             fixed_mask[rows_c, cols_c] = True
             fixed_elev[rows_c, cols_c] = chain[:, 1].astype(np.float64)  # Y = elevation
@@ -261,7 +276,8 @@ class TerrainReconstructionStage(PipelineStage):
 
         self.log_info(
             f"Ridge chains: {n_anchored} anchored (≥{min_anchor_m:.0f} m), "
-            f"{n_skipped} foreground skipped"
+            f"{n_skipped} foreground skipped, {n_points_dropped} near-camera "
+            f"point(s) dropped (<{cfg.ridge_override_min_distance_m:.0f} m)"
         )
 
         # ── Critical-slope envelope ───────────────────────────────────────────
