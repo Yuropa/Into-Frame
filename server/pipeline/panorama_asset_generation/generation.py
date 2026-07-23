@@ -9,7 +9,7 @@ from pipeline.model_generation.model_generation import ModelGenerator, ModelGene
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter
 from util.device_utils import DeviceStrategy, preferred_device
-from util.crop_scoring import composite_score, occlusion_score
+from util.crop_scoring import composite_score, occlusion_score, mask_fill_ratio
 
 
 class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
@@ -116,13 +116,31 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
                 self.log_info(f"  {mesh_key}: {depth:.1f} m, score {score:.2f} → 3D mesh (crop_{idx})")
                 crop = context.input_image(f"crop_{idx}")
+
+                fill_ratio = mask_fill_ratio(crop)
+                if fill_ratio is not None and fill_ratio <= 0.0:
+                    self.log_info(f"  {mesh_key}: crop_{idx} has an empty mask, skipping mesh (billboard-only)")
+                    self.advance_progress(asset_task)
+                    continue
+
                 temp_path = self.temp / mesh_key if self.temp is not None else None
                 if temp_path is not None:
                     temp_path.mkdir(parents=True, exist_ok=True)
                 super().clean_up()
-                mesh = gen.meshify(crop, temp_path, seed=self.seed)
-                mesh = mesh.repair()
-                mesh.fit_to_box(1.0, 1.0)
+                try:
+                    mesh = gen.meshify(crop, temp_path, seed=self.seed)
+                    mesh = mesh.repair()
+                    mesh.fit_to_box(1.0, 1.0)
+                except Exception as e:
+                    # A single degenerate crop (e.g. a near-empty mask the
+                    # generator's own preprocessing collapses to nothing)
+                    # shouldn't take down every other group's mesh --
+                    # scene_generation.py already falls back to this group's
+                    # billboard pool when category_mesh_{class}_{bucket} is
+                    # absent.
+                    self.log_info(f"  {mesh_key}: meshify failed ({e}), falling back to billboard-only")
+                    self.advance_progress(asset_task)
+                    continue
                 context.add_mesh(mesh_key, mesh)
                 self.log_info(f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f")
                 self.advance_progress(asset_task)
