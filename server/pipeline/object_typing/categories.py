@@ -90,6 +90,20 @@ UNIQUE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "fountain", "gazebo", "waterfall", "bridge", "tower",
 })
 
+# Categories that can plausibly exhibit visible motion worth animating -- either
+# wind sway (VEGETATION_CATEGORIES) or genuine rigid-body movement (person/vehicle/
+# animal) or inherent motion in the subject itself (flowing water). Everything else
+# (street furniture, signage, fixed infrastructure, statues/monuments, buildings,
+# rock, ...) is permanently static: an "animated" clip of a park bench or fire
+# hydrant would just be SAM2 mask-tracking noise, not real motion, so
+# VideoObjectExtractionStage skips tracking those categories outright rather than
+# paying for a video pass whose output nothing downstream needs.
+ANIMATABLE_CATEGORIES: Final[frozenset[str]] = VEGETATION_CATEGORIES | frozenset({
+    "person", "car", "truck", "bus", "motorcycle", "bicycle",
+    "boat", "ship", "aircraft", "train", "animal",
+    "fountain", "waterfall",
+})
+
 _ALL_KNOWN: Final[frozenset[str]] = frozenset(OBJECT_CATEGORIES) | frozenset({
     "sky", "clouds", "fog", "haze", "sunset", "aurora", "rainbow", "moon", "stars",
     "water", "river", "ocean", "lake", "beach", "ground", "dirt", "grass", "field",
