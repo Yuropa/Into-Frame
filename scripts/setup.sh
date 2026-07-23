@@ -617,6 +617,16 @@ p.write_text(
 setup_sam3d() {
     clone_if_needed https://github.com/facebookresearch/sam-3d-objects.git "$LIB_DIR/SAM3D"
 
+    # Texture baking's "opt" mode (postprocessing_utils.py::bake_texture) rasterizes
+    # and holds every one of nviews views (UV + UV-derivative + observation tensors,
+    # each ~1024x1024) on GPU simultaneously for the whole 2500-step optimization --
+    # at the upstream default of 100 views that's several GB on top of the still-resident
+    # SS/SLAT diffusion models, and was OOMing during Panorama Asset Generation runs.
+    # Halving the view count cuts that overhead roughly proportionally with only a
+    # modest hit to bake coverage; texture_size (final atlas resolution) is untouched.
+    sed -i 's/nviews=100/nviews=48/' \
+        "$LIB_DIR/SAM3D/sam3d_objects/model/backbone/tdfy_dit/utils/postprocessing_utils.py"
+
     create_env "sam3d"
     run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-sam3d.txt"
 

@@ -83,11 +83,16 @@ class RemoteServer(ABC):
                     )
                     self._send(result, temp_path=temp_path)
                 except Exception as e:
+                    # A single failed request (e.g. a CUDA OOM during one
+                    # object's texture bake) must not take the whole subprocess
+                    # down -- that would silently fail every later request in
+                    # the same pipeline run, not just this one. Report the
+                    # error and keep polling.
                     stack_text = traceback.format_exc()
+                    print(f"perform failed: {e}\n{stack_text}", flush=True)
                     result = RemoteOutput(action=request.action, output=None, error=str(e), stack=stack_text)
                     self._send(result, temp_path=temp_path)
-                    return
-                
+
                 clean_device_cache(self.device)
             if is_running is False:
                 break

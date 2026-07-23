@@ -47,14 +47,30 @@ class ModelGenerator(ModelGeneratorBase):
 
         rgba = np.concatenate([image_np[:, :, :3], mask[:, :, None]], axis=-1)
 
-        output = self._pipeline.run(
-            rgba,
-            mask=None,
-            seed=seed,
-            with_mesh_postprocess=True,
-            with_texture_baking=True,
-            use_vertex_color=False,
-        )
+        try:
+            output = self._pipeline.run(
+                rgba,
+                mask=None,
+                seed=seed,
+                with_mesh_postprocess=True,
+                with_texture_baking=True,
+                use_vertex_color=False,
+            )
+        except torch.cuda.OutOfMemoryError:
+            # Texture baking (bake_texture's "opt" mode) holds every rasterized
+            # view on GPU for the whole optimization -- the single heaviest step
+            # in this pipeline. Retry once vertex-color-only (no baking) so this
+            # object still comes back with a mesh instead of losing it entirely.
+            print("SAM3D texture baking OOM'd -- retrying without texture baking", flush=True)
+            torch.cuda.empty_cache()
+            output = self._pipeline.run(
+                rgba,
+                mask=None,
+                seed=seed,
+                with_mesh_postprocess=True,
+                with_texture_baking=False,
+                use_vertex_color=True,
+            )
         return output["glb"]
 
 
