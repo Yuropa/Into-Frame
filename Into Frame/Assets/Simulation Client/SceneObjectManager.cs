@@ -246,7 +246,17 @@ public class SceneObjectManager : MonoBehaviour
         };
 
         if (!string.IsNullOrEmpty(data.videoColor) && !string.IsNullOrEmpty(data.videoAlpha))
-            go.AddComponent<AnimatedBillboardVideo>().Play(assetServer().assetBaseUrl, data.videoColor, data.videoAlpha);
+        {
+            var capturedGo = go;
+            var capturedTexture = data.texture;
+            go.AddComponent<AnimatedBillboardVideo>().Play(
+                assetServer().assetBaseUrl, data.videoColor, data.videoAlpha,
+                onFailed: () =>
+                {
+                    if (!string.IsNullOrEmpty(capturedTexture))
+                        StartCoroutine(ApplyTexture(capturedGo, capturedTexture));
+                });
+        }
         else if (!string.IsNullOrEmpty(data.texture))
             StartCoroutine(ApplyTexture(go, data.texture));
 

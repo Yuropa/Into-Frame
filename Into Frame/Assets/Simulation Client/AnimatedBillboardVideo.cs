@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 using UnityEngine.Video;
 
@@ -22,17 +23,32 @@ public class AnimatedBillboardVideo : MonoBehaviour
     private Renderer _renderer;
     private MaterialPropertyBlock _mpb;
     private bool _colorReady, _alphaReady;
+    private Action _onFailed;
+    private bool _failed;
 
-    public void Play(string assetBaseUrl, string colorKey, string alphaKey)
+    /// <param name="onFailed">
+    /// Invoked at most once if either video fails to prepare/play (e.g. the asset
+    /// server's extensionless URL -- same convention as mesh/texture assets -- isn't
+    /// reliably sniffable by every platform's video backend, unlike GLTFast/
+    /// UnityWebRequestTexture which parse downloaded bytes directly instead of
+    /// handing a URL to a native streaming player). Caller should fall back to the
+    /// billboard's static texture instead of leaving it blank.
+    /// </param>
+    public void Play(string assetBaseUrl, string colorKey, string alphaKey, Action onFailed = null)
     {
+        _onFailed = onFailed;
         _renderer = GetComponentInChildren<Renderer>();
-        if (_renderer == null) return;
+        if (_renderer == null)
+        {
+            Fail("no Renderer found in children");
+            return;
+        }
 
         if (_compositeShader == null)
             _compositeShader = Shader.Find("Hidden/IntoFrame/AlphaVideoComposite");
         if (_compositeShader == null)
         {
-            Debug.LogError("[AnimatedBillboardVideo] Composite shader not found -- leaving the static texture in place");
+            Fail("composite shader 'Hidden/IntoFrame/AlphaVideoComposite' not found");
             return;
         }
 
@@ -43,8 +59,19 @@ public class AnimatedBillboardVideo : MonoBehaviour
         _alphaPlayer = CreatePlayer(assetBaseUrl + alphaKey);
         _colorPlayer.prepareCompleted += _ => TryStart();
         _alphaPlayer.prepareCompleted += _ => TryStart();
+        _colorPlayer.errorReceived += (_, msg) => Fail($"color video '{colorKey}': {msg}");
+        _alphaPlayer.errorReceived += (_, msg) => Fail($"alpha video '{alphaKey}': {msg}");
         _colorPlayer.Prepare();
         _alphaPlayer.Prepare();
+    }
+
+    private void Fail(string reason)
+    {
+        if (_failed) return; // only report/fall back once, even if both players error
+        _failed = true;
+        Debug.LogError($"[AnimatedBillboardVideo] Playback failed ({reason}) -- falling back to static texture");
+        _onFailed?.Invoke();
+        Destroy(this);
     }
 
     private VideoPlayer CreatePlayer(string url)
@@ -95,6 +122,10 @@ public class AnimatedBillboardVideo : MonoBehaviour
 
     private void OnDestroy()
     {
+        // VideoPlayers were added to this same GameObject (not a child), so they
+        // outlive this component unless torn down explicitly here.
+        if (_colorPlayer != null) Destroy(_colorPlayer);
+        if (_alphaPlayer != null) Destroy(_alphaPlayer);
         if (_colorRT != null) _colorRT.Release();
         if (_alphaRT != null) _alphaRT.Release();
         if (_combinedRT != null) _combinedRT.Release();
