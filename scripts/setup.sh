@@ -627,6 +627,17 @@ setup_sam3d() {
     sed -i 's/nviews=100/nviews=48/' \
         "$LIB_DIR/SAM3D/sam3d_objects/model/backbone/tdfy_dit/utils/postprocessing_utils.py"
 
+    # SAM3D decimates every mesh down to 5% of its original triangles before its own
+    # hole-filling pass runs (postprocess_slat_output's simplify=0.95) -- on complex
+    # thin geometry (tree branches/foliage especially) that aggressive a collapse both
+    # tears open new gaps and, since fill_holes_max_hole_nbe is derived as
+    # int(250*sqrt(1-simplify)), narrows how large a hole pymeshfix is even willing to
+    # patch afterward (~56 boundary edges at 0.95). Less aggressive decimation fixes
+    # both at once. Purely CPU-side (PyVista decimate + pymeshfix) -- no extra GPU/VRAM
+    # cost, unlike the texture-baking fix above.
+    sed -i 's/simplify=0.95,/simplify=0.85,/' \
+        "$LIB_DIR/SAM3D/sam3d_objects/pipeline/inference_pipeline.py"
+
     create_env "sam3d"
     run_in_env pip install -r "$REQUIREMENTS_DIR/requirements-sam3d.txt"
 
