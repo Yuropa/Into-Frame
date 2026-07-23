@@ -505,6 +505,20 @@ class HeightMapGenerator:
         # fixed certainty so the solver treats them as a soft prior rather than an
         # observation, letting the Laplacian blend them smoothly into real terrain
         # observations beyond the zone.
+        #
+        # The disc radius is nadir_exclusion_radius + nadir_ramp_width, not just
+        # nadir_exclusion_radius: cells in the ramp band are still real (non-NaN)
+        # samples, but the ramp exists specifically because the depth model is known
+        # to be least reliable there too -- Y = depth * sin(phi) makes ordinary
+        # depth-model noise translate almost directly into height error the closer
+        # phi gets to nadir. Leaving those samples in place let them get pinned as
+        # hard Dirichlet ground truth downstream (Terrain Reconstruction only reads
+        # the binary observed mask, not certainty), producing a ring-shaped bump at
+        # a consistent radius/height in every direction -- a dead giveaway it's a
+        # projection artifact, not real terrain. Folding the ramp band into the
+        # diffused prior instead means the whole zone the model itself doesn't
+        # trust gets treated the same way: synthetic, deferring to real data only
+        # once it starts past the ramp.
         cell_m = grid_size_meters / grid_resolution
         _x_c = np.linspace(-half + cell_m / 2.0, half - cell_m / 2.0, grid_resolution, dtype=np.float32)
         _X_cell, _Z_cell = np.meshgrid(_x_c, _x_c)
@@ -512,13 +526,14 @@ class HeightMapGenerator:
 
         flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
         if nadir_exclusion_radius > 0:
-            flat_prior_mask = _r_cell <= nadir_exclusion_radius
+            prior_radius = nadir_exclusion_radius + max(nadir_ramp_width, 0.0)
+            flat_prior_mask = _r_cell <= prior_radius
 
             # The disc is always centred on the grid; diffuse over a small local
             # crop around it (padded well past the disc radius to reach real
             # boundary data) rather than the whole grid -- the disc's resolved
             # value only depends on its immediate surroundings.
-            radius_cells = nadir_exclusion_radius / cell_m
+            radius_cells = prior_radius / cell_m
             pad = max(int(radius_cells * 6), 64)
             c0 = grid_resolution // 2
             lo, hi = max(0, c0 - pad), min(grid_resolution, c0 + pad)
@@ -543,6 +558,14 @@ class HeightMapGenerator:
             # anything.
             cell_relief[flat_prior_mask] = 0.0
             cell_slope_deg[flat_prior_mask] = 0.0
+
+            # The ramp band held real (if untrusted) samples, so true_observed was
+            # already True for it -- clear it now that its value has been replaced
+            # by fabricated fill, or downstream stages that hard-pin/restore
+            # true_observed cells (Terrain Reconstruction, Terrain Noise
+            # Refinement) would still treat this ring as ground truth and undo the
+            # fix above.
+            true_observed[flat_prior_mask] = False
 
         # Cells filled by the panorama-depth fallback or the nadir flat-ground prior
         # above weren't part of the walkable-component analysis (they're
