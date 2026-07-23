@@ -190,7 +190,15 @@ class ObjectCategoryClusteringStage(PipelineStage):
         correlation = context.object_correlation(ContextKey.OBJECT_CORRELATION)
         if correlation is None:
             return True
-        for grp in correlation.groups.values():
+        for obj_class, grp in correlation.groups.items():
+            # Mirror run()'s own skip condition -- environment/indeterminate
+            # objects are never bucketed, so metadata_{idx} for them is never
+            # written by this stage. Checking has_stage_output for them
+            # unconditionally made this stage (and everything downstream, via
+            # the dirty cascade) rerun on every single invocation whenever the
+            # scene had any such object.
+            if obj_class in ENVIRONMENT_CATEGORIES or obj_class == "indeterminate":
+                continue
             for idx in grp.indices:
                 if not context.has_stage_output(f"metadata_{idx}"):
                     return False
