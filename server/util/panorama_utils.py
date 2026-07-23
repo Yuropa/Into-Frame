@@ -264,14 +264,24 @@ class Panorama:
         real surface (harmonic solve, slope envelopes, noise) -- it is never
         guaranteed to sit at exactly the elevation angle the camera actually
         photographed at that azimuth. Wherever the naive projection above
-        lands on a sky pixel, that mismatch is guaranteed wrong (a real
-        mesh vertex is solid ground, never literally the sky), so the pixel
-        is walked straight down its own column (same azimuth/U, only V
-        adjusted) to the nearest non-sky content below it and that's used
-        instead -- a small, local nudge back onto real photographed
-        content, rather than the nearest-XZ-neighbour fallback below (which
-        can jump to a totally different part of the mesh and is reserved
-        for the near-nadir singularity, a different failure mode).
+        lands on a sky pixel, that mismatch is guaranteed wrong (a real mesh
+        vertex is solid ground, never literally the sky), so its row is
+        rescaled instead: each panorama column's own overshooting vertices
+        (same azimuth/U, only V adjusted) get linearly compressed from
+        [that column's worst overshoot, the column's real ridge/horizon
+        row] onto [0, ridge row], using the sky headroom above the ridge
+        line as room to preserve a distinct, monotonically-ordered row per
+        vertex -- a squeezed but continuous gradient up toward the peak,
+        rather than every overshooting vertex on a slope collapsing onto
+        the single ridge-line pixel (which reads as smeared/repeated
+        texture right at the peak). Vertices already inside the real
+        (non-sky) band are untouched, and the mapping is continuous at the
+        ridge row itself, so there's no seam between real and rescaled
+        content. Columns with no real content at all (sky top to bottom)
+        are left unchanged -- nothing to anchor a gradient to. This is
+        separate from the nearest-XZ-neighbour fallback below (which can
+        jump to a totally different part of the mesh and is reserved for
+        the near-nadir singularity, a different failure mode).
         Resampled to this panorama's own size first if its shape differs.
 
         Callers that also need the mesh to stay watertight across the
@@ -307,17 +317,52 @@ class Panorama:
             pu_i = np.clip(np.round(pu).astype(np.int64), 0, W - 1)
             pv_i = np.clip(np.round(pv).astype(np.int64), 0, H - 1)
             if sky_arr[pv_i, pu_i].any():
-                # nearest_nonsky_row[r, c]: smallest row >= r in column c that
-                # is not sky (H = sentinel "none below" -- column is sky all
-                # the way to the bottom edge, left unchanged since there's
-                # nothing real to snap to). Sky only ever sits above real
-                # content in an equirectangular panorama, so walking down
-                # (increasing row) is the only direction that makes sense.
+                # ridge_row[c]: topmost non-sky row in column c (H = sentinel
+                # "column is sky all the way down" -- nothing real to anchor
+                # to, left unchanged). Sky only ever sits above real content
+                # in an equirectangular panorama, so the smallest non-sky row
+                # scanning down from the top is exactly the photographed
+                # ridge/horizon line for that azimuth.
                 row_if_nonsky = np.where(~sky_arr, np.arange(H)[:, None], H)
-                nearest_nonsky_row = np.minimum.accumulate(row_if_nonsky[::-1], axis=0)[::-1]
-                target_row = nearest_nonsky_row[pv_i, pu_i]
-                snap = sky_arr[pv_i, pu_i] & (target_row < H)
-                pv = np.where(snap, target_row.astype(np.float64), pv)
+                ridge_row = np.minimum.accumulate(row_if_nonsky[::-1], axis=0)[::-1][0, :]
+
+                overshoot = sky_arr[pv_i, pu_i] & (ridge_row[pu_i] < H)
+                if overshoot.any():
+                    # A vertex's world position is a *reconstruction* -- a
+                    # mountainside/ridge vertex can legitimately sit higher
+                    # than whatever the camera actually photographed at that
+                    # azimuth (slope envelope, harmonic solve smoothing), and
+                    # different vertices climbing the same slope overshoot by
+                    # different amounts. Snapping all of them straight to
+                    # ridge_row (the old behaviour) collapsed a whole climb's
+                    # worth of distinct elevations onto one pixel row per
+                    # column -- different mesh heights sampling nearly the
+                    # same narrow texture strip, which reads as smeared,
+                    # repeated texture right at the peak.
+                    #
+                    # Instead, linearly compress each column's own overshoot
+                    # range -- [that column's worst overshoot, ridge_row] --
+                    # onto [0, ridge_row]. Every overshooting vertex keeps its
+                    # own distinct, monotonically-ordered row (a squeezed but
+                    # genuine gradient up toward the peak, using the sky
+                    # headroom above the ridge line as the only room there is
+                    # to put it) instead of being crushed onto the boundary.
+                    # Vertices already inside the real (non-sky) band are
+                    # untouched, and the mapping is continuous at ridge_row
+                    # itself (0% compression right at the boundary), so there
+                    # is no seam between real and rescaled content.
+                    cols = pu_i[overshoot]
+                    pv_over = pv[overshoot]
+                    col_pv_min = np.full(W, np.inf)
+                    np.minimum.at(col_pv_min, cols, pv_over)
+
+                    r_sky = ridge_row[cols].astype(np.float64)
+                    denom = np.maximum(r_sky - col_pv_min[cols], 1e-6)
+                    frac = (r_sky - pv_over) / denom
+                    new_pv = r_sky * (1.0 - frac)
+
+                    pv = pv.copy()
+                    pv[overshoot] = new_pv
 
         u = (pu / max(W - 1, 1)).astype(np.float32)
         v = (1.0 - pv / max(H - 1, 1)).astype(np.float32)
