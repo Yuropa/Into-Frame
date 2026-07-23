@@ -158,34 +158,51 @@ class VideoObjectExtractionStage(PipelineStage):
         with av.open(str(path)) as container:
             stream = container.streams.video[0]
             fps = float(stream.average_rate) if stream.average_rate else DEFAULT_FRAME_RATE
-            frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
+            # stream.frames (container-declared frame count) is usually reliable for an
+            # MP4 we encoded ourselves -- when it isn't (0/unknown, e.g. some muxers
+            # leave it unset), fall back to a single-step task rather than guessing a
+            # total, same coarse behaviour this stage already had.
+            total = int(stream.frames) if stream.frames else 0
+            decode_task = self.create_progress(max(total, 1), "Decoding video…")
+            frames = []
+            for frames_decoded, frame in enumerate(container.decode(stream), start=1):
+                frames.append(frame.to_ndarray(format="rgb24"))
+                if total > 0:
+                    self.update_progress(decode_task, frames_decoded / total)
+            self.finish_progress(decode_task)
         return frames, fps
 
-    def _encode_h264(self, path: Path, width: int, height: int, fps: float, rgb_frames):
+    def _encode_h264(
+        self, path: Path, width: int, height: int, fps: float, rgb_frames, total: int, on_progress=None,
+    ):
         with av.open(str(path), mode="w") as out_container:
             stream = out_container.add_stream("h264", rate=max(1, round(fps)))
             stream.width = width
             stream.height = height
             stream.pix_fmt = "yuv420p"
-            for frame in rgb_frames:
+            for i, frame in enumerate(rgb_frames, start=1):
                 video_frame = av.VideoFrame.from_ndarray(frame, format="rgb24")
                 for packet in stream.encode(video_frame):
                     out_container.mux(packet)
+                if on_progress is not None and total > 0:
+                    on_progress(i / total, "Encoding…")
             for packet in stream.encode():
                 out_container.mux(packet)
 
-    def _write_masked_video(self, path: Path, frames: list[np.ndarray], masks: np.ndarray, fps: float):
+    def _write_masked_video(
+        self, path: Path, frames: list[np.ndarray], masks: np.ndarray, fps: float, on_progress=None,
+    ):
         height, width = frames[0].shape[:2]
         rgb_frames = ((frame * mask[..., None]).astype(np.uint8) for frame, mask in zip(frames, masks))
-        self._encode_h264(path, width, height, fps, rgb_frames)
+        self._encode_h264(path, width, height, fps, rgb_frames, total=len(frames), on_progress=on_progress)
 
-    def _write_alpha_video(self, path: Path, masks: np.ndarray, fps: float):
+    def _write_alpha_video(self, path: Path, masks: np.ndarray, fps: float, on_progress=None):
         """Grayscale matte video (mask value repeated across RGB) matching a
         _write_masked_video color video frame-for-frame — see class docstring's
         object_video_alpha_{i} entry for why a separate matte beats black-keying."""
         height, width = masks[0].shape
         rgb_frames = (np.repeat((mask.astype(np.uint8) * 255)[..., None], 3, axis=2) for mask in masks)
-        self._encode_h264(path, width, height, fps, rgb_frames)
+        self._encode_h264(path, width, height, fps, rgb_frames, total=len(masks), on_progress=on_progress)
 
     def _frame_stats(self, masks: np.ndarray) -> dict:
         """Per-frame centroid + tight bbox (video-pixel space) from each frame's mask.
@@ -276,12 +293,23 @@ class VideoObjectExtractionStage(PipelineStage):
             num_frames = min(len(frames), result.num_frames)
             frame_masks = result.masks[:num_frames]
 
+            # Fresh callback per phase (not one reused across both): make_progress_callback
+            # reads the sub-task's *current* completed position each time it's called, so
+            # each of these two encodes gets whatever headroom segment_video's own
+            # progress calls (and the other encode) left in this object's one step,
+            # instead of both writing into a stale, already-consumed span.
             out_path = (temp_path or self.temp) / "object.mp4"
-            self._write_masked_video(out_path, frames[:num_frames], frame_masks, fps)
+            self._write_masked_video(
+                out_path, frames[:num_frames], frame_masks, fps,
+                on_progress=self.make_progress_callback(extraction_task),
+            )
             context.add_video(out_key, Video(out_path, fps=fps, num_frames=num_frames))
 
             alpha_path = (temp_path or self.temp) / "object_alpha.mp4"
-            self._write_alpha_video(alpha_path, frame_masks, fps)
+            self._write_alpha_video(
+                alpha_path, frame_masks, fps,
+                on_progress=self.make_progress_callback(extraction_task),
+            )
             context.add_video(alpha_key, Video(alpha_path, fps=fps, num_frames=num_frames))
 
             context.add_object(motion_key, {

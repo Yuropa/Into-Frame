@@ -204,7 +204,14 @@ class SegmentationStage(PipelineStage):
             self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)
 
-        result = self._seg.segment(input_image, self.temp)
+        # The remote SAM2 call already reports real per-tile progress on
+        # panorama-scale input (image_segmentation_imp.py's tiled path can be
+        # a dozen+ full SAM2 passes) -- without on_progress here, that signal
+        # was computed server-side and simply dropped, leaving the bar frozen
+        # on this one step for the entire multi-minute call.
+        result = self._seg.segment(
+            input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task),
+        )
         store_segmentation_result(result)
 
         self.advance_progress(segmenting_task)
