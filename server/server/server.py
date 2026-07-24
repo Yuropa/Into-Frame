@@ -218,14 +218,26 @@ class SimulationServer():
     async def _progress_scene(self):
         if self.pipeline is None:
             # Local mode: serve from the pre-loaded context without running the pipeline.
-            if self._context is not None:
-                self.scene = self._context.scene(ContextKey.SCENE)
-                self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
-                self._scene_id = str(uuid.uuid4())
-                self.log.info("Serving pre-loaded scene")
-                await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
-            else:
+            if self._context is None:
                 await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": "No context loaded"})
+                return
+
+            scene = self._context.scene(ContextKey.SCENE)
+            if scene is None:
+                # _scene_id must never be set unless self.scene is a real Scene --
+                # every later CLIENT_READY takes the "already have a scene" fast path
+                # straight to get_snapshot(), which unconditionally calls
+                # self.scene.encode() and would crash on None for every client after
+                # this one, not just this request.
+                self.log.error("Archive has no scene data (ContextKey.SCENE missing) — nothing to serve")
+                await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": "Archive has no scene data"})
+                return
+
+            self.scene = scene
+            self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
+            self._scene_id = str(uuid.uuid4())
+            self.log.info("Serving pre-loaded scene")
+            await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
             return
 
         self.log.info("Starting pipeline")
