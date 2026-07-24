@@ -1,3 +1,5 @@
+import threading
+
 import av
 import numpy as np
 import torch
@@ -8,9 +10,10 @@ from PIL import Image as PILImage
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import ANIMATABLE_CATEGORIES, VEGETATION_CATEGORIES
+from pipeline.object_typing.categories import ANIMATABLE_CATEGORIES
 from pipeline.segmentation.video_segmentation import VideoSeg
-from util.device_utils import DeviceStrategy, preferred_device
+from util.device_utils import DeviceStrategy
+from util.gpu_task_pool import GpuTaskPool
 from util.video_utils import Video
 
 # Fallback frame rate when neither the source Video nor its own container header
@@ -55,6 +58,18 @@ class VideoObjectExtractionStage(PipelineStage):
     through the whole video with VideoSeg (SAM2's video predictor) and writes out one
     video per object: same frame size and frame count as the source, with everything
     outside that object's per-frame mask blacked out.
+
+    SAM2 tracking itself runs via GpuTaskPool: every eligible object is enqueued once
+    (cheap category/cache/cap filtering and mask reconstruction happen serially first,
+    see run() -- there's no benefit to doing plain CPU work inside the pool), then
+    the pool runs across every available device in parallel (one VideoSeg subprocess
+    per device, created lazily and reused for that device's whole share of the work --
+    spinning up a fresh SAM2 subprocess per object would be far too slow). An object
+    whose tracking fails on its first (parallel) attempt is retried once, serially, on
+    the pool's fallback device -- see GpuTaskPool's own docstring. A fallback failure
+    is not caught here either; it propagates out of run() and aborts the pipeline run,
+    same terminal severity a single failure already had before this stage used the
+    pool (there was no retry at all previously).
 
     Input key      (SemanticKey.INPUT)         -> ContextKey.INPUT            (Image, default)
                                                    or a Panorama at the same key
@@ -127,13 +142,18 @@ class VideoObjectExtractionStage(PipelineStage):
 
     def __init__(self, config: VideoObjectExtractionConfiguration) -> None:
         super().__init__(config)
-        self._video_seg = None
-        # AUTO (the default device), not MEMORY: this stage is compute-bound, not
-        # memory-bound (VRAM footprint stays low even at 100% GPU util -- SAM2 video
-        # tracking works one frame at a time), so it doesn't need MEMORY's
-        # highest-total-capacity GPU. Landing it on the default device instead keeps
-        # it off whichever GPU the memory-hungry diffusion stages contend for.
-        self.preferred_device, _ = preferred_device(DeviceStrategy.AUTO)
+        # Keyed by device (not a single instance) -- GpuTaskPool runs one worker
+        # per available device, and each needs its own VideoSeg subprocess (a
+        # RemoteClient pinned to that device via CUDA_VISIBLE_DEVICES). Created
+        # lazily in _get_video_seg the first time a given device is actually used,
+        # and reused for every other task that lands on that same device.
+        self._video_segs: dict[torch.device, VideoSeg] = {}
+        self._video_segs_lock = threading.Lock()
+        # Guards self.advance_progress(extraction_task) when called from a
+        # GpuTaskPool worker thread -- it does a read-then-write on the task's
+        # shared `completed` counter that isn't safe under concurrent callers,
+        # unlike a plain context.add_video/add_object (see _track_one).
+        self._progress_lock = threading.Lock()
 
     def _resolved_keys(self):
         return self.keys({
@@ -264,6 +284,61 @@ class VideoObjectExtractionStage(PipelineStage):
             bboxes.append([x0, y0, x1 - x0, y1 - y0])
         return {"centroids": centroids, "bboxes": bboxes}
 
+    def _get_video_seg(self, device: torch.device) -> VideoSeg:
+        with self._video_segs_lock:
+            video_seg = self._video_segs.get(device)
+            if video_seg is None:
+                video_seg = VideoSeg(device)
+                self._video_segs[device] = video_seg
+            return video_seg
+
+    def _track_one(self, device: torch.device, data: tuple[int, np.ndarray]) -> bool:
+        """GpuTaskPool work_fn -- runs on a worker thread pinned to `device`. Writes
+        its results straight to context (safe: every task touches distinct keys, so
+        this is just non-overlapping dict/set writes on the shared per-stage state)
+        rather than batching them until after pool.run() returns, so a task that
+        fails unrecoverably on the fallback phase doesn't discard every other
+        object's already-completed video."""
+        idx, mask = data
+        video_seg = self._get_video_seg(device)
+
+        out_key = f"object_video_{idx}"
+        alpha_key = f"object_video_alpha_{idx}"
+        motion_key = f"object_motion_{idx}"
+        temp_path = self.temp / out_key if self.temp is not None else None
+        if temp_path is not None:
+            temp_path.mkdir(parents=True, exist_ok=True)
+
+        result = video_seg.segment_video(
+            self._video,
+            reference_mask=mask,
+            temp_path=temp_path,
+            reference_frame_idx=self.config.reference_frame_idx,
+        )
+
+        num_frames = min(len(self._frames), result.num_frames)
+        frame_masks = result.masks[:num_frames]
+
+        out_path = (temp_path or self.temp) / "object.mp4"
+        self._write_masked_video(out_path, self._frames[:num_frames], frame_masks, self._fps)
+        self._context.add_video(out_key, Video(out_path, fps=self._fps, num_frames=num_frames))
+
+        alpha_path = (temp_path or self.temp) / "object_alpha.mp4"
+        self._write_alpha_video(alpha_path, frame_masks, self._fps)
+        self._context.add_video(alpha_key, Video(alpha_path, fps=self._fps, num_frames=num_frames))
+
+        self._context.add_object(motion_key, {
+            "fps": self._fps,
+            "width": self._video_w,
+            "height": self._video_h,
+            **self._frame_stats(frame_masks),
+        })
+
+        self.log_info(f"  {out_key}: {num_frames} frames @ {self._fps:.1f}fps on {device}")
+        with self._progress_lock:
+            self.advance_progress(self._extraction_task)
+        return True
+
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, video_key, count_key, output_key = self._resolved_keys()
 
@@ -293,12 +368,26 @@ class VideoObjectExtractionStage(PipelineStage):
         video_size = (video_w, video_h)
         ref_size = input_image.size if input_image is not None else video_size
 
-        if self._video_seg is None:
-            self._video_seg = VideoSeg(self.preferred_device)
+        # Shared, read-only state _track_one needs -- GpuTaskPool's work_fn signature
+        # is fixed to (device, data), so anything beyond the per-task mask has to be
+        # stage instance state rather than an extra closure argument.
+        self._context = context
+        self._video = video
+        self._frames = frames
+        self._fps = fps
+        self._video_w = video_w
+        self._video_h = video_h
 
         extracted = 0
-        tracked_per_bucket: dict[tuple[str, int], int] = {}
-        extraction_task = self.create_progress(object_count, "Extracting per-object videos…")
+        tracked_per_category: dict[str, int] = {}
+        eligible: list[tuple[int, np.ndarray]] = []
+        self._extraction_task = extraction_task = self.create_progress(object_count, "Extracting per-object videos…")
+
+        # Pass 1: cheap, serial filtering + mask reconstruction. Category/cache/cap
+        # checks and mask reconstruction are all plain CPU work with no reason to
+        # run inside the parallel pool -- deciding what's worth SAM2 tracking before
+        # touching any GPU keeps GpuTaskPool's work_fn (_track_one) doing nothing but
+        # the actually-parallelizable part.
         for idx in range(object_count):
             if idx not in placed_indices:
                 self.advance_progress(extraction_task)
@@ -315,19 +404,15 @@ class VideoObjectExtractionStage(PipelineStage):
             # generated from, so there's no real footage of them to track. They have
             # no "box"/crop_{idx} either, so _reference_mask below would always fail
             # for them anyway -- skip explicitly and early instead of silently burning
-            # a max_tracked_per_bucket slot (they'd all collapse onto bucket 0, since
-            # synthetic points never have a "bucket") on a guaranteed no-op.
+            # a max_tracked_per_category slot on a guaranteed no-op.
             if metadata.get("synthetic"):
                 self.advance_progress(extraction_task)
                 continue
 
-            if obj_class in VEGETATION_CATEGORIES:
-                bucket_key = (obj_class, int(metadata.get("bucket") or 0))
-                tracked = tracked_per_bucket.get(bucket_key, 0)
-                if tracked >= self.config.max_tracked_per_bucket:
-                    self.advance_progress(extraction_task)
-                    continue
-                tracked_per_bucket[bucket_key] = tracked + 1
+            tracked = tracked_per_category.get(obj_class, 0)
+            if tracked >= self.config.max_tracked_per_category:
+                self.advance_progress(extraction_task)
+                continue
 
             out_key = f"object_video_{idx}"
             alpha_key = f"object_video_alpha_{idx}"
@@ -337,6 +422,7 @@ class VideoObjectExtractionStage(PipelineStage):
                     and context.video(alpha_key) is not None
                     and context.object(motion_key) is not None):
                 self.log_info(f"  {out_key}: cached")
+                tracked_per_category[obj_class] = tracked + 1
                 extracted += 1
                 self.advance_progress(extraction_task)
                 continue
@@ -346,50 +432,20 @@ class VideoObjectExtractionStage(PipelineStage):
                 self.advance_progress(extraction_task)
                 continue
 
-            temp_path = self.temp / out_key if self.temp is not None else None
-            if temp_path is not None:
-                temp_path.mkdir(parents=True, exist_ok=True)
+            tracked_per_category[obj_class] = tracked + 1
+            eligible.append((idx, mask))
 
-            result = self._video_seg.segment_video(
-                video,
-                reference_mask=mask,
-                temp_path=temp_path,
-                reference_frame_idx=self.config.reference_frame_idx,
-                on_progress=self.make_progress_callback(extraction_task),
-            )
+        # Pass 2: SAM2 tracking + encoding, parallel across every available device
+        # (GpuTaskPool), with anything that fails its first attempt retried once,
+        # serially, on the fallback device. _track_one writes context/log/progress
+        # itself as each task completes -- see its docstring for why.
+        if eligible:
+            pool = GpuTaskPool(self._track_one, device_strategy=DeviceStrategy.AUTO)
+            for task_data in eligible:
+                pool.enqueue(task_data)
+            outcomes = pool.run()
+            extracted += sum(1 for ok in outcomes if ok)
 
-            num_frames = min(len(frames), result.num_frames)
-            frame_masks = result.masks[:num_frames]
-
-            # Fresh callback per phase (not one reused across both): make_progress_callback
-            # reads the sub-task's *current* completed position each time it's called, so
-            # each of these two encodes gets whatever headroom segment_video's own
-            # progress calls (and the other encode) left in this object's one step,
-            # instead of both writing into a stale, already-consumed span.
-            out_path = (temp_path or self.temp) / "object.mp4"
-            self._write_masked_video(
-                out_path, frames[:num_frames], frame_masks, fps,
-                on_progress=self.make_progress_callback(extraction_task),
-            )
-            context.add_video(out_key, Video(out_path, fps=fps, num_frames=num_frames))
-
-            alpha_path = (temp_path or self.temp) / "object_alpha.mp4"
-            self._write_alpha_video(
-                alpha_path, frame_masks, fps,
-                on_progress=self.make_progress_callback(extraction_task),
-            )
-            context.add_video(alpha_key, Video(alpha_path, fps=fps, num_frames=num_frames))
-
-            context.add_object(motion_key, {
-                "fps": fps,
-                "width": video_w,
-                "height": video_h,
-                **self._frame_stats(frame_masks),
-            })
-
-            self.log_info(f"  {out_key}: {num_frames} frames @ {fps:.1f}fps")
-            extracted += 1
-            self.advance_progress(extraction_task)
         self.finish_progress(extraction_task)
 
         context.add_object(output_key, extracted)
@@ -420,7 +476,8 @@ class VideoObjectExtractionStage(PipelineStage):
         )
 
     def clean_up(self):
-        if self._video_seg is not None:
-            self._video_seg.close()
-            self._video_seg = None
+        with self._video_segs_lock:
+            for video_seg in self._video_segs.values():
+                video_seg.close()
+            self._video_segs.clear()
         super().clean_up()

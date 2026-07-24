@@ -22,18 +22,13 @@ class DeviceStrategy(Enum):
     AUTO = "auto"
     MEMORY = "memory"
 
-def all_devices() -> [torch.device]:
+def all_devices() -> list[torch.device]:
     if torch.cuda.is_available():
-        devices = []
-
-        for idx in range(torch.cuda.device_count()):
-            devices += [torch.device(f"cuda:{best}")]
+        return [torch.device(f"cuda:{idx}") for idx in range(torch.cuda.device_count())]
     elif torch.backends.mps.is_available():
-        devices = torch.device("mps")
+        return [torch.device("mps")]
     else:
-        devices = torch.device("cpu")
-
-    return devices
+        return [torch.device("cpu")]
 
 def preferred_device(strategy: DeviceStrategy = DeviceStrategy.AUTO) -> tuple[torch.device, torch.dtype]:
     if torch.cuda.is_available():
