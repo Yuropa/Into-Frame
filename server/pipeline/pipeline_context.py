@@ -90,6 +90,14 @@ class ContextKey:
     # this must stay separate from HEIGHT_MAP_OBSERVED_MASK rather than
     # replacing it.
     HEIGHT_MAP_PANO_UV_TRUST_MASK = "height_map_pano_uv_trust_mask"
+    # Broader than HEIGHT_MAP_OBSERVED_MASK: also True for the nadir disc's ramp
+    # band, which HEIGHT_MAP_OBSERVED_MASK excludes for elevation hard-pinning
+    # purposes even though those cells came from a genuine depth sample. Written by
+    # HeightMapGenerator, consumed by TerrainReconstructionStage when it builds
+    # HEIGHT_MAP_PANO_UV_TRUST_MASK -- a ramp-band cell's cached panorama UV is
+    # still trustworthy (it came from a real sample), so it shouldn't be starved of
+    # that cached UV just because its height isn't trusted as ground truth.
+    HEIGHT_MAP_REAL_SAMPLE_MASK = "height_map_real_sample_mask"
     HEIGHT_MAP_COMPONENT_ID = "height_map_component_id"
     HEIGHT_MAP_PANO_U = "height_map_pano_u"
     HEIGHT_MAP_PANO_V = "height_map_pano_v"

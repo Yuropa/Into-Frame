@@ -54,13 +54,14 @@ class HeightMapGenerator:
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Project ground points from a depth map onto a top-down height grid.
 
         Returns (height_array, certainty_array, cell_relief_array, cell_slope_array,
-        true_observed_array, component_id_array). The first four are
-        (grid_resolution, grid_resolution) float32; true_observed_array is bool;
+        true_observed_array, component_id_array, pano_uv_u_array, pano_uv_v_array,
+        real_sample_mask_array). The first four are (grid_resolution, grid_resolution)
+        float32; true_observed_array and real_sample_mask_array are bool;
         component_id_array is int32. certainty is in [0, 1]:
         sin²(depression_angle) for cells with any direct observation (primary or
         panorama depth), 0 for pure interpolation -- but it decays with distance and
@@ -69,7 +70,17 @@ class HeightMapGenerator:
         true_observed_array is that latter signal: True only for cells with a
         genuine direct measurement (primary projection, dense forward-projected
         stats, or panorama fill), independent of distance-based certainty decay and
-        excluding both the flat-ground prior and interpolated fill. component_id_array
+        excluding both the flat-ground prior and interpolated fill -- including the
+        nadir disc's ramp band, which real_sample_mask_array does not exclude.
+        real_sample_mask_array is true_observed_array as it stood before that ramp
+        band was folded into the flat-ground prior: still True for a ramp-band cell,
+        since it did come from a genuine sample even though it's not trusted enough
+        to pin as elevation ground truth. Use true_observed_array to decide "should
+        this be treated as elevation ground truth" (hard-pinning/restoring in Terrain
+        Reconstruction and Terrain Noise Refinement); use real_sample_mask_array to
+        decide "does this cell have a real, trustworthy cached panorama UV" (the
+        nadir ramp band's cached UV is still good even though its height isn't).
+        component_id_array
         labels which connected walkable-ground component each cell belongs to (see
         _label_ground_components): 0 = none/interpolated gap, 1 = the largest
         component (the base terrain), 2, 3, ... = smaller components ranked by size
@@ -342,14 +353,43 @@ class HeightMapGenerator:
             # so that consistency check fired on the majority of ordinary cells
             # and collapsed coverage. Real forward-projected data is simply
             # always preferred instead, unconditionally, whenever it exists).
+            #
+            # NOT additionally gated on `valid`: valid is the *primary ray's own*
+            # verdict (sampled at the flat-ground-assumed pixel, a different pixel
+            # than the one any real forward sample actually came from), so ANDing
+            # it in here re-imposes exactly the flat-ground assumption this
+            # override exists to bypass. Concretely, for a real point well above
+            # eye level (a mountain slope tens of metres up), the flat-ground
+            # assumed ray for that same (X, Z) typically samples sky or fails
+            # ground_y_max well before reaching that real elevation, so `valid`
+            # is false there almost by construction -- gating on it silently
+            # discarded the large majority of real forward-projected mountain/
+            # slope samples (observed on one capture: ~167k cells at 50-90 m with
+            # a real ground-valid sample averaging +24 m of elevation, of which
+            # under 0.4% made it into the final height map; four in five of those
+            # cells fell through to pure synthetic interpolation with no real
+            # signal at all) instead of using the perfectly good real data they
+            # already had.
             if any_forward_mask.any():
-                use_weak = valid & ~dense_mask & any_forward_mask
+                use_weak = ~dense_mask & any_forward_mask
                 height_map[use_weak] = fwd_mean_y[use_weak]
                 cell_relief[use_weak] = fwd_relief[use_weak]
 
             if despike_threshold_m > 0:
+                # Protects any_forward_mask cells too, not just dense_mask: despiking
+                # exists to catch the primary single-ray inverse guess's own "flying
+                # pixel" noise (the flat-ground assumption sampling one wrong pixel
+                # next to another), not to second-guess a genuine forward-projected
+                # 3-D measurement. A weak (1-3 sample) forward cell is exactly as real
+                # as a dense one -- just without enough points for its own relief/
+                # slope -- and it's disproportionately likely to sit in a sparse far
+                # region where its neighbourhood is mostly nearest-neighbour-filled
+                # flat/interpolated values, i.e. exactly the setup that would make a
+                # real, isolated elevated sample (a mountain slope point surrounded by
+                # empty cells) look like a "spike" against that neighbourhood's median
+                # and get reverted right back to the flat guess it was meant to fix.
                 height_map, spike_mask = HeightMapGenerator._despike_single_sample_cells(
-                    height_map, protected_mask=dense_mask,
+                    height_map, protected_mask=dense_mask | any_forward_mask,
                     threshold_m=despike_threshold_m, window=despike_window,
                     distance_m=sampled_depth, reference_distance_m=despike_reference_distance_m,
                 )
@@ -475,6 +515,18 @@ class HeightMapGenerator:
         # use to decide "is this a real point" rather than "how much do we trust it."
         true_observed = ~np.isnan(height_map)
 
+        # Snapshot of true_observed before the nadir flat-prior disc below clears it
+        # for hard-pin purposes (see that block). A cell in the disc's ramp band
+        # still came from a genuine depth sample -- untrustworthy as *elevation*
+        # ground truth (that's what the clearing below is for), but its panorama UV,
+        # cached below from that same real sample, is still exactly the right UV for
+        # this cell's position and far more reliable than one re-derived later from
+        # a synthetic diffused height near nadir (see pano_uv_u/pano_uv_v comment --
+        # UV-from-height error blows up right there). real_sample_mask preserves that
+        # distinction for whichever downstream consumer needs "was this ever a real
+        # sample" rather than "should this be pinned/restored as ground truth."
+        real_sample_mask = true_observed.copy()
+
         # Each observed cell's own panorama UV, captured now from this cell's own
         # (X, height, Z) -- before Terrain Reconstruction's DEM solve, Terrain
         # Noise Refinement, single_sample_blur_sigma below, _smooth_edge_preserving,
@@ -525,6 +577,7 @@ class HeightMapGenerator:
         _r_cell = np.sqrt(_X_cell.astype(np.float64) ** 2 + _Z_cell.astype(np.float64) ** 2).astype(np.float32)
 
         flat_prior_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+        prior_radius = nadir_exclusion_radius
         if nadir_exclusion_radius > 0:
             prior_radius = nadir_exclusion_radius + max(nadir_ramp_width, 0.0)
             flat_prior_mask = _r_cell <= prior_radius
@@ -577,13 +630,24 @@ class HeightMapGenerator:
         component_id[(component_id == 0) & ~np.isnan(height_map)] = 1
 
         # Certainty: sin²(elevation) × smooth nadir ramp. The ramp rises from 0 at
-        # nadir_exclusion_radius to full geometric certainty at nadir_exclusion_radius
-        # + nadir_ramp_width, avoiding the hard ring artifact a step boundary creates.
-        # Flat-prior cells get a fixed low certainty (flat_zone_certainty).
+        # prior_radius (the outer edge of the flat-prior disc -- nadir_exclusion_radius
+        # + nadir_ramp_width once the ramp band is folded in above, same as
+        # nadir_exclusion_radius when there's no disc at all) to full geometric
+        # certainty one more nadir_ramp_width beyond that. Anchoring the ramp's start
+        # at prior_radius rather than the bare nadir_exclusion_radius matters now that
+        # flat_prior_mask covers the whole disc: the ramp used to be sized to exactly
+        # match the (smaller) old disc, so it reached full strength precisely at the
+        # old disc's edge -- with the disc enlarged to include the ramp band, an
+        # unshifted ramp is already saturated at 1.0 well before flat_prior_mask ends,
+        # so certainty would jump straight from flat_zone_certainty to ~full strength
+        # in one cell right at the (new, larger) disc boundary -- the exact hard-step
+        # artifact this ramp exists to avoid, just relocated outward. Flat-prior cells
+        # get a fixed low certainty (flat_zone_certainty) instead of whatever this
+        # ramp would say, applied below.
         observed = ~np.isnan(height_map)
         certainty = HeightMapGenerator._build_certainty(
             observed, height_map, grid_size_meters, grid_resolution, certainty_falloff_meters,
-            nadir_exclusion_radius=nadir_exclusion_radius,
+            nadir_exclusion_radius=prior_radius,
             nadir_ramp_width=nadir_ramp_width,
             elevation_distortion_power=elevation_distortion_power,
             reclaimed_mask=reclaimed_grid,
@@ -593,23 +657,31 @@ class HeightMapGenerator:
             certainty[flat_prior_mask] = flat_zone_certainty
 
         # Partial, density-gated blur: single-inverse-mapped-sample cells (not
-        # backed by _forward_project_cell_stats' dense_mask) have no intra-cell
-        # averaging to fall back on, so per-pixel depth-model noise survives as
-        # visible per-cell dither -- not sharp enough for despiking's outlier test
-        # (a cell disagreeing with an otherwise-agreeing neighbourhood), since
-        # neighbouring single-sample cells usually carry similar-magnitude noise
-        # rather than one cell standing out from a clean local median. Blur is
-        # blended in per-cell by (1 - certainty), which by this point already
-        # reflects both distance and projection-distortion trust (see
-        # _build_certainty) -- confident single-sample cells stay close to their
-        # raw value, poorly-conditioned ones lean further toward the local
-        # average. Dense cells are never blurred: they're already a real
-        # multi-sample average, so there's no single-ray noise here to correct.
+        # backed by _forward_project_cell_stats' dense_mask, and with no real
+        # forward-projected sample of their own either -- see any_forward_mask)
+        # have no intra-cell averaging to fall back on, so per-pixel depth-model
+        # noise survives as visible per-cell dither -- not sharp enough for
+        # despiking's outlier test (a cell disagreeing with an otherwise-agreeing
+        # neighbourhood), since neighbouring single-sample cells usually carry
+        # similar-magnitude noise rather than one cell standing out from a clean
+        # local median. Blur is blended in per-cell by (1 - certainty), which by
+        # this point already reflects both distance and projection-distortion
+        # trust (see _build_certainty) -- confident single-sample cells stay
+        # close to their raw value, poorly-conditioned ones lean further toward
+        # the local average. Dense cells are never blurred: they're already a
+        # real multi-sample average, so there's no single-ray noise here to
+        # correct. any_forward_mask cells (a weak but still genuine forward-
+        # projected 3-D measurement, just short of dense_mask's sample count) are
+        # excluded for the same reason, and because they're disproportionately
+        # far-range/sparse -- exactly where certainty (and so 1 - certainty, the
+        # blend weight) is lowest, meaning an unprotected real sample there would
+        # get blended almost entirely away into the local blurred average instead
+        # of correcting the flat-ground guess the way it's meant to.
         if use_equirectangular and single_sample_blur_sigma > 0:
             blurred = gaussian_filter(
                 np.where(observed, height_map, 0.0), sigma=single_sample_blur_sigma
             )
-            blur_weight = np.where(observed & ~dense_mask, 1.0 - certainty, 0.0)
+            blur_weight = np.where(observed & ~dense_mask & ~any_forward_mask, 1.0 - certainty, 0.0)
             height_map = np.where(
                 observed, height_map * (1.0 - blur_weight) + blurred * blur_weight, height_map
             ).astype(np.float32)
@@ -656,7 +728,7 @@ class HeightMapGenerator:
                 viz = (component_id.astype(np.float32) / max(n_components, 1) * 255).astype(np.uint8)
                 PIL.Image.fromarray(viz, "L").save(debug_dir / "heightmap_component_id.png")
 
-        return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id, pano_uv_u, pano_uv_v
+        return result, certainty, cell_relief, cell_slope_deg, true_observed, component_id, pano_uv_u, pano_uv_v, real_sample_mask
 
     @staticmethod
     def _panorama_uv_from_height(

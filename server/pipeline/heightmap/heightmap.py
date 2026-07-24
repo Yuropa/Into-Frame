@@ -248,7 +248,7 @@ class HeightMapStage(PipelineStage):
                     f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.glb"
                 )
 
-        height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array, component_id_array, pano_uv_u_array, pano_uv_v_array = HeightMapGenerator.generate(
+        height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array, component_id_array, pano_uv_u_array, pano_uv_v_array, real_sample_mask_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
             grid_size_meters=cfg.grid_size_meters,
@@ -288,6 +288,9 @@ class HeightMapStage(PipelineStage):
         context.add_depth(ContextKey.HEIGHT_MAP_CELL_SLOPE, Depth(cell_slope_array))
         context.add_depth(
             ContextKey.HEIGHT_MAP_OBSERVED_MASK, Depth(true_observed_array.astype(np.float32))
+        )
+        context.add_depth(
+            ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK, Depth(real_sample_mask_array.astype(np.float32))
         )
         context.add_depth(
             ContextKey.HEIGHT_MAP_COMPONENT_ID, Depth(component_id_array.astype(np.float32))

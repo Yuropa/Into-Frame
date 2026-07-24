@@ -153,6 +153,21 @@ class TerrainReconstructionStage(PipelineStage):
             else np.zeros((H, W), dtype=bool)
         )
 
+        # Broader than true_observed: also True for the nadir disc's ramp band,
+        # which true_observed excludes for elevation hard-pinning purposes (see
+        # HeightMapGenerator.generate) even though those cells came from a genuine
+        # depth sample with a genuinely correct cached panorama UV. Used below only
+        # for the HEIGHT_MAP_PANO_UV_TRUST_MASK publish, never for fixed_mask/
+        # restore_mask -- those must keep using true_observed so the ramp band still
+        # isn't hard-pinned or spliced back in as elevation ground truth. Falls back
+        # to true_observed if absent so an older cached context still works.
+        real_sample_depth = context.input_depth(ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK)
+        real_sample_mask = (
+            real_sample_depth.depth.astype(bool)
+            if real_sample_depth is not None and real_sample_depth.depth.shape == (H, W)
+            else true_observed
+        )
+
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
@@ -589,7 +604,17 @@ class TerrainReconstructionStage(PipelineStage):
         # has since moved to match the ridge envelope -- producing a
         # geometry/texture mismatch (stretching) confined to exactly the
         # distant-mountain cells the ridge override was introduced to correct.
-        context.add_depth(ContextKey.HEIGHT_MAP_PANO_UV_TRUST_MASK, Depth(restore_mask.astype(np.float32)))
+        # Built from real_sample_mask, not restore_mask/true_observed: the nadir
+        # disc's ramp band is deliberately excluded from true_observed (so it isn't
+        # hard-pinned/restored as elevation ground truth), but its cached panorama UV
+        # came from that same genuine sample and is still correct -- starving it of
+        # that cached UV instead sends TerrainMeshGenerator to re-derive UV from the
+        # ramp band's synthetic diffused height, which is exactly where UV-from-
+        # height error is worst (near nadir), and was the actual source of "sky
+        # visible on near-camera ground" after the ramp band was folded into the
+        # flat-ground prior.
+        pano_uv_trust_mask = real_sample_mask & ~observed_override_native
+        context.add_depth(ContextKey.HEIGHT_MAP_PANO_UV_TRUST_MASK, Depth(pano_uv_trust_mask.astype(np.float32)))
 
         if self.temp is not None:
             Depth(new_hm).save_debug_image(self.temp / "heightmap_reconstructed.png")
