@@ -42,6 +42,7 @@ class HeightMapGenerator:
         reclaimed_certainty_factor: float = 0.5,
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
+        far_exclusion_radius: Optional[float] = None,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
         elevation_distortion_power: float = 1.0,
@@ -169,6 +170,30 @@ class HeightMapGenerator:
                                 project directly under the camera and generate a deep
                                 bowl.  The excluded cells are later filled by
                                 interpolation from the surrounding reliable ring.
+        far_exclusion_radius: when use_equirectangular=True, the mirror image of
+                                nadir_exclusion_radius at the opposite end of the
+                                range. The single-ray inverse mapping assumes flat
+                                ground and computes phi_grid = -arctan(camera_height
+                                / r); as r grows, phi_grid -> 0, so Y = sampled_depth
+                                * sin(phi_grid) crushes any real elevation signal
+                                toward a coincidentally-plausible near-zero height
+                                regardless of the real depth value -- the same
+                                fundamental instability as the nadir case, just
+                                suppressing height information instead of amplifying
+                                depth-model noise into it. Beyond this radius (metres),
+                                a cell backed only by that single ray (no genuine
+                                forward-projected sample -- see "any real forward-
+                                projected sample" below, which is exempt since it's a
+                                real 3-D unprojection, not the flat-ground guess) stops
+                                counting as true_observed: it keeps its computed height
+                                and certainty (certainty already decays continuously
+                                with r and needs no special-casing here) as a
+                                reasonable placeholder, but Terrain Reconstruction and
+                                Terrain Noise Refinement no longer hard-pin/restore it
+                                as elevation ground truth, leaving the harmonic solve
+                                free to shape that cell from real neighbours and ridge-
+                                chain anchors instead. None disables (no far exclusion,
+                                matching prior behaviour).
         certainty_falloff_meters: distance at which observed-ground certainty decays
                                   to 0.5 (see util.projection_utils.ground_projection_certainty).
                                   This is a depth-model-trust radius, not the physical
@@ -619,6 +644,31 @@ class HeightMapGenerator:
             # Refinement) would still treat this ring as ground truth and undo the
             # fix above.
             true_observed[flat_prior_mask] = False
+
+        # Far-range exclusion: the mirror image of the nadir disc above, at the
+        # opposite end of the range -- see far_exclusion_radius's docstring for why
+        # sin(phi_grid) -> 0 as r grows crushes real elevation signal the same way
+        # phi_grid -> -90 deg near the nadir amplifies depth-model noise into it.
+        # any_forward_mask cells are exempt: those are genuine forward-projected 3-D
+        # unprojections (see "any real forward-projected sample" above), not the
+        # flat-ground single ray, so they don't suffer from this at all. Only
+        # use_equirectangular has an any_forward_mask (the pinhole branch below does
+        # true per-pixel unprojection with no flat-ground guess to begin with, so
+        # this doesn't apply there).
+        #
+        # Unlike the nadir disc, this doesn't touch height_map/cell_relief/certainty:
+        # certainty already decays continuously with r (ground_projection_certainty)
+        # without any special-casing, and the single-ray value is still a reasonable
+        # placeholder for a cell the solve would otherwise have nothing at all to go
+        # on. What actually needs fixing is Terrain Reconstruction/Terrain Noise
+        # Refinement hard-pinning/restoring true_observed cells regardless of
+        # certainty or range -- past far_exclusion_radius, a single-ray cell with no
+        # corroborating real sample stops getting that authority and becomes a free
+        # node the harmonic solve can shape from real neighbours and ridge-chain
+        # anchors instead.
+        if use_equirectangular and far_exclusion_radius is not None and far_exclusion_radius > 0:
+            far_exclusion_mask = (_r_cell > far_exclusion_radius) & ~any_forward_mask
+            true_observed[far_exclusion_mask] = False
 
         # Cells filled by the panorama-depth fallback or the nadir flat-ground prior
         # above weren't part of the walkable-component analysis (they're

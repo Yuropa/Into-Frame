@@ -31,6 +31,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         flood_fill_max_step: float = 1.5,
         nadir_exclusion_radius: float = 1.0,
         nadir_ramp_width: float = 5.0,
+        far_exclusion_radius: Optional[float] = None,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
         elevation_distortion_power: float = 1.0,
@@ -70,6 +71,15 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # up to full geometric certainty over nadir_ramp_width metres beyond that radius.
         self.nadir_exclusion_radius = nadir_exclusion_radius
         self.nadir_ramp_width = nadir_ramp_width
+        # Mirror image of nadir_exclusion_radius at the far end of the range: beyond
+        # this radius (metres), a cell backed only by the flat-ground single-ray guess
+        # (no genuine forward-projected sample) stops counting as observed ground
+        # truth for hard-pinning purposes, since sin(phi_grid) -> 0 out there crushes
+        # real elevation signal the same way phi_grid -> -90 deg near the nadir
+        # amplifies depth-model noise into it. Certainty and the computed height are
+        # left alone -- only true_observed is affected. None disables (no far
+        # exclusion). See HeightMapGenerator.generate's far_exclusion_radius docstring.
+        self.far_exclusion_radius = far_exclusion_radius
         self.flat_zone_certainty = flat_zone_certainty
         # Distance (metres) at which observed-ground certainty decays to 0.5. This is a
         # depth-model-trust radius, independent of camera_height_meters -- it must be
@@ -266,6 +276,7 @@ class HeightMapStage(PipelineStage):
             reclaimed_certainty_factor=cfg.reclaimed_certainty_factor,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
+            far_exclusion_radius=cfg.far_exclusion_radius,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
             elevation_distortion_power=cfg.elevation_distortion_power,

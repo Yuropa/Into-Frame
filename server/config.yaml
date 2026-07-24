@@ -236,6 +236,22 @@ stages:
                                  # the user.
     nadir_ramp_width: 3.0       # metres over which certainty ramps from 0 (at exclusion boundary)
                                  # to full geometric certainty; prevents a hard ring artifact.
+    far_exclusion_radius: 45.0  # metres: mirror image of nadir_exclusion_radius at the far end.
+                                 # Beyond this radius, a cell backed only by the flat-ground
+                                 # single-ray guess (no real forward-projected sample) stops
+                                 # counting as observed ground truth for hard-pinning purposes —
+                                 # sin(phi_grid) -> 0 out there crushes real elevation signal
+                                 # toward a coincidentally flat-looking height regardless of the
+                                 # real depth value, the same instability as the nadir case just
+                                 # suppressing signal instead of amplifying noise. Cells with a
+                                 # genuine forward-projected sample are exempt and always trusted
+                                 # regardless of range. Certainty and the computed height are left
+                                 # alone; only hard-pinning is affected. Chosen a bit past
+                                 # certainty_falloff_meters (already ~16% trust by 45 m) — on one
+                                 # test capture, single-ray cells with no real sample were wrong
+                                 # more often than not (ratio of implied-to-expected-flat depth <
+                                 # 0.5) starting around 30-50 m and worsening steadily beyond that.
+                                 # None disables. See HeightMapGenerator.generate's docstring.
     certainty_falloff_meters: 20.0 # distance at which observed-ground certainty decays to 0.5.
                                  # A depth-model-trust radius, NOT camera_height_meters — using
                                  # camera height (~1 m) here made certainty collapse to a few
@@ -257,10 +273,12 @@ stages:
                                  # written to <build>/ground_point_cloud.glb
     point_cloud_stride: 4       # take every Nth panorama pixel per axis before unprojecting
     min_forward_samples: 4      # minimum forward-projected panorama pixels landing in one grid
-                                 # cell before its single inverse-mapped sample is overridden by
-                                 # real per-cell mean/relief/slope statistics (near-field only —
-                                 # far cells rarely collect enough samples and keep using the
-                                 # existing inverse-mapped value)
+                                 # cell before its per-cell mean/relief/slope statistics count as
+                                 # "dense" (real intra-cell averaging, incl. slope). Below this,
+                                 # a cell with at least one real forward-projected sample still
+                                 # unconditionally overrides the inverse-mapped guess (just without
+                                 # a slope/relief measurement) — only a cell with zero real forward
+                                 # samples keeps the inverse-mapped value.
     fill_boundary_falloff_cells: 6.0 # unobserved-cell fill: how many cells (at each octave's
                                  # own resolution) beyond a real observation the injected noise
                                  # needs before reaching full amplitude — fill right next to real
