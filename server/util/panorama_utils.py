@@ -269,14 +269,18 @@ class Panorama:
         rescaled instead: each panorama column's own overshooting vertices
         (same azimuth/U, only V adjusted) get linearly compressed from
         [that column's worst overshoot, the column's real ridge/horizon
-        row] onto [0, ridge row], using the sky headroom above the ridge
-        line as room to preserve a distinct, monotonically-ordered row per
-        vertex -- a squeezed but continuous gradient up toward the peak,
-        rather than every overshooting vertex on a slope collapsing onto
-        the single ridge-line pixel (which reads as smeared/repeated
-        texture right at the peak). Vertices already inside the real
-        (non-sky) band are untouched, and the mapping is continuous at the
-        ridge row itself, so there's no seam between real and rescaled
+        row] onto [ridge row, ridge row + a small band of real rows just
+        below it], preserving a distinct, monotonically-ordered row per
+        vertex -- a squeezed but continuous gradient past the peak, rather
+        than every overshooting vertex on a slope collapsing onto the
+        single ridge-line pixel (which reads as smeared/repeated texture
+        right at the peak). Deliberately stays on the real side of the
+        boundary rather than using the sky headroom above it: a sky pixel
+        is guaranteed wrong for a mesh vertex, so spreading vertices into it
+        just trades one artifact (smeared texture) for a worse one (mountain
+        slopes sampling literal sky colour). Vertices already inside the
+        real (non-sky) band are untouched, and the mapping is continuous at
+        the ridge row itself, so there's no seam between real and rescaled
         content. Columns with no real content at all (sky top to bottom)
         are left unchanged -- nothing to anchor a gradient to. This is
         separate from the nearest-XZ-neighbour fallback below (which can
@@ -342,15 +346,26 @@ class Panorama:
                     #
                     # Instead, linearly compress each column's own overshoot
                     # range -- [that column's worst overshoot, ridge_row] --
-                    # onto [0, ridge_row]. Every overshooting vertex keeps its
-                    # own distinct, monotonically-ordered row (a squeezed but
-                    # genuine gradient up toward the peak, using the sky
-                    # headroom above the ridge line as the only room there is
-                    # to put it) instead of being crushed onto the boundary.
+                    # onto [ridge_row, ridge_row + real_band], a small band of
+                    # REAL rows just *below* the ridge line (real_band capped
+                    # per-column by how much real content the column actually
+                    # has beneath ridge_row). Every overshooting vertex keeps
+                    # its own distinct, monotonically-ordered row (a squeezed
+                    # but genuine gradient) instead of being crushed onto the
+                    # boundary -- but unlike an earlier version of this fix,
+                    # which used the sky headroom *above* ridge_row as that
+                    # room, every resampled row here stays on the real side of
+                    # the boundary. Sky rows are, by construction, guaranteed
+                    # wrong for a mesh vertex (real ground is never literally
+                    # sky) -- sampling into the sky headroom just moved the
+                    # smearing bug into a worse one (mountain slopes reading
+                    # as literal sky colour). A few real rows past the ridge
+                    # are still a photographed sample of the same rock/snow
+                    # texture, not a different, unrelated part of the scene.
                     # Vertices already inside the real (non-sky) band are
                     # untouched, and the mapping is continuous at ridge_row
-                    # itself (0% compression right at the boundary), so there
-                    # is no seam between real and rescaled content.
+                    # itself (0% offset right at the boundary), so there is no
+                    # seam between real and rescaled content.
                     cols = pu_i[overshoot]
                     pv_over = pv[overshoot]
                     col_pv_min = np.full(W, np.inf)
@@ -359,7 +374,9 @@ class Panorama:
                     r_sky = ridge_row[cols].astype(np.float64)
                     denom = np.maximum(r_sky - col_pv_min[cols], 1e-6)
                     frac = (r_sky - pv_over) / denom
-                    new_pv = r_sky * (1.0 - frac)
+                    max_real_band = 24.0
+                    real_band = np.minimum(max_real_band, np.maximum(H - 1.0 - r_sky, 0.0))
+                    new_pv = r_sky + real_band * frac
 
                     pv = pv.copy()
                     pv[overshoot] = new_pv
