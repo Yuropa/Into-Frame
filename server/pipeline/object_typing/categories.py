@@ -81,14 +81,29 @@ OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "other":        ["a photo of an unidentified object", "a miscellaneous item outdoors"],
 }
 
-# Objects that are intrinsically one-of-a-kind in a scene.  Multiple detections of
-# these types are treated as duplicates of the same object rather than a population
-# to scatter.  Everything outside this set is count-driven: 1 instance → individual
-# placement, ≥2 instances → distribution.
+# Objects that are intrinsically one-of-a-kind in a scene. Multiple detections of
+# these types are treated as duplicates of the same object (ObjectCorrelationStage
+# merges them). Distinct from DISTRIBUTABLE_CATEGORIES below, which gates the
+# opposite direction -- which *non*-duplicate categories are allowed to be scattered
+# as a synthesized population.
 UNIQUE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "monument", "statue", "landmark", "lighthouse",
     "fountain", "gazebo", "waterfall", "bridge", "tower",
 })
+
+# Categories ObjectDistributionStage/DistributionSynthesisStage are allowed to treat
+# as a population to scatter more of, rather than just "not one-of-a-kind". Natural
+# clutter that plausibly repeats across a matching region -- vegetation, and rock
+# (already coalesced per-formation by ObjectInstanceRefinementStage, see
+# COALESCE_CATEGORIES, so a "rock" detection here is one real rock, not a fragment).
+# Deliberately excludes every other countable/discrete category (person, car, animal,
+# bench, fire_hydrant, ...): two real detections of a person or a car is not evidence
+# that more of them belong scattered around, and doing so anyway is what previously
+# made VideoObjectExtractionStage try to SAM2-track hundreds of synthetic people/
+# vehicles/animals -- ANIMATABLE_CATEGORIES has no per-bucket tracking cap outside
+# VEGETATION_CATEGORIES, since a real detection there is supposed to be a genuinely
+# distinct subject worth its own trajectory, not decorative fill.
+DISTRIBUTABLE_CATEGORIES: Final[frozenset[str]] = VEGETATION_CATEGORIES | frozenset({"rock"})
 
 # Categories that can plausibly exhibit visible motion worth animating -- either
 # wind sway (VEGETATION_CATEGORIES) or genuine rigid-body movement (person/vehicle/

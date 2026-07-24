@@ -14,7 +14,7 @@ from pipeline.object_distribution.object_distribution_result import (
     TypeDistribution,
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.object_typing.categories import UNIQUE_CATEGORIES
+from pipeline.object_typing.categories import DISTRIBUTABLE_CATEGORIES
 from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
 
 _MIN_POINTS = 2
@@ -171,7 +171,7 @@ class ObjectDistributionStage(PipelineStage):
         distributable_types = [
             obj_type
             for obj_type, grp in correlation.groups.items()
-            if obj_type not in UNIQUE_CATEGORIES
+            if obj_type in DISTRIBUTABLE_CATEGORIES
         ]
 
         if not distributable_types:

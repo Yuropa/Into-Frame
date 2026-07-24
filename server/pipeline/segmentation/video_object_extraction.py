@@ -307,6 +307,17 @@ class VideoObjectExtractionStage(PipelineStage):
                 self.advance_progress(extraction_task)
                 continue
 
+            # Synthetic points (DistributionSynthesisStage) are procedural placements,
+            # not real detections -- they never appeared in the panorama the video was
+            # generated from, so there's no real footage of them to track. They have
+            # no "box"/crop_{idx} either, so _reference_mask below would always fail
+            # for them anyway -- skip explicitly and early instead of silently burning
+            # a max_tracked_per_bucket slot (they'd all collapse onto bucket 0, since
+            # synthetic points never have a "bucket") on a guaranteed no-op.
+            if metadata.get("synthetic"):
+                self.advance_progress(extraction_task)
+                continue
+
             if obj_class in VEGETATION_CATEGORIES:
                 bucket_key = (obj_class, int(metadata.get("bucket") or 0))
                 tracked = tracked_per_bucket.get(bucket_key, 0)
