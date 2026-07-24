@@ -52,12 +52,26 @@ class Mesh:
         self.mesh.apply_scale(scale)
         self.mesh.apply_translation(-self.mesh.centroid)
 
+    def _vertex_colors_01(self) -> "np.ndarray | None":
+        """(N, 3) per-vertex RGB in [0, 1], baking down TextureVisuals if needed. None if unset."""
+        visual = self.mesh.visual
+        if getattr(visual, "kind", None) is None:
+            return None
+        # ColorVisuals exposes vertex_colors directly; TextureVisuals needs baking first.
+        colors = visual.vertex_colors if isinstance(visual, trimesh.visual.ColorVisuals) else visual.to_color().vertex_colors
+        return np.asarray(colors)[:, :3] / 255.0
+
     def repair(self) -> "Mesh":
         """Return a new Mesh with a clean watertight surface via Poisson reconstruction.
 
         Raw meshes from reconstruction models are typically non-manifold (~50% broken
         faces). Poisson reconstruction samples the surface and fits a clean closed mesh,
         eliminating holes before any downstream use (rendering, decimation, etc.).
+
+        Poisson reconstruction discards the original topology, so any texture/UV
+        material can't carry over directly. Baked colors are carried through instead:
+        sampled onto the surface point cloud and reconstructed as Open3D's own
+        per-vertex color output, which survives simplify()'s decimation afterward.
         """
         import open3d as o3d
 
@@ -69,15 +83,22 @@ class Mesh:
         pcd.normals = o3d.utility.Vector3dVector(normals)
         pcd.orient_normals_consistent_tangent_plane(30)
 
+        vertex_colors_01 = self._vertex_colors_01()
+        if vertex_colors_01 is not None:
+            point_colors = vertex_colors_01[self.mesh.faces[face_ids]].mean(axis=1)
+            pcd.colors = o3d.utility.Vector3dVector(point_colors)
+
         poisson, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=8)
         densities = np.asarray(densities)
         poisson.remove_vertices_by_mask(densities < np.quantile(densities, 0.05))
         poisson.remove_degenerate_triangles()
         poisson.remove_duplicated_vertices()
 
+        vertex_colors = np.asarray(poisson.vertex_colors) if poisson.has_vertex_colors() else None
         return Mesh(trimesh.Trimesh(
             vertices=np.asarray(poisson.vertices),
             faces=np.asarray(poisson.triangles),
+            vertex_colors=vertex_colors,
         ))
 
     def simplify(self, max_error_fraction: float = 0.03, min_faces: int = 50) -> "Mesh":
@@ -97,6 +118,9 @@ class Mesh:
             vertices=o3d.utility.Vector3dVector(self.mesh.vertices),
             triangles=o3d.utility.Vector3iVector(self.mesh.faces),
         )
+        vertex_colors_01 = self._vertex_colors_01()
+        if vertex_colors_01 is not None:
+            o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors_01)
 
         target = min_faces
         while target < len(self.mesh.faces):
@@ -107,6 +131,7 @@ class Mesh:
             candidate = trimesh.Trimesh(
                 vertices=np.asarray(dec.vertices),
                 faces=np.asarray(dec.triangles),
+                vertex_colors=np.asarray(dec.vertex_colors) if dec.has_vertex_colors() else None,
             )
             _, distances, _ = trimesh.proximity.closest_point(candidate, sample_pts)
             if np.percentile(distances, 95) <= error_budget:
