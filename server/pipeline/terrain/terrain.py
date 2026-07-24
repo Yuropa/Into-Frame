@@ -52,6 +52,14 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         noise_blend_floor: float = 0.15,
         texture_tile_factor: float = 8.0,
         water_depression_m: float = 0.5,
+        # Coarse geometry-only collision mesh (see TerrainMeshGenerator.
+        # generate_physics_mesh), written to ContextKey.TERRAIN_PHYSICS_MESH for
+        # Unity's MeshCollider -- same Poisson-disc near-camera density bias as
+        # inner/outer_min_dist above, just far sparser (scales with grid size the
+        # same way, so a larger grid gets proportionally more collider detail too).
+        physics_inner_min_dist: float = 0.5,
+        physics_outer_min_dist: float = 8.0,
+        physics_n_boundary: int = 24,
         # Non-primary connected ground components (see HEIGHT_MAP_COMPONENT_ID /
         # HeightMapGenerator._label_ground_components) each get their own separate
         # mesh -- a real, physically disconnected landmass or rock formation,
@@ -59,6 +67,12 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         formation_depression_m: float = 0.5,
         formation_min_dist: float = 0.5,
         formation_n_boundary: int = 8,
+        # Coarser sibling of formation_min_dist/formation_n_boundary for each
+        # formation's own physics mesh -- same reasoning as physics_inner/
+        # outer_min_dist above, just uniform density (formations have no
+        # obvious "near" point the way the main terrain has the camera).
+        physics_formation_min_dist: float = 2.0,
+        physics_formation_n_boundary: int = 8,
         # Debug aid: also export terrain_uv_debug.glb alongside terrain.glb,
         # with its embedded preview material swapped for a synthetic R=U/G=V
         # gradient (see _uv_debug_texture) instead of the real panorama,
@@ -81,9 +95,14 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.noise_blend_floor = noise_blend_floor
         self.texture_tile_factor = texture_tile_factor
         self.water_depression_m = water_depression_m
+        self.physics_inner_min_dist = physics_inner_min_dist
+        self.physics_outer_min_dist = physics_outer_min_dist
+        self.physics_n_boundary = physics_n_boundary
         self.formation_depression_m = formation_depression_m
         self.formation_min_dist = formation_min_dist
         self.formation_n_boundary = formation_n_boundary
+        self.physics_formation_min_dist = physics_formation_min_dist
+        self.physics_formation_n_boundary = physics_formation_n_boundary
         self.debug_uv_texture = debug_uv_texture
 
 
@@ -133,6 +152,7 @@ class TerrainMeshStage(PipelineStage):
     Panorama key    (SemanticKey.PANORAMA)   → ContextKey.PANORAMA_TERRAIN (optional)
     Intrinsics key  (SemanticKey.INTRINSICS) → ContextKey.INTRINSICS      (optional)
     Output key      (SemanticKey.OUTPUT)     → ContextKey.TERRAIN_MESH
+                                              → ContextKey.TERRAIN_PHYSICS_MESH
                                               → ContextKey.WATER_MESH     (optional)
                                               → ContextKey.TERRAIN_FORMATIONS (optional)
     """
@@ -158,7 +178,7 @@ class TerrainMeshStage(PipelineStage):
         input_key, panorama_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: TerrainMeshConfiguration = self.config
 
-        task = self.create_progress(3, "Terrain Mesh…")
+        task = self.create_progress(4, "Terrain Mesh…")
 
         height_map = context.input_depth(input_key)
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
@@ -302,6 +322,29 @@ class TerrainMeshStage(PipelineStage):
             f"{grid_size:.0f} m grid, UV scale ×{tile_factor:.0f}"
         )
 
+        # ── Physics (collision) mesh ──────────────────────────────────────────
+        physics_mesh = TerrainMeshGenerator.generate_physics_mesh(
+            height_map=height_map,
+            grid_size_meters=grid_size,
+            inner_min_dist=cfg.physics_inner_min_dist,
+            outer_min_dist=cfg.physics_outer_min_dist,
+            n_boundary=cfg.physics_n_boundary,
+            noise_seed=cfg.seed,
+            region_map=region_map,
+            water_depression_m=cfg.water_depression_m,
+            observed_mask=observed_mask,
+            component_id=component_id,
+            formation_depression_m=cfg.formation_depression_m,
+        )
+        context.add_mesh(ContextKey.TERRAIN_PHYSICS_MESH, physics_mesh)
+        self.log_info(
+            f"Terrain physics mesh: {physics_mesh.vertex_count} vertices, "
+            f"{physics_mesh.face_count} triangles"
+        )
+        if self.temp is not None:
+            physics_mesh.save(self.temp / "terrain_physics_mesh.glb")
+        self.advance_progress(task)
+
         # ── Formation meshes (non-primary ground components) ─────────────────────
         formations: list[dict] = []
         if component_id is not None:
@@ -321,9 +364,34 @@ class TerrainMeshStage(PipelineStage):
                 formation_mesh, x_center, z_center, x_half, z_half = result
                 mesh_key = f"terrain_formation_{target_id}"
                 context.add_mesh(mesh_key, formation_mesh)
+
+                # Own collision proxy, same reasoning as the base terrain's
+                # TERRAIN_PHYSICS_MESH above -- without this, the base terrain's
+                # own depression under this formation (formation_depression_m)
+                # would leave a hole in the collision surface with nothing here
+                # to fill it, and anyone standing on the formation would fall
+                # through the (invisible, unrendered) gap.
+                physics_result = TerrainMeshGenerator.generate_component_mesh(
+                    height_map=height_map,
+                    component_id=component_id,
+                    target_id=target_id,
+                    grid_size_meters=grid_size,
+                    min_dist=cfg.physics_formation_min_dist,
+                    n_boundary=cfg.physics_formation_n_boundary,
+                    seed=cfg.seed + target_id,
+                )
+                physics_mesh_key = None
+                if physics_result is not None:
+                    formation_physics_mesh = physics_result[0]
+                    physics_mesh_key = f"{mesh_key}_physics"
+                    context.add_mesh(physics_mesh_key, formation_physics_mesh)
+                    if self.temp is not None:
+                        formation_physics_mesh.save(self.temp / f"terrain_formation_{target_id}_physics.glb")
+
                 formations.append({
                     "id": target_id,
                     "mesh_key": mesh_key,
+                    "physics_mesh_key": physics_mesh_key,
                     "x_center": x_center,
                     "z_center": z_center,
                     "x_half": x_half,
@@ -399,6 +467,10 @@ class TerrainMeshStage(PipelineStage):
             "Outer min dist": f"{cfg.outer_min_dist:.1f} m",
             "Texture": texture_desc,
         }
+
+        physics_mesh = context.mesh(ContextKey.TERRAIN_PHYSICS_MESH)
+        if physics_mesh is not None:
+            stats["Physics mesh"] = f"{physics_mesh.vertex_count:,} vertices, {physics_mesh.face_count:,} triangles"
 
         water_mesh = context.mesh(ContextKey.WATER_MESH)
         if water_mesh is not None:

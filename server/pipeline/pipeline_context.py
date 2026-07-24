@@ -42,6 +42,7 @@ class ContextKey:
     HEIGHT_MAP = "height_map"
     HEIGHT_MAP_PARAMS = "height_map_params"
     TERRAIN_MESH = "terrain_mesh"
+    TERRAIN_PHYSICS_MESH = "terrain_physics_mesh"
     WATER_MESH = "water_mesh"
     TERRAIN_FORMATIONS = "terrain_formations"
     LIGHTING = "lighting"

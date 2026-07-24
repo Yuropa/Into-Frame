@@ -16,6 +16,12 @@ class Object3D():
         self.type = ""
         self.texture = ""
         self.mesh = ""
+        # Optional separate, lower-poly mesh asset key Unity loads as a
+        # MeshCollider on this object -- e.g. the terrain's TERRAIN_PHYSICS_MESH,
+        # a coarse geometry-only proxy instead of the dense, textured render
+        # mesh. Empty (the default, and every non-terrain mesh today) -> no
+        # collider is attached, same as before this field existed.
+        self.physics_mesh = ""
         self.name = ""
         self.position = vec3()
         self.rotation = vec3()
@@ -86,6 +92,8 @@ class Object3D():
             data["sway"] = self.sway
         if self.physics is not None:
             data["physics"] = self.physics
+        if self.physics_mesh:
+            data["physicsMesh"] = self.physics_mesh
         return data
 
     @classmethod
@@ -125,4 +133,5 @@ class Object3D():
         obj.video_alpha = data.get("videoAlpha", "")
         obj.sway = data.get("sway")
         obj.physics = data.get("physics")
+        obj.physics_mesh = data.get("physicsMesh", "")
         return obj

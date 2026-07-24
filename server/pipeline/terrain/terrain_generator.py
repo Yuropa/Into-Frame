@@ -358,6 +358,53 @@ class TerrainMeshGenerator:
 
         return Mesh(tri_mesh), water_mesh, pano_uv
 
+    # ── Physics (collision) mesh ────────────────────────────────────────────────
+
+    @staticmethod
+    def generate_physics_mesh(
+        height_map: Depth,
+        grid_size_meters: float,
+        inner_min_dist: float = 0.5,
+        outer_min_dist: float = 8.0,
+        n_boundary: int = 24,
+        noise_seed: int = 42,
+        region_map: Optional[Depth] = None,
+        water_depression_m: float = 0.5,
+        observed_mask: Optional[Depth] = None,
+        component_id: Optional[Depth] = None,
+        formation_depression_m: float = 0.5,
+    ) -> Mesh:
+        """
+        Build a coarse, geometry-only collision mesh for the terrain.
+
+        Just generate() again -- same Poisson-disc/Delaunay sampling (so it
+        keeps the near-camera density bias, and scales with grid_size_meters
+        the same way) and the same water/formation depression (so the
+        collider is correctly carved under a lake or wherever an extracted
+        formation's own mesh/physics mesh sits) -- just no texture/panorama
+        (geometry-only branch) and no cosmetic noise, and with much sparser
+        min_dist defaults than the visual mesh's own (default inner/outer
+        0.10/2.0 m): a MeshCollider only needs to be close enough to walk/
+        land on, not the visual mesh's full density.
+        """
+        mesh, _, _ = TerrainMeshGenerator.generate(
+            height_map=height_map,
+            grid_size_meters=grid_size_meters,
+            inner_min_dist=inner_min_dist,
+            outer_min_dist=outer_min_dist,
+            n_boundary=n_boundary,
+            z_far=grid_size_meters / 2.0,
+            noise_amplitude=0.0,
+            noise_blend_floor=0.0,
+            noise_seed=noise_seed,
+            region_map=region_map,
+            water_depression_m=water_depression_m,
+            observed_mask=observed_mask,
+            component_id=component_id,
+            formation_depression_m=formation_depression_m,
+        )
+        return mesh
+
     # ── Component (formation) meshes ────────────────────────────────────────────
 
     @staticmethod

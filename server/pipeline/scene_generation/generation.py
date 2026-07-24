@@ -336,6 +336,11 @@ class SceneGenerationStage(PipelineStage):
             terrain = Object3D.mesh(ContextKey.TERRAIN_MESH, x=0.0, y=0.0, z=0.0)
             terrain.set_rotation(*ground_rotation)
             terrain.name = "terrain"
+            # Coarse geometry-only collision proxy (TerrainMeshGenerator.
+            # generate_physics_mesh) -- Unity attaches this, not the dense
+            # textured render mesh above, as a MeshCollider.
+            if context.input_mesh(ContextKey.TERRAIN_PHYSICS_MESH) is not None:
+                terrain.physics_mesh = ContextKey.TERRAIN_PHYSICS_MESH
             scene.add_object(terrain)
 
         water_mesh = context.input_mesh(ContextKey.WATER_MESH)
@@ -368,6 +373,12 @@ class SceneGenerationStage(PipelineStage):
             formation_obj = Object3D.mesh(formation["mesh_key"], x=0.0, y=0.0, z=0.0)
             formation_obj.set_rotation(*ground_rotation)
             formation_obj.name = f"formation_{formation['id']}"
+            # Own collision proxy (see TerrainMeshStage.run's physics_result) --
+            # without it, the base terrain's own depression under this formation
+            # would be an unfilled hole in the collision surface.
+            physics_mesh_key = formation.get("physics_mesh_key")
+            if physics_mesh_key and context.input_mesh(physics_mesh_key) is not None:
+                formation_obj.physics_mesh = physics_mesh_key
             scene.add_object(formation_obj)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
