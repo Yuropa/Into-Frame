@@ -9,17 +9,26 @@ from aiohttp import web
 from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
-from typing import Any, Optional
-from pipeline.pipeline import Pipeline, PipelineContext, ContextKey
+from typing import Any, Optional, TYPE_CHECKING
+# PipelineContext/ContextKey live in pipeline_context.py, not pipeline.py -- importing
+# from pipeline.pipeline here would drag in every stage class (and therefore torch/
+# transformers/diffusers/...) just to serve a pre-built .frame archive's files, which
+# is all `local` mode does (pipeline=None; see _progress_scene). Pipeline itself is
+# only ever used as a type hint in this file (the caller constructs and passes one
+# in), so it's TYPE_CHECKING-only -- no runtime import, no runtime dependency on the
+# heavy stage graph.
+from pipeline.pipeline_context import PipelineContext, ContextKey
 from server.messages import ServerMessages, ClientMessages
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.splat_material import SplatMaterial
 from util.path_utils import resource_directory
 from pipeline.pipeline_input import PipelineInput
-from pipeline.pipeline_runner import PipelineRunner
 
 import websockets
+
+if TYPE_CHECKING:
+    from pipeline.pipeline import Pipeline
 
 class SimulationServerConfiguration():
     def __init__(self) -> None:
@@ -34,7 +43,7 @@ class SimulationServer():
     def __init__(
         self,
         config: SimulationServerConfiguration,
-        pipeline: Optional[Pipeline] = None,
+        pipeline: Optional["Pipeline"] = None,
         context: Optional[PipelineContext] = None,
         asset_dir: Optional[Path] = None,
         input_path: Optional[Path] = None,
@@ -237,6 +246,12 @@ class SimulationServer():
                     break
 
         drain_task = asyncio.ensure_future(drain())
+
+        # Deferred: pulls in pipeline.pipeline (every stage class, transitively
+        # torch/transformers/diffusers/...) -- only worth paying for when a pipeline
+        # actually needs to run, never in `local` mode (self.pipeline is None, handled
+        # above, before this branch is reached at all).
+        from pipeline.pipeline_runner import PipelineRunner
 
         input = PipelineInput(self._input_path)
         runner = PipelineRunner(self.pipeline)

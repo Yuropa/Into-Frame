@@ -298,7 +298,11 @@ elif [[ "$SUBCOMMAND" == "local" ]]; then
 
   [[ "$ARCHIVE" != /* ]] && ARCHIVE="$PWD/$ARCHIVE"
 
-  check_env "$ENV"
+  # No conda env required: `local` only serves a pre-built .frame archive's files
+  # over HTTP/WebSocket (aiohttp + websockets + a couple of light libs) -- it never
+  # touches the pipeline or its torch/transformers/diffusers/... stack, and main.py
+  # no longer imports any of that for this subcommand either. --env is accepted
+  # above for consistency with the other subcommands but isn't enforced here.
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) local "$ARCHIVE" --host "$HOST" --port "$PORT" --asset-port "$ASSET_PORT")

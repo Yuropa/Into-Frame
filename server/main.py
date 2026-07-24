@@ -2,15 +2,6 @@
 import os
 import sys
 
-_env = os.environ.get("CONDA_DEFAULT_ENV")
-if _env != "frame":
-    print(
-        f"Error: wrong conda environment '{_env}'. "
-        f"Activate 'frame' first:\n  conda activate frame",
-        file=sys.stderr,
-    )
-    sys.exit(1)
-
 # Setting in case we run on macOS
 os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
 
@@ -25,12 +16,32 @@ import asyncio
 import argparse
 import logging
 from pathlib import Path
-from pipeline.pipeline import Pipeline, PipelineConfiguration, SeedConfiguration
-from pipeline.pipeline_input import PipelineInput
-from pipeline.pipeline_runner import PipelineRunner
+# PipelineConfiguration/SeedConfiguration/Pipeline/PipelineRunner all live behind
+# pipeline.pipeline, which imports every stage class (torch/transformers/diffusers/
+# SAM2/...) at module scope. `local` mode only serves a pre-built .frame archive's
+# files -- it never touches any of that -- so those imports are deferred into the
+# handlers that actually need them (handle_server/handle_run/handle_download)
+# instead of paid unconditionally here. Same reasoning for the conda-env check
+# below: it's only required for commands that actually run the pipeline.
 from server.server import SimulationServerConfiguration, SimulationServer
 
 DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+# Commands that actually run pipeline stages (and therefore need the "frame" conda
+# env's torch/transformers/diffusers/SAM2/... stack). `local` just serves a pre-built
+# .frame archive's files over HTTP/WebSocket -- no pipeline, no GPU, no special env.
+_REQUIRES_FRAME_ENV = {"server", "run", "download"}
+
+
+def _check_conda_env():
+    env = os.environ.get("CONDA_DEFAULT_ENV")
+    if env != "frame":
+        print(
+            f"Error: wrong conda environment '{env}'. "
+            f"Activate 'frame' first:\n  conda activate frame",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 def create_parser():
     parser = argparse.ArgumentParser(
@@ -220,7 +231,8 @@ def create_parser():
 
     return parser
 
-def _parse_seeds(seed_args: list[str] | None) -> SeedConfiguration:
+def _parse_seeds(seed_args: list[str] | None):
+    from pipeline.pipeline import SeedConfiguration
     if not seed_args:
         return SeedConfiguration()
 
@@ -255,6 +267,7 @@ def _parse_rerun(rerun_args: list[str] | None) -> set[str]:
 
 
 def _create_pipeline_config(args):
+    from pipeline.pipeline import PipelineConfiguration
     config = PipelineConfiguration(
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),
@@ -269,6 +282,7 @@ def _create_pipeline_config(args):
     return config
 
 def handle_server(args):
+    from pipeline.pipeline import Pipeline
     from util.path_utils import resource_directory
 
     if not args.seed:
@@ -296,6 +310,10 @@ def handle_server(args):
 
 
 def handle_run(args):
+    from pipeline.pipeline import Pipeline
+    from pipeline.pipeline_input import PipelineInput
+    from pipeline.pipeline_runner import PipelineRunner
+
     config = _create_pipeline_config(args=args)
     pipeline = Pipeline(config=config)
 
@@ -372,6 +390,8 @@ def handle_local(args):
         asyncio.run(server.run())
 
 def handle_download(args):
+    from pipeline.pipeline import Pipeline, PipelineConfiguration
+
     config = PipelineConfiguration(
         output=None,
         config_path=getattr(args, "config", DEFAULT_CONFIG_PATH),
@@ -392,13 +412,15 @@ def main():
         print(f"{e}")
         return
 
-    if args.log_mode != "verbose":
-        import transformers
-        import diffusers
-        transformers.logging.set_verbosity_error()
-        diffusers.logging.set_verbosity_error()
-        from huggingface_hub import utils as hf_utils
-        hf_utils.disable_progress_bars()
+    if args.command in _REQUIRES_FRAME_ENV:
+        _check_conda_env()
+        if args.log_mode != "verbose":
+            import transformers
+            import diffusers
+            transformers.logging.set_verbosity_error()
+            diffusers.logging.set_verbosity_error()
+            from huggingface_hub import utils as hf_utils
+            hf_utils.disable_progress_bars()
 
     try:
         if args.command == "server":
