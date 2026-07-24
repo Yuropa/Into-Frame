@@ -72,8 +72,18 @@ class Mesh:
         material can't carry over directly. Baked colors are carried through instead:
         sampled onto the surface point cloud and reconstructed as Open3D's own
         per-vertex color output, which survives simplify()'s decimation afterward.
+
+        Trimming Poisson's own low-density "balloon" geometry (below) is necessary
+        but reintroduces holes and non-manifold edges of its own -- density-based
+        vertex removal punches through an otherwise-closed surface. MeshFix (same
+        repair library used for SAM3D's own vendored postprocessing, see
+        project-sam3d-vendor-patches memory) closes those back up into a single
+        watertight shell; it also discards vertices, so colors are re-attached by
+        nearest-neighbor lookup against the pre-MeshFix positions afterward.
         """
         import open3d as o3d
+        import pymeshfix
+        from scipy.spatial import cKDTree
 
         pts, face_ids = trimesh.sample.sample_surface(self.mesh, 50000)
         normals = self.mesh.face_normals[face_ids]
@@ -94,10 +104,20 @@ class Mesh:
         poisson.remove_degenerate_triangles()
         poisson.remove_duplicated_vertices()
 
-        vertex_colors = np.asarray(poisson.vertex_colors) if poisson.has_vertex_colors() else None
+        poisson_vertices = np.asarray(poisson.vertices)
+        poisson_colors = np.asarray(poisson.vertex_colors) if poisson.has_vertex_colors() else None
+
+        mf = pymeshfix.MeshFix(poisson_vertices, np.asarray(poisson.triangles))
+        mf.repair()
+
+        vertex_colors = None
+        if poisson_colors is not None:
+            _, nearest = cKDTree(poisson_vertices).query(mf.points)
+            vertex_colors = poisson_colors[nearest]
+
         return Mesh(trimesh.Trimesh(
-            vertices=np.asarray(poisson.vertices),
-            faces=np.asarray(poisson.triangles),
+            vertices=mf.points,
+            faces=mf.faces,
             vertex_colors=vertex_colors,
         ))
 
