@@ -305,6 +305,12 @@ public class SceneObjectManager : MonoBehaviour
         var capturedGeneration = _queueGeneration;
         EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
 
+        if (!string.IsNullOrEmpty(data.physicsMesh))
+        {
+            var capturedPhysicsMesh = data.physicsMesh;
+            EnqueueTask(() => LoadPhysicsMeshInto(capturedContainer, capturedPhysicsMesh, capturedGeneration));
+        }
+
         if (IsEnvironmentMesh(data.name))
         {
             if (data.sway != null || data.physics != null)
@@ -386,6 +392,67 @@ public class SceneObjectManager : MonoBehaviour
 
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
+    }
+
+    // Loads a geometry-only GLB (e.g. the terrain's TERRAIN_PHYSICS_MESH) and
+    // attaches it as a MeshCollider directly -- no GameObject/renderer
+    // instantiation, unlike LoadGlbInto above, since this mesh is never meant
+    // to be seen, only collided with. `convex = false` is correct (not just
+    // "left at the default") for every current caller: this collider always
+    // lands on a static container with no Rigidbody (terrain/formations are
+    // explicitly excluded from PhysicsHandoff, see IsEnvironmentMesh), and
+    // Unity only requires a convex hull for a collider attached to a
+    // non-kinematic Rigidbody.
+    private IEnumerator LoadPhysicsMeshInto(GameObject container, string meshId, int generation)
+    {
+        if (string.IsNullOrEmpty(meshId)) yield break;
+
+        using var req = assetServer().GetResource(meshId);
+        yield return req.SendWebRequest();
+
+        if (generation != _queueGeneration)
+        {
+            Debug.Log($"[SceneObjectManager] Discarding stale physics mesh load for '{meshId}'");
+            yield break;
+        }
+
+        if (req.result != UnityWebRequest.Result.Success)
+        {
+            Debug.LogError($"[SceneObjectManager] Failed to download physics mesh '{meshId}': {req.error}");
+            yield break;
+        }
+
+        byte[] glbBytes = req.downloadHandler.data.ToArray();
+        var logger = new GLTFastLogger();
+        var gltf = new GltfImport(logger: logger);
+        var glbTask = gltf.Load(glbBytes, new System.Uri(req.url));
+
+        while (!glbTask.IsCompleted)
+            yield return null;
+
+        if (generation != _queueGeneration) yield break;
+
+        if (glbTask.IsFaulted || !glbTask.Result)
+        {
+            Debug.LogError($"[SceneObjectManager] Failed to parse physics mesh '{meshId}'. " +
+                           $"Errors: {string.Join(" | ", logger.Errors)}");
+            yield break;
+        }
+
+        var physicsMesh = gltf.Meshes.FirstOrDefault(m => m != null);
+        if (physicsMesh == null)
+        {
+            Debug.LogError($"[SceneObjectManager] Physics mesh '{meshId}' contained no geometry");
+            yield break;
+        }
+
+        if (container == null) yield break; // destroyed while loading
+
+        var collider = container.AddComponent<MeshCollider>();
+        collider.sharedMesh = physicsMesh;
+        collider.convex = false;
+
+        Debug.Log($"[SceneObjectManager] Physics mesh '{meshId}' attached as MeshCollider on {container.name}");
     }
 
     // ── Texture Loading ────────────────────────────────────────────────────

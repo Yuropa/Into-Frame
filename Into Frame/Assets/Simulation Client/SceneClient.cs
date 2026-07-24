@@ -244,6 +244,11 @@ public class SceneObject
     public string type;
     public string texture;
     public string mesh;
+    // Optional separate, lower-poly mesh asset key loaded as a MeshCollider on
+    // this object instead of colliding against the (possibly dense, textured)
+    // `mesh` above -- e.g. the terrain's coarse geometry-only collision proxy.
+    // Empty -> no collider is attached.
+    public string physicsMesh;
     public string name;
     public Vec3   position;
     public Vec3   rotation;
