@@ -29,22 +29,24 @@ class VideoObjectExtractionConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         reference_frame_idx: int = 0,
-        max_tracked_per_bucket: int = 3,
+        max_tracked_per_category: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.reference_frame_idx = reference_frame_idx
-        # Vegetation instances sharing a (class, bucket) visual variant (see
-        # ObjectCategoryClusteringStage) are visually interchangeable and their sway
-        # is generic wind physics, not something that needs individual ground truth --
-        # a scene can have dozens of real detected trees/bushes in one bucket, and
-        # tracking all of them would be paying SAM2's most expensive step once per
-        # near-duplicate instead of once per visual variant. Only the first
-        # max_tracked_per_bucket instances encountered per (class, bucket) get tracked;
-        # the rest render with no sway animation. Does not apply to non-vegetation
-        # ANIMATABLE_CATEGORIES (person/vehicle/animal/...): those are genuinely
-        # distinct subjects, not decorative fill, so each real detection keeps its
-        # own trajectory regardless of bucket.
-        self.max_tracked_per_bucket = max_tracked_per_bucket
+        # SAM2 video tracking is by far the most expensive step in this stage. A
+        # class routinely splits into dozens of small ObjectCategoryClusteringStage
+        # visual-similarity buckets (e.g. a "tree" class with 65 buckets and only
+        # 1-2 instances each is typical), so a per-bucket cap lets nearly everything
+        # through uncapped -- and non-vegetation ANIMATABLE_CATEGORIES (person,
+        # vehicle, animal, ...) previously had no cap at all, on the reasoning that
+        # each is a genuinely distinct subject. In practice a real scene can have
+        # well over a hundred detected trees or a couple dozen people, and tracking
+        # all of them is far more than needed to drive that class's animation look --
+        # a handful of tracked clips per class is enough. Capped per class overall
+        # instead, uniformly across every ANIMATABLE_CATEGORIES class. Instances
+        # beyond the cap still get placed (mesh/billboard) via Scene Generation,
+        # just with no sway/motion animation.
+        self.max_tracked_per_category = max_tracked_per_category
 
 
 class VideoObjectExtractionStage(PipelineStage):
@@ -84,17 +86,16 @@ class VideoObjectExtractionStage(PipelineStage):
     annotation has nothing to attach for them regardless -- tracking them would
     only produce mask-tracking noise on an object that never actually moves.
 
-    Within VEGETATION_CATEGORIES, instances are further capped at
-    max_tracked_per_bucket per (class, bucket) visual variant (see
-    ObjectCategoryClusteringStage) -- a scene can have dozens of real detected
-    trees/bushes clustered into a handful of visual buckets, and each instance's
-    sway is generic wind physics rather than something needing individual ground
-    truth, so tracking every one of them would pay SAM2's most expensive step once
-    per near-duplicate instead of once per visual variant. Instances beyond the cap
-    still get placed (via the shared bucket mesh or billboard pool) but render with
-    no sway animation. Non-vegetation ANIMATABLE_CATEGORIES are never capped this
-    way -- a person or vehicle is a genuinely distinct subject, not decorative fill,
-    so every real detection keeps its own trajectory.
+    Every ANIMATABLE_CATEGORIES class is further capped at max_tracked_per_category
+    instances overall (not per ObjectCategoryClusteringStage visual-similarity
+    bucket -- a class routinely splits into dozens of small buckets, which would
+    let a per-bucket cap through almost entirely uncapped). A couple of tracked
+    clips is already enough to drive a class's animation look, whether that's
+    generic wind sway on foliage or a person/vehicle's rigid-body trajectory --
+    tracking every one of what can be well over a hundred real detections just
+    pays SAM2's most expensive step for redundant samples. Instances beyond the
+    cap still get placed (via the shared bucket mesh, individual mesh, or
+    billboard pool) but render with no sway/motion animation.
 
     Reads:  ContextKey.SCENE (Scene, to know which detections were actually placed),
             crop_{i} (Image, RGBA masked crop), metadata_{i} ({"box": [x, y, w, h], ...})
@@ -116,6 +117,8 @@ class VideoObjectExtractionStage(PipelineStage):
 
     Config: reference_frame_idx — video frame that lines up with the reference image's
       masks (default 0, matching VideoGenerationStage's frame-0 conditioning).
+      max_tracked_per_category — cap on tracked instances per class overall
+      (default 3), across every ANIMATABLE_CATEGORIES class.
     """
 
     @classmethod

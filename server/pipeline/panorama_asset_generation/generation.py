@@ -60,6 +60,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
     Groups where every instance is farther than billboard_distance_m stay
     billboard-only.
 
+    metadata_{i}['position_only'] (ObjectCategoryClusteringStage -- a low-confidence
+    crop visually corroborated against some class, trusted only for its world
+    position) is always excluded here: never a mesh representative, never in a
+    billboard pool, regardless of its class/bucket/score.
+
     Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class', 'bucket', 'box'),
             crop_{i}, ContextKey.PANORAMA_OBJECT_DEPTH (depth on the ORIGINAL panorama,
             matching what objects were detected against), ContextKey.PANORAMA
@@ -193,6 +198,17 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     "idx": idx,
                     "class": obj_class,
                     "reason": "category_filter",
+                })
+                continue
+            if metadata.get("position_only"):
+                # ObjectCategoryClusteringStage visually corroborated this
+                # low-confidence crop enough to trust its position for
+                # ObjectDistributionStage, but not enough to anchor a bucket,
+                # get meshed, or appear as a billboard from its own crop.
+                skipped_debug.append({
+                    "idx": idx,
+                    "class": obj_class,
+                    "reason": "position_only",
                 })
                 continue
 

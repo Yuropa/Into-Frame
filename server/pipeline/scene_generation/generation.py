@@ -168,6 +168,15 @@ class SceneGenerationStage(PipelineStage):
                     self.advance_progress(generation_task)
                     continue
 
+                if metadata.get("position_only"):
+                    # ObjectCategoryClusteringStage visually corroborated this
+                    # low-confidence crop against class `cls` but it's still not
+                    # trustworthy enough to render from its own crop -- only its
+                    # position feeds ObjectDistributionStage's spatial pattern for
+                    # `cls`. Never placed, meshed, or video-tracked.
+                    self.advance_progress(generation_task)
+                    continue
+
                 if metadata.get("synthetic"):
                     # Points painted across a region by DistributionSynthesisStage carry
                     # their world XZ + footprint directly — there's no detection bbox to

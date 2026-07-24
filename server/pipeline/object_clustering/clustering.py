@@ -12,6 +12,7 @@ from scipy.cluster.hierarchy import fcluster, linkage
 from scipy.spatial.distance import pdist
 
 from pipeline.object_clustering.dinov2_embedder import DinoV2Embedder
+from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES
 from pipeline.pipeline_context import ContextKey, PipelineContext
 from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration
@@ -28,36 +29,65 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         embedding_model_name: str = DinoV2Embedder.MODEL_NAME,
         cluster_distance_threshold: float = 0.3,
+        position_only_similarity_threshold: float = 0.75,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
         self.cluster_distance_threshold = cluster_distance_threshold
+        self.position_only_similarity_threshold = position_only_similarity_threshold
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
     """
-    Sub-clusters each class's detections by visual similarity into 'bucket'
-    groups -- e.g. splitting one undifferentiated "flower" population into
-    distinct color/species variants -- so downstream stages (Panorama Asset
-    Generation, Scene Generation) can curate and place assets per visual
-    variant instead of treating an entire class as one interchangeable pool.
+    Sub-clusters each class's *confident* detections (ObjectTypingStage's
+    'low_confidence' flag false -- the real crop pixels alone cleared the CLIP
+    confidence bar) by visual similarity into 'bucket' groups -- e.g. splitting
+    one undifferentiated "flower" population into distinct color/species
+    variants -- so downstream stages (Panorama Asset Generation, Scene
+    Generation) can curate and place assets per visual variant instead of
+    treating an entire class as one interchangeable pool.
 
     Runs after Object Correlation, reusing its class -> indices grouping
-    directly rather than re-deriving it. Within each class group, crops are
-    embedded with DINOv2 (a self-supervised visual-similarity model -- CLIP's
-    zero-shot *text*-prompted classification can tell "flower" from "tree" but
-    isn't suited to telling one flower's embedding from another's) and
-    agglomeratively clustered (average-linkage, cosine distance, cut at
+    directly rather than re-deriving it. Within each class group, confident
+    crops are embedded with DINOv2 (a self-supervised visual-similarity model
+    -- CLIP's zero-shot *text*-prompted classification can tell "flower" from
+    "tree" but isn't suited to telling one flower's embedding from another's)
+    and agglomeratively clustered (average-linkage, cosine distance, cut at
     cluster_distance_threshold) -- unlike k-means, this doesn't require
     knowing the number of visual variants ahead of time, which varies per
-    scene. Classes with fewer than 2 detections trivially get bucket 0.
+    scene. Classes with fewer than 2 confident detections trivially get
+    bucket 0.
 
-    Reads:  ContextKey.OBJECT_CORRELATION (class -> indices), crop_{i}
-    Writes: metadata_{i} ('bucket': int, scoped within its own class)
-    Debug:  self.output/clustering_debug.json -- per-class cluster counts/sizes
+    Low-confidence crops (a caption or prior-class fallback guess ObjectTypingStage
+    couldn't verify against the actual pixels -- see its docstring) never get to
+    anchor a bucket or found their own category on that guess alone: instead, each
+    one's DINOv2 embedding is compared against every confident bucket's centroid
+    embedding, across every class, not just the one it was originally (unreliably)
+    guessed as. A strong enough match (position_only_similarity_threshold) reassigns
+    it to that class with metadata_{idx}['position_only'] = True -- it's moved into
+    that class's ObjectCorrelationResult group (so ObjectDistributionStage counts its
+    world position toward that class's spatial pattern) but PanoramaAssetGenerationStage
+    and SceneGenerationStage both skip position_only crops outright: no mesh, no
+    billboard, no video tracking, nothing rendered from its own uncertain crop --
+    only its location is trusted. No match at all demotes it to 'indeterminate',
+    dropped everywhere, same as a crop CLIP was never confident about in the first
+    place. This is what stops a handful of noise-sized, hallucinated-caption crops
+    (a blurry rock crop BLIP captioned as "a person", say) from spawning a whole
+    fake category with no real evidence anywhere else in the scene.
+
+    Reads:  ContextKey.OBJECT_CORRELATION (class -> indices), crop_{i}, metadata_{i}
+            ('low_confidence', from ObjectTypingStage)
+    Writes: metadata_{i} ('bucket': int, scoped within its own class, for confident
+            crops; 'class'/'position_only' for reassigned low-confidence crops;
+            'class' = 'indeterminate' for rejected ones)
+            ContextKey.OBJECT_CORRELATION (re-persisted with low-confidence crops
+            moved to their visually-matched class's group, or dropped entirely)
+    Debug:  self.output/clustering_debug.json -- per-class cluster counts/sizes,
+            plus low-confidence reassignment/rejection counts
             self.output/debug_panorama.png -- panorama with bucket-colored boxes
     Config: embedding_model_name (default facebook/dinov2-base),
             cluster_distance_threshold (default 0.3, cosine distance)
+            position_only_similarity_threshold (default 0.75, cosine similarity)
     """
 
     @classmethod
@@ -81,6 +111,9 @@ class ObjectCategoryClusteringStage(PipelineStage):
         task = self.create_progress(max(total, 1), "Clustering object categories…")
 
         debug_by_class: dict[str, dict] = {}
+        low_confidence_by_class: dict[str, list[int]] = {}
+        centroids_by_class: dict[str, dict[int, np.ndarray]] = {}
+
         for obj_class, grp in correlation.groups.items():
             # Environment/indeterminate groups (sky, grass, water, ...) are
             # never meshed or billboard-curated downstream (Panorama Asset
@@ -91,13 +124,33 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 for _ in grp.indices:
                     self.advance_progress(task)
                 continue
-            debug_by_class[obj_class] = self._cluster_class(context, obj_class, grp.indices, task)
 
+            confident_indices, low_confidence_indices = [], []
+            for idx in grp.indices:
+                metadata = context.input_object(f"metadata_{idx}") or {}
+                if metadata.get("low_confidence"):
+                    low_confidence_indices.append(idx)
+                else:
+                    confident_indices.append(idx)
+
+            debug_by_class[obj_class], centroids_by_class[obj_class] = self._cluster_class(
+                context, obj_class, confident_indices, task
+            )
+            if low_confidence_indices:
+                low_confidence_by_class[obj_class] = low_confidence_indices
+
+        reassigned, rejected = self._reassign_low_confidence(
+            context, correlation, low_confidence_by_class, centroids_by_class, task
+        )
+
+        context.add_object_correlation(ContextKey.OBJECT_CORRELATION, correlation)
         self.finish_progress(task)
-        self._write_debug(context, debug_by_class)
+        self._write_debug(context, debug_by_class, reassigned, rejected)
         return context
 
-    def _cluster_class(self, context: PipelineContext, obj_class: str, indices: list[int], task) -> dict:
+    def _cluster_class(
+        self, context: PipelineContext, obj_class: str, indices: list[int], task
+    ) -> tuple[dict, dict[int, np.ndarray]]:
         embeddings = []
         valid_indices = []
         for idx in indices:
@@ -110,15 +163,87 @@ class ObjectCategoryClusteringStage(PipelineStage):
         if len(valid_indices) < 2:
             for idx in valid_indices:
                 self._set_bucket(context, idx, 0)
-            return {"count": len(valid_indices), "buckets": 1 if valid_indices else 0}
+            centroids = {0: embeddings[0]} if embeddings else {}
+            return {"count": len(valid_indices), "buckets": 1 if valid_indices else 0}, centroids
 
-        labels = self._cluster(np.stack(embeddings))
+        embeddings_arr = np.stack(embeddings)
+        labels = self._cluster(embeddings_arr)
         for idx, bucket in zip(valid_indices, labels):
             self._set_bucket(context, idx, int(bucket))
 
+        centroids: dict[int, np.ndarray] = {}
+        for b in np.unique(labels):
+            centroid = embeddings_arr[labels == b].mean(axis=0)
+            centroids[int(b)] = centroid / np.linalg.norm(centroid)
+
         sizes = {int(b): int((labels == b).sum()) for b in np.unique(labels)}
         self.log_info(f"  {obj_class}: {len(valid_indices)} object(s) -> {len(sizes)} bucket(s) {sizes}")
-        return {"count": len(valid_indices), "buckets": len(sizes), "bucket_sizes": sizes}
+        return {"count": len(valid_indices), "buckets": len(sizes), "bucket_sizes": sizes}, centroids
+
+    def _reassign_low_confidence(
+        self,
+        context: PipelineContext,
+        correlation: ObjectCorrelationResult,
+        low_confidence_by_class: dict[str, list[int]],
+        centroids_by_class: dict[str, dict[int, np.ndarray]],
+        task,
+    ) -> tuple[int, int]:
+        # Flatten every confident bucket's centroid into one list to compare each
+        # low-confidence crop against, regardless of which class it was originally
+        # (unreliably) guessed as -- the match is purely visual, per the user's
+        # explicit intent: color/shape similarity, not caption/keyword text.
+        all_centroids: list[tuple[str, np.ndarray]] = [
+            (cls, centroid)
+            for cls, buckets in centroids_by_class.items()
+            for centroid in buckets.values()
+        ]
+
+        reassigned = 0
+        rejected = 0
+        threshold = self.config.position_only_similarity_threshold
+        for old_class, indices in low_confidence_by_class.items():
+            for idx in indices:
+                metadata = context.input_object(f"metadata_{idx}") or {}
+                crop = context.input_image(f"crop_{idx}")
+
+                best_class, best_sim = None, -1.0
+                if crop is not None and all_centroids:
+                    embedding = self._embedder.embed(crop)
+                    for cls, centroid in all_centroids:
+                        sim = float(np.dot(embedding, centroid))
+                        if sim > best_sim:
+                            best_sim, best_class = sim, cls
+
+                if best_class is not None and best_sim >= threshold:
+                    self._move_index(correlation, old_class, best_class, idx)
+                    context.add_object(f"metadata_{idx}", {
+                        **metadata, "class": best_class, "position_only": True,
+                        "visual_match_similarity": round(best_sim, 4),
+                    })
+                    reassigned += 1
+                else:
+                    self._move_index(correlation, old_class, None, idx)
+                    context.add_object(f"metadata_{idx}", {**metadata, "class": "indeterminate"})
+                    rejected += 1
+                self.advance_progress(task)
+
+        if reassigned or rejected:
+            self.log_info(
+                f"  low-confidence crops: {reassigned} visually corroborated (position-only), "
+                f"{rejected} unmatched -> dropped"
+            )
+        return reassigned, rejected
+
+    def _move_index(
+        self, correlation: ObjectCorrelationResult, old_class: str, new_class: str | None, idx: int,
+    ) -> None:
+        old_grp = correlation.groups.get(old_class)
+        if old_grp is not None and idx in old_grp.indices:
+            old_grp.indices.remove(idx)
+        if new_class is not None:
+            if new_class not in correlation.groups:
+                correlation.groups[new_class] = ObjectGroupStats(object_type=new_class)
+            correlation.groups[new_class].indices.append(idx)
 
     def _set_bucket(self, context: PipelineContext, idx: int, bucket: int):
         metadata = context.input_object(f"metadata_{idx}") or {}
@@ -133,13 +258,15 @@ class ObjectCategoryClusteringStage(PipelineStage):
         remap = {old: new for new, old in enumerate(sorted(set(labels.tolist())))}
         return np.array([remap[label] for label in labels])
 
-    def _write_debug(self, context: PipelineContext, debug_by_class: dict[str, dict]):
+    def _write_debug(self, context: PipelineContext, debug_by_class: dict[str, dict], reassigned: int, rejected: int):
         if self.output is None:
             return
 
         with open(self.output / "clustering_debug.json", "w") as f:
             json.dump({
                 "cluster_distance_threshold": self.config.cluster_distance_threshold,
+                "position_only_similarity_threshold": self.config.position_only_similarity_threshold,
+                "low_confidence": {"reassigned_position_only": reassigned, "rejected": rejected},
                 "classes": debug_by_class,
             }, f, indent=2)
 

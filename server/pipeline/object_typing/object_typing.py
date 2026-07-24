@@ -51,7 +51,11 @@ class ObjectTypingStage(PipelineStage):
     CLIP scores, object-margin, and top candidates for every crop.
 
     Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}, ContextKey.PANORAMA (scene context)
-    Writes: metadata_{i} (updates 'class' and 'confidence' fields)
+    Writes: metadata_{i} (updates 'class', 'confidence', and 'low_confidence' fields --
+            the latter true whenever the real crop pixels alone didn't clear
+            confidence_threshold, i.e. the class came from a caption or prior-class
+            fallback rather than the image itself; see ObjectCategoryClusteringStage
+            for how this gates downstream trust)
     Debug:  typing_debug.json
     Config: confidence_threshold (default 0.1), object_margin_threshold (default 0.08),
             min_confident_area_fraction (default 0.01)
@@ -115,6 +119,13 @@ class ObjectTypingStage(PipelineStage):
                 area_fraction=area_fraction,
                 scene_category_prior=scene_category_prior,
             )
+            # The real crop pixels alone didn't clear the confidence bar -- whatever
+            # class this ends up as (caption fallback, prior-class fallback) is an
+            # unverified guess, not evidence this is actually a distinct object.
+            # ObjectCategoryClusteringStage uses this to require independent visual
+            # (DINOv2 embedding) corroboration against a confidently-classified crop
+            # before trusting it for anything beyond contributing a position sample.
+            low_confidence = obj_type == "indeterminate"
             caption = metadata.get("caption", "")
             caption_fallback = False
             if obj_type == "indeterminate" and caption:
@@ -132,7 +143,10 @@ class ObjectTypingStage(PipelineStage):
                 obj_type = prior_class
                 caption_fallback = False
 
-            context.add_object(f"metadata_{idx}", {**metadata, "class": obj_type, "confidence": round(confidence, 4)})
+            context.add_object(f"metadata_{idx}", {
+                **metadata, "class": obj_type, "confidence": round(confidence, 4),
+                "low_confidence": low_confidence and obj_type != "indeterminate",
+            })
             suffix = " [caption fallback]" if caption_fallback else ""
             self.log_info(f"  crop_{idx}: '{caption}' → {obj_type} ({confidence:.2f}){suffix}")
 

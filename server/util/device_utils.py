@@ -22,6 +22,19 @@ class DeviceStrategy(Enum):
     AUTO = "auto"
     MEMORY = "memory"
 
+def all_devices() -> [torch.device]:
+    if torch.cuda.is_available():
+        devices = []
+
+        for idx in range(torch.cuda.device_count()):
+            devices += [torch.device(f"cuda:{best}")]
+    elif torch.backends.mps.is_available():
+        devices = torch.device("mps")
+    else:
+        devices = torch.device("cpu")
+
+    return devices
+
 def preferred_device(strategy: DeviceStrategy = DeviceStrategy.AUTO) -> tuple[torch.device, torch.dtype]:
     if torch.cuda.is_available():
         if strategy == DeviceStrategy.MEMORY:
