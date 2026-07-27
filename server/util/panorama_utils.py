@@ -17,6 +17,11 @@ class Panorama:
       unproject(depth)                 — instance alias of the above.
       project_3d(vertices)             — 3D world points → panorama pixel (u, v), unrestricted.
       sample_3d(vertices)              — 3D world points → bilinear-sampled RGBA colours.
+      sample_uv(u, v)                  — already-resolved normalised UV (mesh_uvs' own
+                                          convention) → bilinear-sampled RGBA colours, e.g.
+                                          for reusing a mesh's cached extra_uv without
+                                          re-deriving it from (possibly since-perturbed) vertex
+                                          position.
       mesh_uvs(vertices)               — 3D world points → normalised [0,1] mesh UVs (this
                                           panorama's own pixel grid -- "project the mesh back
                                           onto the panorama"), for texturing a mesh directly
@@ -214,17 +219,7 @@ class Panorama:
             pv_i = np.clip(np.round(pv).astype(np.int64), 0, H - 1)
             valid &= ~sky_arr[pv_i, pu_i]
 
-        pu0 = np.floor(pu).astype(np.int32) % W
-        pu1 = (pu0 + 1) % W
-        pv0 = np.clip(np.floor(pv).astype(np.int32), 0, H - 1)
-        pv1 = np.clip(pv0 + 1, 0, H - 1)
-        fu  = (pu - np.floor(pu))[:, None]
-        fv  = (pv - np.floor(pv))[:, None]
-
-        colors_f = (pano[pv0, pu0] * (1 - fu) * (1 - fv) +
-                    pano[pv0, pu1] * fu        * (1 - fv) +
-                    pano[pv1, pu0] * (1 - fu)  * fv       +
-                    pano[pv1, pu1] * fu         * fv)
+        colors_f = Panorama._bilinear_wrap(pano, pu, pv)
 
         colors = np.zeros((len(vertices), 4), dtype=np.uint8)
         colors[:, 3] = 255
@@ -237,6 +232,74 @@ class Panorama:
             )
             colors[invalid, :3] = colors[valid][nn, :3]
 
+        return colors
+
+    @staticmethod
+    def _bilinear_wrap(pano: np.ndarray, pu: np.ndarray, pv: np.ndarray) -> np.ndarray:
+        """
+        Shared bilinear pixel lookup for sample_3d/sample_uv: wraps
+        horizontally (pu, the equirect longitude axis -- column 0 and column
+        W-1 are adjacent, not the image edge), clamps vertically (pv, the
+        latitude axis -- a real edge at the poles, not a wrap).
+
+        pano: (H, W, C) float array. pu, pv: pixel-space float arrays (any
+        matching shape, NOT normalised [0,1] -- see sample_uv for that
+        conversion). Returns (..., C) float array, same leading shape as
+        pu/pv.
+        """
+        H, W = pano.shape[:2]
+        pu0 = np.floor(pu).astype(np.int32) % W
+        pu1 = (pu0 + 1) % W
+        pv0 = np.clip(np.floor(pv).astype(np.int32), 0, H - 1)
+        pv1 = np.clip(pv0 + 1, 0, H - 1)
+        fu  = (pu - np.floor(pu))[..., None]
+        fv  = (pv - np.floor(pv))[..., None]
+        return (pano[pv0, pu0] * (1 - fu) * (1 - fv) +
+                pano[pv0, pu1] * fu        * (1 - fv) +
+                pano[pv1, pu0] * (1 - fu)  * fv       +
+                pano[pv1, pu1] * fu         * fv)
+
+    def sample_uv(self, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+        """
+        Bilinear-sample this panorama directly from already-resolved
+        normalised UV, in mesh_uvs' own convention: u in [0,1] (longitude,
+        wraps at the seam), v in [0,1] PRE-FLIPPED so v=1 is row 0 / the
+        image top (mesh_uvs/_uvs_pinhole's "cancel trimesh's export-time
+        V-flip" convention -- see mesh_uvs' own docstring).
+
+        Exists so a caller already holding a mesh's own per-vertex UV --
+        e.g. TerrainMeshGenerator.generate's panorama_uv return value,
+        cached on Mesh.extra_uv, which for an observed vertex already
+        prefers that cell's own true measured UV (HeightMapGenerator.
+        _panorama_uv_from_height, captured before Terrain Reconstruction/
+        Noise Refinement/mesh noise could perturb it -- see mesh_uvs) over
+        one re-derived from the vertex's current position -- can reuse that
+        exact same trusted UV for a second texture/bake without repeating
+        (or subtly diverging from) mesh_uvs' own projection or v-flip maths.
+        Un-flipping v here, in one place, is deliberately the only spot that
+        needs to get that inversion right.
+
+        No sky/near-nadir gating, unlike sample_3d/mesh_uvs -- the UV handed
+        in has already been resolved (including any such gating) by
+        whichever of those two produced it; this is a pure UV -> colour
+        lookup.
+
+        u, v: matching-shape float arrays. Returns (..., 4) uint8 RGBA
+        (alpha always 255 -- this panorama has no alpha of its own).
+        """
+        pano = np.array(self.rgb(), dtype=np.float32)
+        H, W = pano.shape[:2]
+
+        u = np.asarray(u, dtype=np.float64)
+        v = np.asarray(v, dtype=np.float64)
+        pu = u * (W - 1)
+        pv = (1.0 - v) * (H - 1)
+
+        colors_f = Panorama._bilinear_wrap(pano, pu, pv)
+
+        colors = np.empty(colors_f.shape[:-1] + (4,), dtype=np.uint8)
+        colors[..., 3] = 255
+        colors[..., :3] = np.clip(colors_f, 0, 255).astype(np.uint8)
         return colors
 
     def mesh_uvs(

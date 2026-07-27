@@ -18,7 +18,7 @@ from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.terrain.pattern_texture import bake_real_layer, synthesize_region_layer
+from pipeline.terrain.pattern_texture import bake_real_layer, bake_real_layer_from_mesh, synthesize_region_layer
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
@@ -504,6 +504,22 @@ class TerrainTextureGenerationStage(PipelineStage):
         reference = self._bake_reference(context, cfg) if cfg.use_photo_reference else None
         pattern_ctx = self._pattern_texture_context(context, cfg) if cfg.use_pattern_texture else None
 
+        # Real-content base layer for every region type's pattern texture,
+        # computed once and shared (doesn't depend on region_val) -- see
+        # bake_real_layer_from_mesh's own docstring for why this projects
+        # from the terrain mesh's own (already correct, cached-preferring)
+        # per-vertex panorama UV instead of re-deriving position/height from
+        # a synthetic top-down world grid. `reference`'s panorama is the same
+        # PANORAMA_TERRAIN TerrainMeshStage built panorama_uv against (see
+        # that stage's own SemanticKey.PANORAMA resolution), so this stays in
+        # the same coordinate space pattern_ctx["panorama_uv"] was computed in.
+        real_everywhere = None
+        if pattern_ctx is not None and reference is not None:
+            real_everywhere = bake_real_layer_from_mesh(
+                pattern_ctx["vertices"], pattern_ctx["faces"], pattern_ctx["panorama_uv"],
+                reference[0], cfg.pattern_canvas_size, pattern_ctx["half"], pattern_ctx["half"],
+            )
+
         tiles: dict[str, PIL.Image.Image] = {}
         tile_factors: dict[str, float] = {}
         try:
@@ -520,7 +536,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                     )
                     if ref_patches:
                         pattern_layer = self._synthesize_pattern_layer(
-                            pattern_ctx, panorama, int(rt), ref_patches, cfg, seed_offset=idx,
+                            pattern_ctx, real_everywhere, int(rt), ref_patches, cfg, seed_offset=idx,
                         )
 
                 if pattern_layer is not None:
@@ -966,15 +982,23 @@ class TerrainTextureGenerationStage(PipelineStage):
         region_map_depth = context.input_depth(ContextKey.REGION_MAP)
         if terrain_mesh is None or height_map_depth is None or region_map_depth is None:
             return None
+        # extra_uv (TEXCOORD_1): the same already-correct, cached-preferring,
+        # per-vertex panorama UV TerrainMeshGenerator.generate() computed once
+        # for the live panorama layer -- see bake_real_layer_from_mesh, which
+        # reuses it directly instead of re-deriving a second, less trustworthy
+        # position/height-based projection of its own. No panorama was ever
+        # supplied to generate() if this is None (e.g. no PANORAMA_TERRAIN),
+        # in which case there's nothing this whole module can usefully bake.
+        panorama_uv = getattr(terrain_mesh, "extra_uv", None)
+        if panorama_uv is None:
+            return None
 
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         half = grid_size / 2.0
 
-        sky_mask = context.input_sky_mask()
-
         vertices = np.asarray(terrain_mesh.mesh.vertices, dtype=np.float64)
         faces = np.asarray(terrain_mesh.mesh.faces, dtype=np.int64)
-        if len(faces) == 0:
+        if len(faces) == 0 or len(panorama_uv) != len(vertices):
             return None
         centroids = vertices[faces].mean(axis=1)  # (M, 3) world XYZ
 
@@ -1005,15 +1029,14 @@ class TerrainTextureGenerationStage(PipelineStage):
             "faces": faces,
             "face_needs_synthesis": face_needs_synthesis,
             "face_region_idx": face_region_idx,
-            "height_map": height_map_depth.depth,
+            "panorama_uv": panorama_uv,
             "half": half,
-            "sky_mask": sky_mask,
         }
 
     def _synthesize_pattern_layer(
         self,
         pattern_ctx: dict,
-        panorama: Panorama,
+        real_everywhere: np.ndarray,
         region_val: int,
         ref_patches: list[PIL.Image.Image],
         cfg: "TerrainTextureGenerationConfiguration",
@@ -1039,14 +1062,11 @@ class TerrainTextureGenerationStage(PipelineStage):
             face_needs_synthesis=pattern_ctx["face_needs_synthesis"],
             face_region_mask=face_region_mask,
             reference_patches=delit_patches,
-            panorama=panorama,
-            height_map=pattern_ctx["height_map"],
-            terrain_half=pattern_ctx["half"],
+            real_everywhere=real_everywhere,
             x_half=pattern_ctx["half"],
             z_far=pattern_ctx["half"],
             canvas_size=cfg.pattern_canvas_size,
             seed=cfg.seed + seed_offset,
-            sky_mask=pattern_ctx["sky_mask"],
             sample_res=cfg.pattern_sample_res,
             border_width_frac=cfg.pattern_border_width_frac,
             feather_band_px=cfg.pattern_feather_band_px,

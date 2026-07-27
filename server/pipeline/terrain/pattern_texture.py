@@ -212,6 +212,81 @@ def bake_real_layer(
     ).reshape(canvas_size, canvas_size, 3)
 
 
+# ── Real-content baking (mesh-projected) ──────────────────────────────────────
+
+def bake_real_layer_from_mesh(
+    vertices: np.ndarray,
+    faces: np.ndarray,
+    panorama_uv: np.ndarray,
+    panorama: Panorama,
+    canvas_size: int,
+    x_half: float,
+    z_far: float,
+    x_center: float = 0.0,
+    z_center: float = 0.0,
+) -> np.ndarray:
+    """
+    Real-photo colour for the main terrain mesh's pattern-texture base layer,
+    projected from the mesh's own vertices instead of resampled from a
+    synthetic top-down world grid.
+
+    bake_real_layer (above) determines each canvas pixel's world Y by
+    resampling the *final* HEIGHT_MAP -- after Terrain Reconstruction/Noise
+    Refinement's own solving/diffusion/certainty-weighted blending -- at a
+    position that has no relationship to any real measurement. Right where
+    this function's caller (synthesize_region_layer) actually needs real
+    content most (the near-nadir/horizon band the panorama layer's own
+    weight rejects -- see TerrainTextureGenerationStage._panorama_visibility_
+    weight), a small height error there amplifies into a large panorama-row
+    error (Y = depth * sin(phi), phi steep near nadir) -- the exact same
+    failure mode that made TerrainMeshGenerator.generate() prefer each
+    observed vertex's own *cached* true panorama UV (HeightMapGenerator.
+    _panorama_uv_from_height, captured before any of that downstream
+    processing) over re-deriving UV from final geometry, for the main
+    panorama layer. This function reuses that exact same already-correct,
+    already-cached per-vertex UV (panorama_uv -- pass the terrain mesh's own
+    Mesh.extra_uv, computed once by TerrainMeshGenerator.generate() and
+    validated by the live panorama layer) instead of computing a second,
+    independent, and *less* trustworthy position/height estimate of its own.
+
+    Concretely: sample this panorama once per real mesh vertex (via
+    Panorama.sample_uv, which expects mesh_uvs' own UV convention -- pass
+    panorama_uv through unmodified), then rasterise each triangle into the
+    canvas by barycentric-interpolating its own three vertices' colours
+    (same triangle rasteriser _rasterize_triangle uses for library samples
+    below). Colour interpolation has no seam-wrap ambiguity the way UV
+    interpolation does (see TerrainMeshGenerator._fix_uv_seam) -- a colour is
+    already a resolved value, not an angle that can wrap the wrong way -- so
+    no seam handling is needed here despite reusing the same per-vertex data
+    a seam-fixed UV channel would.
+
+    vertices, faces: the terrain mesh's own (already seam-fixed) arrays --
+    same ones TerrainMeshGenerator.generate() built panorama_uv against, so
+    indices line up 1:1. Only vertices[:, 0]/[:, 2] (X, Z) are used for
+    canvas placement; Y is not needed at all here, since colour already came
+    from panorama_uv rather than being re-derived from position.
+
+    Returns (canvas_size, canvas_size, 3) float32 in [0, 1].
+    """
+    canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.float32)
+
+    vertex_colors = (
+        panorama.sample_uv(panorama_uv[:, 0], panorama_uv[:, 1])[:, :3].astype(np.float32) / 255.0
+    )
+
+    tri_xz = vertices[faces][:, :, [0, 2]]       # (M, 3, 2) world (X, Z)
+    tri_colors = vertex_colors[faces]            # (M, 3, 3)
+
+    for i in range(len(faces)):
+        def colors_fn(w0, w1, w2, _tri_xz, c=tri_colors[i]):
+            return (
+                w0[..., None] * c[0] + w1[..., None] * c[1] + w2[..., None] * c[2]
+            )
+        _rasterize_triangle(canvas, None, tri_xz[i], colors_fn, x_half, z_far, x_center, z_center)
+
+    return canvas
+
+
 # ── Rasterization ────────────────────────────────────────────────────────────
 #
 # x_center/z_center let the canvas domain be [-x_half, x_half] x [-z_far, z_far]
@@ -277,9 +352,7 @@ def synthesize_region_layer(
     face_needs_synthesis: np.ndarray,
     face_region_mask: np.ndarray,
     reference_patches: list[PIL.Image.Image],
-    panorama: Panorama,
-    height_map: np.ndarray,
-    terrain_half: float,
+    real_everywhere: np.ndarray,
     x_half: float,
     z_far: float,
     canvas_size: int,
@@ -291,7 +364,6 @@ def synthesize_region_layer(
     feather_band_px: float = 48.0,
     feather_sigma_px: float = 8.0,
     min_coverage_fraction: float = 0.002,
-    sky_mask: Optional[np.ndarray] = None,
 ) -> Optional[PIL.Image.Image]:
     """
     Build this region type's texture layer by assigning boundary-matched real
@@ -304,11 +376,15 @@ def synthesize_region_layer(
     (x_center, z_center) -- 0, 0 for the main terrain (its own domain is
     centered at the world origin), but a formation mesh (see
     TerrainMeshGenerator.generate_component_mesh) lives wherever its own
-    footprint actually is, hence the offset. terrain_half is the *shared*
-    HEIGHT_MAP's own half-extent (always centered at the origin, regardless
-    of what this call's own canvas covers) -- needed separately so a
-    formation's much smaller canvas can still correctly look up real height
-    from the one shared grid.
+    footprint actually is, hence the offset.
+
+    real_everywhere: precomputed by the caller once (see
+    bake_real_layer_from_mesh), shared across every region type's own call to
+    this function -- it doesn't depend on region_val, so building it fresh
+    per call (as an earlier version of this function did, via its own
+    panorama/height_map/terrain_half parameters) was pure repeated work,
+    on top of computing the same mesh-projection every region type needlessly
+    re-triggered.
 
     Returns None if there are no reference patches (caller should fall back
     to FLUX generation) or the qualifying footprint is smaller than
@@ -325,14 +401,6 @@ def synthesize_region_layer(
         return None
 
     rng = np.random.default_rng(seed)
-
-    # Real content everywhere on the canvas -- the base layer (so any pixel
-    # not covered by a qualifying triangle is a sane fallback, not blank),
-    # and the feather target at the library/real seam.
-    real_everywhere = bake_real_layer(
-        panorama, height_map, terrain_half, x_half, z_far, canvas_size, x_center, z_center,
-        sky_mask=sky_mask,
-    )
 
     canvas = real_everywhere.copy()
     synth_mask = np.zeros((canvas_size, canvas_size), dtype=bool)

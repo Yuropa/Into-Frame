@@ -130,6 +130,8 @@ class RegionMapGenerator:
         near_field_support_row_offset: int = 6,
         near_field_trust_distance_m: float = 45.0,
         near_field_min_radius_m: float = 5.0,
+        prominence_min_m: float = 20.0,
+        prominence_shoulder_m: float = 25.0,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column and place it on a top-down
@@ -216,6 +218,38 @@ class RegionMapGenerator:
         no usable reading (no panorama_depth, invalid/saturated depth, or a
         genuine reading beyond near_field_trust_distance_m) keep the full shell
         height, same as before this parameter existed.
+
+        prominence_min_m / prominence_shoulder_m: the greedy chaining +
+        hole-stitching above routinely merges an entire panorama's silhouette
+        into one long (often near-360°) chain -- ordinary background silhouette
+        (nearby trees, a rise, a low ridge) exists in essentially every
+        direction around a full panorama, not just where a real, singular
+        summit sits. TerrainReconstructionStage anchors every chain point as a
+        hard Dirichlet boundary condition; a near-complete ring of anchors at
+        moderate elevation dominates that harmonic solve almost everywhere real
+        (sparse, island-shaped) observed coverage doesn't override it -- on one
+        capture, unobserved terrain within 4.5 m of the *camera* reconstructed
+        to ~7x its own raw height because of this, which then fed directly into
+        wrong (sky-ward) panorama-texture sampling for that terrain. Filtered
+        here to topographic *prominence* (the standard "key col" definition --
+        a point's height above the higher of the two saddles you'd have to
+        cross, in each direction along the chain, before reaching a taller
+        point) via scipy.signal's peak-finding: only a point that stands out
+        from its own local silhouette neighbourhood by at least
+        prominence_min_m is kept, as a window of prominence_shoulder_m either
+        side of it (arc length along the chain, not azimuth) -- a genuine
+        summit's shoulder, not the whole silhouette. Chains are tiled x3
+        internally so a real peak straddling the chain's arbitrary start/end
+        index (very often the case for a near-closed ring; the greedy walk's
+        own starting point has no topographic meaning) still sees its true
+        neighbours on both sides. Everything not within a qualifying window is
+        dropped from the returned chains entirely -- not anchored at any
+        height -- letting the solve interpolate that stretch from nearby real
+        data instead of an un-singular silhouette guess. 0 disables (every
+        chain point keeps its full anchoring authority, prior behaviour). Only
+        prunes the *returned* chains used for anchoring/height texturing; the
+        rasterised silhouette `grid` below is built from the full, unpruned
+        chains, since it's debug/visualisation output, not a solve input.
 
         Returns (grid, chains) where:
           grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).
@@ -476,9 +510,54 @@ class RegionMapGenerator:
             from scipy.ndimage import binary_dilation
             grid = binary_dilation(grid > 0, iterations=dilation_iters).astype(np.float32)
 
+        # ── Prominence-based summit selection ───────────────────────────────────
+        # See prominence_min_m/prominence_shoulder_m's own docstring above for
+        # why this exists. Only affects xyz_chains (the anchoring output) --
+        # `grid` above was already rasterised from the full, unpruned chains.
+        anchor_chains_data = all_chains_data
+        if prominence_min_m > 0:
+            from scipy.signal import find_peaks, peak_prominences
+
+            anchor_chains_data = []
+            for chain_xz, chain_y in all_chains_data:
+                n = len(chain_y)
+                if n < 5:
+                    anchor_chains_data.append((chain_xz, chain_y))
+                    continue
+
+                seg = np.hypot(np.diff(chain_xz[:, 0]), np.diff(chain_xz[:, 1]))
+                arc = np.concatenate([[0.0], np.cumsum(seg)])
+
+                # Tiled x3: see docstring -- a real summit can straddle this
+                # chain's arbitrary start/end index for a near-closed ring.
+                y3 = np.concatenate([chain_y, chain_y, chain_y])
+                peaks3, _ = find_peaks(y3)
+                if len(peaks3) == 0:
+                    continue
+                prominences3 = peak_prominences(y3, peaks3)[0]
+
+                keep = np.zeros(n, dtype=bool)
+                for p3, prom in zip(peaks3, prominences3):
+                    if prom < prominence_min_m:
+                        continue
+                    p = p3 - n
+                    if not (0 <= p < n):
+                        continue
+                    keep |= np.abs(arc - arc[p]) <= prominence_shoulder_m
+
+                if not keep.any():
+                    continue
+
+                # Contiguous kept runs become separate chains -- a summit's
+                # shoulder is a local window, not (necessarily) the whole chain.
+                edges = np.flatnonzero(np.diff(np.concatenate([[False], keep, [False]])))
+                for start, stop in zip(edges[0::2], edges[1::2]):
+                    if stop - start >= 2:
+                        anchor_chains_data.append((chain_xz[start:stop], chain_y[start:stop]))
+
         # ── Assemble XYZ chains ───────────────────────────────────────────────
         xyz_chains: list[np.ndarray] = []
-        for chain_xz, chain_y in all_chains_data:
+        for chain_xz, chain_y in anchor_chains_data:
             xyz_chains.append(np.stack([
                 chain_xz[:, 0].astype(np.float32),
                 chain_y.astype(np.float32),
