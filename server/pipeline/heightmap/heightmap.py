@@ -44,6 +44,8 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         despike_threshold_m: float = 0.3,
         despike_window: int = 5,
         despike_reference_distance_m: float = 10.0,
+        despike_dense_threshold_scale: float = 2.5,
+        despike_dense_min_real_support: float = 0.6,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
@@ -132,13 +134,16 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # their own component -- avoids spurious few-cell noise clusters becoming
         # a "formation" downstream. See HeightMapGenerator._label_ground_components.
         self.min_component_area_fraction = min_component_area_fraction
-        # Equirectangular mode only: despike single-inverse-mapped-sample cells
-        # (not backed by min_forward_samples' dense statistics) that diverge from
-        # their own despike_window-sized neighbourhood median by more than this
-        # many metres -- source depth-map noise (a "flying pixel" edge flickering
-        # between two competing surfaces) otherwise lands as an alternating
-        # checkerboard of wildly different heights between adjacent grid cells.
-        # 0 disables. See HeightMapGenerator._despike_single_sample_cells.
+        # Equirectangular mode only: despike any cell (including dense_mask/
+        # any_forward_mask, backed by min_forward_samples' multi-sample stats --
+        # a mixed-pixel cell straddling a real depth discontinuity can still
+        # disagree sharply with its neighbours even after averaging) that
+        # diverges from its own despike_window-sized neighbourhood median by
+        # more than this many metres -- source depth-map noise (a "flying
+        # pixel" edge flickering between two competing surfaces) otherwise
+        # lands as an alternating checkerboard of wildly different heights
+        # between adjacent grid cells. 0 disables. See
+        # HeightMapGenerator._despike_cells.
         self.despike_threshold_m = despike_threshold_m
         self.despike_window = despike_window
         # Per-pixel depth-model noise grows with sampled range (and is further
@@ -147,6 +152,19 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # above it -- for cells sampled beyond this distance, scaled by
         # despike_reference_distance_m / sampled_depth.
         self.despike_reference_distance_m = despike_reference_distance_m
+        # Extra multiplier (>= 1.0) on the effective despike threshold for
+        # dense_mask/any_forward_mask cells only -- already averaged over
+        # multiple forward-projected samples, so genuine sensor noise should
+        # mostly have cancelled; a bigger deviation is required before one is
+        # flagged than a single-ray cell needs.
+        self.despike_dense_threshold_scale = despike_dense_threshold_scale
+        # Minimum fraction (0-1) of real (non-interpolated) cells required in a
+        # dense_mask/any_forward_mask cell's own despike_window before it can be
+        # flagged at all -- protects a real, sparsely-surrounded sample (e.g. an
+        # isolated distant ridge point) from being judged against a mostly-
+        # fabricated local median and wrongly flattened. See
+        # HeightMapGenerator._despike_cells.
+        self.despike_dense_min_real_support = despike_dense_min_real_support
         # Binary closing iterations applied to the ground-valid classification
         # before it gates which pixels count as ground (see
         # HeightMapGenerator._ground_valid_mask). Per-pixel semantic segmentation
@@ -160,7 +178,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # per-cell by (1 - certainty) -- dense (multi-sample) cells are never
         # touched. Targets per-pixel depth-model dither that despiking's outlier
         # test can't catch. 0 disables. See
-        # HeightMapGenerator._despike_single_sample_cells and _build_certainty.
+        # HeightMapGenerator._despike_cells and _build_certainty.
         self.single_sample_blur_sigma = single_sample_blur_sigma
         # Equirectangular mode only: certainty multiplier for cells whose
         # ground validity came from PANORAMA_REGION_AMBIGUOUS_MASK -- pixels
@@ -293,6 +311,8 @@ class HeightMapStage(PipelineStage):
             despike_threshold_m=cfg.despike_threshold_m,
             despike_window=cfg.despike_window,
             despike_reference_distance_m=cfg.despike_reference_distance_m,
+            despike_dense_threshold_scale=cfg.despike_dense_threshold_scale,
+            despike_dense_min_real_support=cfg.despike_dense_min_real_support,
             region_closing_iterations=cfg.region_closing_iterations,
             single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,

@@ -3,7 +3,7 @@ import warnings
 import numpy as np
 import PIL.Image
 from pathlib import Path
-from scipy.ndimage import binary_closing, distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, median_filter, minimum_filter, zoom
+from scipy.ndimage import binary_closing, distance_transform_edt, gaussian_filter, generate_binary_structure, label, maximum_filter, median_filter, minimum_filter, uniform_filter, zoom
 from typing import Optional
 from util.depth_utils import Depth
 from util.panorama_utils import Panorama
@@ -53,6 +53,8 @@ class HeightMapGenerator:
         despike_threshold_m: float = 0.3,
         despike_window: int = 5,
         despike_reference_distance_m: float = 10.0,
+        despike_dense_threshold_scale: float = 2.5,
+        despike_dense_min_real_support: float = 0.6,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
@@ -231,23 +233,21 @@ class HeightMapGenerator:
                             synthetic fill's injected noise needs before reaching full
                             amplitude. Cells nearer a real observation than this stay
                             close to its diffused trend instead of drifting via noise.
-        despike_threshold_m: equirectangular mode only. A single-inverse-mapped-
-                            sample cell (i.e. not in dense_mask — see
-                            _forward_project_cell_stats) whose height differs from
-                            its own despike_window-sized neighbourhood median by
-                            more than this is replaced by that median. Single-
-                            sample cells have no intra-cell averaging to smooth
-                            over source depth-map noise; a "flying pixel" edge
-                            where the depth model flickers between two competing
-                            surfaces from one equirectangular pixel to the next
-                            otherwise lands as an alternating checkerboard of
-                            wildly different heights between adjacent grid cells.
-                            0 disables. See _despike_single_sample_cells. Also
-                            reused, unscaled, as _forward_project_cell_stats'
-                            outlier_threshold_m -- the analogous per-point outlier
-                            rejection for dense (multi-sample) cells, which pool a
-                            mean/relief/slope from raw forward-projected samples
-                            with no such protection otherwise.
+        despike_threshold_m: equirectangular mode only. A cell whose height
+                            differs from its own despike_window-sized
+                            neighbourhood median by more than this (scaled by
+                            despike_dense_threshold_scale for dense_mask/
+                            any_forward_mask cells) is replaced by that median.
+                            Applies to every real cell, not just the flat-ground-
+                            assumed single ray -- see _despike_cells for why a
+                            multi-sample mean can still need this. 0 disables.
+                            Also reused, unscaled, as
+                            _forward_project_cell_stats' outlier_threshold_m --
+                            the analogous per-*point* outlier rejection during a
+                            dense cell's own mean/relief/slope pooling, a
+                            different mechanism (within one cell's raw samples,
+                            not across neighbouring cells) that this despike
+                            pass doesn't replace.
         despike_window: odd cell-window size for the local median used above.
         despike_reference_distance_m: equirectangular mode only. Per-pixel depth-
                             model noise grows with sampled radial range, and is
@@ -255,11 +255,28 @@ class HeightMapGenerator:
                             Y = depth * sin(phi) -- a single fixed
                             despike_threshold_m tuned for near, roughly-flat
                             ground under-catches real noise on longer, steeper
-                            single-sample rays. The effective threshold shrinks
-                            below despike_threshold_m (never grows past it) for
-                            cells sampled beyond this distance, scaled by
+                            rays. The effective threshold shrinks below
+                            despike_threshold_m (never grows past it) for cells
+                            sampled beyond this distance, scaled by
                             despike_reference_distance_m / sampled_depth. See
-                            _despike_single_sample_cells.
+                            _despike_cells.
+        despike_dense_threshold_scale: extra multiplier (>= 1.0) on the
+                            effective despike threshold for dense_mask/
+                            any_forward_mask cells only -- they're already
+                            averaged over multiple forward-projected samples, so
+                            genuine sensor noise should mostly have cancelled;
+                            a bigger deviation is required to flag one as a
+                            spike than a single-ray cell needs. See
+                            _despike_cells.
+        despike_dense_min_real_support: minimum fraction (0-1) of real (non-
+                            interpolated) cells required within a dense_mask/
+                            any_forward_mask cell's own despike_window before it
+                            can be flagged at all -- protects a real, sparsely-
+                            surrounded sample (e.g. an isolated distant ridge
+                            point) from being judged against a mostly-fabricated
+                            local median and flattened. 0 disables this
+                            safeguard (not recommended once dense/forward cells
+                            are despike candidates). See _despike_cells.
         region_closing_iterations: equirectangular mode only. Binary closing
                             iterations applied to the ground-valid classification
                             (see _ground_valid_mask) before it gates which pixels
@@ -408,22 +425,25 @@ class HeightMapGenerator:
                 cell_relief[use_weak] = fwd_relief[use_weak]
 
             if despike_threshold_m > 0:
-                # Protects any_forward_mask cells too, not just dense_mask: despiking
-                # exists to catch the primary single-ray inverse guess's own "flying
-                # pixel" noise (the flat-ground assumption sampling one wrong pixel
-                # next to another), not to second-guess a genuine forward-projected
-                # 3-D measurement. A weak (1-3 sample) forward cell is exactly as real
-                # as a dense one -- just without enough points for its own relief/
-                # slope -- and it's disproportionately likely to sit in a sparse far
-                # region where its neighbourhood is mostly nearest-neighbour-filled
-                # flat/interpolated values, i.e. exactly the setup that would make a
-                # real, isolated elevated sample (a mountain slope point surrounded by
-                # empty cells) look like a "spike" against that neighbourhood's median
-                # and get reverted right back to the flat guess it was meant to fix.
-                height_map, spike_mask = HeightMapGenerator._despike_single_sample_cells(
-                    height_map, protected_mask=dense_mask | any_forward_mask,
+                # dense_mask/any_forward_mask cells are candidates too, not just the
+                # single-ray fallback: on this pipeline's own captures, forward-
+                # projected cells within ~20 m of the camera measure 200-400x
+                # rougher than cells further out, and none of that ever reached a
+                # despike check before -- dense_mask was excluded outright on the
+                # theory that a multi-sample mean doesn't need it, but a mixed-pixel
+                # cell straddling a real depth discontinuity can still average out
+                # to something that disagrees sharply with its neighbours. The two
+                # strict_* safeguards below exist specifically so this doesn't
+                # regress the reason dense/forward cells were excluded in the first
+                # place: a real, sparsely-surrounded feature (a distant ridge point
+                # with mostly empty/interpolated neighbours) must not get flattened
+                # back toward a mostly-synthetic local median. See _despike_cells.
+                height_map, spike_mask = HeightMapGenerator._despike_cells(
+                    height_map, strict_mask=dense_mask | any_forward_mask,
                     threshold_m=despike_threshold_m, window=despike_window,
                     distance_m=sampled_depth, reference_distance_m=despike_reference_distance_m,
+                    strict_threshold_scale=despike_dense_threshold_scale,
+                    strict_min_real_support=despike_dense_min_real_support,
                 )
                 if spike_mask.any():
                     cell_relief[spike_mask] = 0.0
@@ -912,13 +932,17 @@ class HeightMapGenerator:
 
         outlier_threshold_m: cells with >= min_samples raw points are pooled
                        straight into mean_y/relief/slope_deg with no outlier
-                       rejection -- unlike the single-sample path, which is
-                       protected by _despike_single_sample_cells downstream (see
-                       HeightMapGenerator.generate), nothing here catches a lone
-                       flying-pixel sample skewing a dense cell's mean enough to
-                       trip _label_ground_components' walkability step check,
-                       fragmenting otherwise-continuous ground into spurious
-                       components that get discarded and replaced by
+                       rejection by default -- this is a *within-cell* check on
+                       the raw points a cell's own mean is pooled from, distinct
+                       from _despike_cells downstream (see HeightMapGenerator.
+                       generate), which only ever compares a cell's already-
+                       pooled mean against its *neighbouring* cells' pooled
+                       means and so can't see a cell whose own raw samples
+                       disagreed with each other before pooling. Without this,
+                       a lone flying-pixel sample can skew a dense cell's mean
+                       enough to trip _label_ground_components' walkability
+                       step check, fragmenting otherwise-continuous ground into
+                       spurious components that get discarded and replaced by
                        _interpolate's synthetic fill. When > 0, points in an
                        initially-dense cell that disagree with that cell's own
                        preliminary mean by more than this (metres) are dropped
@@ -1095,36 +1119,61 @@ class HeightMapGenerator:
         return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask
 
     @staticmethod
-    def _despike_single_sample_cells(
+    def _despike_cells(
         height_map: np.ndarray,
-        protected_mask: np.ndarray,
+        strict_mask: np.ndarray,
         threshold_m: float,
         window: int,
         distance_m: Optional[np.ndarray] = None,
         reference_distance_m: float = 10.0,
+        strict_threshold_scale: float = 1.0,
+        strict_min_real_support: float = 0.0,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Replace isolated height outliers among single-inverse-mapped-sample cells
-        with their local neighbourhood median.
+        Replace isolated height outliers with their local neighbourhood median.
 
-        Single-sample cells (protected_mask is False -- i.e. not backed by
-        _forward_project_cell_stats' dense_mask) have no intra-cell averaging to
-        smooth over source depth-map noise: a "flying pixel" edge where the depth
-        model flickers between two competing surfaces from one equirectangular
-        pixel to the next lands directly as an alternating checkerboard of wildly
-        different heights between immediately adjacent grid cells, instead of the
-        smooth gradient a real slope would produce.
+        Every cell with a real sample (~isnan(height_map)) is a candidate,
+        including strict_mask cells (dense_mask | any_forward_mask -- backed by
+        multiple forward-projected samples, not just the flat-ground-assumed
+        single ray). A "flying pixel" edge, where the depth model flickers
+        between two competing surfaces from one equirectangular pixel to the
+        next, lands directly as an alternating checkerboard of wildly different
+        heights between adjacent grid cells instead of the smooth gradient a
+        real slope would produce -- and averaging a handful of forward-projected
+        samples doesn't fully protect a dense cell from this if most of its
+        samples land on the same wrong surface (a mixed-pixel cell straddling a
+        real depth discontinuity), so this isn't purely a single-ray problem.
 
         A cell is only corrected if it diverges from its own window-sized
-        neighbourhood median by more than threshold_m. A genuine, spatially
-        coherent step edge (a real cliff/ridge) moves many neighbouring cells
-        together, so the local median there already reflects the step and isn't
-        flagged; only a cell disagreeing with a neighbourhood that mostly agrees
-        with itself gets touched -- the same principle as a standard median/
-        Hampel despike filter for salt-and-pepper sensor noise. Dense cells
-        (protected_mask) are never candidates, even if their value happens to
-        differ from neighbours, since they're backed by real multi-sample
-        statistics rather than a single noisy ray.
+        neighbourhood median by more than threshold_m (scaled by
+        strict_threshold_scale for strict_mask cells -- see below). A genuine,
+        spatially coherent step edge (a real cliff/ridge) moves many
+        neighbouring cells together, so the local median there already reflects
+        the step and isn't flagged; only a cell disagreeing with a neighbourhood
+        that mostly agrees with itself gets touched -- the same principle as a
+        standard median/Hampel despike filter for salt-and-pepper sensor noise.
+
+        strict_mask cells get two extra safeguards single-ray cells don't,
+        since they're otherwise-trustworthy multi-sample measurements and a
+        real, sparsely-surrounded feature (e.g. a distant ridge/slope point
+        with mostly empty or nearest-neighbour-filled cells around it) must
+        not be mistaken for noise and flattened back toward its synthetic
+        neighbourhood:
+          1. strict_threshold_scale (>= 1.0) raises the bar before a strict_mask
+             cell is even considered a deviation -- dense/forward data is
+             already averaged over multiple rays, so genuine sensor noise
+             should mostly have cancelled; a spike surviving that averaging
+             needs to be more extreme to justify overriding it.
+          2. strict_min_real_support requires the cell's own window to be
+             mostly *real* data (not nearest-neighbour-filled gap-fill) before
+             a deviation counts at all -- computed from the true (pre-fill)
+             observed mask, so a real isolated sample surrounded by sparse/
+             synthetic coverage never has enough real neighbours to trip this,
+             regardless of how far its value sits from the (mostly-fabricated)
+             local median. Only a strict_mask cell embedded in a neighbourhood
+             of other real, mutually-agreeing measurements -- exactly the
+             setting where "this one disagrees with its real neighbours" is a
+             meaningful statement -- can be flagged.
 
         distance_m (optional): per-cell sampled radial depth (e.g. equirectangular
         sampled_depth), same shape as height_map. Per-pixel depth-model noise
@@ -1134,16 +1183,15 @@ class HeightMapGenerator:
         effective threshold shrinks below threshold_m (never above it) for cells
         sampled beyond reference_distance_m, scaled by
         reference_distance_m / distance_m -- near cells keep the base threshold,
-        far single-sample cells are held to a stricter one.
+        far cells are held to a stricter one. Applies before strict_threshold_scale.
 
         Returns (height_map, spike_mask) -- a new array (input is not mutated)
         and the bool mask of cells that were replaced, so callers can also clear
         any relief/slope measurement that belonged to the discarded value.
         """
         valid = ~np.isnan(height_map)
-        candidates = valid & ~protected_mask
         empty_spikes = np.zeros_like(valid)
-        if not candidates.any():
+        if not valid.any():
             return height_map, empty_spikes
 
         # The local median needs a real value at every cell to be meaningful --
@@ -1158,11 +1206,19 @@ class HeightMapGenerator:
 
         if distance_m is not None:
             scale = np.clip(reference_distance_m / np.maximum(distance_m, 1e-6), 0.0, 1.0)
-            effective_threshold = threshold_m * scale
+            effective_threshold = (threshold_m * scale).astype(np.float64)
         else:
-            effective_threshold = threshold_m
+            effective_threshold = np.full(height_map.shape, threshold_m, dtype=np.float64)
+        effective_threshold = effective_threshold.copy()
+        effective_threshold[strict_mask] *= strict_threshold_scale
 
-        spike = candidates & (np.abs(height_map - local_median) > effective_threshold)
+        spike = valid & (np.abs(height_map - local_median) > effective_threshold)
+
+        if strict_min_real_support > 0 and strict_mask.any():
+            real_support = uniform_filter(valid.astype(np.float32), size=window)
+            insufficient_support = strict_mask & (real_support < strict_min_real_support)
+            spike &= ~insufficient_support
+
         if not spike.any():
             return height_map, empty_spikes
 

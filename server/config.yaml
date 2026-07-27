@@ -309,19 +309,32 @@ stages:
                                  # of the grid are folded into the interpolated-gap fallback
                                  # instead of kept as their own component (see
                                  # HEIGHT_MAP_COMPONENT_ID / TerrainMeshStage's formation meshes)
-    despike_threshold_m: 0.3    # single-inverse-mapped-sample cells (below min_forward_samples,
-                                 # so no intra-cell averaging) whose height differs from their own
-                                 # despike_window neighbourhood median by more than this are
-                                 # replaced by that median — a "flying pixel" edge where the depth
-                                 # model flickers between two competing surfaces otherwise lands as
-                                 # an alternating checkerboard of spikes between adjacent cells.
-                                 # 0 disables.
+    despike_threshold_m: 0.3    # any cell (including dense_mask/any_forward_mask, backed by
+                                 # min_forward_samples' multi-sample stats — a mixed-pixel cell
+                                 # straddling a real depth discontinuity can still disagree
+                                 # sharply with its neighbours even after averaging) whose height
+                                 # differs from its own despike_window neighbourhood median by
+                                 # more than this are replaced by that median — a "flying pixel"
+                                 # edge where the depth model flickers between two competing
+                                 # surfaces otherwise lands as an alternating checkerboard of
+                                 # spikes between adjacent cells. 0 disables.
     despike_window: 5           # odd cell-window size for the local median used above
     despike_reference_distance_m: 10.0 # depth-model noise grows with sampled range and is
                                  # further amplified for elevated/steep rays (Y = depth *
                                  # sin(phi)); the effective despike threshold shrinks below
                                  # despike_threshold_m (never above it) for cells sampled
                                  # beyond this distance, scaled by this / sampled_depth.
+    despike_dense_threshold_scale: 2.5 # extra multiplier on the despike threshold for
+                                 # dense_mask/any_forward_mask cells only — already averaged
+                                 # over multiple forward-projected samples, so genuine sensor
+                                 # noise should mostly have cancelled; a bigger deviation is
+                                 # required before one is flagged than a single-ray cell needs.
+    despike_dense_min_real_support: 0.6 # minimum fraction (0-1) of real (non-interpolated)
+                                 # cells required in a dense_mask/any_forward_mask cell's own
+                                 # despike_window before it can be flagged at all — protects a
+                                 # real, sparsely-surrounded sample (e.g. an isolated distant
+                                 # ridge point) from being judged against a mostly-fabricated
+                                 # local median and wrongly flattened.
     region_closing_iterations: 2 # binary closing passes on the ground-valid classification
                                  # before it gates which pixels count as ground — per-pixel
                                  # semantic segmentation is noisy right at class boundaries;
