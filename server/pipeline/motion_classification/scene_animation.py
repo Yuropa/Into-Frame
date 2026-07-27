@@ -94,11 +94,19 @@ class SceneAnimationStage(PipelineStage):
 
             if metadata["stationary"]:
                 if obj.type == ObjectType.BILLBOARD:
-                    color = context.input_video(f"object_video_{idx}")
-                    alpha = context.input_video(f"object_video_alpha_{idx}")
+                    # Keyed on the crop the billboard actually DISPLAYS, not on the
+                    # detection it was placed from -- see Object3D.texture_source_index.
+                    # These differ whenever the billboard drew from its (class, bucket)
+                    # pool, and always differ for a synthetic painted instance, which
+                    # has no crop or clip of its own but renders a real sibling's.
+                    video_idx = obj.texture_source_index
+                    if video_idx is None:
+                        video_idx = idx
+                    color = context.input_video(f"object_video_{video_idx}")
+                    alpha = context.input_video(f"object_video_alpha_{video_idx}")
                     if color is not None and alpha is not None:
-                        obj.video_color = f"object_video_{idx}"
-                        obj.video_alpha = f"object_video_alpha_{idx}"
+                        obj.video_color = f"object_video_{video_idx}"
+                        obj.video_alpha = f"object_video_alpha_{video_idx}"
                         annotated += 1
                 elif obj.type == ObjectType.MESH:
                     sway = metadata.get("sway") or {}

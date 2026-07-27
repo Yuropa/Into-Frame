@@ -88,15 +88,33 @@ class ObjectMotionClassificationStage(PipelineStage):
                 processed += 1
                 self.advance_progress(task)
                 continue
-            if motion is None:
-                self.advance_progress(task)
-                continue
-
-            fps = motion["fps"]
-            centroids = np.asarray(motion["centroids"], dtype=float)
-            bboxes = np.asarray(motion["bboxes"], dtype=float)
-            valid = bboxes[:, 2] > 0  # frames where the mask wasn't empty
-            if valid.sum() < 2:
+            # No usable track for this object: either Video Object Extraction never
+            # produced one (occluded at frame 0, mask too small, video generation
+            # off) or it produced fewer than two frames where the mask was non-empty.
+            # Fall back to stationary with no measured sway, rather than leaving
+            # "stationary" absent entirely.
+            #
+            # An absent flag isn't neutral -- SceneAnimationStage skips any object
+            # without it outright, so an untracked instance got no video, no sway and
+            # no physics, and sat frozen next to tracked siblings that swayed. Marking
+            # it stationary lets those paths engage: a mesh picks up the generic sway
+            # defaults, and a billboard can still animate from the clip belonging to
+            # the crop it actually displays (its pooled sibling's -- see
+            # Object3D.texture_source_index), which frequently exists even when this
+            # instance's own track doesn't. Same trade already made below when world
+            # unprojection fails: a genuinely moving object that we failed to track
+            # loses its physics, which is the better error than freezing every plant
+            # the tracker happened to miss.
+            usable = motion is not None
+            if usable:
+                fps = motion["fps"]
+                centroids = np.asarray(motion["centroids"], dtype=float)
+                bboxes = np.asarray(motion["bboxes"], dtype=float)
+                valid = bboxes[:, 2] > 0  # frames where the mask wasn't empty
+                usable = bool(valid.sum() >= 2)
+            if not usable:
+                context.add_object(f"metadata_{idx}", {**metadata, "stationary": True})
+                processed += 1
                 self.advance_progress(task)
                 continue
 

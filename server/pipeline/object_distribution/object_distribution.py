@@ -183,6 +183,9 @@ class ObjectDistributionStage(PipelineStage):
         # Collect points + footprint sizes per (obj_type, region_type), in world XZ meters.
         points_by_group: dict[tuple[str, str], list[tuple[float, float]]] = {}
         sizes_by_group: dict[tuple[str, str], list[tuple[float, float]]] = {}
+        # Index-aligned with points/sizes -- see TypeDistribution.buckets for why the
+        # visual variant travels with each exemplar instead of splitting the groups.
+        buckets_by_group: dict[tuple[str, str], list[int]] = {}
         for obj_type in distributable_types:
             grp = correlation.groups[obj_type]
             for idx in grp.indices:
@@ -213,6 +216,7 @@ class ObjectDistributionStage(PipelineStage):
                 key = (obj_type, region_type)
                 points_by_group.setdefault(key, []).append((x, z))
                 sizes_by_group.setdefault(key, []).append((float(width), float(height)))
+                buckets_by_group.setdefault(key, []).append(int(metadata.get("bucket") or 0))
 
         if not points_by_group:
             self.log_info("No objects could be unprojected to world space")
@@ -225,6 +229,7 @@ class ObjectDistributionStage(PipelineStage):
 
         for (obj_type, region_type), points in points_by_group.items():
             sizes = sizes_by_group[(obj_type, region_type)]
+            buckets = buckets_by_group[(obj_type, region_type)]
             if len(points) >= _MIN_POINTS:
                 pcf_data = _run_pcf_cli(pcf_cli, points, self._bin_count)
                 if pcf_data is None:
@@ -240,6 +245,7 @@ class ObjectDistributionStage(PipelineStage):
                     pair_count=pcf_data.get("pair_count", 0),
                     points=points,
                     sizes=sizes,
+                    buckets=buckets,
                 )
                 self.log_info(
                     f"  {obj_type} [{region_type}]: {dist.n_points} points, "
@@ -256,6 +262,7 @@ class ObjectDistributionStage(PipelineStage):
                     pair_count=0,
                     points=points,
                     sizes=sizes,
+                    buckets=buckets,
                 )
                 self.log_info(f"  {obj_type} [{region_type}]: 1 instance (singleton)")
 

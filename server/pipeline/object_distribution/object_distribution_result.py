@@ -19,6 +19,17 @@ class TypeDistribution:
     # for inspection/reporting only.
     points: list[tuple[float, float]] = field(default_factory=list)
     sizes: list[tuple[float, float]] = field(default_factory=list)
+    # ObjectCategoryClusteringStage's visual variant id for each exemplar, index-
+    # aligned with points/sizes. The spatial pattern is modelled per CLASS, not per
+    # bucket -- a bucket is a per-instance appearance attribute, and splitting the
+    # point set by it would fragment most groups below the two-point minimum a PCF
+    # needs. Instead DistributionSynthesisStage draws a whole exemplar (its size AND
+    # its bucket together) for each painted point, so the painted population inherits
+    # the observed mix of variants and each instance keeps a self-consistent
+    # size/appearance pairing. Without this the clustering result never reached
+    # synthesis at all and every painted instance fell back to bucket 0 in
+    # SceneGenerationStage -- one variant repeated across the whole region.
+    buckets: list[int] = field(default_factory=list)
 
     def encode(self) -> dict:
         return {
@@ -30,6 +41,7 @@ class TypeDistribution:
             "pair_count": self.pair_count,
             "points": [list(p) for p in self.points],
             "sizes": [list(s) for s in self.sizes],
+            "buckets": list(self.buckets),
         }
 
     @classmethod
@@ -44,6 +56,9 @@ class TypeDistribution:
         obj.hist = data.get("hist", [])
         obj.points = [tuple(p) for p in data.get("points", [])]
         obj.sizes = [tuple(s) for s in data.get("sizes", [])]
+        # Older caches predate buckets; fall back to variant 0 for every exemplar so
+        # a stale OBJECT_DISTRIBUTION still decodes and paints (as it did before).
+        obj.buckets = [int(b) for b in data.get("buckets", [])] or [0] * len(obj.points)
         return obj
 
 

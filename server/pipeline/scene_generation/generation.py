@@ -297,6 +297,28 @@ class SceneGenerationStage(PipelineStage):
                     # from a real detection's pool; if none exists there's nothing
                     # to render.
                     crop_pool = billboard_pools.get(pool_key) or ([] if metadata.get("synthetic") else [idx])
+                    if not crop_pool and metadata.get("synthetic"):
+                        # This painted instance inherited its bucket from a real
+                        # exemplar (DistributionSynthesisStage samples size and bucket
+                        # together), but not every bucket ends up with a curated pool --
+                        # PanoramaAssetGenerationStage disqualifies crops on quality and
+                        # occlusion, so a thinly-populated variant can lose all of its
+                        # candidates. Falling back to any pool for the same class keeps
+                        # the instance in the scene as a sibling variant instead of
+                        # silently deleting it, which is the better failure for a
+                        # population whose whole purpose is filling the environment.
+                        fallback = [
+                            i
+                            for key, pool in billboard_pools.items()
+                            if key.split("::", 1)[0] == cls
+                            for i in pool
+                        ]
+                        if fallback:
+                            self.log_info(
+                                f"No pool for {pool_key}; synthetic object {idx} "
+                                f"falling back to another {cls} variant"
+                            )
+                            crop_pool = fallback
                     if not crop_pool:
                         self.log_warning(f"No billboard crop available for synthetic object {idx} ({cls}), skipping")
                         self.advance_progress(generation_task)
@@ -313,6 +335,13 @@ class SceneGenerationStage(PipelineStage):
                     )
                     billboard.name = f"billboard_{idx}"
                     billboard.source_index = idx
+                    # Record whose crop is actually on screen -- see
+                    # Object3D.texture_source_index. SceneAnimationStage keys the
+                    # object_video_{i} lookup on this, so a pooled or synthetic
+                    # billboard animates with the clip belonging to the crop it
+                    # displays instead of a different instance's (or, for synthetic
+                    # points, none at all).
+                    billboard.texture_source_index = chosen_idx
                     scene.add_object(billboard)
                 self.advance_progress(generation_task)
 

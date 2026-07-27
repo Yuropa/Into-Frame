@@ -243,11 +243,27 @@ class DistributionSynthesisStage(PipelineStage):
         distribution = context.input_object_distribution(ContextKey.OBJECT_DISTRIBUTION)
         if distribution is None:
             self.log_info("No object distribution, skipping")
+            # Mark complete even though nothing was painted: has_expected_output()
+            # only checks this marker, so returning without it makes this stage --
+            # and, via the dirty cascade, Panorama Asset Generation, Scene
+            # Generation, Video Generation, Video Object Extraction, Motion
+            # Classification, Rigging and Animation -- look permanently incomplete
+            # and rerun on every single invocation. Same guard ObjectDistributionStage
+            # already applies for its own "binary not found" path.
+            context.add_object(_RAN_MARKER, True)
             return context
 
         region_map_depth = context.input_depth(ContextKey.REGION_MAP)
         if region_map_depth is None:
             self.log_info("No region map, skipping")
+            # Mark complete even though nothing was painted: has_expected_output()
+            # only checks this marker, so returning without it makes this stage --
+            # and, via the dirty cascade, Panorama Asset Generation, Scene
+            # Generation, Video Generation, Video Object Extraction, Motion
+            # Classification, Rigging and Animation -- look permanently incomplete
+            # and rerun on every single invocation. Same guard ObjectDistributionStage
+            # already applies for its own "binary not found" path.
+            context.add_object(_RAN_MARKER, True)
             return context
         region_map = region_map_depth.depth
         grid_resolution = region_map.shape[0]
@@ -263,6 +279,14 @@ class DistributionSynthesisStage(PipelineStage):
                 "synthesize_cli binary not found — build pattern-synthesis first "
                 "(cmake .. && make synthesize_cli). Skipping distribution synthesis."
             )
+            # Mark complete even though nothing was painted: has_expected_output()
+            # only checks this marker, so returning without it makes this stage --
+            # and, via the dirty cascade, Panorama Asset Generation, Scene
+            # Generation, Video Generation, Video Object Extraction, Motion
+            # Classification, Rigging and Animation -- look permanently incomplete
+            # and rerun on every single invocation. Same guard ObjectDistributionStage
+            # already applies for its own "binary not found" path.
+            context.add_object(_RAN_MARKER, True)
             return context
 
         groups = [
@@ -273,6 +297,14 @@ class DistributionSynthesisStage(PipelineStage):
         ]
         if not groups:
             self.log_info("No non-singleton distributions to paint")
+            # Mark complete even though nothing was painted: has_expected_output()
+            # only checks this marker, so returning without it makes this stage --
+            # and, via the dirty cascade, Panorama Asset Generation, Scene
+            # Generation, Video Generation, Video Object Extraction, Motion
+            # Classification, Rigging and Animation -- look permanently incomplete
+            # and rerun on every single invocation. Same guard ObjectDistributionStage
+            # already applies for its own "binary not found" path.
+            context.add_object(_RAN_MARKER, True)
             return context
 
         rng = np.random.default_rng(self.seed)
@@ -381,7 +413,8 @@ class DistributionSynthesisStage(PipelineStage):
                             "seed": self.seed + seed_counter,
                         })
 
-        group_placed: list[list[tuple[float, float, float, float]]] = [[] for _ in groups]
+        # (x, z, width, height, bucket) per painted instance.
+        group_placed: list[list[tuple[float, float, float, float, int]]] = [[] for _ in groups]
 
         if jobs:
             max_workers = cfg.max_workers or os.cpu_count() or 1
@@ -429,21 +462,37 @@ class DistributionSynthesisStage(PipelineStage):
                 dist = groups[job["group_idx"]][2]
                 placed = group_placed[job["group_idx"]]
                 for x, z in synth["output_points"]:
-                    w, h = dist.sizes[int(rng.integers(len(dist.sizes)))]
+                    # Draw ONE exemplar and take both its footprint and its visual
+                    # variant, rather than sampling them independently: bucket is an
+                    # appearance class and size correlates with it (a bucket of small
+                    # buds and one of tall stalks are different plants), so mixing a
+                    # tall exemplar's height with a small exemplar's variant produces
+                    # instances that match neither. Also inherits the observed mix of
+                    # variants for free -- a region that was 80% bucket 0 paints ~80%
+                    # bucket 0.
+                    e = int(rng.integers(len(dist.sizes)))
+                    w, h = dist.sizes[e]
+                    bucket = dist.buckets[e] if e < len(dist.buckets) else 0
                     jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))
-                    placed.append((float(x), float(z), w * jitter, h * jitter))
+                    placed.append((float(x), float(z), w * jitter, h * jitter, int(bucket)))
 
             self.finish_progress(task)
 
         for group_idx, (region_type, obj_type, dist) in enumerate(groups):
             placed = group_placed[group_idx]
-            for x, z, w, h in placed:
+            for x, z, w, h, bucket in placed:
                 context.add_object(f"metadata_{next_idx}", {
                     "class": obj_type,
                     "synthetic": True,
                     "world_position": [x, 0.0, z],
                     "world_width": w,
                     "world_height": h,
+                    # Carries ObjectCategoryClusteringStage's visual variant through to
+                    # SceneGenerationStage, which resolves it to category_mesh_{cls}_
+                    # {bucket} / the "{cls}::{bucket}" billboard pool. Without it that
+                    # lookup fell back to `metadata.get("bucket") or 0`, so every
+                    # painted instance in the scene rendered as variant 0.
+                    "bucket": int(bucket),
                 })
                 next_idx += 1
 

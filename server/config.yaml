@@ -758,22 +758,31 @@ stages:
 
   - name: Object Distribution
     stage: ObjectDistributionStage
-    enabled: false          # see Distribution Synthesis below for why
+    enabled: true           # learns the per-(class, region) spatial pattern that
+                             # Distribution Synthesis below paints. Needs the pcf_cli
+                             # binary from pattern-synthesis (cmake .. && make pcf_cli);
+                             # without it the stage writes an empty result and paints
+                             # nothing rather than failing.
     bin_count: 48
     # pcf_cli_path: /path/to/pattern-synthesis/build/pcf_cli  # override if needed
 
   - name: Distribution Synthesis
     stage: DistributionSynthesisStage
-    enabled: false          # Real detected instances, unprojected straight from
-                             # PANORAMA_OBJECT_DEPTH (the original, with-objects
-                             # panorama), already place well -- scattering extra
-                             # synthetic instances from a fitted spatial-statistics
-                             # model was adding density the real detections don't
-                             # support. SceneGenerationStage places every surviving
-                             # metadata_{i} regardless of this stage's on/off state,
-                             # so disabling it just means "only the real ones."
-                             # ObjectDistributionStage is disabled alongside it since
-                             # nothing else reads ContextKey.OBJECT_DISTRIBUTION.
+    enabled: true           # paints the learned pattern across every matching region
+                             # so the environment is populated, not just the handful of
+                             # instances the detector happened to catch. Previously off
+                             # because the density it added wasn't supported by the real
+                             # detections -- worth re-checking the debug images under
+                             # temp/synthesis_{region}_{type}.png (red = real exemplars,
+                             # yellow = painted) and backing off via
+                             # input_boundary_pad_factor if it overshoots again.
+                             #
+                             # Requires BOTH Object Distribution above (for the pattern)
+                             # and Panorama Asset Generation below (for the per-(class,
+                             # bucket) meshes and billboard pools). Painted points carry
+                             # no crop of their own, so with asset generation off every
+                             # one of them is dropped at Scene Generation with a "no
+                             # billboard crop available" warning.
     min_blob_area_cells: 64
     max_candidates_per_tile: 2000
     max_iters: 400

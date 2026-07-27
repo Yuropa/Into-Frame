@@ -39,6 +39,21 @@ class Object3D():
         # silently lose every object's join key and animate nothing.
         self.source_index: Optional[int] = None
 
+        # Which detection's crop this billboard actually DISPLAYS, when that differs
+        # from source_index. SceneGenerationStage draws a billboard's texture from
+        # its (class, bucket) pool of top-K curated crops, so the crop shown is very
+        # often a visually-equivalent sibling rather than this instance's own -- and
+        # for a synthetic (painted) instance there is no own crop at all, so it is
+        # ALWAYS a sibling's. SceneAnimationStage needs this, not source_index, to
+        # find the matching object_video_{i}: keyed on source_index it attached a
+        # different plant's clip to the still it was showing (a visible swap the
+        # moment the video started), and attached nothing at all to every synthetic
+        # billboard even though the clip for the crop it displays existed.
+        # None -> the billboard shows source_index's own crop. Encoded so it
+        # round-trips for a resumed run, same reasoning as source_index above; the
+        # clients never read it.
+        self.texture_source_index: Optional[int] = None
+
         # Animated-billboard video assets (asset keys, same convention as
         # `texture`), set by SceneAnimationStage for a stationary billboard with
         # a corresponding extracted clip. None/empty -> render the static
@@ -82,6 +97,8 @@ class Object3D():
         }
         if self.source_index is not None:
             data["sourceIndex"] = self.source_index
+        if self.texture_source_index is not None:
+            data["textureSourceIndex"] = self.texture_source_index
         # Only present on animated objects -- keeps every untouched object's
         # payload identical to before this field set existed.
         if self.video_color:
@@ -129,6 +146,7 @@ class Object3D():
         obj.scale = data["scale"]
         obj.name = data["name"]
         obj.source_index = data.get("sourceIndex")
+        obj.texture_source_index = data.get("textureSourceIndex")
         obj.video_color = data.get("videoColor", "")
         obj.video_alpha = data.get("videoAlpha", "")
         obj.sway = data.get("sway")
