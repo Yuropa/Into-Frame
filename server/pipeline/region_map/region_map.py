@@ -40,6 +40,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         trail_skeleton_smooth_radius: int = 4,
         interior_peak_max_range_factor: float = 2.0,
         interior_peak_min_depth_m: float = 50.0,
+        ridge_prominence_min_m: float = 0.0,
+        ridge_prominence_shoulder_m: float = 25.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -69,6 +71,13 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # let near-camera noise dominate the output. See
         # RegionMapGenerator.extract_interior_peaks.
         self.interior_peak_min_depth_m = interior_peak_min_depth_m
+        # Prominence pruning of the ridge silhouette before it becomes solve
+        # anchors. Defaults to 0 (keep the whole horizon) -- see
+        # RegionMapGenerator.extract_mountain_ridgeline for why the near-field
+        # flooding this used to guard against is now fixed at its actual source,
+        # and why prominence discards most of a real horizon.
+        self.ridge_prominence_min_m = ridge_prominence_min_m
+        self.ridge_prominence_shoulder_m = ridge_prominence_shoulder_m
 
 
 class RegionMapStage(PipelineStage):
@@ -238,11 +247,29 @@ class RegionMapStage(PipelineStage):
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
             panorama_depth=panorama_depth,
+            prominence_min_m=cfg.ridge_prominence_min_m,
+            prominence_shoulder_m=cfg.ridge_prominence_shoulder_m,
         )
         context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
         context.add_object(ContextKey.MOUNTAIN_RIDGE_CHAINS, ridge_chains)
         silhouette_px = int(silhouette_grid.sum())
-        self.log_info(f"Mountain silhouette: {silhouette_px} grid cells, {len(ridge_chains)} ridge chain(s)")
+        # Azimuth coverage, not just chain count: the failure mode worth catching
+        # here is a horizon that survives extraction but only anchors a few
+        # degrees of it, which leaves the rest of the scene flat (and, downstream,
+        # smears the panorama across it at grazing incidence).
+        azimuth_cov = 0.0
+        if ridge_chains:
+            az = np.concatenate([
+                np.degrees(np.arctan2(np.asarray(c)[:, 0], np.asarray(c)[:, 2]))
+                for c in ridge_chains
+            ])
+            azimuth_cov = float((np.histogram(az, np.arange(-180, 181, 5))[0] > 0).mean())
+        self.log_info(
+            f"Mountain silhouette: {silhouette_px} grid cells, {len(ridge_chains)} ridge chain(s), "
+            f"{azimuth_cov * 100:.0f}% azimuth coverage"
+            + (f" (prominence ≥ {cfg.ridge_prominence_min_m:.0f} m)"
+               if cfg.ridge_prominence_min_m > 0 else "")
+        )
         if self.temp is not None:
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)

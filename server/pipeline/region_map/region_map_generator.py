@@ -130,7 +130,7 @@ class RegionMapGenerator:
         near_field_support_row_offset: int = 6,
         near_field_trust_distance_m: float = 45.0,
         near_field_min_radius_m: float = 5.0,
-        prominence_min_m: float = 20.0,
+        prominence_min_m: float = 0.0,
         prominence_shoulder_m: float = 25.0,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
@@ -219,37 +219,54 @@ class RegionMapGenerator:
         genuine reading beyond near_field_trust_distance_m) keep the full shell
         height, same as before this parameter existed.
 
-        prominence_min_m / prominence_shoulder_m: the greedy chaining +
-        hole-stitching above routinely merges an entire panorama's silhouette
-        into one long (often near-360°) chain -- ordinary background silhouette
-        (nearby trees, a rise, a low ridge) exists in essentially every
-        direction around a full panorama, not just where a real, singular
-        summit sits. TerrainReconstructionStage anchors every chain point as a
-        hard Dirichlet boundary condition; a near-complete ring of anchors at
-        moderate elevation dominates that harmonic solve almost everywhere real
-        (sparse, island-shaped) observed coverage doesn't override it -- on one
-        capture, unobserved terrain within 4.5 m of the *camera* reconstructed
-        to ~7x its own raw height because of this, which then fed directly into
-        wrong (sky-ward) panorama-texture sampling for that terrain. Filtered
-        here to topographic *prominence* (the standard "key col" definition --
-        a point's height above the higher of the two saddles you'd have to
-        cross, in each direction along the chain, before reaching a taller
-        point) via scipy.signal's peak-finding: only a point that stands out
-        from its own local silhouette neighbourhood by at least
-        prominence_min_m is kept, as a window of prominence_shoulder_m either
-        side of it (arc length along the chain, not azimuth) -- a genuine
-        summit's shoulder, not the whole silhouette. Chains are tiled x3
-        internally so a real peak straddling the chain's arbitrary start/end
-        index (very often the case for a near-closed ring; the greedy walk's
-        own starting point has no topographic meaning) still sees its true
-        neighbours on both sides. Everything not within a qualifying window is
-        dropped from the returned chains entirely -- not anchored at any
-        height -- letting the solve interpolate that stretch from nearby real
-        data instead of an un-singular silhouette guess. 0 disables (every
-        chain point keeps its full anchoring authority, prior behaviour). Only
-        prunes the *returned* chains used for anchoring/height texturing; the
-        rasterised silhouette `grid` below is built from the full, unpruned
-        chains, since it's debug/visualisation output, not a solve input.
+        prominence_min_m / prominence_shoulder_m: keep only chain points within
+        prominence_shoulder_m (arc length along the chain) of a local maximum
+        whose topographic prominence -- the standard "key col" definition, a
+        point's height above the higher of the two saddles you'd cross in each
+        direction before reaching a taller point -- is at least
+        prominence_min_m. Everything else is dropped from the returned chains
+        entirely. Chains are tiled x3 internally so a peak straddling the
+        chain's arbitrary start/end index (very often the case for a near-closed
+        ring; the greedy walk's start has no topographic meaning) still sees its
+        true neighbours. Only prunes the *returned* chains used for anchoring;
+        the rasterised silhouette `grid` is built from the full, unpruned chains.
+
+        DEFAULTS TO 0 (disabled). This existed to stop a near-complete ring of
+        Dirichlet anchors from dominating TerrainReconstructionStage's harmonic
+        solve -- on one capture, unobserved terrain within 4.5 m of the camera
+        reconstructed to ~7x its own raw height. That symptom was real, but the
+        ring was not its cause: the near-field flooding came from the critical-
+        slope envelope projecting unbounded talus cones inward from every anchor
+        (a 54 m crest at 70 m has a 69 m run-out, so its cone still carried
+        15-20 m of elevation back to the camera and got hard-pinned there), and
+        from ridge_chain_jaggedness_map's missing distance falloff holding the
+        envelope angle at ~69 deg across half the grid. Both are fixed at
+        source -- see envelope_max_reach_m in TerrainReconstructionStage and the
+        falloff in ridge_chain_jaggedness_map -- so the ring no longer has a
+        mechanism to reach the camera.
+
+        Meanwhile the cost of this filter is severe, and prominence is
+        structurally the wrong instrument for the job. A photographed horizon is
+        a smooth, closed curve; smooth curves have almost no prominence
+        anywhere, so the filter does not select "real summits," it selects the
+        two or three points where the curve happens to be locally peaked and
+        discards the rest of the horizon. Measured on a Mount Rainier panorama:
+        every one of the 4096 columns carries a real sky/terrain boundary
+        between 16 and 54 m of crest elevation -- a continuous mountainous
+        horizon -- and at the old 20 m threshold only 19% of azimuth survived
+        into the anchored chains, leaving a mountain in front, one behind, and
+        flat ground through 290 degrees of the scene.
+
+        That flatness is also, indirectly, a texturing bug. With no anchors, the
+        terrain out to the grid edge stays a level plane, which the panorama
+        then paints at grazing incidence: at 80 m each panorama row covers 12.4
+        ground-metres, versus 0.51 with the horizon anchored at its real
+        elevation. The radial smearing in the baked ground texture is that ratio
+        made visible.
+
+        Left as a tunable (not deleted) because the underlying idea -- an
+        ordinary silhouette is a weaker elevation estimate than a real summit --
+        is sound, and a capture with a genuinely flat horizon may want it back.
 
         Returns (grid, chains) where:
           grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).

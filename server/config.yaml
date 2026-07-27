@@ -375,6 +375,20 @@ stages:
                                  # being capped to avoid enlarging an unconstrained flat disc.
     nadir_ramp_width: 5.0       # metres over which flood-fill certainty ramps up from 0.
     certainty_falloff_meters: 20.0 # must match Height Map's value — see that stage's comment.
+    ridge_prominence_min_m: 0.0  # 0 = anchor the whole photographed horizon. This used to be 20 m,
+                                 # to stop a near-complete ring of Dirichlet anchors from flooding the
+                                 # near field -- but that flooding came from the slope envelope's
+                                 # unbounded reach and the jaggedness map's missing falloff, both now
+                                 # fixed at source (see envelope_max_reach_m). Prominence is also the
+                                 # wrong instrument: a photographed horizon is a smooth closed curve
+                                 # and smooth curves have almost no prominence, so the filter kept
+                                 # only the two locally-peaked spots. Measured on the Rainier
+                                 # panorama: all 4096 columns carry a real crest at 16-54 m, yet only
+                                 # 19% of azimuth survived -- a mountain in front, one behind, and
+                                 # flat ground through 290 degrees. Raise it again only for a capture
+                                 # with a genuinely flat horizon.
+    ridge_prominence_shoulder_m: 25.0  # arc-length window kept either side of a qualifying peak;
+                                 # unused while ridge_prominence_min_m is 0.
     interior_peak_max_range_factor: 2.0 # interior-peak candidates farther than
                                  # (grid_size_meters/2 * this) are dropped rather than
                                  # clamped onto the grid boundary — real distant content
