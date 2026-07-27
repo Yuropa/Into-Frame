@@ -443,6 +443,16 @@ stages:
                                        # source's nearest-neighbour region meets another's (visible
                                        # otherwise as an axis-aligned-looking seam/box in the
                                        # reconstructed heightmap). 0 disables.
+    envelope_min_radius_m: 15.0       # neither envelope may pin a free node within this radius of
+                                       # the camera, regardless of what its projected profile says --
+                                       # a distant summit's own worst-case talus slope routinely still
+                                       # has residual elevation left by the time it reaches the camera
+                                       # (measured: a real, correctly-anchored 54 m summit 65 m away
+                                       # left +3.4 m of "still descending" elevation at the origin,
+                                       # hard-pinned into a flat plateau there). The camera's own
+                                       # position already has a much better-justified flat-ground-ish
+                                       # prior (the nadir disc + real sparse observed coverage) that
+                                       # should always win over that assumption. 0 disables.
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage

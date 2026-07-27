@@ -93,6 +93,28 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         # handoff into a gradual transition instead of a hard step for the solve
         # to carry forward. 0 disables (the previous, unsmoothed behaviour).
         envelope_smooth_m: float = 3.0,
+        # Neither envelope has any notion of "too close to the camera to assume
+        # this" -- a real, correctly-identified summit's own worst-case talus
+        # slope (elevation / tan(ridge_max_slope_angle_deg)) routinely reaches
+        # 60-70+ m from its own crest, easily covering the *entire* grid back to
+        # the camera itself for a summit within ordinary anchoring range. That
+        # residual "the mountain's slope hasn't fully bottomed out yet" elevation
+        # then gets hard-pinned as a Dirichlet boundary right at the camera's own
+        # position -- measured on one capture: 0.65 m raw -> 5.2 m reconstructed,
+        # flattened into a plateau (std dropping to ~0.09 m), even with only the
+        # correctly-identified real summit anchored (see prominence_min_m above).
+        # A distant mountain's steepest-plausible-slope assumption is a reasonable
+        # prior for genuinely unobserved *mid-range* terrain, but it's a *worse*
+        # prior than the one this pipeline already has specifically for the area
+        # right around the camera (the nadir flat-ground disc + real sparse
+        # observed coverage -- see HeightMapGenerator's flat_prior_mask) -- that
+        # more specific prior should always win. Neither envelope is allowed to
+        # pin a free node within this radius of the camera at all, regardless of
+        # what its projected profile says; the harmonic solve interpolates that
+        # zone from real nearby data (or the flat prior) instead, same as if no
+        # envelope existed there. Matches the same "camera_dist_m >=" gating
+        # pattern already used for ridge_override_min_distance_m below.
+        envelope_min_radius_m: float = 15.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -112,6 +134,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.cliff_shelf_crest_percentile = cliff_shelf_crest_percentile
         self.cliff_shelf_min_blob_cells = cliff_shelf_min_blob_cells
         self.envelope_smooth_m = envelope_smooth_m
+        self.envelope_min_radius_m = envelope_min_radius_m
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -509,10 +532,16 @@ class TerrainReconstructionStage(PipelineStage):
 
         # Pin free nodes that either envelope places notably above observed terrain.
         # No absolute elevation threshold: each envelope is relative to its own crest.
+        # Gated on envelope_min_radius_m -- see that parameter's own docstring: a
+        # distant summit's own worst-case talus slope routinely still has residual
+        # elevation left by the time it reaches the camera, and neither envelope
+        # has any way to know that's too close to trust over the camera's own
+        # much better-justified flat-ground-ish prior there.
         apply = (
             ~fixed_mask
             & (profile_best > fixed_elev + 0.1)
             & np.isfinite(profile_best)
+            & (camera_dist_m >= cfg.envelope_min_radius_m)
         )
         fixed_mask[apply] = True
         fixed_elev[apply] = profile_best[apply]
@@ -520,7 +549,8 @@ class TerrainReconstructionStage(PipelineStage):
             f"Slope/shelf envelope: {int(apply.sum())} free nodes pinned "
             f"(talus={cfg.ridge_max_slope_angle_deg:.0f}°, "
             f"cliff={cfg.cliff_max_slope_angle_deg:.0f}° where cliff_mask > 0, "
-            f"shelf={cfg.cliff_shelf_angle_deg:.0f}°)"
+            f"shelf={cfg.cliff_shelf_angle_deg:.0f}°, "
+            f"excluded within {cfg.envelope_min_radius_m:.0f} m of camera)"
         )
 
         self.advance_progress(task)
