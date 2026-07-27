@@ -22,7 +22,6 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         min_samples: int = 300,
         max_extrapolation_factor: float = 20.0,
         max_depth_m: Optional[float] = None,
-        max_depth_basis_percentile: float = 95.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -52,16 +51,6 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # far — while guaranteeing the farthest point still fits. None disables (no
         # rescale, only the relative max_extrapolation_factor cap above applies).
         self.max_depth_m = max_depth_m
-        # Percentile (over non-sky pixels) of calibrated depth used as the rescale
-        # basis instead of the literal max — DAP's raw prediction saturates at the
-        # same ceiling for both real distant terrain and sky, so the single
-        # farthest pixel is usually one member of a wide shared plateau rather
-        # than a genuine outlier; excluding sky alone doesn't fix this, since real
-        # terrain independently reaches that ceiling too. A lower percentile
-        # scales against the bulk of real signal instead of that plateau, at the
-        # cost of hard-clipping the (small) remaining tail beyond it. See
-        # _rescale_to_fit.
-        self.max_depth_basis_percentile = max_depth_basis_percentile
 
 
 def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -240,27 +229,28 @@ def _rescale_to_fit(
     depth: np.ndarray,
     max_depth_m: float,
     sky_mask: Optional[np.ndarray] = None,
-    basis_percentile: float = 95.0,
 ) -> tuple[np.ndarray, float]:
     """
-    Uniformly scales `depth` down so its basis_percentile-th percentile (over
-    non-sky pixels, when sky_mask is given) is at most max_depth_m, preserving
-    every relative distance and shape (a ridge that was twice as far as another
-    stays twice as far) instead of flat-clamping every far outlier individually,
-    which would collapse distinct far distances onto one indistinguishable wall.
+    Uniformly scales `depth` down so its farthest non-sky pixel is at most
+    max_depth_m, preserving every relative distance and shape (a ridge that
+    was twice as far as another stays twice as far) instead of flat-clamping
+    every far outlier individually, which would collapse distinct far
+    distances onto one indistinguishable wall.
 
-    A high percentile is used instead of the literal max because DAP's raw
-    prediction saturates at the same ceiling for both real distant terrain and
-    sky (see _apply_panorama_depth_curve's docstring) -- the farthest pixel is
-    often just one member of a wide plateau sharing that ceiling, not a genuine
-    single outlier. Excluding sky_mask alone doesn't fix this: real terrain
-    independently saturates at the identical value (observed on one test
-    panorama: 41% of pixels sat at the exact ceiling, most but not all of it
-    sky), so a literal non-sky max still lets that plateau dictate an
-    unnecessarily aggressive scale. Scaling against a robust percentile of the
-    bulk of real signal instead, then hard-clipping the rare remaining tail to
-    max_depth_m, keeps that plateau from single-handedly compressing the entire
-    near field.
+    sky_mask, when given, excludes open sky from the basis -- sky has no real
+    surface and gets assigned DAP's saturation ceiling by construction, so
+    letting it set the scale would be scaling against a fabricated value, not
+    real scene content. This does not fully separate real distant terrain
+    from sky, though: DAP's raw prediction saturates at the same ceiling for
+    both (see _apply_panorama_depth_curve's docstring) -- on this project's
+    own test panorama, 5% of the *non-sky* max-value plateau is real terrain
+    (a mountain's upper slopes) sitting at that identical ceiling, not sky.
+    There's no further signal in the raw prediction to distinguish that
+    terrain from sky by; it's already the single most distant real content in
+    the scene, so it being what sets the scale is correct, not a gap to route
+    around with a lower percentile -- doing so would only under-scale (leave
+    farther than necessary) everything else to protect against terrain that
+    was never going to be distinguishable anyway.
 
     Only ever shrinks: if the basis value is already within budget (scale would
     be >= 1), the depth map is returned unchanged. Returns (rescaled_depth,
@@ -274,7 +264,7 @@ def _rescale_to_fit(
         non_sky = depth[~sky_mask]
         if non_sky.size > 0:
             basis_pool = non_sky
-    basis_value = float(np.percentile(basis_pool, basis_percentile))
+    basis_value = float(basis_pool.max())
     if basis_value <= max_depth_m or basis_value <= 0:
         return depth, 1.0
     scale = max_depth_m / basis_value
@@ -291,7 +281,6 @@ def calibrate_panorama_depth(
     min_samples: int = 300,
     max_extrapolation_factor: float = 20.0,
     max_depth_m: Optional[float] = None,
-    max_depth_basis_percentile: float = 95.0,
 ) -> Optional[np.ndarray]:
     """Fits a curve (see _fit_panorama_depth_curve) and applies it to dap_pred_raw in one call.
     Returns None if too few valid overlap samples survive filtering."""
@@ -302,7 +291,7 @@ def calibrate_panorama_depth(
         return None
     corrected = _apply_panorama_depth_curve(dap_pred_raw, *curve, max_extrapolation_factor=max_extrapolation_factor)
     if max_depth_m is not None:
-        corrected, _ = _rescale_to_fit(corrected, max_depth_m, sky_mask, max_depth_basis_percentile)
+        corrected, _ = _rescale_to_fit(corrected, max_depth_m, sky_mask)
     return corrected
 
 
@@ -411,7 +400,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         scale = 1.0
         if cfg.max_depth_m is not None:
             calibrated_arr, scale = _rescale_to_fit(
-                calibrated_arr, cfg.max_depth_m, sky_mask, cfg.max_depth_basis_percentile
+                calibrated_arr, cfg.max_depth_m, sky_mask
             )
         calibrated = Depth(calibrated_arr)
         if self.temp is not None:

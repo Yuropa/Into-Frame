@@ -235,7 +235,6 @@ class RegionMapStage(PipelineStage):
         self.log_info(f"Ridgeline inputs: {sky_px} sky px, {terrain_px} terrain px — types in panorama: {unique_types_pano}")
         silhouette_grid, ridge_chains = RegionMapGenerator.extract_mountain_ridgeline(
             type_idx_map=type_idx_map,
-            panorama_depth=panorama_depth,
             sky_idx=sky_idx,
             water_idx=water_idx,
             grid_size_meters=cfg.grid_size_meters,

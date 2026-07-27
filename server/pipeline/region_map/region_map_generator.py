@@ -114,13 +114,11 @@ class RegionMapGenerator:
     @staticmethod
     def extract_mountain_ridgeline(
         type_idx_map: np.ndarray,
-        panorama_depth: Depth,
         sky_idx: int,
         water_idx: int = -1,
         grid_size_meters: float = 100.0,
         grid_resolution: int = 4096,
-        depth_offset_rows: int = 3,
-        depth_smooth_width: int = 15,
+        ridge_radius_frac: float = 0.85,
         dilation_iters: int = 3,
         connect_radius_px: int = 30,
         chain_smooth_window: int = 15,
@@ -130,8 +128,26 @@ class RegionMapGenerator:
         hole_stitch_max_dist_px: int = 90,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
-        Extract the sky-foreground horizon per column, sample depth just below it,
-        and project to a top-down grid using actual XZ positions.
+        Extract the sky-foreground horizon per column and place it on a top-down
+        grid at a fixed radius from the camera, using only the boundary's real
+        angle (elevation from its row, azimuth from its column) -- not depth.
+
+        This is a deliberate scale compromise, not a depth-accuracy shortcut: a
+        real mountain kilometres out cannot be walkable local terrain in a grid
+        only grid_size_meters across, so it's intentionally brought in close and
+        shrunk, the same way a scale model would be. What has to survive that
+        compression is the mountain's silhouette shape; its literal real-world
+        distance is meaningless once compressed this far, so nothing is lost by
+        not using it. Depth is doubly unsuited to supplying it anyway: DAP's raw
+        prediction saturates at the same ceiling for both real distant terrain
+        and sky (see PanoramaDepthCalibrationStage), so calibrated depth right
+        at the ridge crest is frequently a low-confidence log-space extrapolation,
+        not a measurement -- using it to place the ridge would let that noise
+        warp the one thing (shape) this method actually needs to preserve.
+        ridge_radius_frac (fraction of grid_size_meters / 2) is a deliberately
+        chosen display distance, comfortably inside TerrainReconstructionStage's
+        own ridge_override_min_distance_m + ridge_override_feather_m band so the
+        solve has room to blend real near-camera terrain up to it.
 
         Any non-sky, non-water pixel that sits directly below a sky pixel is treated
         as part of the ridgeline — this covers bare TERRAIN, forest-covered mountains
@@ -158,18 +174,15 @@ class RegionMapGenerator:
         water mask, not inferred from anything upstream, so a real water break can
         never be closed regardless of how small it happens to look.
 
-        For each panorama column, finds the first non-sky row below sky, then
-        samples depth depth_offset_rows below that boundary (where depth estimators
-        are more reliable than at the exact edge). Columns with no non-sky pixel at
-        all are usually a short classification glitch, not a real absence — real
-        terrain is obviously present just past it on both sides — so they get a
-        synthetic boundary row circularly interpolated from their nearest real
-        neighbours, but only for runs up to max_hole_cols columns wide; wider runs
-        are left as a genuine gap rather than fabricating a long stretch of invented
-        ridge. NaN/invalid depth values (at both real and synthesised-row columns)
-        are then interpolated from neighbouring columns, wrapping at the 360° seam.
-        Each valid column is unprojected to XYZ and placed in the grid — close
-        mountains land near the centre, distant ones near the edge.
+        For each panorama column, finds the first non-sky row below sky — that
+        row/column pair is the boundary's real elevation/azimuth angle, placed
+        at ridge_radius_frac * grid_size_meters / 2 from the camera along that
+        angle. Columns with no non-sky pixel at all are usually a short
+        classification glitch, not a real absence — real terrain is obviously
+        present just past it on both sides — so they get a synthetic boundary
+        row circularly interpolated from their nearest real neighbours, but
+        only for runs up to max_hole_cols columns wide; wider runs are left as
+        a genuine gap rather than fabricating a long stretch of invented ridge.
 
         Projected points are chained via greedy nearest-neighbour search within
         connect_radius_px grid cells, then smoothed with a moving average of width
@@ -187,7 +200,7 @@ class RegionMapGenerator:
           grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).
           chains — list of (M, 3) float32 arrays of world (X, Y, Z) per ridge chain,
                    where Y is the camera-relative elevation of the ridge crest
-                   (Y = depth * sin(phi), positive = above camera).
+                   (Y = ridge_radius_m * sin(phi), positive = above camera).
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
@@ -255,40 +268,19 @@ class RegionMapGenerator:
                 boundary_row = _circular_fill(boundary_row, has_silhouette)
                 has_silhouette = has_silhouette | fillable
 
-        sample_rows = np.clip(np.round(boundary_row).astype(np.int64) + depth_offset_rows, 0, h - 1)
-
-        d = panorama_depth.depth.astype(np.float32)
-        depths = np.where(has_silhouette, d[sample_rows, cols], np.nan)
-
-        # Interpolate NaN/invalid depths (circularly) so depth gaps don't leave holes.
-        nan_mask = ~np.isfinite(depths) | (depths <= 0)
-        valid_for_interp = has_silhouette & ~nan_mask
-        if valid_for_interp.any() and (~valid_for_interp).any():
-            depths = _circular_fill(depths, valid_for_interp)
-
-        # Suppress single-column depth spikes before projecting to XZ.
-        if depth_smooth_width > 1 and np.any(np.isfinite(depths)):
-            from scipy.ndimage import median_filter as _med
-            _arr = np.where(np.isfinite(depths), depths, 0.0)
-            depths = np.where(np.isfinite(depths), _med(_arr, size=depth_smooth_width, mode='nearest'), depths)
-
-        Xs, Ys, Zs = equirectangular_pixels_to_world(sample_rows, cols, depths, h, w)
-
         half = grid_size_meters / 2.0
-        in_bounds = has_silhouette & np.isfinite(depths)
+        ridge_radius_m = ridge_radius_frac * half
 
-        # Ridge points beyond the grid's representable extent (very often true for
-        # genuinely distant mountains) are clamped radially onto the grid boundary
-        # along their real camera ray, rather than silently dropped — a distant
-        # peak should render at the edge of the mesh, not vanish or leave a gap in
-        # the silhouette. Y is foreshortened by the same factor so the ray's real
-        # elevation angle from the camera is preserved (only the distance along it
-        # is compressed to fit).
-        r_inf = np.maximum(np.abs(Xs), np.abs(Zs))
-        scale = np.where(r_inf > half, half / np.maximum(r_inf, 1e-9), 1.0)
-        Xs, Ys, Zs = Xs * scale, Ys * scale, Zs * scale
+        # Place every ridge point on a shell at the fixed ridge_radius_m, using
+        # only the boundary's real angle -- no depth involved. See this method's
+        # own docstring for why: depth is both meaningless once compressed this
+        # far, and unreliable right at the ridge crest in the first place.
+        Xs, Ys, Zs = equirectangular_pixels_to_world(
+            boundary_row, cols, np.full(w, ridge_radius_m, dtype=np.float64), h, w
+        )
 
         # Mountains above the horizon have phi > 0, so Ys > 0 (above camera).
+        in_bounds = has_silhouette
         Ys_valid = Ys[in_bounds]
         cols_valid = cols[in_bounds]
         Xs, Zs = Xs[in_bounds], Zs[in_bounds]
