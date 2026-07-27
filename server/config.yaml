@@ -438,6 +438,11 @@ stages:
                                         # above this elevation percentile count as the crest
     cliff_shelf_min_blob_cells: 20    # ignore measured-cliff blobs smaller than this (at solve
                                        # resolution) to avoid anchoring on stray steep-pixel noise
+    envelope_smooth_m: 3.0            # blur (metres) on the combined ridge/shelf envelope before
+                                       # it pins free nodes -- softens the handoff where one crest
+                                       # source's nearest-neighbour region meets another's (visible
+                                       # otherwise as an axis-aligned-looking seam/box in the
+                                       # reconstructed heightmap). 0 disables.
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage

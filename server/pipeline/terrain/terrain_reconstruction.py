@@ -79,6 +79,20 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         cliff_shelf_angle_deg: float = 8.0,
         cliff_shelf_crest_percentile: float = 85.0,
         cliff_shelf_min_blob_cells: int = 20,
+        # Both envelopes above (ridge talus cone, cliff-top shelf) are built from
+        # distance_transform_edt against a *nearest-crest* lookup -- exact right up
+        # to the crest source's own extent, but wherever the nearest crest source
+        # is itself an extended, roughly straight run of anchor points (e.g. a
+        # ridge-chain segment spanning tens of metres of azimuth at the shell
+        # radius, not a single point), the envelope's own "am I still influenced
+        # by this crest" edge inherits that near-straight-line shape too --
+        # visible as an axis-aligned-looking box/seam in the reconstructed
+        # heightmap, sharpest exactly at a crest segment's own endpoint (where
+        # nearest-crest hands off to a different, competing source). A small blur
+        # on profile_best before it's used to decide/set fixed nodes softens that
+        # handoff into a gradual transition instead of a hard step for the solve
+        # to carry forward. 0 disables (the previous, unsmoothed behaviour).
+        envelope_smooth_m: float = 3.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -97,6 +111,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.cliff_shelf_angle_deg = cliff_shelf_angle_deg
         self.cliff_shelf_crest_percentile = cliff_shelf_crest_percentile
         self.cliff_shelf_min_blob_cells = cliff_shelf_min_blob_cells
+        self.envelope_smooth_m = envelope_smooth_m
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -472,6 +487,26 @@ class TerrainReconstructionStage(PipelineStage):
                         np.where(np.isfinite(shelf_profile), shelf_profile, 0.0).astype(np.float32)
                     ).save_debug_image(self.temp / "cliff_shelf_profile.png")
 
+        # Soften the envelope handoff -- see envelope_smooth_m's own docstring.
+        # NaN/inf-aware weighted blur (same idiom as HeightMapGenerator's
+        # label_smooth_sigma): only ever averages cells profile_best actually
+        # has a finite value at, so an area with no envelope coverage at all
+        # stays -inf (never applied) rather than getting dragged toward 0 by
+        # neighbouring -inf cells.
+        if cfg.envelope_smooth_m > 0:
+            finite = np.isfinite(profile_best)
+            if finite.any():
+                sigma_cells = cfg.envelope_smooth_m / cell_size_m
+                filled = np.where(finite, profile_best, 0.0).astype(np.float64)
+                weight = finite.astype(np.float64)
+                blurred_sum = gaussian_filter(filled, sigma=sigma_cells)
+                blurred_weight = gaussian_filter(weight, sigma=sigma_cells)
+                profile_best = np.divide(
+                    blurred_sum, blurred_weight,
+                    out=np.full_like(profile_best, -np.inf),
+                    where=blurred_weight > 1e-6,
+                )
+
         # Pin free nodes that either envelope places notably above observed terrain.
         # No absolute elevation threshold: each envelope is relative to its own crest.
         apply = (
@@ -545,8 +580,21 @@ class TerrainReconstructionStage(PipelineStage):
         )
 
         # ── Upsample back to original resolution ──────────────────────────────
+        # order=1 (bilinear), not cubic: a harmonic solution has no interior local
+        # extrema almost everywhere, EXCEPT exactly at a hard-pinned Dirichlet
+        # node -- e.g. the critical-slope/cliff-shelf envelope's own fixed_elev
+        # override just above, which (even smoothed by envelope_smooth_m) can
+        # still step sharply where one crest source's nearest-neighbour region
+        # hands off to another's. Cubic interpolation overshoots/rings right at
+        # a sharp step like that (classic Gibbs-phenomenon behaviour) -- measured
+        # on one capture as height oscillating within a ~14 m range over barely
+        # 1 m of horizontal distance, right at an envelope handoff seam, with
+        # nothing physically real behind it. Bilinear can't overshoot past the
+        # local min/max of its own source cells, eliminating that ringing outright,
+        # at the minor cost of very slightly less smooth curvature elsewhere (the
+        # solve is already smoothed further by TerrainNoiseRefinementStage).
         if H_s < H or W_s < W:
-            new_hm = nd_zoom(new_hm_s, (H / H_s, W / W_s), order=3).astype(np.float32)
+            new_hm = nd_zoom(new_hm_s, (H / H_s, W / W_s), order=1).astype(np.float32)
         else:
             new_hm = new_hm_s.astype(np.float32)
 
