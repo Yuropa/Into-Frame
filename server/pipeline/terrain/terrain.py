@@ -73,6 +73,13 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         # obvious "near" point the way the main terrain has the camera).
         physics_formation_min_dist: float = 2.0,
         physics_formation_n_boundary: int = 8,
+        # Plausibility gates separating a real disconnected landmass/rock formation
+        # from a depth-projection artifact that merely happens to be disconnected --
+        # see the formation loop in run() for what these catch and why connectivity
+        # alone doesn't.
+        formation_min_relief_m: float = 1.0,
+        formation_max_extent_fraction: float = 0.35,
+        formation_max_aspect_ratio: float = 4.0,
         # Debug aid: also export terrain_uv_debug.glb alongside terrain.glb,
         # with its embedded preview material swapped for a synthetic R=U/G=V
         # gradient (see _uv_debug_texture) instead of the real panorama,
@@ -103,6 +110,9 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.formation_n_boundary = formation_n_boundary
         self.physics_formation_min_dist = physics_formation_min_dist
         self.physics_formation_n_boundary = physics_formation_n_boundary
+        self.formation_min_relief_m = formation_min_relief_m
+        self.formation_max_extent_fraction = formation_max_extent_fraction
+        self.formation_max_aspect_ratio = formation_max_aspect_ratio
         self.debug_uv_texture = debug_uv_texture
 
 
@@ -310,7 +320,18 @@ class TerrainMeshStage(PipelineStage):
         # (e.g. the SplatMaterial branch's cheap placeholder above). Unity
         # itself never reads this embedded material for the panorama layer,
         # so overwriting it here has no effect on the live render.
-        if panorama_tex is not None and pano_uv is not None:
+        #
+        # Skipped when the panorama branch inside generate() already won: in that
+        # case the mesh was textured with this exact same panorama image under a
+        # UV0 that IS pano_uv, so embedding it again as a preview writes a second,
+        # separately-encoded copy of the same picture into the GLB for no visual
+        # difference whatsoever. Measured on one export: two ~8.2 MB copies of the
+        # same panorama, 16.5 MB of a 19 MB file. That branch wins whenever there's
+        # no SplatMaterial or pre-baked TERRAIN_TEXTURE yet -- which, since
+        # TerrainMeshStage runs before TerrainTextureGenerationStage, is every
+        # first run.
+        already_panorama_textured = precomputed_image is None and pinhole_texture is None
+        if panorama_tex is not None and pano_uv is not None and not already_panorama_textured:
             mesh.preview_image = panorama_tex.image
 
         context.add_mesh(output_key, mesh)
@@ -360,6 +381,47 @@ class TerrainMeshStage(PipelineStage):
                 if result is None:
                     continue
                 formation_mesh, x_center, z_center, x_half, z_half = result
+
+                # Plausibility gate. _label_ground_components only asks "is this
+                # patch of ground connected to the base terrain," which any patch
+                # the depth model severed will fail -- including artifacts that are
+                # not landmasses at all. The characteristic one is a forward-
+                # projection wedge: a contiguous run of panorama columns unprojects
+                # into a thin fan radiating from the camera, gets its own component
+                # id, and is then promoted to a "rock formation" with its own
+                # extracted mesh, its own collision proxy, its own generated FLUX
+                # texture, and a 0.5 m depression carved into the base terrain
+                # underneath it. Measured on one capture: an 89 x 17 m sliver with
+                # 1.3 m of total relief, pinned against the grid edge.
+                #
+                # Three cheap geometric tests, all in the component's own terms:
+                #   relief   -- a formation worth its own mesh rises off the ground;
+                #               a projection wedge is a near-flat sheet.
+                #   extent   -- an "isolated rock formation" spanning half the world
+                #               is not isolated, and is not a rock.
+                #   aspect   -- wedges are slivers; real landmasses are compact-ish.
+                verts = np.asarray(formation_mesh.mesh.vertices, dtype=np.float64)
+                relief = float(verts[:, 1].max() - verts[:, 1].min()) if len(verts) else 0.0
+                extent_x, extent_z = 2.0 * x_half, 2.0 * z_half
+                long_side, short_side = max(extent_x, extent_z), max(min(extent_x, extent_z), 1e-6)
+                aspect = long_side / short_side
+                reject = None
+                if relief < cfg.formation_min_relief_m:
+                    reject = f"relief {relief:.2f} m < {cfg.formation_min_relief_m:.2f} m"
+                elif long_side > cfg.formation_max_extent_fraction * grid_size:
+                    reject = (
+                        f"extent {long_side:.0f} m > "
+                        f"{cfg.formation_max_extent_fraction * grid_size:.0f} m"
+                    )
+                elif aspect > cfg.formation_max_aspect_ratio:
+                    reject = f"aspect {aspect:.1f} > {cfg.formation_max_aspect_ratio:.1f}"
+                if reject is not None:
+                    self.log_info(
+                        f"Formation {target_id}: rejected as a projection artifact ({reject}) — "
+                        f"left as base terrain"
+                    )
+                    continue
+
                 mesh_key = f"terrain_formation_{target_id}"
                 context.add_mesh(mesh_key, formation_mesh)
 

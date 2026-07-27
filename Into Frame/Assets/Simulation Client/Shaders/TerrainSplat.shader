@@ -44,6 +44,29 @@ Shader "IntoFrame/TerrainSplat"
         // rather than planar tiled UV. Used for the panorama layer (typically layer 0).
         _EquirectLayers ("Equirect Layers Bitmask", Int) = 0
 
+        // Object-space XZ extent of the terrain grid: (minX, minZ, maxX, maxZ).
+        // Set per-renderer from the mesh's own bounds (see TerrainMaterialManager),
+        // and used to derive the top-down 0→1 grid UV the blend maps and every
+        // planar-tiled layer are authored against.
+        //
+        // That UV is NOT read from the mesh's TEXCOORD0 any more. TerrainMeshStage
+        // runs before TerrainTextureGenerationStage, so no SplatMaterial or baked
+        // texture exists yet when TerrainMeshGenerator.generate() picks a UV0 --
+        // it falls through to its `elif panorama is not None` branch and writes the
+        // equirectangular panorama UV into TEXCOORD0, identical to TEXCOORD1.
+        // (Verified on an exported terrain_mesh.glb: the two accessors are
+        // byte-identical.) Sampling a top-down blend map with azimuth/elevation
+        // coordinates confined to v ∈ [0.29, 0.54] reads layer weights from
+        // unrelated world positions and tiles synthetic layers in equirect space.
+        //
+        // Deriving it here instead of fixing the mesh export keeps the glTF format
+        // unchanged, which matters: the visionOS renderer binds a single
+        // MDLVertexAttributeTextureCoordinate (set 0) and samples the embedded
+        // panorama preview through it, so it renders correctly today precisely
+        // because UV0 holds the panorama UV. Writing a top-down UV0 server-side
+        // would fix Unity and break visionOS in the same commit.
+        _TerrainExtent ("Terrain XZ Extent (minX, minZ, maxX, maxZ)", Vector) = (-100, -100, 100, 100)
+
         // Height-biased blending: each layer tile's alpha channel carries a local
         // micro-height map (see terrain_texture_generation.py). Blend-map weights are
         // biased by that local height before normalising, so e.g. grass pokes through
@@ -130,6 +153,7 @@ Shader "IntoFrame/TerrainSplat"
                 float  _Layer7Smoothness;
                 int    _EquirectLayers;
                 float  _HeightBlendSharpness;
+                float4 _TerrainExtent;
             CBUFFER_END
 
             // ── Structs ────────────────────────────────────────────────────
@@ -137,6 +161,11 @@ Shader "IntoFrame/TerrainSplat"
             {
                 float4 positionOS : POSITION;
                 float3 normalOS   : NORMAL;
+                // Deliberately unused: on the exported terrain mesh TEXCOORD0 is a
+                // duplicate of the panorama UV, not the top-down grid UV the blend
+                // maps and planar layers need. Vert derives that from positionOS
+                // instead -- see _TerrainExtent. Kept in the layout so the vertex
+                // stream still matches meshes that carry it.
                 float2 uv         : TEXCOORD0;
                 // Baked panorama UV (server-side TerrainMeshGenerator.generate's
                 // panorama_uv, exported as glTF TEXCOORD_1) -- per-vertex, computed
@@ -180,6 +209,22 @@ Shader "IntoFrame/TerrainSplat"
                 return meshUV * tileRepeat;
             }
 
+            // Top-down 0→1 UV over the terrain grid, derived from object-space XZ --
+            // see _TerrainExtent for why this is computed rather than read from
+            // TEXCOORD0. Matches the server's own canvas convention exactly:
+            // pattern_texture._world_to_px and _panorama_visibility_weight both index
+            // row 0 at Z = -half, and a PNG's row 0 lands at v = 1 once Unity uploads
+            // it, so V is flipped here.
+            float2 TerrainGridUV(float3 positionOS)
+            {
+                float2 mn = _TerrainExtent.xy;
+                float2 mx = _TerrainExtent.zw;
+                float2 span = max(mx - mn, 1e-5);
+                float u = (positionOS.x - mn.x) / span.x;
+                float v = (positionOS.z - mn.y) / span.y;
+                return float2(u, 1.0 - v);
+            }
+
             // ── Vertex ─────────────────────────────────────────────────────
             Varyings Vert(Attributes IN)
             {
@@ -193,7 +238,7 @@ Shader "IntoFrame/TerrainSplat"
                 OUT.positionCS = posInputs.positionCS;
                 OUT.positionWS = posInputs.positionWS;
                 OUT.normalWS   = normalInputs.normalWS;
-                OUT.uv         = IN.uv;
+                OUT.uv         = TerrainGridUV(IN.positionOS.xyz);
                 OUT.fogFactor  = ComputeFogFactor(posInputs.positionCS.z);
                 OUT.panoUV     = IN.panoUV;
                 return OUT;

@@ -42,14 +42,23 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         self.max_extrapolation_factor = max_extrapolation_factor
         # Hard ceiling (metres) on the farthest calibrated depth, matching the terrain
         # grid's own footprint (Height Map's grid_size_meters / 2 — anything farther
-        # can never land inside that grid anyway). Enforced by uniformly *rescaling*
-        # the whole depth map down (see _rescale_to_fit), not by clamping outliers to
-        # this value: a flat clamp would collapse every distance beyond it (a nearby
-        # ridge at 120 m and a hazy peak at 900 m alike) onto one indistinguishable
-        # wall at the cutoff. A global scale instead preserves every relative
-        # distance/shape — near stays proportionally near, far stays proportionally
-        # far — while guaranteeing the farthest point still fits. None disables (no
-        # rescale, only the relative max_extrapolation_factor cap above applies).
+        # can never land inside that grid anyway). Enforced by compressing only the
+        # FAR end of the range (see _compress_far_range), leaving the near field at
+        # its calibrated metric scale.
+        #
+        # This used to be a uniform rescale of the whole map (scale = max_depth_m /
+        # farthest non-sky pixel). That preserved relative distances exactly, but the
+        # scale is set by the most distant thing in the scene — unbounded for any
+        # landscape photo — and it silently broke the pipeline's other metric anchor,
+        # camera_height_meters, which HeightMapGenerator relies on to place ground at
+        # -camera_height under the camera. Measured on a Mount Rainier capture: a
+        # kilometres-distant summit forced a ~6.5x global shrink, ground 1.37 m below
+        # the camera came back at 0.21 m of depth, and the reconstructed terrain
+        # surface ended up ~0.9 m ABOVE eye level with the camera buried inside it.
+        # A flat clamp is still wrong for the opposite reason (it collapses a 120 m
+        # ridge and a 900 m peak onto one wall); the compression curve keeps far
+        # content ordered and distinguishable without touching the near field.
+        # None disables (only the relative max_extrapolation_factor cap above applies).
         self.max_depth_m = max_depth_m
 
 
@@ -225,51 +234,75 @@ def _apply_panorama_depth_curve(
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
 
 
-def _rescale_to_fit(
+def _compress_far_range(
     depth: np.ndarray,
     max_depth_m: float,
-    sky_mask: Optional[np.ndarray] = None,
-) -> tuple[np.ndarray, float]:
+    knee_fraction: float = 0.6,
+) -> np.ndarray:
     """
-    Uniformly scales `depth` down so its farthest non-sky pixel is at most
-    max_depth_m, preserving every relative distance and shape (a ridge that
-    was twice as far as another stays twice as far) instead of flat-clamping
-    every far outlier individually, which would collapse distinct far
-    distances onto one indistinguishable wall.
+    Fit `depth` inside max_depth_m by compressing the FAR end only, leaving the
+    near field metrically intact.
 
-    sky_mask, when given, excludes open sky from the basis -- sky has no real
-    surface and gets assigned DAP's saturation ceiling by construction, so
-    letting it set the scale would be scaling against a fabricated value, not
-    real scene content. This does not fully separate real distant terrain
-    from sky, though: DAP's raw prediction saturates at the same ceiling for
-    both (see _apply_panorama_depth_curve's docstring) -- on this project's
-    own test panorama, 5% of the *non-sky* max-value plateau is real terrain
-    (a mountain's upper slopes) sitting at that identical ceiling, not sky.
-    There's no further signal in the raw prediction to distinguish that
-    terrain from sky by; it's already the single most distant real content in
-    the scene, so it being what sets the scale is correct, not a gap to route
-    around with a lower percentile -- doing so would only under-scale (leave
-    farther than necessary) everything else to protect against terrain that
-    was never going to be distinguishable anyway.
+    This replaces a uniform global rescale (scale = max_depth_m / farthest
+    non-sky pixel, applied to every pixel). That rescale preserved relative
+    distances exactly -- a ridge twice as far as another stayed twice as far --
+    which sounds like the conservative choice and is the wrong invariant to
+    protect. The pipeline has a second, independent, and far more load-bearing
+    metric anchor: camera_height_meters. HeightMapGenerator unprojects ground
+    as Y = depth * sin(phi) and expects flat ground under the camera to land at
+    -camera_height_meters; every panorama UV, grid placement and elevation
+    downstream is referred to that same origin. A uniform scale silently
+    invalidates it.
 
-    Only ever shrinks: if the basis value is already within budget (scale would
-    be >= 1), the depth map is returned unchanged. Returns (rescaled_depth,
-    scale) so callers can apply the same scale factor to a second, related depth
-    map (see PanoramaDepthCalibrationStage -- PANORAMA_OBJECT_DEPTH must shrink
-    by the same factor as PANORAMA_DEPTH or the two would place the same
-    real-world point at two different distances).
+    And the scale is set by the single most distant thing in the scene, which
+    for any landscape photo is effectively unbounded. Measured on a Mount
+    Rainier capture: the mountain is kilometres away, so fitting it into 100 m
+    divided the whole map by ~6.5x. Ground 1.37 m below the camera came back as
+    0.21 m of depth, putting the terrain surface ~0.9 m ABOVE the eye instead of
+    1 m below it -- 97% of the reconstructed grid ended up above camera height,
+    the camera was buried inside its own terrain, and every near-field panorama
+    UV collapsed into a thin band either side of the horizon (v in [0.29, 0.54]),
+    which is what turned the baked ground texture into a radial pinwheel of sky
+    and snow. None of that is visible as a depth-map artifact; it only surfaces
+    three stages later as geometry and texturing failures.
+
+    So: identity below the knee, then a bounded exponential approach to
+    max_depth_m above it.
+
+        d' = d                                                    d <= knee
+        d' = knee + (max - knee) * (1 - exp(-(d - knee)/(max - knee)))
+
+    Continuous and C1 at the knee (both sides have unit slope there), strictly
+    monotonic everywhere, and asymptotic to max_depth_m so nothing can exceed
+    the budget without a hard clamp. Distant content keeps its ordering and
+    stays distinguishable -- the real concern behind the original flat-clamp
+    objection -- it just stops being proportional, which it never meaningfully
+    was once a 15 km mountain had to fit in a 200 m grid.
+
+    No sky_mask parameter: the curve is fixed by (max_depth_m, knee_fraction)
+    alone rather than by the data's own maximum, so there is no basis pool to
+    contaminate, and sky saturating at the ceiling can no longer drag real
+    terrain down with it. That also makes it trivially reproducible across the
+    two depth maps that must agree (PANORAMA_DEPTH and PANORAMA_OBJECT_DEPTH):
+    applying the same deterministic function to both places the same real-world
+    point at the same distance, with no scale factor to thread between them.
+
+    knee_fraction: where identity ends, as a fraction of max_depth_m.
     """
-    basis_pool = depth
-    if sky_mask is not None and sky_mask.shape == depth.shape:
-        non_sky = depth[~sky_mask]
-        if non_sky.size > 0:
-            basis_pool = non_sky
-    basis_value = float(basis_pool.max())
-    if basis_value <= max_depth_m or basis_value <= 0:
-        return depth, 1.0
-    scale = max_depth_m / basis_value
-    rescaled = np.minimum(depth * scale, max_depth_m).astype(np.float32)
-    return rescaled, scale
+    if max_depth_m is None or max_depth_m <= 0:
+        return depth.astype(np.float32)
+
+    knee = float(np.clip(knee_fraction, 0.0, 0.99)) * max_depth_m
+    tail = max_depth_m - knee
+    if tail <= 0:
+        return np.minimum(depth, max_depth_m).astype(np.float32)
+
+    d = depth.astype(np.float64)
+    over = d > knee
+    out = d.copy()
+    out[over] = knee + tail * (1.0 - np.exp(-(d[over] - knee) / tail))
+    # Asymptotic, so this only guards float error and non-finite input.
+    return np.minimum(out, max_depth_m).astype(np.float32)
 
 
 def calibrate_panorama_depth(
@@ -291,7 +324,7 @@ def calibrate_panorama_depth(
         return None
     corrected = _apply_panorama_depth_curve(dap_pred_raw, *curve, max_extrapolation_factor=max_extrapolation_factor)
     if max_depth_m is not None:
-        corrected, _ = _rescale_to_fit(corrected, max_depth_m, sky_mask)
+        corrected = _compress_far_range(corrected, max_depth_m)
     return corrected
 
 
@@ -391,15 +424,14 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         calibrated_arr = _apply_panorama_depth_curve(
             dap_pred_raw, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
         )
-        # Single global scale, derived from PANORAMA_DEPTH (the map with the explicit
-        # grid-footprint constraint) and reused below for PANORAMA_OBJECT_DEPTH — both
-        # must shrink by the same factor or the same real-world point ends up at two
-        # different distances in the two maps. See _rescale_to_fit.
-        scale = 1.0
+        # Far-range compression, not a global scale: the near field has to stay
+        # metric because camera_height_meters anchors everything downstream to it.
+        # The curve depends only on max_depth_m, so applying the identical
+        # function to PANORAMA_OBJECT_DEPTH below keeps both maps agreeing on
+        # where any given real-world point sits, with no scale factor to thread
+        # between them. See _compress_far_range.
         if cfg.max_depth_m is not None:
-            calibrated_arr, scale = _rescale_to_fit(
-                calibrated_arr, cfg.max_depth_m, sky_mask
-            )
+            calibrated_arr = _compress_far_range(calibrated_arr, cfg.max_depth_m)
         calibrated = Depth(calibrated_arr)
         if self.temp is not None:
             calibrated.save_debug_image(self.temp / "pano_depth_calibrated.png")
@@ -407,7 +439,11 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         self.log_info(
             f"Calibrated panorama depth {before_min:.1f} → {before_max:.1f} m (raw) "
             f"into {calibrated.min():.1f} → {calibrated.max():.1f} m (calibrated"
-            + (f", scaled ×{scale:.3f} to fit {cfg.max_depth_m:.0f} m)" if scale != 1.0 else ")")
+            + (
+                f", far range compressed above {0.6 * cfg.max_depth_m:.0f} m "
+                f"to fit {cfg.max_depth_m:.0f} m)"
+                if cfg.max_depth_m is not None else ")"
+            )
         )
         context.add_depth(panorama_depth_key, calibrated)
 
@@ -416,19 +452,23 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             calibrated_object_arr = _apply_panorama_depth_curve(
                 dap_pred_raw_fit, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
             )
-            if scale != 1.0:
-                # Same global scale as PANORAMA_DEPTH (see comment above) -- but this
-                # map's own saturation tail can differ (separate DAP pass), so it still
-                # needs its own hard clip rather than assuming the shared scale alone
-                # keeps it within budget.
-                calibrated_object_arr = np.minimum(calibrated_object_arr * scale, cfg.max_depth_m)
+            if cfg.max_depth_m is not None:
+                # The identical curve PANORAMA_DEPTH got above -- it's a pure
+                # function of max_depth_m, so both maps place the same real-world
+                # point at the same distance without sharing any fitted state.
+                calibrated_object_arr = _compress_far_range(
+                    calibrated_object_arr, cfg.max_depth_m
+                )
             calibrated_object = Depth(calibrated_object_arr)
             if self.temp is not None:
                 calibrated_object.save_debug_image(self.temp / "pano_object_depth_calibrated.png")
             self.log_info(
                 f"Calibrated panorama object depth {obj_before_min:.1f} → {obj_before_max:.1f} m (raw) "
                 f"into {calibrated_object.min():.1f} → {calibrated_object.max():.1f} m (calibrated"
-                + (f", scaled ×{scale:.3f})" if scale != 1.0 else ")")
+                + (
+                    f", far range compressed to fit {cfg.max_depth_m:.0f} m)"
+                    if cfg.max_depth_m is not None else ")"
+                )
             )
             context.add_depth(ContextKey.PANORAMA_OBJECT_DEPTH, calibrated_object)
 

@@ -275,9 +275,38 @@ class TerrainNoiseRefinementStage(PipelineStage):
             terrain = terrain * (1.0 - protect) + pre_diffusion * protect
 
         # ── Pass 4: Peak Sharpening ───────────────────────────────────────────────
-        # Normalise to [0,1], apply h^sharpness_map element-wise, rescale back.
-        # sharpness_map is (H, W): varies spatially so jagged ridgeline zones get
-        # pointier peaks while smoother areas of the terrain stay rounded.
+        # Apply h^sharpness_map to each cell's height normalised against its own
+        # LOCAL base and summit, not the grid-wide min/max.
+        #
+        # t^s (s > 1) is the right shape operator for making a peak pointier: it
+        # fixes t = 1 (the summit) and pulls mid-slope values down, so relief
+        # concentrates toward the top. But that only holds when t is measured
+        # against the feature's own base and its own summit. Normalising against
+        # the grid-wide [min, max] instead -- which this pass used to do -- makes
+        # t a measure of "how tall is this cell compared to the single highest
+        # point anywhere on the grid," so every feature that isn't the tallest
+        # one gets crushed toward the global minimum rather than sharpened.
+        # Measured on one capture (global range [-0.38, 54.31] m, s = 2.05): 25 m
+        # -> 10.95 m, 16 m -> 4.24 m, 10 m -> 1.43 m, 5 m -> 0.09 m. Only terrain
+        # within a few metres of the global summit survived at all.
+        #
+        # That interacted badly with sharpness_map's own spatial variation: two
+        # cells with near-identical heights but different exponents got wildly
+        # different outputs, so any edge in sharpness_map became a cliff in the
+        # terrain. On the same capture, 13.79 m at s = 1.0 and 10.22 m two metres
+        # away at s = 2.05 came out as 13.79 m and 1.43 m -- a 3.6 m step turned
+        # into a 10 m wall with nothing physically real behind it. (The edge
+        # itself was ridge_chain_jaggedness_map's missing distance falloff, fixed
+        # separately, but a local normalisation is what makes this pass robust to
+        # a sharpness gradient of any steepness rather than merely to that one.)
+        #
+        # Local base/summit come from min/max filters over peak_sharpness_window_m
+        # -- the same window the jaggedness score itself is measured over, so the
+        # normalisation scope matches the scope the exponent was derived at.
+        # Computed at reduced resolution (the fields are smooth by construction
+        # and a metre-scale window is tens of cells wide at 4096), then blurred
+        # to take the staircase edges off the filters' own plateaus.
+        pre_sharpen = terrain.copy()
         fixed_sharpness = cfg.peak_sharpness
         if fixed_sharpness is None:
             chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
@@ -295,10 +324,29 @@ class TerrainNoiseRefinementStage(PipelineStage):
         else:
             sharpness_map = np.full((H, W), fixed_sharpness, dtype=np.float32)
 
-        lo, hi = terrain.min(), terrain.max()
-        if hi > lo:
-            t = ((terrain - lo) / (hi - lo)).clip(0.0, 1.0)
-            terrain = lo + (hi - lo) * np.power(t, sharpness_map)
+        local_lo, local_hi = TerrainNoiseRefinementStage._local_extent(
+            terrain, grid_size, cfg.peak_sharpness_window_m,
+        )
+        span = local_hi - local_lo
+        # Below ~1 cm of local relief there's no peak to sharpen and t is pure
+        # numerical noise; leave those cells exactly as they are.
+        active = span > 0.01
+        if active.any():
+            t = np.zeros_like(terrain)
+            np.divide(terrain - local_lo, span, out=t, where=active)
+            np.clip(t, 0.0, 1.0, out=t)
+            sharpened = local_lo + span * np.power(t, sharpness_map)
+            terrain = np.where(active, sharpened, terrain)
+
+        # Same protection every other pass in this stage honours: sharpening is a
+        # synthetic reshaping, and a cliff face or a directly-measured cell has no
+        # business being reshaped by it. This pass was previously the only one
+        # that skipped `protect` entirely, relying solely on the true_observed
+        # restore at the very end -- which meant every cell in the taper zone
+        # around real data got full-strength sharpening no matter how close to a
+        # real measurement it sat.
+        if has_protection:
+            terrain = terrain * (1.0 - protect) + pre_sharpen * protect
 
         # ── Pass 5: Hydrological Erosion ─────────────────────────────────────
         # Derives the complete drainage network from terrain topology via flow
@@ -419,6 +467,57 @@ class TerrainNoiseRefinementStage(PipelineStage):
             ref_low=ref_low, ref_high=ref_high,
         )
         return (sharpness_min + (sharpness_max - sharpness_min) * jaggedness).astype(np.float32)
+
+    @staticmethod
+    def _local_extent(
+        terrain: np.ndarray,
+        grid_size_meters: float,
+        window_m: float,
+        solve_res: int = 512,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Per-cell local minimum and maximum elevation over a window_m window.
+
+        Used by peak sharpening to normalise each cell against its own feature's
+        base and summit instead of the grid-wide extremes -- see that pass for
+        why the global version is wrong.
+
+        Computed at solve_res and upsampled: both fields are smooth by
+        construction, a metres-wide window is tens of cells across at native
+        resolution, and min/max filters are the expensive part. The Gaussian
+        after each filter removes the flat plateaus min/max filters leave behind
+        (a max filter holds the same value across the whole window around each
+        local peak), which would otherwise show up as faceting in the sharpened
+        output.
+
+        Returns (local_lo, local_hi), both native-resolution float64.
+        """
+        from scipy.ndimage import maximum_filter, minimum_filter
+
+        H, W = terrain.shape
+        res = min(solve_res, H, W)
+        small = nd_zoom(terrain, res / H, order=1) if res < H else terrain
+
+        cell_m = grid_size_meters / res
+        size = max(3, int(round(window_m / max(cell_m, 1e-6))))
+        smooth_sigma = max(1.0, size / 4.0)
+
+        lo = gaussian_filter(minimum_filter(small, size=size, mode="nearest"), sigma=smooth_sigma)
+        hi = gaussian_filter(maximum_filter(small, size=size, mode="nearest"), sigma=smooth_sigma)
+
+        if res < H:
+            lo = nd_zoom(lo, H / res, order=1)
+            hi = nd_zoom(hi, H / res, order=1)
+
+        # Clamped against the NATIVE terrain, after upsampling: the blur (and the
+        # upsample itself) can leave lo above / hi below a cell's own value at a
+        # sharp extremum, and an un-clamped lo > terrain would push that cell UP
+        # once t clips to 0. Clamping here keeps t inside [0, 1] with the summit
+        # still landing exactly at 1, and guarantees sharpening can never raise a
+        # cell above its own local maximum.
+        lo = np.minimum(lo, terrain)
+        hi = np.maximum(hi, terrain)
+        return lo.astype(np.float64), hi.astype(np.float64)
 
     @staticmethod
     def _landlab_diffuse(

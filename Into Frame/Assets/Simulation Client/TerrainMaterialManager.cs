@@ -22,6 +22,10 @@ public class TerrainMaterialManager : MonoBehaviour
     [Tooltip("Any loaded mesh whose name contains this string (case-insensitive) is treated as terrain.")]
     public string terrainNamePattern = "terrain";
 
+    [Tooltip("Meshes whose name contains any of these are NOT treated as base terrain, even " +
+             "though they match terrainNamePattern.")]
+    public string[] terrainNameExclusions = { "formation", "physics", "water" };
+
     [Header("Shader (assign once the splat shader exists)")]
     public Material splatMaterial;
 
@@ -80,6 +84,7 @@ public class TerrainMaterialManager : MonoBehaviour
     };
 
     static readonly int _equirectLayersId = Shader.PropertyToID("_EquirectLayers");
+    static readonly int _terrainExtentId  = Shader.PropertyToID("_TerrainExtent");
 
     // Deferred: terrain may arrive before or after the splat data
     private readonly List<Renderer> _pendingRenderers = new();
@@ -139,6 +144,24 @@ public class TerrainMaterialManager : MonoBehaviour
         if (string.IsNullOrEmpty(meshName)) return;
         if (meshName.IndexOf(terrainNamePattern, StringComparison.OrdinalIgnoreCase) < 0) return;
 
+        // A substring match on "terrain" also catches terrain_formation_N, whose mesh
+        // keys the server derives from the same prefix. Those are separately extracted
+        // rock/landmass meshes that already carry their own baked texture and their own
+        // orthographic UV0, local to that formation's own footprint (see
+        // TerrainMeshGenerator.generate_component_mesh) -- applying the base terrain's
+        // splat material to them replaces that texture with blend maps and tiles
+        // indexed against the FULL grid, which their local UV has no relationship to.
+        // Same for the physics collision meshes and the separate water plane.
+        if (terrainNameExclusions != null)
+        {
+            foreach (var excluded in terrainNameExclusions)
+            {
+                if (string.IsNullOrEmpty(excluded)) continue;
+                if (meshName.IndexOf(excluded, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return;
+            }
+        }
+
         foreach (var r in go.GetComponentsInChildren<Renderer>())
         {
             if (IsReady)
@@ -189,6 +212,20 @@ public class TerrainMaterialManager : MonoBehaviour
 
         mpb.SetInt(_equirectLayersId, EquirectMask);
 
+        // Object-space XZ extent, so the shader can derive the top-down grid UV the
+        // blend maps and planar layers are authored against instead of trusting
+        // TEXCOORD0 (which the exported mesh fills with the panorama UV -- see
+        // _TerrainExtent in TerrainSplat.shader). Taken from the mesh's own bounds
+        // rather than plumbing grid_size_meters through from the server: the terrain
+        // mesh spans exactly [-half, half] in X and Z by construction, so its bounds
+        // ARE the grid, and this stays correct if that ever changes.
+        var bounds = LocalBounds(r);
+        if (bounds.HasValue)
+        {
+            var b = bounds.Value;
+            mpb.SetVector(_terrainExtentId, new Vector4(b.min.x, b.min.z, b.max.x, b.max.z));
+        }
+
         r.SetPropertyBlock(mpb);
 
         Debug.Log($"[TerrainMaterialManager] Applied to '{r.gameObject.name}' — " +
@@ -197,6 +234,24 @@ public class TerrainMaterialManager : MonoBehaviour
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Object-space bounds of the mesh behind this renderer, or null if it has none.
+    /// Reads the shared mesh directly rather than Renderer.bounds, which is world-space
+    /// and already transformed — the shader needs the untransformed extent to match
+    /// positionOS.
+    /// </summary>
+    private static Bounds? LocalBounds(Renderer r)
+    {
+        if (r is SkinnedMeshRenderer smr && smr.sharedMesh != null)
+            return smr.sharedMesh.bounds;
+
+        var mf = r.GetComponent<MeshFilter>();
+        if (mf != null && mf.sharedMesh != null)
+            return mf.sharedMesh.bounds;
+
+        return null;
+    }
 
     private static Texture2D DecodeTexture(string base64, string label, bool linear)
     {

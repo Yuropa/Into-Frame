@@ -115,6 +115,37 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         # envelope existed there. Matches the same "camera_dist_m >=" gating
         # pattern already used for ridge_override_min_distance_m below.
         envelope_min_radius_m: float = 15.0,
+        # How far from its own crest either envelope is allowed to pin anything.
+        #
+        # Both envelopes are LOWER BOUNDS, not predictions: "terrain this close to
+        # a crest of height H cannot have descended below H - dist*tan(theta),
+        # because nothing sustains a slope steeper than theta." That bound is
+        # tight right below the crest and gets looser with every metre, until it
+        # says nothing at all (the cone reaches the ground and keeps going).
+        # Pinning it as a hard Dirichlet boundary asserts the terrain sits exactly
+        # ON the bound -- i.e. that it descends at its steepest sustainable rate,
+        # without interruption, the whole way -- which is only a defensible
+        # reading of the evidence near the crest.
+        #
+        # Nothing previously bounded that reach. A 54 m crest at 70 m with the
+        # 38 deg talus angle has a 69 m run-out, so its cone still carried 15-20 m
+        # of elevation when it arrived back at the camera, and got pinned there:
+        # measured on one capture, 91% of the 15-20 m annulus around the camera
+        # was pinned above 1 m, at 15-20 m of fabricated elevation, sitting on top
+        # of directly-observed ground that averaged -0.09 m in the same band. That
+        # ring read as a complete second mountain encircling the viewer, with the
+        # real one behind it. envelope_min_radius_m carved out a small disc at the
+        # camera but did nothing about the reach itself -- it just moved where the
+        # fabricated ring started.
+        #
+        # Past envelope_max_reach_m the envelope tapers back to the observed
+        # height over envelope_reach_feather_m (a hard cutoff would just relocate
+        # the ring to the cutoff radius), and beyond that proposes nothing, so the
+        # harmonic solve interpolates from real data and ridge anchors as if no
+        # envelope existed there. 0 disables the limit (the old, unbounded
+        # behaviour).
+        envelope_max_reach_m: float = 25.0,
+        envelope_reach_feather_m: float = 10.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -135,6 +166,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.cliff_shelf_min_blob_cells = cliff_shelf_min_blob_cells
         self.envelope_smooth_m = envelope_smooth_m
         self.envelope_min_radius_m = envelope_min_radius_m
+        self.envelope_max_reach_m = envelope_max_reach_m
+        self.envelope_reach_feather_m = envelope_reach_feather_m
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -364,6 +397,28 @@ class TerrainReconstructionStage(PipelineStage):
         # floor the other mechanism would have proposed for the same cell.
         profile_best = np.full((H_s, W_s), -np.inf)
 
+        def taper_by_reach(profile: np.ndarray, dist_m: np.ndarray) -> np.ndarray:
+            """
+            Fade an envelope profile back to the observed surface as it gets far
+            from its own crest -- see envelope_max_reach_m for why an unbounded
+            lower bound must not be pinned as an equality.
+
+            Blends toward hm_s (the untouched downsampled observation), not
+            toward fixed_elev: fixed_elev has already had ridge anchors written
+            into it, and the question here is "what would this cell be if this
+            envelope never spoke," which is the observation. Once the profile
+            equals hm_s the `profile > fixed_elev + 0.1` tests downstream stop
+            firing on their own, so the envelope disables itself smoothly rather
+            than needing a separate mask.
+            """
+            if cfg.envelope_max_reach_m <= 0.0:
+                return profile
+            feather = max(cfg.envelope_reach_feather_m, 1e-6)
+            w = np.clip(
+                (cfg.envelope_max_reach_m + feather - dist_m) / feather, 0.0, 1.0
+            )
+            return hm_s + w * (profile - hm_s)
+
         if cfg.ridge_max_slope_angle_deg > 0.0 and n_anchored > 0:
             # Spatially-varying envelope angle: talus angle everywhere, ramped up
             # to cliff_max_slope_angle_deg wherever the cliff mask says this patch
@@ -395,7 +450,7 @@ class TerrainReconstructionStage(PipelineStage):
                 # The tangent is taken at each destination cell (not the crest), so
                 # steep-marked terrain below/beside the crest still gets the relaxed
                 # cap even though the crest pixel itself may be tame.
-                profile = nearest_elev - dist_m * max_slope_tan_map
+                profile = taper_by_reach(nearest_elev - dist_m * max_slope_tan_map, dist_m)
                 profile_best = np.maximum(profile_best, profile)
 
         # ── Ridge override of observed data ───────────────────────────────────
@@ -495,7 +550,10 @@ class TerrainReconstructionStage(PipelineStage):
                 dist_px, src = distance_transform_edt(~shelf_crest_mask, return_indices=True)
                 nearest_elev = shelf_crest_elev_map[src[0], src[1]]
                 dist_m = dist_px * cell_size_m
-                shelf_profile = nearest_elev - dist_m * np.tan(np.radians(cfg.cliff_shelf_angle_deg))
+                shelf_profile = taper_by_reach(
+                    nearest_elev - dist_m * np.tan(np.radians(cfg.cliff_shelf_angle_deg)),
+                    dist_m,
+                )
                 profile_best = np.maximum(profile_best, shelf_profile)
                 self.log_info(
                     f"Cliff shelf: {n_shelf_blobs} crest blob(s) "
@@ -550,7 +608,9 @@ class TerrainReconstructionStage(PipelineStage):
             f"(talus={cfg.ridge_max_slope_angle_deg:.0f}°, "
             f"cliff={cfg.cliff_max_slope_angle_deg:.0f}° where cliff_mask > 0, "
             f"shelf={cfg.cliff_shelf_angle_deg:.0f}°, "
-            f"excluded within {cfg.envelope_min_radius_m:.0f} m of camera)"
+            f"excluded within {cfg.envelope_min_radius_m:.0f} m of camera, "
+            f"reach ≤ {cfg.envelope_max_reach_m:.0f} m from crest "
+            f"+{cfg.envelope_reach_feather_m:.0f} m feather)"
         )
 
         self.advance_progress(task)

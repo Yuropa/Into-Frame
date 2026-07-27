@@ -20,7 +20,7 @@ constraint, converted from PyTorch to NumPy, adapted API to match this project.
 """
 
 import numpy as np
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import distance_transform_edt, gaussian_filter, zoom
 
 
 def diffuse_heightmap(
@@ -200,6 +200,27 @@ def ridge_chain_jaggedness_map(
     All splatted values are then Gaussian-spread by spread_sigma_m metres so
     the influence diffuses smoothly away from the ridgeline. Pixels with no
     chain coverage are 0.
+
+    The spread is applied as an explicit distance falloff, NOT as the ratio of
+    two Gaussian blurs. Dividing a blurred score by a blurred weight is the
+    right way to get the *value* (a splat-density-independent weighted mean of
+    nearby chain samples' scores), but the division also exactly cancels the
+    blur's own decay -- so the ratio stays at roughly the local ridge score no
+    matter how far from any ridge the pixel is, and the only thing that ever
+    ended the influence was a `weight_blur > 1e-6` coverage test. That test is
+    a numerical noise floor, not a distance: measured on one capture it held
+    the score at ~0.7 across the entire half of a 200 m grid nearest the chain,
+    still 0.64 at 54 m out, then dropped to 0 in a single cell where the blurred
+    weight happened to cross the threshold -- a hard, roughly circular edge with
+    no physical meaning. Both consumers read that as real signal: it flipped
+    TerrainReconstructionStage's envelope angle from the talus 38 deg to ~69 deg
+    across one cell, and TerrainNoiseRefinementStage's sharpness exponent from
+    1.0 to ~2.1, each of which puts its own discontinuity into the terrain at
+    exactly the same contour.
+
+    So: keep the ratio for the value (smoothed along the ridgeline, which is
+    what the blur is genuinely useful for), and multiply it by a Gaussian in
+    the true distance to the nearest chain sample, which actually reaches zero.
     """
     half = grid_size_meters / 2.0
     score_acc  = np.zeros((H, W), dtype=np.float64)
@@ -242,10 +263,28 @@ def ridge_chain_jaggedness_map(
         np.add.at(score_acc,  (rows, cols), t_scores)
         np.add.at(weight_acc, (rows, cols), 1.0)
 
+    splat_mask = weight_acc > 0
+    if not splat_mask.any():
+        return np.zeros((H, W), dtype=np.float32)
+
     spread_px   = max(1.0, spread_sigma_m / grid_size_meters * max(H, W))
     score_blur  = gaussian_filter(score_acc,  sigma=spread_px)
     weight_blur = gaussian_filter(weight_acc, sigma=spread_px)
 
-    covered = weight_blur > 1e-6
-    jaggedness = np.where(covered, (score_blur / weight_blur.clip(1e-9)).clip(0.0, 1.0), 0.0)
-    return jaggedness.astype(np.float32)
+    # Value: splat-density-independent weighted mean of nearby samples' scores.
+    # Well-conditioned near the ridgeline where weight_blur is substantial; far
+    # out both terms decay into numerical noise, but the falloff below is ~0
+    # there anyway, so clamp rather than special-case.
+    score = np.divide(
+        score_blur, weight_blur,
+        out=np.zeros_like(score_blur), where=weight_blur > 1e-12,
+    ).clip(0.0, 1.0)
+
+    # Falloff: true Euclidean distance to the nearest chain sample, in metres.
+    # exp(-d^2 / 2 sigma^2) matches the Gaussian the spread was always meant to
+    # be, and is ~0.011 by 3 sigma instead of surviving indefinitely.
+    cell_m  = grid_size_meters / max(H, W)
+    dist_m  = distance_transform_edt(~splat_mask) * cell_m
+    falloff = np.exp(-0.5 * (dist_m / max(spread_sigma_m, 1e-6)) ** 2)
+
+    return (score * falloff).astype(np.float32)
