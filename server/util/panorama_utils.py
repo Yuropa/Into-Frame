@@ -436,7 +436,28 @@ class Panorama:
 
                     r_sky = ridge_row[cols].astype(np.float64)
                     denom = np.maximum(r_sky - col_pv_min[cols], 1e-6)
-                    frac = (r_sky - pv_over) / denom
+                    # frac is a fraction of this column's own overshoot span by
+                    # construction (col_pv_min is this exact column's minimum
+                    # pv_over, so numerator <= denom always -- *provided*
+                    # ridge_row is itself a trustworthy "topmost real row").
+                    # It isn't always: a single mislabelled sky-mask pixel right
+                    # at row 0 (observed in practice at the panorama's longitude
+                    # seam, cols 0/W-1 -- a border artefact in the sky
+                    # segmentation, not a real feature; zenith is essentially
+                    # never real ground) makes ridge_row report 0 for that whole
+                    # column while actual overshooting vertices there still sit
+                    # at their own, much larger pv_over -- denom goes negative,
+                    # clamped to the 1e-6 floor, and frac explodes to hundreds
+                    # of millions (measured on one capture: a handful of
+                    # vertices out of 40k landed at V ~ -428000, each one
+                    # stretching its triangle's texture across virtually the
+                    # entire panorama). frac is only ever meant to select a
+                    # position *within* this column's own overshoot span, so
+                    # clamping it to [0, 1] is always correct regardless of
+                    # what upstream sky-mask noise triggered an out-of-model
+                    # denom -- it cannot silently mask a real, in-range case
+                    # (those already satisfy 0 <= frac <= 1 by construction).
+                    frac = np.clip((r_sky - pv_over) / denom, 0.0, 1.0)
                     max_real_band = 24.0
                     real_band = np.minimum(max_real_band, np.maximum(H - 1.0 - r_sky, 0.0))
                     new_pv = r_sky + real_band * frac
@@ -456,6 +477,17 @@ class Panorama:
             )
             u[invalid] = u[valid][nn]
             v[invalid] = v[valid][nn]
+
+        # Final unconditional guarantee: u is already always in [0, 1] by
+        # construction (pu comes from atan2, inherently bounded -- this is a
+        # no-op for every legitimate vertex), but v has no such structural
+        # guarantee once the sky-overshoot correction above is involved. Clip
+        # rather than trust every branch above to have gotten it right --
+        # a single garbage UV silently wrecks its triangle's texture into a
+        # stretch spanning most of the panorama (see the overshoot fix's own
+        # comment for a real, measured instance of exactly that).
+        u = np.clip(u, 0.0, 1.0)
+        v = np.clip(v, 0.0, 1.0)
 
         return np.stack([u, v], axis=-1)
 
