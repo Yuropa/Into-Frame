@@ -29,6 +29,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         camera_height_meters: float = 1.0,
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
+        label_smooth_sigma: float = 1.5,
         nadir_exclusion_radius: float = 1.0,
         nadir_ramp_width: float = 5.0,
         far_exclusion_radius: Optional[float] = None,
@@ -66,6 +67,13 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.flood_fill = flood_fill
         # Maximum Y change (metres) between adjacent grid cells during flood-fill.
         self.flood_fill_max_step = flood_fill_max_step
+        # Gaussian sigma (grid cells) for a NaN-aware smoothed copy used only to
+        # decide flood-fill connectivity -- absorbs depth-model noise that would
+        # otherwise spuriously sever a small patch from the larger formation it
+        # should belong to, without altering the actual returned height values.
+        # 0 disables (raw height_map decides connectivity, as before). See
+        # HeightMapGenerator._label_ground_components.
+        self.label_smooth_sigma = label_smooth_sigma
         # Cells within nadir_exclusion_radius are pinned to -camera_height_meters (flat
         # ground prior) with certainty flat_zone_certainty. Certainty then ramps smoothly
         # up to full geometric certainty over nadir_ramp_width metres beyond that radius.
@@ -268,6 +276,7 @@ class HeightMapStage(PipelineStage):
             sky_mask=sky_mask,
             flood_fill=cfg.flood_fill,
             flood_fill_max_step=cfg.flood_fill_max_step,
+            label_smooth_sigma=cfg.label_smooth_sigma,
             panorama_depth=fill_panorama_depth,
             region_type_mask=region_type_mask,
             region_ambiguous_mask=region_ambiguous_mask,

@@ -36,6 +36,7 @@ class HeightMapGenerator:
         sky_mask: Optional[np.ndarray] = None,
         flood_fill: bool = True,
         flood_fill_max_step: float = 1.5,
+        label_smooth_sigma: float = 1.5,
         panorama_depth: Optional[Depth] = None,
         region_type_mask: Optional[np.ndarray] = None,
         region_ambiguous_mask: Optional[np.ndarray] = None,
@@ -156,6 +157,12 @@ class HeightMapGenerator:
         min_component_area_fraction: components smaller than this fraction of the
                              grid are folded into the interpolated-gap fallback
                              instead of kept as their own component.
+        label_smooth_sigma: Gaussian sigma (grid cells) for a NaN-aware smoothed
+                             copy used only to decide flood-fill connectivity (see
+                             _label_ground_components) -- absorbs depth-model noise
+                             that would otherwise spuriously sever a small patch
+                             from a larger formation it should belong to, without
+                             altering the actual returned height values. 0 disables.
         grid_size_meters: side length of the square grid; both X and Z span ±half.
         use_equirectangular: treat depth as equirectangular (radial distances); otherwise
                              use pinhole unprojection via intrinsics.
@@ -503,7 +510,7 @@ class HeightMapGenerator:
         # everything outside its one kept component.
         if flood_fill:
             component_id = HeightMapGenerator._label_ground_components(
-                height_map, flood_fill_max_step, min_component_area_fraction
+                height_map, flood_fill_max_step, min_component_area_fraction, label_smooth_sigma
             )
             accepted = component_id > 0
             height_map[~accepted] = np.nan
@@ -1241,6 +1248,7 @@ class HeightMapGenerator:
         height_map: np.ndarray,
         max_step: float,
         min_component_area_fraction: float = 0.001,
+        label_smooth_sigma: float = 1.5,
     ) -> np.ndarray:
         """
         Connected-component labeling of walkable ground, ranked by size.
@@ -1250,6 +1258,19 @@ class HeightMapGenerator:
         through it. Empty cells (NaN) can never bridge a gap, so they are excluded
         from both the max and min before the range is taken (sky-masked regions
         near the horizon naturally stop a component, as before).
+
+        label_smooth_sigma: the walkability test above runs on height_map before
+        _smooth_edge_preserving ever touches it (that pass needs a NaN-free grid,
+        which doesn't exist until after this labeling + interpolation), so raw
+        depth-model noise -- small multi-cell waviness too broad for despiking's
+        single-outlier-cell test -- can push a local max-min range over max_step
+        and sever a patch that should logically belong to its neighbour, producing
+        a small spurious "formation" downstream. To avoid that without touching
+        the real returned height_map, the max/min range is computed from a NaN-
+        aware Gaussian-smoothed copy (weighted blur normalised by observed-data
+        weight, i.e. only ever averaging real neighbouring cells) used solely for
+        this connectivity decision. 0 disables (uses height_map directly, as
+        before).
 
         Unlike an earlier single-seed version of this function (which kept only
         the component connected to the camera's own position and discarded
@@ -1283,9 +1304,22 @@ class HeightMapGenerator:
         grid_h, grid_w = height_map.shape
         has_data = ~np.isnan(height_map)
 
+        if label_smooth_sigma > 0:
+            filled = np.where(has_data, height_map, 0.0).astype(np.float32)
+            weight = has_data.astype(np.float32)
+            blurred_sum = gaussian_filter(filled, sigma=label_smooth_sigma)
+            blurred_weight = gaussian_filter(weight, sigma=label_smooth_sigma)
+            step_source = np.divide(
+                blurred_sum, blurred_weight,
+                out=height_map.astype(np.float32).copy(),
+                where=blurred_weight > 1e-6,
+            )
+        else:
+            step_source = height_map
+
         # -inf/+inf for missing cells so they never win the max/min at a boundary.
-        local_max = maximum_filter(np.where(has_data, height_map, -np.inf), size=3)
-        local_min = minimum_filter(np.where(has_data, height_map,  np.inf), size=3)
+        local_max = maximum_filter(np.where(has_data, step_source, -np.inf), size=3)
+        local_min = minimum_filter(np.where(has_data, step_source,  np.inf), size=3)
         walkable = has_data & (local_max - local_min <= max_step)
 
         structure = generate_binary_structure(2, 2)  # 8-connectivity

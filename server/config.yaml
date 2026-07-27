@@ -243,6 +243,10 @@ stages:
                                  # sky-pixel artefacts near the horizon, and as the flood-fill reference.
     flood_fill: true             # BFS from grid centre outward; stops at height jumps and sky gaps
     flood_fill_max_step: 1.5    # max Y change (metres) between adjacent cells in the flood-fill
+    label_smooth_sigma: 1.5     # Gaussian sigma (grid cells) for a NaN-aware smoothed copy used only
+                                 # to decide flood-fill connectivity, absorbing depth-model noise that
+                                 # would otherwise spuriously sever a small patch into its own tiny
+                                 # "formation"; doesn't alter the actual returned height values. 0 disables.
     nadir_exclusion_radius: 1.5 # metres: discard near-nadir equirectangular pixels within this
                                  # radius of the camera; their depth is unreliable and projects
                                  # directly below the user, creating a spurious bowl/valley.
