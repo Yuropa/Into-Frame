@@ -194,13 +194,20 @@ class TerrainNoiseRefinementStage(PipelineStage):
         # terrain 90 m away that was never observed at all -- a hard "trust cliff"
         # right at the boundary of real coverage instead of a gradual taper.
         certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
+        certainty_available = certainty_depth is not None and certainty_depth.depth.shape == (H, W)
         certainty = (
-            certainty_depth.depth.astype(np.float64)
-            if certainty_depth is not None and certainty_depth.depth.shape == (H, W)
+            certainty_depth.depth.astype(np.float64) if certainty_available
             else np.zeros((H, W), dtype=np.float64)
         )
         protect = np.maximum(cliff_mask, certainty * cfg.observed_trust_strength)
         has_protection = bool(protect.any())
+        # Separate fallback for the final restore step below: certainty absent
+        # there should mean "trust true_observed fully, as if HEIGHT_MAP_CERTAINTY
+        # never existed" (restore weight 1), not "zero protection" (protect's own
+        # fallback, correct for its purpose of gating how much noise/diffusion/
+        # erosion apply -- 0 there means "no extra protection beyond cliff_mask",
+        # the opposite of what the restore step needs when certainty is missing).
+        restore_certainty = certainty if certainty_available else np.ones((H, W), dtype=np.float64)
 
         # ── Pass 1: Road Grading ──────────────────────────────────────────────
         road_depth = context.input_depth(ContextKey.ROAD_SKELETON)
@@ -332,17 +339,29 @@ class TerrainNoiseRefinementStage(PipelineStage):
         # diffusion, peak sharpening, hydro erosion) uniformly, rather than adding
         # per-pass exclusion logic to each one -- simpler, and avoids a pass like
         # peak sharpening (a global tone-curve remap) producing local kinks from
-        # mid-algorithm exclusion. Real cells end up with zero net synthetic
-        # influence, exactly as before `protect` existed above; the certainty-based
-        # tapering earlier in this stage only changes how much the *surrounding*
-        # (not-quite-observed) cells get reshaped on the way here, so this final
-        # hard restore and that continuous gating are complementary, not redundant.
+        # mid-algorithm exclusion.
+        #
+        # Scaled by `certainty` (already loaded above for `protect`), not just the
+        # true_observed boolean: a hard binary restore here would silently discard
+        # everything `protect`'s certainty-based tapering did earlier in this
+        # stage for exactly the cells it was meant to help -- the low-certainty
+        # end of true_observed (near-nadir real samples, noisiest by construction
+        # since Y = depth * sin(phi) there amplifies ordinary depth noise almost
+        # directly into height noise) would still get spliced back to its raw,
+        # unsmoothed value at the very end regardless of how gently the earlier
+        # passes treated it. High-certainty real cells still end up at ~zero net
+        # synthetic influence, same as before `protect` existed; only the
+        # low-certainty band is now allowed to keep some of this stage's
+        # smoothing instead of being unconditionally overwritten by its own noise.
         if true_observed.any():
-            restore_weight = gaussian_filter(true_observed.astype(np.float64), sigma=1.0)
+            restore_weight = gaussian_filter(
+                true_observed.astype(np.float64) * restore_certainty, sigma=1.0
+            )
             terrain = terrain * (1.0 - restore_weight) + original_terrain * restore_weight
             self.log_info(
-                f"Terrain noise refinement: {int(true_observed.sum())} px reverted "
-                f"to measured elevation"
+                f"Terrain noise refinement: {int(true_observed.sum())} px eligible "
+                f"(mean certainty {float(restore_certainty[true_observed].mean()):.2f}), reverted "
+                f"toward measured elevation"
             )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))

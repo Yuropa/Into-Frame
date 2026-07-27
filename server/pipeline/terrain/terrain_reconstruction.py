@@ -168,6 +168,17 @@ class TerrainReconstructionStage(PipelineStage):
             else true_observed
         )
 
+        # HEIGHT_MAP_CERTAINTY: continuous real-data trust (see
+        # HeightMapGenerator._build_certainty). Used below to scale how hard the
+        # "Restore observed data" step reverts to the raw measured value -- see
+        # that section for why a purely binary true_observed restore is wrong.
+        certainty_depth = context.input_depth(ContextKey.HEIGHT_MAP_CERTAINTY)
+        certainty = (
+            certainty_depth.depth.astype(np.float32)
+            if certainty_depth is not None and certainty_depth.depth.shape == (H, W)
+            else np.ones((H, W), dtype=np.float32)
+        )
+
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_size = float(params.get("grid_size_meters", 100.0))
 
@@ -573,15 +584,32 @@ class TerrainReconstructionStage(PipelineStage):
         # Cells the ridge envelope overrode above are deliberately excluded here --
         # restoring them would silently splice the raw (untrusted) depth value
         # back in and undo that override.
+        #
+        # Scaled by HEIGHT_MAP_CERTAINTY, not just the true_observed boolean: near
+        # the nadir, equirectangular unprojection (Y = depth * sin(phi)) amplifies
+        # ordinary depth-model noise almost directly into height noise, exactly
+        # where certainty is already lowest (the nadir ramp). A binary restore
+        # spliced that raw noisy value back in at full strength regardless,
+        # undoing the harmonic solve's smoothing precisely where the real data is
+        # least trustworthy -- visible as a jagged, un-smoothable halo of "real"
+        # noise a few metres out from the nadir disc, sitting on top of terrain
+        # that should read as smooth ground. A high-certainty true_observed cell
+        # (most real data beyond the ramp) still restores at ~full weight, same
+        # as before; only the low-certainty/near-nadir band is now actually
+        # allowed to keep some of the solve's smoothing instead of being
+        # unconditionally overwritten by its own noise.
         restore_mask = true_observed & ~observed_override_native
         if restore_mask.any():
-            restore_weight = gaussian_filter(restore_mask.astype(np.float64), sigma=1.0).astype(np.float32)
+            restore_weight = gaussian_filter(
+                restore_mask.astype(np.float32) * certainty, sigma=1.0
+            ).astype(np.float32)
             new_hm = (
                 new_hm * (1.0 - restore_weight) + heightmap.astype(np.float32) * restore_weight
             ).astype(np.float32)
             self.log_info(
-                f"Observed-data restoration: {int(restore_mask.sum())} px reverted "
-                f"to measured elevation "
+                f"Observed-data restoration: {int(restore_mask.sum())} px eligible "
+                f"(mean certainty {float(certainty[restore_mask].mean()):.2f}), reverted "
+                f"toward measured elevation "
                 f"({int(observed_override_native.sum())} px excluded as ridge-overridden)"
             )
 

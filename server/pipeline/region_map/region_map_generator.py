@@ -126,6 +126,10 @@ class RegionMapGenerator:
         max_hole_cols: int = 12,
         hole_stitch_max_col_gap: int = 12,
         hole_stitch_max_dist_px: int = 90,
+        panorama_depth: Optional[Depth] = None,
+        near_field_support_row_offset: int = 6,
+        near_field_trust_distance_m: float = 45.0,
+        near_field_min_radius_m: float = 5.0,
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column and place it on a top-down
@@ -196,11 +200,30 @@ class RegionMapGenerator:
         outside connect_radius_px) without loosening connect_radius_px/
         max_col_gap_frac themselves, which is what actually protects water breaks.
 
+        panorama_depth (optional): calibrated depth at the same resolution as
+        type_idx_map. Placing every column's Y on the same shell radius means a
+        real nearby hillside and a genuinely distant peak that happen to reach
+        the same elevation angle phi end up at the same synthetic height too —
+        a "twin peak" in whatever direction the nearer feature sits. Sampled a
+        few rows below the crest (near_field_support_row_offset — the crest
+        pixel itself is the unreliable one this method's docstring already
+        warns about, but real terrain a little further into the slope is not),
+        this depth corroborates *how far* that column's feature actually is:
+        readings within near_field_trust_distance_m replace ridge_radius_m with
+        the real (smaller) distance for that column's height calculation only —
+        XZ placement stays on the shell, unchanged, so the "scale model"
+        compression this method relies on for layout is untouched. Columns with
+        no usable reading (no panorama_depth, invalid/saturated depth, or a
+        genuine reading beyond near_field_trust_distance_m) keep the full shell
+        height, same as before this parameter existed.
+
         Returns (grid, chains) where:
           grid   — float32 (grid_resolution, grid_resolution) binary mask (unchanged).
           chains — list of (M, 3) float32 arrays of world (X, Y, Z) per ridge chain,
                    where Y is the camera-relative elevation of the ridge crest
-                   (Y = ridge_radius_m * sin(phi), positive = above camera).
+                   (Y = radius_for_height * sin(phi), positive = above camera;
+                   radius_for_height is ridge_radius_m unless near-field
+                   corroboration above scales it down for that column).
         """
         h, w = type_idx_map.shape
         sky_mask = type_idx_map == sky_idx
@@ -278,6 +301,32 @@ class RegionMapGenerator:
         Xs, Ys, Zs = equirectangular_pixels_to_world(
             boundary_row, cols, np.full(w, ridge_radius_m, dtype=np.float64), h, w
         )
+
+        # ── Near-field corroboration ────────────────────────────────────────
+        # See this method's docstring for the "twin peak" failure mode this
+        # corrects: a real, close hillside can reach the same elevation angle
+        # as a genuinely distant summit and would otherwise get the exact same
+        # synthetic Y. Only Y is touched -- XZ stays on the compressed shell.
+        if panorama_depth is not None:
+            depth_arr = panorama_depth.depth.astype(np.float64)
+            if depth_arr.shape == (h, w):
+                support_row = np.clip(
+                    boundary_row.astype(np.int64) + near_field_support_row_offset, 0, h - 1
+                )
+                support_depth = depth_arr[support_row, cols]
+                usable = (
+                    has_silhouette
+                    & np.isfinite(support_depth)
+                    & (support_depth > 0)
+                    & (support_depth < near_field_trust_distance_m)
+                )
+                if usable.any():
+                    radius_for_height = np.full(w, ridge_radius_m, dtype=np.float64)
+                    radius_for_height[usable] = np.clip(
+                        support_depth[usable], near_field_min_radius_m, ridge_radius_m
+                    )
+                    phi = (0.5 - boundary_row / h) * np.pi
+                    Ys = (radius_for_height * np.sin(phi)).astype(np.float32)
 
         # Mountains above the horizon have phi > 0, so Ys > 0 (above camera).
         in_bounds = has_silhouette

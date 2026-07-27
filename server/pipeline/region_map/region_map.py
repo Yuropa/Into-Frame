@@ -237,6 +237,7 @@ class RegionMapStage(PipelineStage):
             water_idx=water_idx,
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
+            panorama_depth=panorama_depth,
         )
         context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
         context.add_object(ContextKey.MOUNTAIN_RIDGE_CHAINS, ridge_chains)
