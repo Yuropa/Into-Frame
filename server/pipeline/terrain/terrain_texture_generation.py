@@ -720,7 +720,6 @@ class TerrainTextureGenerationStage(PipelineStage):
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.use_panorama_layer else None
         height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
         height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
-        observed_mask_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
 
         if panorama_terrain is not None and height_map_depth is not None:
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
@@ -732,11 +731,6 @@ class TerrainTextureGenerationStage(PipelineStage):
                 nadir_cutoff_deg=cfg.nadir_cutoff_deg,
                 nadir_fade_deg=cfg.nadir_fade_deg,
                 horizon_fade_deg=cfg.horizon_fade_deg,
-                observed_mask=(
-                    observed_mask_depth.depth
-                    if observed_mask_depth is not None and observed_mask_depth.depth.shape == height_map_depth.depth.shape
-                    else None
-                ),
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -815,7 +809,6 @@ class TerrainTextureGenerationStage(PipelineStage):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
-        observed_mask: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
@@ -843,19 +836,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         terrain whenever the height map's values don't happen to fall below
         the camera's zero reference.
 
-        observed_mask (optional): HEIGHT_MAP_OBSERVED_MASK — True only where
-        that cell has a genuine direct point-cloud measurement (see
-        HeightMapGenerator.generate). A viewing angle can be perfectly safe
-        (not near nadir or horizon) while the height sampled there is still
-        pure interpolation/noise fill, e.g. deep inside a large occluded gap —
-        in that case the world position handed to the shader's panorama
-        lookup is fabricated, so whatever it samples is not actually this
-        point's real appearance, just whatever real content happens to sit at
-        that made-up height. Gating on this too means the panorama layer only
-        claims a point once both its viewing geometry *and* its underlying
-        geometry are trustworthy; everywhere it cedes, weight goes to the
-        synthetic layers via the existing (1 − pano_weight) scaling in
-        _build_material, same as an unfavourable viewing angle already does.
+        This used to also gate on HEIGHT_MAP_OBSERVED_MASK, dropping weight
+        wherever a cell had no direct point-cloud measurement, on the theory
+        that unobserved terrain's height is unreliable enough to misdirect a
+        world-position-based panorama lookup. That reasoning no longer
+        applies: the shader doesn't do a live position-based lookup for this
+        layer any more (see TerrainSplat.shader's LayerUV/panoUV) — it
+        samples the server-baked panoUV (TEXCOORD_1), which already prefers
+        each vertex's own true observed panorama pixel and only falls back to
+        a position-derived one where there's no observation, so the
+        uncertainty this gate was defending against is already handled at
+        the UV level, once, upstream. Re-gating here on top of that just
+        threw away most of the real photo for no remaining benefit.
 
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
@@ -879,18 +871,6 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_fade_deg=nadir_fade_deg,
             horizon_fade_deg=horizon_fade_deg,
         ).reshape(blend_map_size, blend_map_size)
-
-        if observed_mask is not None and observed_mask.shape == height_map.shape:
-            # Blur at native resolution before sampling so the observed/
-            # interpolated boundary feathers smoothly instead of leaving a
-            # hard step once resampled down to blend_map_size (point-sampling
-            # a sharp binary mask at a much coarser grid aliases badly).
-            sigma_native = max(2.0, 0.01 * min(hm_h, hm_w))
-            obs_smooth = gaussian_filter(observed_mask.astype(np.float32), sigma=sigma_native)
-            obs_gate = map_coordinates(
-                obs_smooth, [row_c.ravel(), col_c.ravel()], order=1, mode="nearest"
-            ).reshape(blend_map_size, blend_map_size).astype(np.float32)
-            weight = weight * obs_gate.clip(0.0, 1.0)
 
         return (weight ** blend_power).astype(np.float32)
 
@@ -989,7 +969,6 @@ class TerrainTextureGenerationStage(PipelineStage):
         if terrain_mesh is None or height_map_depth is None or region_map_depth is None:
             return None
 
-        observed_mask_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         half = grid_size / 2.0
 
@@ -1008,11 +987,6 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_cutoff_deg=cfg.nadir_cutoff_deg,
             nadir_fade_deg=cfg.nadir_fade_deg,
             horizon_fade_deg=cfg.horizon_fade_deg,
-            observed_mask=(
-                observed_mask_depth.depth
-                if observed_mask_depth is not None and observed_mask_depth.depth.shape == height_map_depth.depth.shape
-                else None
-            ),
         )
         row_c = ((centroids[:, 2] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
         col_c = ((centroids[:, 0] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
