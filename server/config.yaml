@@ -52,6 +52,24 @@ stages:
     # tiling this now needs to avoid quality loss).
     keys:
       input: panorama
+    # SegmentationConfiguration.min_area_fraction's default (0.0003) was calibrated
+    # against 309 raw detections from one ~1200x807 hero photo. A full panorama
+    # tiled into ~20-30 1024x1024 SAM2 passes multiplies that per-tile noise
+    # instead of just re-measuring it against a bigger image (img_area is already
+    # capped at one tile's worth -- see segmentation.py's own comment) -- observed
+    # on a real alpine-meadow capture: 898 raw crops, with the default threshold
+    # sitting at approximately the 1st percentile of their own size distribution
+    # (i.e. barely filtering anything). Inspection at that scale showed the crops
+    # are overwhelmingly individual grass blades/flower petals, not meaningful
+    # discrete objects -- and this stays true even several times past the old
+    # threshold, since a small flower bud and a small rock are genuinely the same
+    # size to a purely geometric filter. Downstream low_confidence + DINOv2
+    # corroboration (ObjectCategoryClusteringStage) already excludes anything
+    # that doesn't hold up semantically from ever getting a mesh or scene
+    # placement -- this threshold isn't relied on for correctness, only to avoid
+    # burning BLIP/CLIP/DINOv2 passes on obvious slivers before that. 0.0015
+    # (~1570px² per tile) roughly halves the raw crop count on that capture.
+    min_area_fraction: 0.0015
 
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
