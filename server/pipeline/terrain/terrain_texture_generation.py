@@ -629,9 +629,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         terrain_half = grid_size / 2.0
 
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
 
         for i, formation in enumerate(formations):
             mesh = context.mesh(formation["mesh_key"])
@@ -972,9 +970,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
         half = grid_size / 2.0
 
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
 
         vertices = np.asarray(terrain_mesh.mesh.vertices, dtype=np.float64)
         faces = np.asarray(terrain_mesh.mesh.faces, dtype=np.int64)

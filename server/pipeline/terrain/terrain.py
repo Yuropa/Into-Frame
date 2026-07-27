@@ -195,9 +195,7 @@ class TerrainMeshStage(PipelineStage):
             or 100.0
         )
 
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
 
         # ── Resolve texture source ─────────────────────────────────────────────
         precomputed_image = None

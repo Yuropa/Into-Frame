@@ -2,6 +2,7 @@ from pipeline.context_value import ContextValue, ValueKeys
 from pathlib import Path
 from typing import Literal, TypeAlias, Optional, Any
 import logging
+import numpy as np
 from util.json_utils import write_json, parse_json
 
 _STAGE_ORDER_FILE = "_stage_order.json"
@@ -272,6 +273,29 @@ class PipelineContext():
     
     def input_object(self, name: ContextKeyName) -> Optional[Any]:
         return self._value(name, self._previous_stage).object()
+
+    def input_sky_mask(self, name: ContextKeyName = ContextKey.PANORAMA_SKY_MASK) -> Optional[np.ndarray]:
+        """
+        (H, W) bool sky mask (True = sky) at whatever native resolution it was
+        written at, preferring a dedicated segmentation stored as an Image
+        (see SkyboxInpaintingStage) over a coarser byproduct some models also
+        store as a plain object under the same key (see PanoramaDepthStage's
+        DAP sky_mask, a rough side-output of the *depth* model, not a real
+        segmentation). Both are legitimate values for this name written by
+        different stages -- _value() only ever returns whichever stage wrote
+        most recently, with no notion of which is more trustworthy, so a
+        caller that only ever calls input_object() silently gets the worse
+        one whenever Panorama Depth happens to have run after Skybox
+        Inpainting (which it always does in the default pipeline order).
+        Returns None if neither is present.
+        """
+        image = self.input_image(name)
+        if image is not None:
+            return np.array(image.image.convert("L")) > 127
+        obj = self.input_object(name)
+        if obj is None:
+            return None
+        return np.asarray(obj, dtype=bool)
 
     # Mesh 
     def add_mesh(self, name: ContextKeyName, input: Any):

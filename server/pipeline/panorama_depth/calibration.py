@@ -355,9 +355,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         intrinsics = context.input_intrinsics(intrinsics_key)
         panorama_depth = context.input_depth(panorama_depth_key)
         panorama_object_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
 
         if da3_depth is None or intrinsics is None or panorama_depth is None:
             self.log_warning("Missing metric depth, intrinsics, or panorama depth — skipping calibration")

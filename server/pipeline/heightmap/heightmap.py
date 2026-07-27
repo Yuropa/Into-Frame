@@ -203,9 +203,7 @@ class HeightMapStage(PipelineStage):
 
         depth = context.input_depth(depth_key)
         intrinsics = context.input_intrinsics(intrinsics_key)
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
         panorama_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         # _TERRAIN: classified from panorama_terrain (object-removed + LoRA-
         # corrected), matching panorama_depth above -- not the original-panorama

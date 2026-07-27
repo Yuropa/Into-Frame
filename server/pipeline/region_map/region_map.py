@@ -131,9 +131,7 @@ class RegionMapStage(PipelineStage):
 
         panorama_depth = context.input_depth(depth_key)
         type_idx_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
-        sky_mask = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-        if isinstance(sky_mask, list):
-            sky_mask = np.array(sky_mask, dtype=bool)
+        sky_mask = context.input_sky_mask()
 
         # Source photo for the panorama-space debug overlays below (see "Debug:
         # project extracted features back onto the source panorama"). Matches

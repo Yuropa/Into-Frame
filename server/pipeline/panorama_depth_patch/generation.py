@@ -128,22 +128,12 @@ class PanoramaDepthPatchStage(PipelineStage):
             hole = binary_dilation(hole, iterations=self.config.mask_extra_dilation_px)
 
         if self.config.exclude_sky:
-            sky_arr = None
-            sky_image = context.input_image(ContextKey.PANORAMA_SKY_MASK)
-            if sky_image is not None:
-                sky_pil = sky_image.image.convert("L")
-                if sky_pil.size != (w, h):
-                    sky_pil = sky_pil.resize((w, h), PILImage.NEAREST)
-                sky_arr = np.array(sky_pil) > 127
-            else:
-                sky_obj = context.input_object(ContextKey.PANORAMA_SKY_MASK)
-                if sky_obj is not None:
-                    sky_arr = np.asarray(sky_obj, dtype=bool)
-                    if sky_arr.shape != (h, w):
-                        sky_arr = np.array(
-                            PILImage.fromarray((sky_arr * 255).astype(np.uint8), mode="L")
-                            .resize((w, h), PILImage.NEAREST)
-                        ) > 127
+            sky_arr = context.input_sky_mask()
+            if sky_arr is not None and sky_arr.shape != (h, w):
+                sky_arr = np.array(
+                    PILImage.fromarray((sky_arr * 255).astype(np.uint8), mode="L")
+                    .resize((w, h), PILImage.NEAREST)
+                ) > 127
             if sky_arr is not None:
                 hole &= ~sky_arr
 
