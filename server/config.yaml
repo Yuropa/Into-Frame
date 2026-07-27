@@ -690,6 +690,7 @@ stages:
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
+    enabled: false
     billboard_distance_m: 30.0
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
@@ -714,7 +715,7 @@ stages:
 
   - name: Video Generation
     stage: VideoGenerationStage
-    enabled: true
+    enabled: false
     # Animate the full 360° panorama (ContextKey.PANORAMA -- the original, with real
     # objects still in it, not PANORAMA_TERRAIN/PANORAMA_SKY which have been through
     # foreground/sky inpainting) instead of just the narrow raw input photo.
