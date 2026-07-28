@@ -161,8 +161,12 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_iters: int = 400,
         size_jitter: float = 0.15,
         input_boundary_pad_factor: float = 1.5,
-        max_instances_per_group: int = 2000,
-        min_exemplar_spacing_m: float = 0.75,
+        max_instances_per_group: int = 12000,
+        min_exemplar_spacing_m: float = 0.25,
+        full_density_radius_m: float = 6.0,
+        density_falloff_exponent: float = 2.0,
+        max_paint_radius_m: float = 30.0,
+        max_exemplar_candidates: int = 4000,
         synthesize_cli_path: str | None = None,
         max_workers: int | None = None,
     ):
@@ -172,24 +176,53 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.max_iters = max_iters
         self.size_jitter = size_jitter
         self.input_boundary_pad_factor = input_boundary_pad_factor
-        # Hard ceiling on painted instances per (object_type, region_type) group.
-        # synthesize_cli is handed n_points=-1, so the count it returns is inferred
-        # from the candidate-density ratio between the input and output boundary --
-        # an unbounded quantity that scales with the painted AREA. The output
-        # boundary is the region type's whole paintable group (TERRAIN/GROUND/
-        # VEGETATION merged), i.e. most of the terrain grid, so a tightly-packed
-        # exemplar cluster extrapolates to a five-figure population that nothing
-        # downstream can carry. Enforced by decimation after synthesis rather than
-        # by shrinking the boundary, so the pattern still spans the whole region at
-        # a thinned density instead of covering a fraction of it at full density.
+        # Hard ceiling on painted instances per (object_type, region_type) group,
+        # and the last thing applied. synthesize_cli is handed n_points=-1, so the
+        # count it returns is inferred from the candidate-density ratio between the
+        # input and output boundary -- an unbounded quantity scaling with painted
+        # AREA, over an output boundary covering most of the terrain grid. The
+        # binding constraint on the far side is the client: SceneObjectManager
+        # instantiates one GameObject per placed object with no GPU instancing, so
+        # this is a GameObject budget, not a triangle budget.
         self.max_instances_per_group = max_instances_per_group
         # Floor on the exemplar nearest-neighbour spacing that sets painted density.
         # Spacing is measured on world XZ unprojected from panorama bboxes, so a
         # clump of foreground subjects a metre from the camera (meadow flowers being
         # the observed case) measures centimetres apart and asks for ~1/spacing^2
-        # instances per square metre across the entire region. This floors the
-        # density the pattern is allowed to claim; it does not move the exemplars.
+        # instances per square metre. This floors the density the pattern may claim;
+        # it does not move the exemplars. Kept low deliberately -- a meadow has to
+        # read as continuous ground cover near the viewer, and the radial falloff
+        # below, not this, is what keeps the total affordable.
         self.min_exemplar_spacing_m = min_exemplar_spacing_m
+        # Radial density falloff about the camera. A uniform cap spends the whole
+        # budget spreading thin across the entire grid -- 6000 instances over a
+        # 100 m grid is 0.6/m², which reads as scattered dots rather than a field,
+        # while the near ground the viewer actually looks at stays bare. Instead,
+        # keep the learned density outright inside full_density_radius_m and thin
+        # beyond it by (full_density_radius / distance) ** density_falloff_exponent,
+        # so the budget concentrates where it resolves. Past max_paint_radius_m
+        # nothing is painted at all: at that range the terrain texture and the
+        # skybox panorama already carry the look, and individual billboards are
+        # sub-pixel. Camera is the grid origin by construction (see _grid_to_world).
+        self.full_density_radius_m = full_density_radius_m
+        self.density_falloff_exponent = density_falloff_exponent
+        self.max_paint_radius_m = max_paint_radius_m
+        # Ceiling on the exemplar candidate grid, enforced by RAISING the effective
+        # spacing rather than by clamping the count -- synthesize_pattern infers the
+        # output count from the input-vs-output candidate density ratio, so the two
+        # grids must stay at equal points-per-area (both are 1/spacing^2) or the
+        # inference silently skews. Clamping only the exemplar grid would break that.
+        #
+        # exemplar_domain_target is input_hull_area / spacing^2, which for points
+        # roughly filling their own hull is just ~the exemplar count -- harmless.
+        # It blows up for CLUMPED groups, where the hull spans the empty gaps
+        # between clusters while spacing is measured within them: three patches of
+        # 20 flowers 40 m apart gives ~1600 m^2 / 0.25^2 = 25,600 candidates. The
+        # optimizer is O(candidates^2) per iteration over max_iters, so that tile
+        # hits the 120 s subprocess timeout, _run_synthesize_cli returns None, and
+        # the group silently paints nothing -- the exact failure mode that looks
+        # like "the distribution just didn't run" rather than like an error.
+        self.max_exemplar_candidates = max_exemplar_candidates
         self.synthesize_cli_path = synthesize_cli_path
         # Each tile's synthesize_cli call is an independent, CPU-bound subprocess (no
         # shared state), so tiles run concurrently in a thread pool -- subprocess.run
@@ -245,10 +278,20 @@ class DistributionSynthesisStage(PipelineStage):
                                        sampled footprint sizes
             input_boundary_pad_factor (float, default 1.5) — exemplar hull padding, in
                                        units of mean exemplar nearest-neighbour spacing
-            max_instances_per_group   (int, default 2000) — ceiling on painted instances
+            max_instances_per_group   (int, default 12000) — ceiling on painted instances
                                        per (object_type, region_type); 0 disables
-            min_exemplar_spacing_m    (float, default 0.75) — floor on the exemplar
+            min_exemplar_spacing_m    (float, default 0.25) — floor on the exemplar
                                        nearest-neighbour spacing that sets painted density
+            full_density_radius_m     (float, default 6.0) — paint at the learned density
+                                       out to here, thinning beyond; 0 disables falloff
+            density_falloff_exponent  (float, default 2.0) — thinning exponent past that
+                                       radius, as (radius / distance) ** exponent
+            max_paint_radius_m        (float, default 30.0) — nothing painted past here;
+                                       0 disables
+            max_exemplar_candidates   (int, default 4000) — ceiling on the exemplar
+                                       candidate grid, enforced by raising the effective
+                                       spacing so both candidate grids stay at equal
+                                       points-per-area; 0 disables
             max_workers               (int, optional) — concurrent synthesize_cli
                                        subprocesses; default os.cpu_count()
     Debug:  self.temp/synthesis_{region_type}_{object_type}.png
@@ -361,6 +404,29 @@ class DistributionSynthesisStage(PipelineStage):
             input_boundary = _padded_hull_polygon(
                 dist.points, pad=max(spacing * cfg.input_boundary_pad_factor, _MIN_PAD_M)
             )
+
+            # Raise spacing if this group's hull would otherwise demand more exemplar
+            # candidates than the optimizer can chew through inside its timeout -- see
+            # max_exemplar_candidates. Recomputed against the hull built above; the
+            # boundary padding shifts only marginally with spacing, so it isn't worth
+            # iterating to a fixed point.
+            if cfg.max_exemplar_candidates > 0:
+                hull_area = float(np.prod(np.maximum(
+                    input_boundary.max(axis=0) - input_boundary.min(axis=0), 1e-6
+                )))
+                budget_spacing = math.sqrt(hull_area / cfg.max_exemplar_candidates)
+                if budget_spacing > spacing:
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: clumped exemplars over a "
+                        f"{hull_area:.0f} m² hull would need "
+                        f"{int(hull_area / spacing ** 2):,} candidates; raising spacing "
+                        f"{spacing:.2f} m -> {budget_spacing:.2f} m to stay inside the "
+                        f"optimizer budget"
+                    )
+                    spacing = budget_spacing
+                    input_boundary = _padded_hull_polygon(
+                        dist.points, pad=max(spacing * cfg.input_boundary_pad_factor, _MIN_PAD_M)
+                    )
             # synthesize_pattern infers how many points to paint from the RATIO of
             # candidates that fall inside the input vs. output boundary, as a proxy
             # for the ratio of their real areal densities (see synthesis_core.cpp).
@@ -425,6 +491,19 @@ class DistributionSynthesisStage(PipelineStage):
                         )
 
                         tile_world_min, tile_world_max = output_boundary.min(axis=0), output_boundary.max(axis=0)
+
+                        # Drop tiles wholly beyond the paint radius before paying for
+                        # their synthesize_cli call -- on a 100 m grid these are the
+                        # majority of tiles, and every point they'd produce would be
+                        # discarded by the falloff below anyway. Nearest corner of the
+                        # tile's world-space bbox to the camera at the grid origin.
+                        if cfg.max_paint_radius_m > 0:
+                            closest = np.minimum(
+                                np.maximum(0.0, tile_world_min), tile_world_max
+                            )
+                            if float(np.hypot(*closest)) > cfg.max_paint_radius_m:
+                                continue
+
                         pad = max(cell_m, _MIN_PAD_M)
                         tile_domain = _local_grid(
                             tile_world_min - pad, tile_world_max + pad, cfg.max_candidates_per_tile
@@ -491,6 +570,20 @@ class DistributionSynthesisStage(PipelineStage):
                 dist = groups[job["group_idx"]][2]
                 placed = group_placed[job["group_idx"]]
                 for x, z in synth["output_points"]:
+                    # Radial density falloff about the camera at the grid origin --
+                    # see full_density_radius_m. Rejection-sampled per point so the
+                    # surviving set keeps the synthesized pattern's local structure
+                    # (a thinned blue-noise field is still blue noise); scaling the
+                    # requested count per tile instead would have quantised the
+                    # falloff to tile granularity.
+                    if cfg.max_paint_radius_m > 0 or cfg.full_density_radius_m > 0:
+                        distance = float(math.hypot(x, z))
+                        if cfg.max_paint_radius_m > 0 and distance > cfg.max_paint_radius_m:
+                            continue
+                        if cfg.full_density_radius_m > 0 and distance > cfg.full_density_radius_m:
+                            keep_prob = (cfg.full_density_radius_m / distance) ** cfg.density_falloff_exponent
+                            if rng.random() >= keep_prob:
+                                continue
                     # Draw ONE exemplar and take both its footprint and its visual
                     # variant, rather than sampling them independently: bucket is an
                     # appearance class and size correlates with it (a bucket of small

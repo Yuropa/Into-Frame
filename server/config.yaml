@@ -822,18 +822,37 @@ stages:
     size_jitter: 0.15
     input_boundary_pad_factor: 1.5
     # synthesize_cli is handed n_points=-1, so the painted count is INFERRED from the
-    # input-vs-output candidate density ratio and scales with the painted area -- and
-    # the output boundary is the whole ground-like region group (TERRAIN/GROUND/
-    # VEGETATION merged), i.e. most of the terrain grid. Exemplar spacing is measured
-    # on world XZ unprojected from panorama bboxes, so a clump of foreground subjects
-    # ~1 m from the camera (meadow flowers) measures centimetres apart and asks for a
-    # five-figure population. These two bound it: the spacing floor thins the density
-    # the pattern may claim, the instance ceiling is a hard backstop applied by
-    # uniform decimation AFTER synthesis (so the thinned result still spans the whole
-    # region rather than covering a fraction of it at full density). Check
+    # input-vs-output candidate density ratio and scales with the painted area -- over
+    # an output boundary covering most of the terrain grid. The binding constraint is
+    # the client: SceneObjectManager instantiates one GameObject per placed object with
+    # no GPU instancing, so this is a GameObject budget.
+    #
+    # Spend that budget where it reads rather than spreading it thin. A meadow has to
+    # look like continuous ground cover in the near field, so the spacing floor stays
+    # low (0.25 m ~ 16/m²) and the RADIUS controls do the limiting: full learned
+    # density out to full_density_radius_m, thinning as (radius/distance)^exponent
+    # beyond it, nothing at all past max_paint_radius_m -- at that range the terrain
+    # texture and skybox panorama already carry the look and a billboard is sub-pixel.
+    # Tiles wholly outside max_paint_radius_m are skipped before their synthesize_cli
+    # call, which is most of them on a 100 m grid.
+    #
+    # If it still reads sparse: raise full_density_radius_m first, then
+    # max_instances_per_group. If it's too heavy: lower full_density_radius_m, or
+    # raise density_falloff_exponent to 1.5-2.0 to thin the mid-field harder. Check
     # temp/synthesis_{region}_{type}.png -- red = real exemplars, yellow = painted.
-    min_exemplar_spacing_m: 0.75
-    max_instances_per_group: 2000    # 0 disables the ceiling
+    min_exemplar_spacing_m: 0.25
+    full_density_radius_m: 6.0
+    density_falloff_exponent: 2.0
+    max_paint_radius_m: 30.0         # 0 disables
+    max_instances_per_group: 12000   # 0 disables the ceiling
+    # Guard against a CLUMPED group (a few tight patches far apart) demanding a huge
+    # exemplar candidate grid: the hull spans the empty gaps while spacing is measured
+    # within the clumps, so e.g. three patches of 20 flowers 40 m apart asks for
+    # ~25,600 candidates. The optimizer is O(candidates²) per iteration, so that tile
+    # hits the 120 s subprocess timeout and the group silently paints NOTHING. Enforced
+    # by raising the effective spacing (keeping both candidate grids at equal
+    # points-per-area, which the count inference depends on), not by clamping.
+    max_exemplar_candidates: 4000    # 0 disables
     # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
     # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
                         # default (unset) is os.cpu_count()
