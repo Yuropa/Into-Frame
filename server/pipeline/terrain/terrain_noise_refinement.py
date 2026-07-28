@@ -685,7 +685,17 @@ class TerrainNoiseRefinementStage(PipelineStage):
             fa.run_one_step()
             fsc.run_one_step(dt)
 
-        return mg.at_node["topographic__elevation"].reshape(H, W).astype(np.float64)
+        eroded = mg.at_node["topographic__elevation"].reshape(H, W).astype(np.float64)
+        # Erosion may only INCISE, never raise. SinkFillerBarnes above raised every
+        # closed depression to its spill level purely so flow could route -- and the
+        # camera's own valley is a closed basin, enclosed by the 360-degree
+        # reconstructed mountain ring (a panorama sees terrain in every direction, so
+        # there is no grid-edge outlet for it). Returning the filled+eroded surface
+        # therefore floods that whole basin up to its lowest saddle, turning the
+        # valley floor under the camera into a raised flat plateau (measured: a -1.9 m
+        # floor came back at +11 m). The fill is a routing device, not real geology;
+        # keep only where erosion cut BELOW the input, discarding every raised cell.
+        return np.minimum(terrain, eroded)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.has_stage_output(ContextKey.HEIGHT_MAP)

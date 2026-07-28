@@ -110,11 +110,30 @@ gives natural rolling-hill texture on previously-smooth slopes, **mountains pres
 (Ymax 51.8 unchanged, r60-80 std 12.6 unchanged), no spiky nadir. Full-terrain hillshade
 looks organic vs the smooth baseline.
 
-**Residual (documented, NOT fixed) — open feedback:** the *small hard disc at the exact
-grid centre* (r < `nadir_exclusion_radius + nadir_ramp_width` ≈ 4.5 m) is a **geometric**
-artefact — the Height-Map flat-prior crater (pinned ~1 m below its surroundings) plus the
-smooth high-certainty ring just outside it. Texture can't remove a coherent circular
-crater; that needs a Height-Map / reconstruction change.
+### ✅ #1b — central PLATEAU / hill (the real one) — FIXED (`terrain_noise_refinement._hydro_erode`)
+The big one, found after the review feedback. The reconstruction gives a flat valley
+floor at −1.9 m under the camera — correct — but the **Noise Refinement output came back
+at +11 m there**: a 13 m hill/plateau. Bisected to the **hydro erosion** pass:
+`SinkFillerBarnes` fills closed depressions to route flow *and permanently raises the
+terrain*. The camera's valley is a closed basin — a panorama reconstructs a 360° mountain
+ring around the viewer, so the basin has no grid-edge outlet — so the filler floods the
+whole valley up to its spill saddle (+11 m). That IS the "plateau in the centre."
+
+Fix: erosion may only **incise, never raise** — `return np.minimum(terrain, eroded)`. The
+sink-fill still does its job (routing the flow that drives incision), but the raised fill
+is discarded. Validated: centre back to −1.7 m (flat valley floor), mountains preserved
+(Ymax 52.9), channel incision preserved (Ymin −3.4). Root cause was NOT the nadir prior
+or `camera_height` — the near-nadir *is* hallucinated (confirmed: the panorama's bottom
+third is invented gravel/snow, the forward-facing hero photo never saw straight down),
+but that turned out to be a side issue; the plateau was hydrological.
+
+**Residual (documented, minor):** a *faint* circle at the nadir-exclusion boundary
+(r ≈ 4.5 m) remains — the Height-Map flat-prior disc. Small now that the +11 m plateau is
+gone. If it still reads in the app, it's a Height-Map change (flat-ground prior + soften
+the certainty rim); the near-nadir being hallucinated means a flat-ground-at-camera-height
+prior is the honest choice there. `camera_height` is 1.0 in config but the image-derived
+ground sits ~1.9 m below the camera — worth deriving it from the observed foreground
+rather than hardcoding, which would also inform the "valleys too deep" question.
 
 User review of the current result (2026): "better but not perfect" — two specific asks
 still open:
