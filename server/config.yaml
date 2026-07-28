@@ -777,6 +777,17 @@ stages:
     # Tune against this stage's debug_panorama.png / clustering_debug.json.
     embedding_model_name: facebook/dinov2-base
     cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
+    # The distance cut alone has no notion of how many buckets it produces. On a
+    # full-panorama detection set it produced one bucket per instance -- measured on
+    # an alpine-meadow capture: 302 (class, bucket) groups, 77 of them flower, 65
+    # tree, 57 table. Each asks Panorama Asset Generation for its own mesh and its
+    # own billboard pool, so pools collapse to a single crop (every instance of a
+    # "variant" reusing one image) and Distribution Synthesis inherits 77 flower
+    # variants. These bound the outcome rather than the cut: re-cut the same
+    # dendrogram coarser if it overshoots, then fold undersized buckets into their
+    # nearest surviving neighbour. Tune against clustering_debug.json's bucket_sizes.
+    max_buckets_per_class: 8          # 0 disables (distance-cut only, prior behaviour)
+    min_bucket_size: 3                # 0/1 disables the fold
 
   - name: Object Distribution
     stage: ObjectDistributionStage
@@ -810,6 +821,19 @@ stages:
     max_iters: 400
     size_jitter: 0.15
     input_boundary_pad_factor: 1.5
+    # synthesize_cli is handed n_points=-1, so the painted count is INFERRED from the
+    # input-vs-output candidate density ratio and scales with the painted area -- and
+    # the output boundary is the whole ground-like region group (TERRAIN/GROUND/
+    # VEGETATION merged), i.e. most of the terrain grid. Exemplar spacing is measured
+    # on world XZ unprojected from panorama bboxes, so a clump of foreground subjects
+    # ~1 m from the camera (meadow flowers) measures centimetres apart and asks for a
+    # five-figure population. These two bound it: the spacing floor thins the density
+    # the pattern may claim, the instance ceiling is a hard backstop applied by
+    # uniform decimation AFTER synthesis (so the thinned result still spans the whole
+    # region rather than covering a fraction of it at full density). Check
+    # temp/synthesis_{region}_{type}.png -- red = real exemplars, yellow = painted.
+    min_exemplar_spacing_m: 0.75
+    max_instances_per_group: 2000    # 0 disables the ceiling
     # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
     # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
                         # default (unset) is os.cpu_count()

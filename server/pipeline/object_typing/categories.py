@@ -91,19 +91,35 @@ UNIQUE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "fountain", "gazebo", "waterfall", "bridge", "tower",
 })
 
+# Street furniture and fixtures that repeat across a built-up region the same way
+# vegetation repeats across a natural one -- a plaza has many benches, a street many
+# lampposts and bins. Every member is permanently static (none appear in
+# ANIMATABLE_CATEGORIES below), which is what makes them safe to scatter: a synthetic
+# instance never reaches VideoObjectExtractionStage's SAM2 tracker, so no per-bucket
+# tracking cap is needed for them the way it is for vegetation.
+STATIC_CLUTTER_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "bench", "chair", "table", "streetlight", "trash_bin", "sign",
+    "fence", "barrier", "umbrella", "traffic_light", "fire_hydrant",
+    "bus_stop", "kiosk", "cart",
+})
+
 # Categories ObjectDistributionStage/DistributionSynthesisStage are allowed to treat
 # as a population to scatter more of, rather than just "not one-of-a-kind". Natural
-# clutter that plausibly repeats across a matching region -- vegetation, and rock
+# clutter that plausibly repeats across a matching region -- vegetation, rock
 # (already coalesced per-formation by ObjectInstanceRefinementStage, see
-# COALESCE_CATEGORIES, so a "rock" detection here is one real rock, not a fragment).
-# Deliberately excludes every other countable/discrete category (person, car, animal,
-# bench, fire_hydrant, ...): two real detections of a person or a car is not evidence
+# COALESCE_CATEGORIES, so a "rock" detection here is one real rock, not a fragment)
+# -- plus the static street furniture above.
+# Deliberately still excludes every *animate* countable category (person, car,
+# animal, boat, train, ...): two real detections of a person or a car is not evidence
 # that more of them belong scattered around, and doing so anyway is what previously
 # made VideoObjectExtractionStage try to SAM2-track hundreds of synthetic people/
 # vehicles/animals -- ANIMATABLE_CATEGORIES has no per-bucket tracking cap outside
 # VEGETATION_CATEGORIES, since a real detection there is supposed to be a genuinely
-# distinct subject worth its own trajectory, not decorative fill.
-DISTRIBUTABLE_CATEGORIES: Final[frozenset[str]] = VEGETATION_CATEGORIES | frozenset({"rock"})
+# distinct subject worth its own trajectory, not decorative fill. Keep this set and
+# ANIMATABLE_CATEGORIES disjoint outside VEGETATION_CATEGORIES for that reason.
+DISTRIBUTABLE_CATEGORIES: Final[frozenset[str]] = (
+    VEGETATION_CATEGORIES | frozenset({"rock"}) | STATIC_CLUTTER_CATEGORIES
+)
 
 # Categories that can plausibly exhibit visible motion worth animating -- either
 # wind sway (VEGETATION_CATEGORIES) or genuine rigid-body movement (person/vehicle/

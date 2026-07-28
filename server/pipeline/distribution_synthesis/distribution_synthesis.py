@@ -161,6 +161,8 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_iters: int = 400,
         size_jitter: float = 0.15,
         input_boundary_pad_factor: float = 1.5,
+        max_instances_per_group: int = 2000,
+        min_exemplar_spacing_m: float = 0.75,
         synthesize_cli_path: str | None = None,
         max_workers: int | None = None,
     ):
@@ -170,6 +172,24 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.max_iters = max_iters
         self.size_jitter = size_jitter
         self.input_boundary_pad_factor = input_boundary_pad_factor
+        # Hard ceiling on painted instances per (object_type, region_type) group.
+        # synthesize_cli is handed n_points=-1, so the count it returns is inferred
+        # from the candidate-density ratio between the input and output boundary --
+        # an unbounded quantity that scales with the painted AREA. The output
+        # boundary is the region type's whole paintable group (TERRAIN/GROUND/
+        # VEGETATION merged), i.e. most of the terrain grid, so a tightly-packed
+        # exemplar cluster extrapolates to a five-figure population that nothing
+        # downstream can carry. Enforced by decimation after synthesis rather than
+        # by shrinking the boundary, so the pattern still spans the whole region at
+        # a thinned density instead of covering a fraction of it at full density.
+        self.max_instances_per_group = max_instances_per_group
+        # Floor on the exemplar nearest-neighbour spacing that sets painted density.
+        # Spacing is measured on world XZ unprojected from panorama bboxes, so a
+        # clump of foreground subjects a metre from the camera (meadow flowers being
+        # the observed case) measures centimetres apart and asks for ~1/spacing^2
+        # instances per square metre across the entire region. This floors the
+        # density the pattern is allowed to claim; it does not move the exemplars.
+        self.min_exemplar_spacing_m = min_exemplar_spacing_m
         self.synthesize_cli_path = synthesize_cli_path
         # Each tile's synthesize_cli call is an independent, CPU-bound subprocess (no
         # shared state), so tiles run concurrently in a thread pool -- subprocess.run
@@ -225,6 +245,10 @@ class DistributionSynthesisStage(PipelineStage):
                                        sampled footprint sizes
             input_boundary_pad_factor (float, default 1.5) — exemplar hull padding, in
                                        units of mean exemplar nearest-neighbour spacing
+            max_instances_per_group   (int, default 2000) — ceiling on painted instances
+                                       per (object_type, region_type); 0 disables
+            min_exemplar_spacing_m    (float, default 0.75) — floor on the exemplar
+                                       nearest-neighbour spacing that sets painted density
             max_workers               (int, optional) — concurrent synthesize_cli
                                        subprocesses; default os.cpu_count()
     Debug:  self.temp/synthesis_{region_type}_{object_type}.png
@@ -328,7 +352,12 @@ class DistributionSynthesisStage(PipelineStage):
                 continue
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
-            spacing = max(_mean_nn_spacing(dist.points), 0.1)
+            # See min_exemplar_spacing_m -- this floor is what stops a foreground
+            # clump's centimetre-scale measured spacing from setting the density
+            # for the entire region. It feeds exemplar_domain_target (hence the
+            # inferred output count) and the tile size, so raising it thins the
+            # painted population directly rather than truncating it after the fact.
+            spacing = max(_mean_nn_spacing(dist.points), cfg.min_exemplar_spacing_m, 0.1)
             input_boundary = _padded_hull_polygon(
                 dist.points, pad=max(spacing * cfg.input_boundary_pad_factor, _MIN_PAD_M)
             )
@@ -480,6 +509,21 @@ class DistributionSynthesisStage(PipelineStage):
 
         for group_idx, (region_type, obj_type, dist) in enumerate(groups):
             placed = group_placed[group_idx]
+            # Ceiling on the population, applied after synthesis so the thinned
+            # result still spans the whole region (see max_instances_per_group).
+            # Uniform random decimation preserves the pattern's shape -- dropping a
+            # fixed fraction independently of position leaves the pair-correlation
+            # unchanged up to the density scale factor -- whereas keeping the first
+            # N would keep whichever tiles happened to be enumerated first and leave
+            # the rest of the region empty.
+            if cfg.max_instances_per_group > 0 and len(placed) > cfg.max_instances_per_group:
+                keep = rng.choice(len(placed), size=cfg.max_instances_per_group, replace=False)
+                self.log_info(
+                    f"  {obj_type} [{region_type}]: {len(placed)} painted exceeds "
+                    f"max_instances_per_group={cfg.max_instances_per_group}, thinning"
+                )
+                placed = [placed[i] for i in sorted(keep.tolist())]
+                group_placed[group_idx] = placed
             for x, z, w, h, bucket in placed:
                 context.add_object(f"metadata_{next_idx}", {
                     "class": obj_type,

@@ -30,11 +30,30 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         embedding_model_name: str = DinoV2Embedder.MODEL_NAME,
         cluster_distance_threshold: float = 0.3,
         position_only_similarity_threshold: float = 0.75,
+        max_buckets_per_class: int = 8,
+        min_bucket_size: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
         self.cluster_distance_threshold = cluster_distance_threshold
         self.position_only_similarity_threshold = position_only_similarity_threshold
+        # A bucket is meant to be a visual VARIANT of a class (a flower colour, a
+        # tree species) -- a handful per class. cluster_distance_threshold alone is
+        # an absolute cut on cosine distance with no notion of how many groups that
+        # produces, and on a full-panorama detection set it produces one bucket per
+        # instance: measured on an alpine-meadow capture, 302 (class, bucket) groups
+        # across 77 flower, 65 tree, 57 table and 33 plant buckets. Every one of
+        # those asks PanoramaAssetGenerationStage for its own mesh and its own
+        # billboard pool, so the pools degenerate to a single crop each (every
+        # instance of a "variant" reusing one image) and DistributionSynthesisStage
+        # inherits 77 flower variants to sample between.
+        #
+        # These two bound the outcome instead of the cut: re-cut the same dendrogram
+        # at the coarsest level that yields at most max_buckets_per_class, then fold
+        # any bucket still under min_bucket_size into its nearest surviving centroid.
+        # 0 disables either check.
+        self.max_buckets_per_class = max_buckets_per_class
+        self.min_bucket_size = min_bucket_size
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -88,6 +107,10 @@ class ObjectCategoryClusteringStage(PipelineStage):
     Config: embedding_model_name (default facebook/dinov2-base),
             cluster_distance_threshold (default 0.3, cosine distance)
             position_only_similarity_threshold (default 0.75, cosine similarity)
+            max_buckets_per_class (default 8) -- re-cut the dendrogram coarser if the
+              distance cut produced more buckets than this; 0 disables
+            min_bucket_size (default 3) -- fold smaller buckets into the nearest
+              surviving one; 0/1 disables
     """
 
     @classmethod
@@ -253,10 +276,69 @@ class ObjectCategoryClusteringStage(PipelineStage):
         distances = pdist(embeddings, metric="cosine")
         z = linkage(distances, method="average")
         labels = fcluster(z, t=self.config.cluster_distance_threshold, criterion="distance")
+
+        # Re-cut the SAME dendrogram at a coarser level rather than raising
+        # cluster_distance_threshold: 'maxclust' picks the largest cut that still
+        # yields at most max_buckets_per_class, which keeps the threshold meaningful
+        # as "how different counts as a different variant" for scenes that genuinely
+        # have few variants, while bounding the pathological case. See the config
+        # comment for the 302-group measurement that motivates it.
+        max_buckets = self.config.max_buckets_per_class
+        if max_buckets > 0 and len(set(labels.tolist())) > max_buckets:
+            labels = fcluster(z, t=max_buckets, criterion="maxclust")
+
+        labels = self._merge_small_buckets(embeddings, labels)
+
         # fcluster labels are 1-based and not necessarily contiguous -- remap
         # to a dense 0-based range for a tidy bucket id space.
         remap = {old: new for new, old in enumerate(sorted(set(labels.tolist())))}
         return np.array([remap[label] for label in labels])
+
+    def _merge_small_buckets(self, embeddings: np.ndarray, labels: np.ndarray) -> np.ndarray:
+        """Fold every bucket smaller than min_bucket_size into the nearest bucket
+        that isn't. A singleton bucket is the failure mode this exists for: it wins
+        its own mesh and its own billboard pool of exactly one crop, so every
+        instance downstream that resolves to it renders the identical image -- worse
+        than being grouped with the visually closest real variant.
+
+        Falls back to folding everything into the largest bucket when no bucket
+        clears the threshold, which is the right answer for a class with only a
+        couple of confident detections: one variant, not several of size one."""
+        min_size = self.config.min_bucket_size
+        if min_size <= 1:
+            return labels
+
+        unique, counts = np.unique(labels, return_counts=True)
+        keep = unique[counts >= min_size]
+        if len(keep) == len(unique):
+            return labels
+        if len(keep) == 0:
+            # Nothing clears the bar -- collapse to the single largest bucket
+            # rather than leaving every instance in a bucket of its own.
+            return np.full_like(labels, unique[int(np.argmax(counts))])
+
+        # Cosine similarity against L2-normalised centroids, matching how
+        # _cluster_class builds the centroids it hands to low-confidence matching.
+        centroids = {}
+        for b in keep:
+            centroid = embeddings[labels == b].mean(axis=0)
+            norm = np.linalg.norm(centroid)
+            centroids[int(b)] = centroid / norm if norm > 0 else centroid
+        keep_ids = list(centroids)
+        centroid_matrix = np.stack([centroids[b] for b in keep_ids])
+
+        merged = labels.copy()
+        for b, count in zip(unique, counts):
+            if count >= min_size:
+                continue
+            members = np.nonzero(labels == b)[0]
+            for i in members:
+                embedding = embeddings[i]
+                norm = np.linalg.norm(embedding)
+                if norm > 0:
+                    embedding = embedding / norm
+                merged[i] = keep_ids[int(np.argmax(centroid_matrix @ embedding))]
+        return merged
 
     def _write_debug(self, context: PipelineContext, debug_by_class: dict[str, dict], reassigned: int, rejected: int):
         if self.output is None:
@@ -266,6 +348,8 @@ class ObjectCategoryClusteringStage(PipelineStage):
             json.dump({
                 "cluster_distance_threshold": self.config.cluster_distance_threshold,
                 "position_only_similarity_threshold": self.config.position_only_similarity_threshold,
+                "max_buckets_per_class": self.config.max_buckets_per_class,
+                "min_bucket_size": self.config.min_bucket_size,
                 "low_confidence": {"reassigned_position_only": reassigned, "rejected": rejected},
                 "classes": debug_by_class,
             }, f, indent=2)

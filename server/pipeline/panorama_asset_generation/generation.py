@@ -76,7 +76,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
     metadata_{i}['position_only'] (ObjectCategoryClusteringStage -- a low-confidence
     crop visually corroborated against some class, trusted only for its world
     position) is always excluded here: never a mesh representative, never in a
-    billboard pool, regardless of its class/bucket/score.
+    billboard pool, regardless of its class/bucket/score. So is
+    metadata_{i}['synthetic'] (DistributionSynthesisStage's painted points, which
+    run before this stage and are already counted in OBJECT_COUNT) -- a painted
+    point has no crop of its own and only ever consumes a pool, never supplies one.
 
     Reads:  ContextKey.OBJECT_COUNT, metadata_{i} (with 'class', 'bucket', 'box'),
             crop_{i}, ContextKey.PANORAMA_OBJECT_DEPTH (depth on the ORIGINAL panorama,
@@ -108,12 +111,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
-        group_best, billboard_pools, skipped_debug, disqualified_debug = self._curate(
+        group_best, billboard_pools, skipped_debug, disqualified_debug, synthetic_skipped = self._curate(
             object_count, context.input_object, context.input_image, panorama_depth, pano_w, pano_h,
         )
 
         context.add_object("billboard_pools", billboard_pools)
-        self._write_debug(skipped_debug, group_best, disqualified_debug, billboard_pools)
+        self._write_debug(skipped_debug, group_best, disqualified_debug, billboard_pools, synthetic_skipped)
 
         if not group_best:
             self.log_info("No objects within 3D generation distance")
@@ -172,12 +175,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
     def _curate(
         self, object_count: int, get_metadata, get_image, panorama_depth, pano_w, pano_h,
-    ) -> tuple[dict[tuple[str, int], tuple[int, float, float]], dict[str, list[int]], list, list]:
+    ) -> tuple[dict[tuple[str, int], tuple[int, float, float]], dict[str, list[int]], list, list, int]:
         """Shared by run() and has_expected_output() (callers pass either the
         input_* accessors to see state as of the previous stage, or the plain
         accessors to see this stage's own already-cached output).
 
-        Returns (group_best, billboard_pools, skipped_debug, disqualified_debug).
+        Returns (group_best, billboard_pools, skipped_debug, disqualified_debug,
+        synthetic_skipped).
         group_best: (class, bucket) -> (idx, depth, score) of the winning mesh
         representative, only for groups with at least one instance closer than
         billboard_distance_m. billboard_pools: "{class}::{bucket}" -> top-K
@@ -187,6 +191,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         """
         threshold = self.config.billboard_distance_m
         skipped_debug = []
+        synthetic_skipped = 0
         depth_by_idx: dict[int, tuple[list, float]] = {}
         candidates_by_group: dict[tuple[str, int], list[dict]] = {}
 
@@ -225,6 +230,27 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     "class": obj_class,
                     "reason": "position_only",
                 })
+                continue
+            if metadata.get("synthetic"):
+                # DistributionSynthesisStage runs BEFORE this stage and bumps
+                # OBJECT_COUNT, so the loop above walks its painted points too --
+                # but a painted point has no detection box and no crop_{idx} of
+                # its own; it exists to CONSUME a pool, never to populate one.
+                # Left in, each one scored on pure defaults (confidence and
+                # fill_ratio both fall back to 0.5, depth is unsamplable so it's
+                # forced to the far value, giving a flat ~0.30) and so outranked
+                # every real detection in a bucket whose instances all sit past
+                # billboard_distance_m with a typical sub-0.5 CLIP confidence.
+                # Those buckets' billboard_pools then filled with indices that
+                # have no image behind them, and SceneGenerationStage rendered
+                # crop_{idx} for a crop that was never written -- observed as
+                # distant classes (trees) disappearing from the scene while close
+                # ones (flowers) survived on their nonzero depth score.
+                #
+                # Counted rather than listed per-index: a painted population is
+                # routinely thousands of points, which would swamp asset_debug.json
+                # with entries carrying no information beyond their own count.
+                synthetic_skipped += 1
                 continue
 
             bucket = metadata.get("bucket") or 0
@@ -299,9 +325,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
                         "chosen_anyway": s["idx"] == winner["idx"],
                     })
 
-        return group_best, billboard_pools, skipped_debug, disqualified_debug
+        return group_best, billboard_pools, skipped_debug, disqualified_debug, synthetic_skipped
 
-    def _write_debug(self, skipped: list, group_best: dict, disqualified: list, billboard_pools: dict):
+    def _write_debug(
+        self, skipped: list, group_best: dict, disqualified: list, billboard_pools: dict,
+        synthetic_skipped: int = 0,
+    ):
         if self.output is None:
             return
         payload = {
@@ -309,6 +338,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             "billboard_top_k": self.config.billboard_top_k,
             "summary": {
                 "skipped_env_or_filtered": len(skipped),
+                "skipped_synthetic": synthetic_skipped,
                 "groups_billboard_only": len(billboard_pools) - len(group_best),
                 "groups_meshified": len(group_best),
             },
@@ -364,7 +394,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
-        group_best, _, _, _ = self._curate(
+        group_best, _, _, _, _ = self._curate(
             count, context.object, context.image, panorama_depth, pano_w, pano_h,
         )
         for obj_class, bucket in group_best:
