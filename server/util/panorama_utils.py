@@ -458,8 +458,26 @@ class Panorama:
                     # denom -- it cannot silently mask a real, in-range case
                     # (those already satisfy 0 <= frac <= 1 by construction).
                     frac = np.clip((r_sky - pv_over) / denom, 0.0, 1.0)
-                    max_real_band = 24.0
-                    real_band = np.minimum(max_real_band, np.maximum(H - 1.0 - r_sky, 0.0))
+                    # Stretch the overshoot climb across real mountain texture
+                    # instead of cramming it into a thin strip. A 24 px cap forced
+                    # a median ~30 px overshoot (2-3 deg) -- with a long tail past
+                    # 150 px -- into 24 rows, so many distinct summit vertices
+                    # sampled nearly the same few pixels and the peak read as one
+                    # flat, repeated colour ("the whole mountain is the colour of
+                    # its top"). A wider band spreads them ~5x (measured: median
+                    # per-column texture span 23 -> ~117 px on a Mount capture), so
+                    # the reconstructed summit carries varied rock/snow texture.
+                    # Capped at the horizon row (H/2) rather than the image bottom:
+                    # rows below the horizon are foreground ground, a different part
+                    # of the scene entirely, and stretching a mountain vertex onto
+                    # grass is a worse artefact than the mild texture fold this
+                    # band's own inward mapping introduces. This stays a best-effort
+                    # compromise -- there is no real texture *above* the skyline to
+                    # sample, so the only fully-correct fix is geometry that doesn't
+                    # overshoot the silhouette in the first place.
+                    max_real_band = 120.0
+                    horizon_room = np.maximum(H / 2.0 - r_sky, 0.0)
+                    real_band = np.minimum(max_real_band, horizon_room)
                     new_pv = r_sky + real_band * frac
 
                     pv = pv.copy()

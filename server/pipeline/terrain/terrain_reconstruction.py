@@ -28,7 +28,7 @@ import numpy as np
 import torch
 from typing import Any, Optional
 from logging import Logger
-from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt, label, binary_dilation
+from scipy.ndimage import zoom as nd_zoom, gaussian_filter, distance_transform_edt, label, binary_dilation, map_coordinates
 from scipy.sparse import csr_matrix
 from scipy.sparse.linalg import spsolve
 
@@ -146,6 +146,22 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         # behaviour).
         envelope_max_reach_m: float = 25.0,
         envelope_reach_feather_m: float = 10.0,
+        # Radial-spoke removal. The equirectangular->grid projection maps each
+        # panorama COLUMN onto a radial line, so a per-column depth bias (the depth
+        # model is noisier column-to-column than it is smooth along a column) turns
+        # into a radial streak -- a "spoke". Those land in the observed data and get
+        # pinned as Dirichlet BCs (measured: ~89% of solve nodes are fixed), so the
+        # harmonic solve cannot remove them. This pass subtracts only the tangential
+        # (per-azimuth) high-frequency component, computed as a polar round-trip
+        # DIFFERENCE so the polar-resample error cancels (a naive resample injects
+        # ~1.2 m of concentric-ring artifact; the spoke component itself is ~0.2 m).
+        # Radial detail and large angular features (mountains span tens of degrees)
+        # are preserved. Gaussian sigma in degrees of azimuth; 0 disables.
+        despoke_angular_sigma_deg: float = 3.0,
+        # Never touch the nadir singularity (azimuth is undefined at r=0); the
+        # correction ramps in from despoke_min_radius_m over despoke_feather_m.
+        despoke_min_radius_m: float = 4.0,
+        despoke_feather_m: float = 3.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
@@ -168,6 +184,9 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.envelope_min_radius_m = envelope_min_radius_m
         self.envelope_max_reach_m = envelope_max_reach_m
         self.envelope_reach_feather_m = envelope_reach_feather_m
+        self.despoke_angular_sigma_deg = despoke_angular_sigma_deg
+        self.despoke_min_radius_m = despoke_min_radius_m
+        self.despoke_feather_m = despoke_feather_m
 
 
 class TerrainReconstructionStage(PipelineStage):
@@ -751,6 +770,23 @@ class TerrainReconstructionStage(PipelineStage):
                 f"({int(observed_override_native.sum())} px excluded as ridge-overridden)"
             )
 
+        # Radial-spoke removal (see despoke_angular_sigma_deg). Runs last, on the
+        # fully assembled surface -- the spokes live in the observed data the restore
+        # step just spliced back at full resolution, so this has to come after it to
+        # reach them, not before. Subtracts only the tangential high-frequency
+        # component, so restored real elevation and mountain shape are preserved.
+        if cfg.despoke_angular_sigma_deg > 0.0:
+            spoked = new_hm
+            new_hm = TerrainReconstructionStage._despoke(
+                new_hm, grid_size, cfg.despoke_angular_sigma_deg,
+                cfg.despoke_min_radius_m, cfg.despoke_feather_m,
+            )
+            self.log_info(
+                f"De-spoke: tangential high-freq removed (sigma "
+                f"{cfg.despoke_angular_sigma_deg:.0f}deg azimuth), "
+                f"mean |Δ| {float(np.abs(new_hm - spoked).mean()):.2f} m"
+            )
+
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 
         # Publish a ridge-override-aware trust mask, DISTINCT from
@@ -803,6 +839,55 @@ class TerrainReconstructionStage(PipelineStage):
 
         self.finish_progress(task)
         return context
+
+    @staticmethod
+    def _despoke(
+        hm: np.ndarray,
+        grid_size_m: float,
+        sigma_theta_deg: float,
+        min_radius_m: float,
+        feather_m: float,
+    ) -> np.ndarray:
+        """
+        Remove radial-streak spokes (per-azimuth depth bias, see
+        despoke_angular_sigma_deg) by subtracting only the tangential
+        high-frequency component of the surface.
+
+        The component is taken as pol - gaussian_smooth_theta(pol) in polar
+        space, then mapped back to the cartesian grid. Both the round-trip and
+        its resample error are identical for pol and its angular blur, so the
+        DIFFERENCE carries essentially none of that error -- this is what keeps
+        the correction free of the concentric-ring artifact a naive
+        polar->smooth->cartesian round-trip would bake in. Only the (small)
+        genuine spoke signal survives; the angularly-smooth surface -- radial
+        gradients and any feature broad in azimuth, i.e. real mountains -- is
+        returned untouched.
+        """
+        if sigma_theta_deg <= 0.0:
+            return hm
+        G = hm.shape[0]
+        cx = cy = G / 2.0
+        nr, nth = G * 2, 2160
+        r = np.linspace(0, G / 2.0 - 1, nr)
+        th = np.linspace(0, 2 * np.pi, nth, endpoint=False)
+        R, TH = np.meshgrid(r, th)
+        pol = map_coordinates(
+            hm.astype(np.float64), [cy + R * np.sin(TH), cx + R * np.cos(TH)],
+            order=3, mode="nearest",
+        )
+        sm = gaussian_filter(pol, (sigma_theta_deg / (360.0 / nth), 0.0), mode="wrap")
+
+        yy, xx = np.mgrid[0:G, 0:G]
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        tt = np.arctan2(yy - cy, xx - cx) % (2 * np.pi)
+        spokes = map_coordinates(
+            pol - sm,
+            [tt / (2 * np.pi) * nth, rr / (G / 2.0 - 1) * (nr - 1)],
+            order=3, mode="grid-wrap",
+        )
+        cell = grid_size_m / G
+        w = np.clip((rr * cell - min_radius_m) / max(feather_m, 1e-6), 0.0, 1.0)
+        return (hm - spokes * w).astype(hm.dtype)
 
     @staticmethod
     def _downsample_observed_max(mask: np.ndarray, out_h: int, out_w: int) -> np.ndarray:
