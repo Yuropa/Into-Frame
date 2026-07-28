@@ -263,11 +263,6 @@ stages:
                                  # the user.
     nadir_ramp_width: 3.0       # metres over which certainty ramps from 0 (at exclusion boundary)
                                  # to full geometric certainty; prevents a hard ring artifact.
-    nadir_relief_match: 0.6     # 0-1: reproduce this fraction of the surrounding ring's relief
-                                 # amplitude inside the harmonic-filled nadir disc, so it isn't a
-                                 # dead-flat mesa (the "plateau") with a hard rim against textured
-                                 # ground. 1.0 = match neighbours exactly; 0 = pure harmonic fill.
-                                 # Partial: the reconstruction stage still attenuates nadir relief.
     far_exclusion_radius: 45.0  # metres: mirror image of nadir_exclusion_radius at the far end.
                                  # Beyond this radius, a cell backed only by the flat-ground
                                  # single-ray guess (no real forward-projected sample) stops
@@ -491,6 +486,13 @@ stages:
     envelope_reach_feather_m: 10.0    # taper band past envelope_max_reach_m over which the envelope
                                        # fades back to the observed height, so the reach limit doesn't
                                        # simply relocate the fabricated ring to its own cutoff radius.
+    despoke_angular_sigma_deg: 3.0    # remove radial "spokes" (per-panorama-column depth bias mapped
+                                       # onto radial lines and pinned as Dirichlet BCs the solve can't
+                                       # smooth). Subtracts only the tangential high-freq component via
+                                       # a ring-free polar-difference; mountains (broad in azimuth) and
+                                       # radial detail are preserved. Degrees of azimuth; 0 disables.
+    despoke_min_radius_m: 4.0         # never touch the nadir singularity; ramp the correction in
+    despoke_feather_m: 3.0            # over this band past despoke_min_radius_m.
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage
@@ -503,7 +505,22 @@ stages:
                                    # texture the harmonic solve's smooth fill farther from the camera,
                                    # but combined with the low certainty of the synthetic nadir prior
                                    # right at the grid center, that read as spiky noise directly under
-                                   # the camera -- reverted back to the original value.
+                                   # the camera -- reverted back to the original value. Texturing the
+                                   # smooth fill is instead handled by unobserved_texture_amplitude
+                                   # below, which avoids that failure mode (see there).
+    unobserved_texture_amplitude: 0.6 # metres of meso-scale fBm re-injected into UNOBSERVED terrain
+                                   # AFTER every smoothing pass (diffusion, and hydro erosion's
+                                   # downsample-to-hydro_resolution round-trip both otherwise strip the
+                                   # fill's texture, leaving reconstructed slopes and the nadir a smooth
+                                   # dome -- the "plateau"). Unlike the reverted noise_amplitude bump
+                                   # above, this is gated by (1 - protect) so it lands ONLY on
+                                   # unobserved/untrusted cells and fades to nothing into real data, and
+                                   # runs post-erosion at full res so it survives. Preserves mountains
+                                   # (measured: r60-80 std unchanged) and observed detail. NOTE: the
+                                   # small hard nadir disc at the exact grid centre (the height-map
+                                   # flat-prior crater, r < nadir_exclusion+ramp) is a separate
+                                   # geometric artefact this does NOT remove -- see docs/terrain_dev.
+                                   # 0 disables.
     linear_diffusivity: 1.0e-3    # Landlab K_d: hillslope diffusivity in m²/[synthetic yr]
     diffusion_dt: 2250.0          # synthetic timestep; diffusion_length ≈ sqrt(4 × K_d × dt) ≈ 3 m.
                                    # Raised from 200 (≈0.9 m) — that was only rounding multi-cell

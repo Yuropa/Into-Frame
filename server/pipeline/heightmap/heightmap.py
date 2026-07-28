@@ -32,7 +32,6 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         label_smooth_sigma: float = 1.5,
         nadir_exclusion_radius: float = 1.0,
         nadir_ramp_width: float = 5.0,
-        nadir_relief_match: float = 0.6,
         far_exclusion_radius: Optional[float] = None,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
@@ -82,17 +81,6 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # up to full geometric certainty over nadir_ramp_width metres beyond that radius.
         self.nadir_exclusion_radius = nadir_exclusion_radius
         self.nadir_ramp_width = nadir_ramp_width
-        # The nadir disc is filled by harmonic diffusion from the terrain just
-        # outside it, which returns the smoothest possible surface -- a dead-flat
-        # mesa under the camera with a hard roughness rim where it meets real,
-        # textured ground (the "plateau"). This fraction (0-1) of the surrounding
-        # ring's own high-frequency relief amplitude is reproduced inside the disc
-        # as coherent noise on top of that trend, so relief stays continuous across
-        # the rim. 1.0 matches the neighbours' amplitude exactly; 0 disables (pure
-        # harmonic fill). See HeightMapGenerator.generate's nadir disc block. Note
-        # the reconstruction stage still attenuates near-nadir relief, so this is a
-        # partial mitigation of the plateau, not a complete one.
-        self.nadir_relief_match = nadir_relief_match
         # Mirror image of nadir_exclusion_radius at the far end of the range: beyond
         # this radius (metres), a cell backed only by the flat-ground single-ray guess
         # (no genuine forward-projected sample) stops counting as observed ground
@@ -313,7 +301,6 @@ class HeightMapStage(PipelineStage):
             reclaimed_certainty_factor=cfg.reclaimed_certainty_factor,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
-            nadir_relief_match=cfg.nadir_relief_match,
             far_exclusion_radius=cfg.far_exclusion_radius,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,

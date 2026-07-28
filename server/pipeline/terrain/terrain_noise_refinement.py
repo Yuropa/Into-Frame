@@ -105,6 +105,18 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         # cliff cell; certainty fades this out gradually rather than the hard on/off
         # edge the final true_observed-only restore leaves behind.
         observed_trust_strength: float = 1.0,
+        # Post-diffusion texture for UNOBSERVED terrain. Hillslope diffusion
+        # (Pass 3) rounds off the fBm from Pass 2 wherever nothing protects it --
+        # worst at the nadir disc, which has no real data and no cliff/certainty
+        # protection, so it diffuses into a smooth dome ringed by the rough,
+        # restore-protected observed terrain around it. That smooth disc under
+        # the camera, with a hard rim where it meets textured ground, is the
+        # "plateau". This re-injects meso-scale fBm AFTER diffusion, scaled by
+        # (1 - protect) so it lands only on unobserved/untrusted cells and fades
+        # to zero into real data -- giving the nadir terrain-like variation
+        # comparable to its neighbours and softening the rim, without touching
+        # measured geometry. Metres of amplitude; 0 disables.
+        unobserved_texture_amplitude: float = 0.6,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.road_blend_weight = road_blend_weight
@@ -128,6 +140,7 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.hydro_resolution = hydro_resolution
         self.cliff_noise_suppression = cliff_noise_suppression
         self.observed_trust_strength = observed_trust_strength
+        self.unobserved_texture_amplitude = unobserved_texture_amplitude
 
 
 class TerrainNoiseRefinementStage(PipelineStage):
@@ -381,6 +394,24 @@ class TerrainNoiseRefinementStage(PipelineStage):
                 f"Terrain noise refinement: hydrological erosion "
                 f"(K={cfg.hydro_erodibility:.1e}, dt={cfg.hydro_dt:.0f}×{cfg.hydro_n_steps})"
             )
+
+        # ── Pass 6: Unobserved-region texture ─────────────────────────────────
+        # See unobserved_texture_amplitude. Every synthetic pass above that adds
+        # fine detail (fBm, before diffusion) is either smoothed off unprotected
+        # cells by diffusion or destroyed by hydro erosion's downsample-to-
+        # hydro_resolution round-trip; observed cells get their detail back from
+        # the restore below, but unobserved terrain -- the nadir disc above all,
+        # which has no real data to restore -- is left as the smooth erosion
+        # output: a flat dome under the camera ringed by textured ground (the
+        # "plateau"). Re-inject meso-scale fBm HERE, after every smoothing pass
+        # and before the restore, scaled by (1 - protect) so it only lands on
+        # unobserved/untrusted cells and fades to nothing into real data. Runs at
+        # full resolution, so nothing downstream in this stage dilutes it. A seed
+        # distinct from Pass 2 so it isn't a copy of noise the earlier passes
+        # already reshaped.
+        if cfg.unobserved_texture_amplitude > 0.0 and has_protection:
+            fill_texture = self._make_noise(H, W, cfg.noise_scale, cfg.noise_octaves, cfg.seed + 101)
+            terrain = terrain + fill_texture * cfg.unobserved_texture_amplitude * (1.0 - protect)
 
         # ── Restore observed data ─────────────────────────────────────────────
         # A single restore covering every pass above (road grading, fBm noise,

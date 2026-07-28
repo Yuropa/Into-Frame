@@ -43,7 +43,6 @@ class HeightMapGenerator:
         reclaimed_certainty_factor: float = 0.5,
         nadir_exclusion_radius: float = 0.0,
         nadir_ramp_width: float = 5.0,
-        nadir_relief_match: float = 0.6,
         far_exclusion_radius: Optional[float] = None,
         flat_zone_certainty: float = 0.15,
         certainty_falloff_meters: float = 20.0,
@@ -653,37 +652,7 @@ class HeightMapGenerator:
                 diffused = diffuse_heightmap(
                     seed, crop_known, n_iters=max(200, int(radius_cells) * 8), seed_from='nearest',
                 )
-                disc_fill = diffused
-                # The harmonic fill above is the smoothest possible surface, so the
-                # disc comes back dead flat while the real terrain immediately
-                # outside it carries micro-relief -- a flat mesa (~2*prior_radius
-                # across) with a hard roughness rim where the two meet, which reads
-                # as a "plateau" pinned under the camera. Reproduce the surrounding
-                # ring's own high-frequency amplitude inside the disc, as coherent
-                # noise laid on top of the harmonic trend, so relief is continuous
-                # across the rim instead of stepping from textured terrain to a
-                # pancake. This fabricates detail in the least-reliable (nadir)
-                # region, but matched to its own neighbours and far less wrong than a
-                # flat plane -- the same synthetic-fill principle _interpolate
-                # already applies to every other unobserved gap. 0 disables (pure
-                # harmonic fill, the prior flat-mesa behaviour).
-                if nadir_relief_match > 0:
-                    crop_r = _r_cell[lo:hi, lo:hi]
-                    # Estimate amplitude from a band just outside the disc only, so a
-                    # distant high-relief mountain caught in the (6*radius) crop can't
-                    # inflate the near-nadir texture. Scale the high-pass at the disc's
-                    # own radius so it captures terrain-scale undulation, not pixel dither.
-                    relief_scale = float(np.clip(radius_cells * 0.15, 3.0, 48.0))
-                    band = crop_known & (crop_r <= prior_radius * 2.5)
-                    if band.sum() >= 16:
-                        highpass = seed - gaussian_filter(seed, relief_scale)
-                        amp = float(np.std(highpass[band]))
-                        if amp > 1e-4:
-                            noise = np.random.default_rng(0).standard_normal(seed.shape).astype(np.float32)
-                            noise = gaussian_filter(noise, relief_scale)
-                            noise /= (float(np.std(noise)) + 1e-6)
-                            disc_fill = diffused + (nadir_relief_match * amp) * noise
-                height_map[lo:hi, lo:hi] = np.where(crop_disc, disc_fill, crop_hm)
+                height_map[lo:hi, lo:hi] = np.where(crop_disc, diffused, crop_hm)
             else:
                 # No real terrain nearby yet to interpolate from -- fall back to
                 # the flat assumption.
