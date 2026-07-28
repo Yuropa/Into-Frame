@@ -263,6 +263,11 @@ stages:
                                  # the user.
     nadir_ramp_width: 3.0       # metres over which certainty ramps from 0 (at exclusion boundary)
                                  # to full geometric certainty; prevents a hard ring artifact.
+    nadir_relief_match: 0.6     # 0-1: reproduce this fraction of the surrounding ring's relief
+                                 # amplitude inside the harmonic-filled nadir disc, so it isn't a
+                                 # dead-flat mesa (the "plateau") with a hard rim against textured
+                                 # ground. 1.0 = match neighbours exactly; 0 = pure harmonic fill.
+                                 # Partial: the reconstruction stage still attenuates nadir relief.
     far_exclusion_radius: 45.0  # metres: mirror image of nadir_exclusion_radius at the far end.
                                  # Beyond this radius, a cell backed only by the flat-ground
                                  # single-ray guess (no real forward-projected sample) stops
@@ -795,6 +800,16 @@ stages:
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
     billboard_distance_m: 30.0
+    # A (class, bucket) group only earns a bespoke 3D mesh when its winning crop's
+    # detection box covers at least this fraction of the panorama -- meshing is
+    # otherwise gated on distance alone, which lets a close-but-tiny subject through.
+    # Measured on an alpine-meadow capture: foreground flowers 0.6-1 m from the
+    # camera each occupy only ~0.01-0.07% of the frame (20-80 px) yet, split into a
+    # bucket per colour, spawned 7 separate flower meshes (several singleton buckets,
+    # one a conf-0.03 "sheep in grass" miscrop). Below this they stay billboard-only
+    # (pool still curated -- not dropped). 0.001 (~0.1%, ~92x92 px) clears those while
+    # keeping any genuine close foreground subject. 0 disables (distance-only).
+    min_mesh_area_fraction: 0.001
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
 

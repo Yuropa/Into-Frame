@@ -22,6 +22,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         billboard_distance_m: float = 10.0,
+        min_mesh_area_fraction: float = 0.001,
         generator_type: str = "TRELLIS",
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
@@ -36,6 +37,18 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.billboard_distance_m = float(billboard_distance_m)
+        # A group only earns a bespoke category mesh if its winning representative's
+        # detection box covers at least this fraction of the panorama. Meshing is
+        # otherwise gated on distance alone (billboard_distance_m), which lets a
+        # tiny-but-close subject through -- e.g. foreground alpine-meadow flowers
+        # sit 0.6-1 m from the camera yet each occupy only ~0.01-0.07% of the frame
+        # (20-80 px), and, split into a bucket per colour, spawn a separate 3D mesh
+        # apiece (observed: 7 flower meshes, several from singleton buckets, one
+        # from a conf-0.03 "sheep in grass" miscrop). Bespoke meshes are meant for
+        # prominent foreground subjects; anything below this stays billboard-only
+        # (its pool is still curated, so it isn't dropped -- just not meshified).
+        # 0 disables the size gate (distance-only, prior behaviour).
+        self.min_mesh_area_fraction = float(min_mesh_area_fraction)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
         self.billboard_top_k = billboard_top_k
@@ -71,6 +84,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
     Writes: category_mesh_{class}_{bucket} for each qualifying group,
             "billboard_pools" ({"{class}::{bucket}": [idx, ...]}) for every group
     Config: billboard_distance_m (default 10.0 m), billboard_top_k (default 4),
+            min_mesh_area_fraction (default 0.001 -- a group whose winning box
+            covers less of the panorama than this stays billboard-only),
             generator_type (default TRELLIS)
     """
 
@@ -253,6 +268,26 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
             eligible = [s for s in within_threshold if not s["disqualified"]] or within_threshold
             winner = max(eligible, key=lambda s: s["score"])
+
+            # Size gate: a bespoke mesh is only worth generating for a prominent
+            # subject. A close-but-tiny winner (e.g. a single meadow flower) stays
+            # billboard-only -- its pool was already curated above, so it isn't
+            # lost, just not meshified. Skipped when panorama dims or the winning
+            # box are unavailable (can't measure), preserving distance-only
+            # behaviour; disabled entirely at min_mesh_area_fraction == 0.
+            wb = winner.get("box")
+            if self.config.min_mesh_area_fraction > 0 and wb is not None and pano_w and pano_h:
+                win_area_fraction = (wb[2] * wb[3]) / float(pano_w * pano_h)
+                if win_area_fraction < self.config.min_mesh_area_fraction:
+                    skipped_debug.append({
+                        "idx": winner["idx"],
+                        "class": obj_class,
+                        "reason": "too_small_for_mesh",
+                        "bucket": bucket,
+                        "area_fraction": round(win_area_fraction, 5),
+                    })
+                    continue
+
             group_best[(obj_class, bucket)] = (winner["idx"], winner["depth"], winner["score"])
             for s in within_threshold:
                 if s["disqualified"]:
