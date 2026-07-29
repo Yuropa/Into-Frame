@@ -13,6 +13,12 @@ DEBUG=""
 CONFIG=""
 OUTPUT="output"
 SEEDS=()
+# Forwarded to main.py as a global --log-mode. Every other frame.sh subcommand
+# already accepts -v/--plain/--log-mode; `remote` passes its argv straight here,
+# so without these cases `frame.sh remote -v` died on "Unknown argument: -v" --
+# which is exactly the flag the pipeline's own model-download stall hint tells
+# you to re-run with.
+LOG_MODE=""
 
 usage() {
   cat <<EOF
@@ -30,6 +36,9 @@ Common options:
   --env         Remote conda environment   (default: ${ENV})
   --ssh-port    SSH port                   (default: 22)
   --key         Path to SSH private key    (default: none)
+  -v, --verbose Verbose remote logging (shows model download progress)
+  --plain       Plain remote logging (no panel UI)
+  --log-mode    panel | plain | verbose    (default: panel)
   -h, --help    Show this help message
 
 server options:
@@ -79,10 +88,32 @@ while [[ $# -gt 0 ]]; do
     --seed)        SEEDS+=("$2");     shift 2 ;;
     -o|--output)   OUTPUT="$2";       shift 2 ;;
     -i|--input)    INPUT="$2";        shift 2 ;;
+    -v|--verbose)  LOG_MODE="verbose"; shift ;;
+    --plain)       LOG_MODE="plain";   shift ;;
+    --log-mode)    LOG_MODE="$2";     shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
   esac
 done
+
+# Quote a path for the REMOTE shell.
+#
+# Everything below is assembled into one string that ssh hands to the remote
+# shell, so an unquoted path with a space in it gets word-split there: the
+# default sample is literally "Mount Rainier.jpg", which arrived as
+# `--input .../Mount` plus a stray `Rainier.jpg` argument and made argparse fail
+# on a file that exists. The leading `~` has to stay OUTSIDE the quotes or it
+# stops being expanded and you get a literal ~ directory instead.
+quote_remote_path() {
+  local p="$1" rest
+  # Escape any embedded single quotes: close, emit an escaped quote, reopen.
+  if [[ "$p" == "~/"* ]]; then
+    rest="${p#\~/}"
+    printf "~/'%s'" "${rest//\'/\'\\\'\'}"
+  else
+    printf "'%s'" "${p//\'/\'\\\'\'}"
+  fi
+}
 
 # Build SSH options string
 SSH_OPTS="-t"
@@ -119,13 +150,17 @@ case "$ACTION" in
     [[ -n "$REMOTE_IN" && "$REMOTE_IN" != /* && "$REMOTE_IN" != "~"* ]] \
       && REMOTE_IN="${REMOTE_DIR}/${REMOTE_IN#./}"
 
-    REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT} --output ${REMOTE_OUT}"
-    [[ -n "$REMOTE_IN" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --input ${REMOTE_IN}"
+    REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT} --output $(quote_remote_path "$REMOTE_OUT")"
+    [[ -n "$REMOTE_IN" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --input $(quote_remote_path "$REMOTE_IN")"
     [[ -n "$DEBUG"  ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --debug $DEBUG"
-    [[ -n "$CONFIG" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --config $CONFIG"
+    [[ -n "$CONFIG" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --config $(quote_remote_path "$CONFIG")"
 
-    # --seed is a top-level main.py flag, so it must precede the "server" subcommand
-    REMOTE_CMD="source ~/miniconda3/etc/profile.d/conda.sh && conda activate ${ENV} && cd ${REMOTE_DIR} && python3 main.py${SEED_ARGS} ${REMOTE_PY_ARGS}"
+    # --seed and --log-mode are top-level main.py flags, so both must precede the
+    # "server" subcommand.
+    GLOBAL_ARGS="$SEED_ARGS"
+    [[ -n "$LOG_MODE" ]] && GLOBAL_ARGS="$GLOBAL_ARGS --log-mode $LOG_MODE"
+
+    REMOTE_CMD="source ~/miniconda3/etc/profile.d/conda.sh && conda activate ${ENV} && cd $(quote_remote_path "$REMOTE_DIR") && python3 main.py${GLOBAL_ARGS} ${REMOTE_PY_ARGS}"
 
     echo "Connecting to ${REMOTE_USER}@${REMOTE_HOST} (forwarding :${PORT} and :${ASSET_PORT})..."
     # shellcheck disable=SC2086
@@ -138,7 +173,7 @@ case "$ACTION" in
 
   pull)
     REMOTE_REPO="$(dirname "$REMOTE_DIR")"
-    REMOTE_CMD="git -C $REMOTE_REPO pull"
+    REMOTE_CMD="git -C $(quote_remote_path "$REMOTE_REPO") pull"
 
     echo "Pulling latest on ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_REPO}..."
     # shellcheck disable=SC2086
@@ -147,7 +182,11 @@ case "$ACTION" in
 
   clear)
     REMOTE_TARGET="${REMOTE_DIR}/${OUTPUT#./}"
-    REMOTE_CMD="if [ -d $REMOTE_TARGET ]; then rm -rf $REMOTE_TARGET/* && echo 'Done.'; else echo \"Output directory does not exist: $REMOTE_TARGET\"; fi"
+    # Quoted for the same reason as the server paths above -- and here it matters
+    # more than a failed argparse: an unquoted `rm -rf $REMOTE_TARGET/*` on a path
+    # containing a space expands to several targets.
+    QUOTED_TARGET="$(quote_remote_path "$REMOTE_TARGET")"
+    REMOTE_CMD="if [ -d $QUOTED_TARGET ]; then rm -rf $QUOTED_TARGET/* && echo 'Done.'; else echo \"Output directory does not exist: $REMOTE_TARGET\"; fi"
 
     echo "Clearing output on ${REMOTE_USER}@${REMOTE_HOST}:${REMOTE_TARGET}..."
     # shellcheck disable=SC2086
