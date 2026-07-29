@@ -143,10 +143,20 @@ case "$ACTION" in
     # default (Mount Rainier.jpg) and lands on a different cache key than whatever
     # `frame.sh run` generated -- which looks exactly like the cache being ignored.
     # Relative paths resolve against REMOTE_DIR, since the remote cd's there first.
-    # Default mirrors frame.sh's own INPUT default (samples/Paris.jpg) so that
-    # `frame.sh run` and `frame.sh remote` land on the SAME cache key by
-    # construction, resolved against the remote repo root rather than a local path.
-    REMOTE_IN="${INPUT:-$(dirname "$REMOTE_DIR")/samples/Paris.jpg}"
+    # Default mirrors frame.sh's own INPUT default so that `frame.sh run` and
+    # `frame.sh remote` land on the SAME cache key by construction.
+    #
+    # That default resolves against REMOTE_DIR (the *server* dir), not its parent:
+    # the samples live in server/samples/, and there is no samples/ at the repo
+    # root, so the previous $(dirname "$REMOTE_DIR")/samples/... pointed at a path
+    # that has never existed -- every no-input remote run died on FileNotFoundError
+    # before reaching the pipeline. Resolving here the same way an explicit
+    # relative --input does also removes the disagreement between the two, which
+    # previously sent them to different directories.
+    #
+    # Mount Rainier matches main.py's own --input default, so a bare `frame.sh
+    # remote` and a bare `python3 main.py server` mean the same scene.
+    REMOTE_IN="${INPUT:-samples/Mount Rainier.jpg}"
     [[ -n "$REMOTE_IN" && "$REMOTE_IN" != /* && "$REMOTE_IN" != "~"* ]] \
       && REMOTE_IN="${REMOTE_DIR}/${REMOTE_IN#./}"
 

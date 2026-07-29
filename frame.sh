@@ -24,7 +24,15 @@ DEBUG=""
 CONFIG=""
 
 # --- run defaults ---
-INPUT="$SCRIPT_DIR/samples/Paris.jpg"
+# The sample images live under server/, not at the repo root -- there is no
+# top-level samples/ directory, so $SCRIPT_DIR/samples/... resolved to a path
+# that has never existed and every no-input invocation died on FileNotFoundError.
+#
+# Mount Rainier matches main.py's own --input default (resource_directory() /
+# "Mount Rainier.jpg"), so all three entry points now agree on which scene a
+# bare invocation means. scripts/remote-server.sh mirrors this so `frame.sh run`
+# and `frame.sh remote` land on the same pipeline cache key; keep the two in step.
+INPUT="$SERVER_DIR/samples/Mount Rainier.jpg"
 RERUN_ARGS=()
 
 # --- server defaults ---
