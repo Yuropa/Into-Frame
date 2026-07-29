@@ -80,6 +80,11 @@ def _padded_hull_polygon(points, pad: float) -> np.ndarray:
     return hull_pts + directions / norms * pad
 
 
+def _polygon_area(polygon: np.ndarray) -> float:
+    x, z = np.asarray(polygon, dtype=np.float64).T
+    return float(abs(np.dot(x, np.roll(z, -1)) - np.dot(z, np.roll(x, -1))) / 2.0)
+
+
 def _local_grid(bbox_min: np.ndarray, bbox_max: np.ndarray, target_count: int) -> np.ndarray:
     res = max(2, int(round(math.sqrt(max(target_count, 4)))))
     xs = np.linspace(bbox_min[0], bbox_max[0], res)
@@ -98,6 +103,8 @@ MIN_EXEMPLAR_SPACING_M = 0.25
 MAX_PAINT_RADIUS_M = 30.0
 MAX_EXEMPLAR_CANDIDATES = 4000
 MIN_PAD_M = 0.5
+FULL_DENSITY_RADIUS_M = 6.0
+DENSITY_FALLOFF_EXPONENT = 2.0
 SEED = 0
 
 
@@ -199,6 +206,13 @@ def build_jobs(ctx: Path, only_group: str | None):
                                 continue
                         pad = max(cell_m, MIN_PAD_M)
                         tile_domain = _local_grid(lo - pad, hi + pad, MAX_CANDIDATES_PER_TILE)
+                        tile_distance = float(np.hypot(*np.minimum(np.maximum(0.0, lo), hi)))
+                        tile_keep = 1.0
+                        if FULL_DENSITY_RADIUS_M > 0 and tile_distance > FULL_DENSITY_RADIUS_M:
+                            tile_keep = (FULL_DENSITY_RADIUS_M / tile_distance) ** DENSITY_FALLOFF_EXPONENT
+                        tile_points = int(round(
+                            len(points) / max(_polygon_area(input_boundary), 1e-6)
+                            * _polygon_area(output_boundary) * tile_keep))
                         jobs.append({
                             "group": name,
                             "domain_points": np.concatenate([exemplar_domain, tile_domain], axis=0),
@@ -206,6 +220,8 @@ def build_jobs(ctx: Path, only_group: str | None):
                             "input_boundary": input_boundary,
                             "output_boundary": output_boundary,
                             "bin_count": dist["bin_count"],
+                            "n_points": max(2, min(tile_points, MAX_CANDIDATES_PER_TILE)),
+                            "distance_m": tile_distance,
                         })
                         group_jobs += 1
             print(f"[{name}] {group_jobs} tile(s) inside {MAX_PAINT_RADIUS_M}m")
@@ -213,7 +229,7 @@ def build_jobs(ctx: Path, only_group: str | None):
 
 
 def to_stdin(job) -> str:
-    lines = [f"{job['bin_count']} -1 {MAX_ITERS} {SEED}"]
+    lines = [f"{job['bin_count']} {job['n_points']} {MAX_ITERS} {SEED}"]
     for key in ("domain_points", "exemplar_points", "input_boundary", "output_boundary"):
         pts = job[key]
         lines.append(str(len(pts)))
@@ -227,22 +243,34 @@ def main():
     ap.add_argument("--group", help="only this '<region>/<type>' group, e.g. ground/flower")
     ap.add_argument("--run", type=Path, help="path to synthesize_cli; execute each tile")
     ap.add_argument("--limit", type=int, default=3, help="tiles to run/write (default 3)")
+    ap.add_argument("--worst", action="store_true",
+                    help="take the tiles with the LARGEST requested point count instead of "
+                         "the first ones. Runtime scales with that count, so this is what "
+                         "you want when the question is whether tiles fit in the timeout — "
+                         "enumeration order has no relationship to cost.")
     ap.add_argument("--out", type=Path, help="directory to write tile stdin files to")
     ap.add_argument("--timeout", type=float, default=120.0)
     args = ap.parse_args()
 
     jobs = build_jobs(args.context_dir, args.group)
-    print(f"\n=== {len(jobs)} tile job(s) total ===")
+    print(f"\n=== {len(jobs)} tile job(s) total, "
+          f"{sum(j['n_points'] for j in jobs)} point(s) requested across all of them ===")
     if not jobs:
         print("No tiles built at all — the stage would paint nothing without ever "
               "invoking synthesize_cli. Look at the region map and max_paint_radius_m.")
         return
 
-    for i, job in enumerate(jobs[:args.limit]):
+    selected = list(enumerate(jobs))
+    if args.worst:
+        selected.sort(key=lambda pair: pair[1]["n_points"], reverse=True)
+    selected = selected[:args.limit]
+
+    for i, job in selected:
         stdin_data = to_stdin(job)
         print(f"\n--- tile {i} [{job['group']}] "
               f"domain={len(job['domain_points'])} exemplars={len(job['exemplar_points'])} "
-              f"input_boundary={len(job['input_boundary'])} output_boundary={len(job['output_boundary'])}")
+              f"input_boundary={len(job['input_boundary'])} output_boundary={len(job['output_boundary'])} "
+              f"dist={job['distance_m']:.1f}m requested_n={job['n_points']}")
         if args.out:
             args.out.mkdir(parents=True, exist_ok=True)
             path = args.out / f"tile_{i}.txt"
@@ -258,13 +286,22 @@ def main():
             print(f"    exit={proc.returncode}")
             if proc.stderr.strip():
                 print(f"    stderr: {proc.stderr.strip()}")
-            out = proc.stdout.strip()
-            try:
-                parsed = json.loads(out)
+            parsed = None
+            for line in reversed(proc.stdout.strip().splitlines()):
+                line = line.strip()
+                if not line.startswith("{"):
+                    print(f"    stdout(noise): {line[:160]}")
+                    continue
+                try:
+                    parsed = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                break
+            if parsed is None:
+                print(f"    NO JSON in stdout: {proc.stdout.strip()[:300]}")
+            else:
                 print(f"    n_points={parsed.get('n_points')} energy={parsed.get('energy')} "
                       f"iterations={parsed.get('iterations')}")
-            except json.JSONDecodeError:
-                print(f"    stdout (unparseable): {out[:400]}")
 
 
 if __name__ == "__main__":

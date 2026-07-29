@@ -9,6 +9,7 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from util.json_utils import parse_json_from_stream
 from pipeline.object_distribution.object_distribution_result import (
     ObjectDistributionResult,
     TypeDistribution,
@@ -74,7 +75,12 @@ def _run_pcf_cli(
         )
         if result.returncode != 0:
             return None
-        return json.loads(result.stdout.strip())
+        # Tolerant of anything printed alongside the JSON -- pcf_cli's stdout is clean
+        # today (it links neither synthesis_core.cpp nor voronoi-pcf.cpp, both of which
+        # print progress), but the identical assumption in DistributionSynthesisStage
+        # is what silently discarded every synthesize_cli result. Same class of bug,
+        # one line to be immune to it.
+        return parse_json_from_stream(result.stdout)
     except Exception:
         return None
 

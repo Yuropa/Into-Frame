@@ -592,7 +592,12 @@ SynthesisResult synthesize_pattern(
     }
     n_points = std::max(2, std::min(n_points, m_out));
 
-    std::cout << "synthesize_pattern: exemplar_pts=" << in_exemplar.size()
+    // stderr, not stdout: synthesize_cli's contract is that stdout is pure JSON (see
+    // its header comment), and its caller parses the whole stream. Printing progress
+    // to stdout prefixed the JSON with these lines, so every successful tile failed to
+    // parse and was discarded -- DistributionSynthesisStage painted nothing while the
+    // optimizer was in fact working perfectly.
+    std::cerr << "synthesize_pattern: exemplar_pts=" << in_exemplar.size()
               << " input_support=" << m_in
               << " output_support=" << m_out
               << " target_n=" << n_points
@@ -712,7 +717,8 @@ SynthesisResult synthesize_pattern(
         }
     }
 
-    std::cout << "synthesize_pattern: finished after " << result.iterations_ran
+    // stderr for the same reason as the progress line above -- stdout is the JSON channel.
+    std::cerr << "synthesize_pattern: finished after " << result.iterations_ran
               << " iterations, energy " << current_energy << " -> " << best_energy << "\n";
 
     // ----------------------------------------------------------

@@ -16,6 +16,7 @@ from scipy import ndimage
 from scipy.spatial import ConvexHull, KDTree
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
+from util.json_utils import parse_json_from_stream
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_segmentation.panorama_region_result import (
     RegionType,
@@ -109,6 +110,12 @@ def _local_grid(bbox_min: np.ndarray, bbox_max: np.ndarray, target_count: int) -
     return np.stack([X.ravel(), Z.ravel()], axis=1)
 
 
+def _polygon_area(polygon: np.ndarray) -> float:
+    """Shoelace area of a simple polygon, in the polygon's own (world, metres) units."""
+    x, z = np.asarray(polygon, dtype=np.float64).T
+    return float(abs(np.dot(x, np.roll(z, -1)) - np.dot(z, np.roll(x, -1))) / 2.0)
+
+
 def _run_synthesize_cli(
     cli_path: Path,
     domain_points: np.ndarray,
@@ -162,15 +169,16 @@ def _run_synthesize_cli(
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
-    stderr_lines = (result.stderr or "").strip().splitlines()
-    last_stderr = stderr_lines[-1].strip() if stderr_lines else ""
+    diagnostics = (result.stderr or "").strip().splitlines()
+    last_stderr = diagnostics[-1].strip() if diagnostics else ""
 
     if result.returncode != 0:
         return None, f"exit {result.returncode}: {last_stderr or 'no stderr'}"
-    try:
-        parsed = json.loads(result.stdout.strip())
-    except json.JSONDecodeError as e:
-        return None, f"unparseable stdout ({e})"
+
+    parsed = parse_json_from_stream(result.stdout)
+    if parsed is None:
+        head = " | ".join(result.stdout.strip().splitlines()[:2])[:300]
+        return None, f"no JSON object in stdout: {head or '(empty)'}"
 
     if not parsed.get("output_points"):
         # Clean exit, empty result -- the interesting case. synthesize_pattern already
@@ -212,11 +220,11 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.size_jitter = size_jitter
         self.input_boundary_pad_factor = input_boundary_pad_factor
         # Hard ceiling on painted instances per (object_type, region_type) group,
-        # and the last thing applied. synthesize_cli is handed n_points=-1, so the
-        # count it returns is inferred from the candidate-density ratio between the
-        # input and output boundary -- an unbounded quantity scaling with painted
-        # AREA, over an output boundary covering most of the terrain grid. The
-        # binding constraint on the far side is the client: SceneObjectManager
+        # and the last thing applied. Each tile is asked for its own share of the
+        # learned density (exemplar count / exemplar hull area, times tile area), so
+        # the total still scales with painted AREA over an output boundary covering
+        # most of the terrain grid. The binding constraint on the far side is the
+        # client: SceneObjectManager
         # instantiates one GameObject per placed object with no GPU instancing, so
         # this is a GameObject budget, not a triangle budget.
         self.max_instances_per_group = max_instances_per_group
@@ -486,6 +494,27 @@ class DistributionSynthesisStage(PipelineStage):
                 input_boundary.min(axis=0), input_boundary.max(axis=0), exemplar_domain_target
             )
 
+            # Instances per square metre, measured directly in world units from this
+            # group's own exemplars. Used below to ask synthesize_cli for an explicit
+            # per-tile count instead of passing n_points=-1 and letting it infer one
+            # from the ratio of candidate positions inside the input vs. output
+            # boundary.
+            #
+            # That proxy is not stable enough to rely on. Both candidate sets come from
+            # Delaunay triangle centres of ONE point set (exemplar_domain + this tile's
+            # own grid), so how many centres land inside the input boundary depends on
+            # where the tile happens to be -- the triangulation spans the gap between
+            # the two grids with long thin triangles whose centres fall wherever the
+            # geometry puts them. Measured on the Rainier capture, three adjacent tiles
+            # of the SAME group reported input_support 349, 4220 and 4220, and asked
+            # for 290, 4 and 7 points respectively. The same instability is what made
+            # the near-field flower tiles request thousands of points each and blow
+            # through the subprocess timeout.
+            #
+            # Exemplar count over exemplar hull area has none of that dependence: it is
+            # a property of the distribution alone, identical for every tile.
+            exemplar_density = len(dist.points) / max(_polygon_area(input_boundary), 1e-6)
+
             # Tile side length in grid cells: pick a tile candidate resolution (points
             # per side) and space those points at the exemplar's own nearest-neighbour
             # spacing, so tiles are fine enough for placement flexibility without
@@ -537,18 +566,44 @@ class DistributionSynthesisStage(PipelineStage):
                         # majority of tiles, and every point they'd produce would be
                         # discarded by the falloff below anyway. Nearest corner of the
                         # tile's world-space bbox to the camera at the grid origin.
-                        if cfg.max_paint_radius_m > 0:
-                            closest = np.minimum(
-                                np.maximum(0.0, tile_world_min), tile_world_max
-                            )
-                            if float(np.hypot(*closest)) > cfg.max_paint_radius_m:
-                                continue
+                        closest = np.minimum(np.maximum(0.0, tile_world_min), tile_world_max)
+                        tile_distance = float(np.hypot(*closest))
+                        if cfg.max_paint_radius_m > 0 and tile_distance > cfg.max_paint_radius_m:
+                            continue
 
                         pad = max(cell_m, _MIN_PAD_M)
                         tile_domain = _local_grid(
                             tile_world_min - pad, tile_world_max + pad, cfg.max_candidates_per_tile
                         )
                         domain_points = np.concatenate([exemplar_domain, tile_domain], axis=0)
+
+                        # This tile's share of the learned density, in world units, ALREADY
+                        # discounted by the radial falloff.
+                        #
+                        # The falloff used to be applied only as per-point rejection after
+                        # synthesis, so a tile 25 m out paid the optimizer's full price to
+                        # place points of which ~94% were then thrown away. That wasted
+                        # work is most of what pushed tiles past the subprocess timeout.
+                        # Discounting the REQUEST costs nothing in fidelity as long as the
+                        # rejection below is made relative to the same factor (it is).
+                        #
+                        # Evaluated at the tile's NEAREST point to the camera, so
+                        # tile_keep is the largest falloff value anywhere in the tile and
+                        # every per-point residual below stays <= 1 -- no clamping, and the
+                        # expected surviving count is identical to the old behaviour.
+                        tile_keep = 1.0
+                        if cfg.full_density_radius_m > 0 and tile_distance > cfg.full_density_radius_m:
+                            tile_keep = (cfg.full_density_radius_m / tile_distance) ** cfg.density_falloff_exponent
+
+                        # Capped at the tile's own candidate count because that is the
+                        # most synthesize_pattern can place anyway (it clamps n_points
+                        # to the number of output candidates), and because per-iteration
+                        # cost scales with it -- an uncapped request is what turned the
+                        # dense near-field tiles into 120 s timeouts.
+                        tile_points = int(round(
+                            exemplar_density * _polygon_area(output_boundary) * tile_keep
+                        ))
+                        tile_points = max(2, min(tile_points, cfg.max_candidates_per_tile))
 
                         seed_counter += 1
                         jobs.append({
@@ -558,6 +613,8 @@ class DistributionSynthesisStage(PipelineStage):
                             "input_boundary": input_boundary,
                             "output_boundary": output_boundary,
                             "bin_count": dist.bin_count,
+                            "n_points": tile_points,
+                            "tile_keep": tile_keep,
                             "seed": self.seed + seed_counter,
                         })
 
@@ -588,7 +645,7 @@ class DistributionSynthesisStage(PipelineStage):
                         exemplar_points=job["exemplar_points"],
                         input_boundary=job["input_boundary"],
                         output_boundary=job["output_boundary"],
-                        n_points=-1,
+                        n_points=job["n_points"],
                         bin_count=job["bin_count"],
                         max_iters=cfg.max_iters,
                         seed=job["seed"],
@@ -636,18 +693,27 @@ class DistributionSynthesisStage(PipelineStage):
                 placed = group_placed[job["group_idx"]]
                 for x, z in synth["output_points"]:
                     # Radial density falloff about the camera at the grid origin --
-                    # see full_density_radius_m. Rejection-sampled per point so the
-                    # surviving set keeps the synthesized pattern's local structure
-                    # (a thinned blue-noise field is still blue noise); scaling the
-                    # requested count per tile instead would have quantised the
-                    # falloff to tile granularity.
+                    # see full_density_radius_m. Still rejection-sampled per point so
+                    # the surviving set keeps the synthesized pattern's local structure
+                    # (a thinned blue-noise field is still blue noise) and the falloff
+                    # stays smooth rather than quantised to tile granularity.
+                    #
+                    # The tile's REQUEST was already discounted by tile_keep (the
+                    # falloff at the tile's nearest point), so what's left to apply here
+                    # is only the residual within the tile. Dividing by tile_keep is
+                    # what keeps the two consistent: the product of the two stages is
+                    # exactly the per-point falloff, as before, but the optimizer no
+                    # longer places points that were always going to be discarded.
                     if cfg.max_paint_radius_m > 0 or cfg.full_density_radius_m > 0:
                         distance = float(math.hypot(x, z))
                         if cfg.max_paint_radius_m > 0 and distance > cfg.max_paint_radius_m:
                             continue
                         if cfg.full_density_radius_m > 0 and distance > cfg.full_density_radius_m:
                             keep_prob = (cfg.full_density_radius_m / distance) ** cfg.density_falloff_exponent
-                            if rng.random() >= keep_prob:
+                            # <= 1 by construction: tile_keep is the falloff at the
+                            # closest point of this tile, so no point in it can have a
+                            # larger one.
+                            if rng.random() >= keep_prob / job["tile_keep"]:
                                 continue
                     # Draw ONE exemplar and take both its footprint and its visual
                     # variant, rather than sampling them independently: bucket is an
