@@ -59,6 +59,7 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         tuft_height_jitter: float = 0.3,
         generator_type: str = "SAM3D",
         build_near_meshes: bool = True,
+        max_near_mesh_faces: int = 4000,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.max_radius_m = float(max_radius_m)
@@ -88,6 +89,17 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # cards covering every distance, which still animates and still reads as
         # grass -- useful for iterating on coverage without paying for SAM3D.
         self.build_near_meshes = bool(build_near_meshes)
+        # Face budget for the reconstructed near-LOD tuft. SAM3D's raw output is not
+        # decimated at all: measured on the Rainier capture the three tufts came back at
+        # 316k, 301k and 208k faces, ~8 MB of GLB each. That is hero-object geometry for
+        # an asset that is one of thousands of instances of ground cover -- it made the
+        # client download 25 GB and the scene 1.8 billion triangles.
+        #
+        # A tuft is a handful of blades; its silhouette is what reads, and that survives
+        # aggressive decimation. 4000 keeps the blade shapes at arm's length (the near
+        # LOD only renders within Scene Generation's grass mesh_lod_distance override,
+        # ~3 m) while cutting the asset ~70x. 0 disables decimation entirely.
+        self.max_near_mesh_faces = int(max_near_mesh_faces)
 
 
 class GrassCoverStage(PipelineStage):
@@ -377,12 +389,19 @@ class GrassCoverStage(PipelineStage):
                 try:
                     mesh = generator.meshify(Image(representatives[bucket]), temp_path, seed=self.seed + bucket)
                     mesh = mesh.repair()
+                    raw_faces = mesh.face_count
+                    # Decimate after repair (which needs the dense surface to fit a clean
+                    # watertight mesh) and before fit_to_box (pure scale, order-independent).
+                    mesh = mesh.decimate(cfg.max_near_mesh_faces)
                     mesh.fit_to_box(1.0, 1.0)
                 except Exception as e:
                     self.log_info(f"  {key}: meshify failed ({e}), falling back to crossed cards at all distances")
                     continue
                 context.add_mesh(key, mesh)
-                self.log_info(f"  {key}: {mesh.vertex_count}v {mesh.face_count}f reconstructed")
+                self.log_info(
+                    f"  {key}: {mesh.vertex_count}v {mesh.face_count}f reconstructed "
+                    f"(decimated from {raw_faces}f)"
+                )
         finally:
             generator.close()
 

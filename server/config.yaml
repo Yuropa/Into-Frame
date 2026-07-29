@@ -933,6 +933,14 @@ stages:
                                # scale, not from many different tufts.
     build_near_meshes: true   # false = crossed cards at every distance (skips the
                                # per-bucket 3D generation; much faster to iterate on)
+    max_near_mesh_faces: 4000 # face budget for the reconstructed tuft. SAM3D returns it
+                               # undecimated -- measured at 316k/301k/208k faces and ~8 MB
+                               # of GLB each, which is hero-object geometry for something
+                               # placed thousands of times. Decimating to 4000 costs almost
+                               # nothing visually (p95 surface error 0.19% of the bounding
+                               # box diagonal) and takes the asset 8.22 MB -> 100 KB.
+                               # Measured error at other budgets: 8000 -> 0.12%,
+                               # 2000 -> 0.29%, 1000 -> 0.70%. 0 disables decimation.
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage

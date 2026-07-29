@@ -121,6 +121,53 @@ class Mesh:
             vertex_colors=vertex_colors,
         ))
 
+    def decimate(self, max_faces: int) -> "Mesh":
+        """Decimate straight to a face budget, keeping per-vertex colour.
+
+        The counterpart to simplify(): that one searches for the coarsest mesh whose
+        95th-percentile surface error stays within a fraction of the bounding box, which
+        is the right question for a hero object seen up close. It is the wrong question
+        for an asset that is one of thousands of instances -- there the budget is the
+        constraint and the error is whatever it is. It is also far cheaper, since
+        simplify() runs a closest_point query against a doubling sequence of candidates
+        (13 rounds on a 275k-face mesh, each against 2000 sample points).
+
+        Surface error is a poor proxy for a grass tuft anyway: what reads at a glance is
+        the silhouette of the blades, not the accuracy of their surfaces.
+
+        Returns a copy unchanged when already within budget, or when max_faces <= 0.
+        """
+        if max_faces <= 0 or len(self.mesh.faces) <= max_faces:
+            return Mesh(self.mesh.copy())
+
+        import open3d as o3d
+
+        o3d_mesh = o3d.geometry.TriangleMesh(
+            vertices=o3d.utility.Vector3dVector(self.mesh.vertices),
+            triangles=o3d.utility.Vector3iVector(self.mesh.faces),
+        )
+        vertex_colors_01 = self._vertex_colors_01()
+        if vertex_colors_01 is not None:
+            o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors_01)
+
+        dec = o3d_mesh.simplify_quadric_decimation(int(max_faces))
+        dec.remove_degenerate_triangles()
+        dec.remove_duplicated_triangles()
+        dec.remove_duplicated_vertices()
+
+        faces = np.asarray(dec.triangles)
+        if len(faces) == 0:
+            # Decimation collapsed the mesh entirely (possible on a highly disconnected
+            # input like separate blades of grass). Better to ship the original than
+            # nothing at all -- the caller has no other asset to fall back to.
+            return Mesh(self.mesh.copy())
+
+        return Mesh(trimesh.Trimesh(
+            vertices=np.asarray(dec.vertices),
+            faces=faces,
+            vertex_colors=np.asarray(dec.vertex_colors) if dec.has_vertex_colors() else None,
+        ))
+
     def simplify(self, max_error_fraction: float = 0.03, min_faces: int = 50) -> "Mesh":
         """Decimate as aggressively as possible while keeping geometric error within budget.
 
