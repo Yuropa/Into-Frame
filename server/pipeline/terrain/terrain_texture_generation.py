@@ -19,7 +19,7 @@ from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.terrain.pattern_texture import (
-    bake_real_layer, bake_real_layer_cached_uv, bake_real_layer_from_mesh, synthesize_region_layer,
+    bake_real_layer, bake_real_layer_from_mesh, synthesize_region_layer, vegetation_bleed_mask,
 )
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
@@ -649,40 +649,37 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         sky_mask = context.input_sky_mask()
 
-        # Each cell's own measured panorama UV, captured before Terrain
-        # Reconstruction/Noise Refinement touched the heights. Preferred over
-        # re-deriving direction from the final height map, which is what put
-        # tree-line green on the peaks -- see bake_real_layer_cached_uv.
-        pano_u_depth = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
-        pano_v_depth = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)
-        trust_depth = context.input_depth(ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK)
-        use_cached_uv = all(d is not None for d in (pano_u_depth, pano_v_depth, trust_depth))
-        if not use_cached_uv:
-            self.log_warning(
-                "No cached panorama UV for formations — falling back to height-derived "
-                "sampling, which bands tree-line colour onto steep peaks"
-            )
+        # Panorama-space region typing of the same image being sampled, used to
+        # keep tree-line foliage out of a rock formation's bake -- see
+        # vegetation_bleed_mask for why this is done on the sampled result rather
+        # than by correcting the sampling angle.
+        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
+        region_type_map = region_type_depth.depth if region_type_depth is not None else None
 
         for i, formation in enumerate(formations):
             mesh = context.mesh(formation["mesh_key"])
             if mesh is None:
                 continue
 
-            if use_cached_uv:
-                layer = bake_real_layer_cached_uv(
-                    panorama_terrain, pano_u_depth.depth, pano_v_depth.depth, trust_depth.depth,
-                    height_map_depth.depth, terrain_half,
+            exclude_mask = None
+            if region_type_map is not None:
+                exclude_mask = vegetation_bleed_mask(
+                    panorama_terrain, height_map_depth.depth, region_type_map, terrain_half,
                     formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
                     formation["x_center"], formation["z_center"],
-                    sky_mask=sky_mask,
                 )
-            else:
-                layer = bake_real_layer(
-                    panorama_terrain, height_map_depth.depth, terrain_half,
-                    formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
-                    formation["x_center"], formation["z_center"],
-                    sky_mask=sky_mask,
-                )
+                if exclude_mask is None:
+                    self.log_info(
+                        f"  formation {formation['id']}: mostly vegetation, keeping foliage as-is"
+                    )
+
+            layer = bake_real_layer(
+                panorama_terrain, height_map_depth.depth, terrain_half,
+                formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
+                formation["x_center"], formation["z_center"],
+                sky_mask=sky_mask,
+                exclude_mask=exclude_mask,
+            )
             tile = PIL.Image.fromarray((layer.clip(0.0, 1.0) * 255.0).astype("uint8"), "RGB")
             if cfg.use_intrinsic_delighting:
                 tile = self._delight_patch(tile, cfg)
@@ -757,6 +754,10 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         # ── Panorama layer ────────────────────────────────────────────────────
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.use_panorama_layer else None
+        if panorama_terrain is not None:
+            # Real ground colour where the removal mask ate the ground rather
+            # than an occluder -- see _ground_colour_panorama.
+            panorama_terrain = self._ground_colour_panorama(context, panorama_terrain)
         height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
         height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
 
@@ -809,6 +810,81 @@ class TerrainTextureGenerationStage(PipelineStage):
             return SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
 
         return SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
+
+    def _ground_colour_panorama(self, context: PipelineContext, panorama_terrain):
+        """PANORAMA_TERRAIN with real ground colour restored from the original photo.
+
+        PANORAMA_TERRAIN is the right *geometry* source -- occluders removed, so
+        nothing punches a hole in the ridgeline or anchors a fake crest -- and it
+        is what the height/region chain is built against. It is the wrong
+        *colour* source, because PanoramaForegroundInpaintingStage's removal test
+        is `depth < foreground_distance_m`, and in a ground-level capture that
+        catches the ground itself across the whole lower hemisphere: on the
+        Rainier capture it replaced a wildflower meadow with fabricated gravel,
+        which the panorama layer (dominant across almost the entire terrain, see
+        _panorama_visibility_weight) then painted over everything the user walks
+        on.
+
+        So this takes the original panorama's own pixels back wherever all three
+        hold:
+          - the ORIGINAL panorama's region typing calls it vegetation or ground
+            (it is a photograph of the surface, not of something standing on it),
+          - it is below the horizon (anything rising above eye level is an
+            occluder or a distant landform, neither of which is ground here),
+          - PANORAMA_FOREGROUND_OCCLUDER_MASK does not cover it (that is the
+            genuine tree/building removal, which must stay removed -- restoring
+            it would put canopy colour on the ground the canopy was hiding).
+
+        Returns panorama_terrain unchanged if the inputs for that test aren't
+        available, which is the pre-existing behaviour.
+        """
+        type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        panorama_original = context.input_panorama(ContextKey.PANORAMA)
+        if type_map_depth is None or panorama_original is None:
+            return panorama_terrain
+
+        original = panorama_original.image.convert("RGB")
+        terrain = panorama_terrain.image.convert("RGB")
+        if original.size != terrain.size:
+            self.log_info(
+                f"Original panorama {original.size} != terrain panorama {terrain.size}; "
+                "keeping the object-removed panorama as the colour source"
+            )
+            return panorama_terrain
+
+        type_map = type_map_depth.depth
+        width, height = terrain.size
+        if type_map.shape != (height, width):
+            type_map = np.array(PIL.Image.fromarray(type_map.astype(np.uint8)).resize(
+                (width, height), PIL.Image.NEAREST,
+            ))
+
+        restore = np.isin(type_map, [int(RegionType.VEGETATION), int(RegionType.GROUND)])
+        restore[: height // 2, :] = False
+
+        occluder_image = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
+        if occluder_image is not None:
+            occluder = np.array(occluder_image.image.convert("L"))
+            if occluder.shape != (height, width):
+                occluder = np.array(PIL.Image.fromarray(occluder).resize(
+                    (width, height), PIL.Image.NEAREST,
+                ))
+            restore &= occluder <= 127
+
+        if not restore.any():
+            return panorama_terrain
+
+        # Feather the boundary -- a hard switch between a real photo and
+        # ObjectClear's fill shows up as a visible outline once it is baked into
+        # the terrain texture and magnified across several metres of ground.
+        alpha = PIL.Image.fromarray((restore * 255).astype(np.uint8), "L").filter(
+            PIL.ImageFilter.GaussianBlur(6)
+        )
+        self.log_info(
+            f"Ground colour: restored real photo over {restore.mean():.1%} of the panorama "
+            f"({restore[height // 2:].mean():.1%} of the lower half)"
+        )
+        return Panorama(Image(PIL.Image.composite(original, terrain, alpha)))
 
     @staticmethod
     def _panorama_tile(panorama, max_resolution: int) -> PIL.Image.Image:
@@ -958,6 +1034,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         type_map_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
         if panorama_terrain is None or type_map_depth is None:
             return None
+        # Reference patches are what every synthetic layer's material is built
+        # from, so they need the same real-ground colour restoration the panorama
+        # layer gets -- otherwise the fallback material for the ground is cut from
+        # the fabricated gravel this exists to stop using.
+        panorama_terrain = self._ground_colour_panorama(context, panorama_terrain)
         depth_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         depth_arr = (
             depth_depth.depth

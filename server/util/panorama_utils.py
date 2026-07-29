@@ -169,6 +169,7 @@ class Panorama:
         vertices: np.ndarray,
         sky_mask: np.ndarray | None = None,
         min_lat_deg: float = -35.0,
+        exclude_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """
         Sample RGBA colours for 3D world-space vertices from this panorama.
@@ -196,6 +197,15 @@ class Panorama:
                      excluded for being "sky" -- only the near-nadir cutoff below
                      still applies.
         min_lat_deg: most-negative latitude still considered valid (degrees).
+        exclude_mask: optional second panorama-space bool mask, treated exactly
+                     like sky_mask -- True means "there is no usable colour at
+                     this pixel for this caller", so the vertex becomes a hole and
+                     is filled from its nearest valid neighbour instead. Separate
+                     from sky_mask because it is caller-specific rather than a
+                     property of the panorama: TerrainTextureGenerationStage uses
+                     it to keep tree-line foliage out of a rock formation's bake
+                     (see bake_real_layer's own `exclude_mask`), where sky_mask is
+                     the same for every caller.
         Returns:     (N, 4) uint8 RGBA array.
         """
         X = vertices[:, 0].astype(np.float64)
@@ -208,16 +218,20 @@ class Panorama:
         min_lat_rad  = np.radians(min_lat_deg)
         valid        = lat >= min_lat_rad
 
-        if sky_mask is not None:
-            sky_arr = np.asarray(sky_mask, dtype=bool)
-            if sky_arr.shape != (H, W):
-                sky_img = PIL.Image.fromarray((sky_arr * 255).astype(np.uint8)).resize(
-                    (W, H), PIL.Image.NEAREST
-                )
-                sky_arr = np.asarray(sky_img) > 127
+        if sky_mask is not None or exclude_mask is not None:
             pu_i = np.clip(np.round(pu).astype(np.int64), 0, W - 1)
             pv_i = np.clip(np.round(pv).astype(np.int64), 0, H - 1)
-            valid &= ~sky_arr[pv_i, pu_i]
+            for mask in (sky_mask, exclude_mask):
+                if mask is None:
+                    continue
+                arr = np.asarray(mask, dtype=bool)
+                if arr.shape != (H, W):
+                    arr = np.asarray(
+                        PIL.Image.fromarray((arr * 255).astype(np.uint8)).resize(
+                            (W, H), PIL.Image.NEAREST
+                        )
+                    ) > 127
+                valid &= ~arr[pv_i, pu_i]
 
         colors_f = Panorama._bilinear_wrap(pano, pu, pv)
 

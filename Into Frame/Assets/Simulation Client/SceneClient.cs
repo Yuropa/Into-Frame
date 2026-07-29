@@ -287,6 +287,21 @@ public class SceneLightingData
     public string log;    // base64 PNG — log-domain environment map
     public int    width;
     public int    height;
+    public SunData sun;   // dominant directional light, or null when overcast
+}
+
+// Key light extracted from the environment map (server SceneLighting.sun).
+[Serializable]
+public class SunData
+{
+    // Unit vector pointing FROM the scene TOWARD the sun, in the panorama's own
+    // frame — apply skyboxRotation before use, same as the skybox.
+    public float[] direction;   // 3
+    public string  color;       // "#rrggbb", tint only; brightness is `intensity`
+    // Relative, not photometric: the environment maps are LDR/log-compressed with
+    // no absolute calibration, so this is a directionality heuristic scaled so a
+    // typical clear sky lands near 1. See SceneLighting.sun's docstring.
+    public float   intensity;
 }
 
 [Serializable]
