@@ -18,7 +18,9 @@ from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.terrain.pattern_texture import bake_real_layer, bake_real_layer_from_mesh, synthesize_region_layer
+from pipeline.terrain.pattern_texture import (
+    bake_real_layer, bake_real_layer_cached_uv, bake_real_layer_from_mesh, synthesize_region_layer,
+)
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
@@ -647,17 +649,40 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         sky_mask = context.input_sky_mask()
 
+        # Each cell's own measured panorama UV, captured before Terrain
+        # Reconstruction/Noise Refinement touched the heights. Preferred over
+        # re-deriving direction from the final height map, which is what put
+        # tree-line green on the peaks -- see bake_real_layer_cached_uv.
+        pano_u_depth = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
+        pano_v_depth = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)
+        trust_depth = context.input_depth(ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK)
+        use_cached_uv = all(d is not None for d in (pano_u_depth, pano_v_depth, trust_depth))
+        if not use_cached_uv:
+            self.log_warning(
+                "No cached panorama UV for formations — falling back to height-derived "
+                "sampling, which bands tree-line colour onto steep peaks"
+            )
+
         for i, formation in enumerate(formations):
             mesh = context.mesh(formation["mesh_key"])
             if mesh is None:
                 continue
 
-            layer = bake_real_layer(
-                panorama_terrain, height_map_depth.depth, terrain_half,
-                formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
-                formation["x_center"], formation["z_center"],
-                sky_mask=sky_mask,
-            )
+            if use_cached_uv:
+                layer = bake_real_layer_cached_uv(
+                    panorama_terrain, pano_u_depth.depth, pano_v_depth.depth, trust_depth.depth,
+                    height_map_depth.depth, terrain_half,
+                    formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
+                    formation["x_center"], formation["z_center"],
+                    sky_mask=sky_mask,
+                )
+            else:
+                layer = bake_real_layer(
+                    panorama_terrain, height_map_depth.depth, terrain_half,
+                    formation["x_half"], formation["z_half"], cfg.pattern_canvas_size,
+                    formation["x_center"], formation["z_center"],
+                    sky_mask=sky_mask,
+                )
             tile = PIL.Image.fromarray((layer.clip(0.0, 1.0) * 255.0).astype("uint8"), "RGB")
             if cfg.use_intrinsic_delighting:
                 tile = self._delight_patch(tile, cfg)

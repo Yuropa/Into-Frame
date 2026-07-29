@@ -212,6 +212,85 @@ def bake_real_layer(
     ).reshape(canvas_size, canvas_size, 3)
 
 
+def bake_real_layer_cached_uv(
+    panorama: Panorama,
+    pano_u: np.ndarray,
+    pano_v: np.ndarray,
+    trust_mask: np.ndarray,
+    height_map: np.ndarray,
+    terrain_half: float,
+    x_half: float,
+    z_far: float,
+    canvas_size: int,
+    x_center: float = 0.0,
+    z_center: float = 0.0,
+    sky_mask: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """bake_real_layer, but preferring each cell's own *measured* panorama UV.
+
+    bake_real_layer above re-derives the panorama direction for every canvas
+    pixel from the FINAL height map -- after Terrain Reconstruction and Noise
+    Refinement have solved, diffused and blended it. The elevation angle it
+    computes is atan2(Y, horizontal distance), so the sensitivity of the sampled
+    panorama row to an error in Y grows with steepness: on a formation
+    (mountains, cliffs, isolated rock) a modest height error slides the sample
+    a long way vertically. When it slides across the tree line, forest colour
+    gets painted onto the peak -- the green-on-snow banding visible in the baked
+    terrain_formation_*_texture.png debug images.
+
+    This is the same failure bake_real_layer_from_mesh's docstring describes, and
+    it has the same answer: HeightMapGenerator._panorama_uv_from_height already
+    captured each cell's UV from the height as *actually measured*, before any of
+    that downstream processing, and TerrainMeshGenerator.generate() already
+    prefers it for the main panorama layer. Formation meshes carry no per-vertex
+    UV of their own (generate_component_mesh is geometry-only), so the cached
+    grid is sampled here per canvas pixel instead.
+
+    trust_mask (HEIGHT_MAP_REAL_SAMPLE_MASK) marks the cells whose cached UV came
+    from a genuine depth sample. Where it doesn't hold there is no measured UV to
+    prefer, so those pixels fall back to bake_real_layer's position-derived
+    sampling -- which is the correct behaviour there, not a compromise: an
+    unsampled cell's height is all we have.
+
+    Returns (canvas_size, canvas_size, 3) float32 in [0, 1].
+    """
+    ys, xs = np.mgrid[0:canvas_size, 0:canvas_size].astype(np.float64)
+    Z = ys / canvas_size * (2.0 * z_far) - z_far + z_center
+    X = xs / canvas_size * (2.0 * x_half) - x_half + x_center
+
+    hm_h, hm_w = height_map.shape
+    row_c = ((Z + terrain_half) / (2.0 * terrain_half) * (hm_h - 1)).clip(0, hm_h - 1)
+    col_c = ((X + terrain_half) / (2.0 * terrain_half) * (hm_w - 1)).clip(0, hm_w - 1)
+
+    # Nearest-neighbour for the UV and the trust flag: interpolating a UV across
+    # the panorama's wrap seam blends theta ~0 with theta ~2*pi and lands the
+    # sample half a panorama away (the ambiguity TerrainMeshGenerator._fix_uv_seam
+    # exists for). Nearest sidesteps it entirely, and at grid resolution the
+    # difference is otherwise negligible.
+    rows_i = np.rint(row_c).astype(np.intp)
+    cols_i = np.rint(col_c).astype(np.intp)
+    u = pano_u[rows_i, cols_i]
+    v = pano_v[rows_i, cols_i]
+    trusted = trust_mask[rows_i, cols_i].astype(bool) & np.isfinite(u) & np.isfinite(v)
+
+    canvas = np.zeros((canvas_size, canvas_size, 3), dtype=np.float32)
+
+    if trusted.any():
+        colors = panorama.sample_uv(u[trusted], v[trusted])[:, :3].astype(np.float32) / 255.0
+        canvas[trusted] = colors
+
+    if not trusted.all():
+        Y = map_coordinates(height_map, [row_c, col_c], order=1, mode="nearest").astype(np.float32)
+        Y = np.nan_to_num(Y, nan=0.0)
+        fallback = ~trusted
+        world_pts = np.stack([X[fallback], Y[fallback], Z[fallback]], axis=-1).astype(np.float32)
+        canvas[fallback] = (
+            panorama.sample_3d(world_pts, sky_mask=sky_mask)[:, :3].astype(np.float32) / 255.0
+        )
+
+    return canvas
+
+
 # ── Real-content baking (mesh-projected) ──────────────────────────────────────
 
 def bake_real_layer_from_mesh(

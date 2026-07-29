@@ -31,8 +31,25 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         wind_axis_degrees: "float | None" = None,
+        default_sway_amplitude: float = 0.16,
+        default_sway_frequency_hz: float = 0.6,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Fallback sway for a stationary mesh whose own instance was never tracked
+        # in the generated video, so ObjectMotionClassificationStage recorded
+        # "stationary" with no measured sway. That is the overwhelming majority of
+        # placed instances -- VideoObjectExtractionStage tracks only a handful per
+        # category -- so these defaults, not the measured values, are what the
+        # scene's motion actually looks like.
+        #
+        # The previous 0.03 / 0.25 Hz was set as a deliberately conservative
+        # placeholder and is invisible in practice: amplitude is a fraction of the
+        # object's own height, so 0.03 on a 10 cm asset is a 3 mm excursion at one
+        # cycle every four seconds. These are taken from the measured values real
+        # tracked vegetation produces instead -- on the Rainier capture, tracked
+        # flowers came back at amplitude 0.17-0.35 and 0.57-0.71 Hz.
+        self.default_sway_amplitude = float(default_sway_amplitude)
+        self.default_sway_frequency_hz = float(default_sway_frequency_hz)
         # A single wind direction for the whole scene reads more physically
         # plausible than each tree leaning its own random way -- fixed at
         # construction (derived from `seed` below when left None) so re-running
@@ -111,9 +128,15 @@ class SceneAnimationStage(PipelineStage):
                 elif obj.type == ObjectType.MESH:
                     sway = metadata.get("sway") or {}
                     phase_rng = np.random.default_rng((self.seed, idx))
+                    amplitude = float(sway.get("amplitude", self.config.default_sway_amplitude))
+                    frequency = float(sway.get("frequencyHz", self.config.default_sway_frequency_hz))
                     obj.sway = {
-                        "amplitude": float(sway.get("amplitude", 0.03)),
-                        "frequencyHz": float(sway.get("frequencyHz", 0.25)),
+                        # Jitter per instance so a field of instances sharing one
+                        # bucket's fallback defaults doesn't move as a single rigid
+                        # sheet -- phase alone desynchronises the timing but leaves
+                        # every blade tracing an identical arc.
+                        "amplitude": amplitude * float(phase_rng.uniform(0.75, 1.25)),
+                        "frequencyHz": frequency * float(phase_rng.uniform(0.8, 1.2)),
                         "phase": float(phase_rng.uniform(0.0, 2.0 * np.pi)),
                         "axisDegrees": wind_axis,
                     }

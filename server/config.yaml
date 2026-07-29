@@ -862,6 +862,30 @@ stages:
     # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
                         # default (unset) is os.cpu_count()
 
+  - name: Grass Cover
+    stage: GrassCoverStage
+    enabled: true
+    # Ground cover, derived from the ORIGINAL panorama's region typing rather than
+    # the object-removed one the region map is built from -- foreground inpainting
+    # replaces the near-field meadow with bare ground, so the region map has no
+    # grass in it to scatter over. See pipeline/grass_cover/grass_area.py.
+    #
+    # Runs after Distribution Synthesis so the two never contend: this stage owns
+    # the grass_tuft class outright, and its instances are written as `synthetic`
+    # so Panorama Asset Generation below skips them the same way it skips painted
+    # distribution points.
+    max_radius_m: 25.0        # grass is one Object3D per instance with no client-side
+                               # instancing, so coverage is bounded; the terrain texture
+                               # carries the ground beyond this.
+    instance_spacing_m: 0.4   # nominal lattice pitch before jitter
+    max_instances: 8000       # budget; exceeding it widens the spacing uniformly
+                               # rather than truncating the scatter
+    bucket_count: 3           # distinct grass variants. Small on purpose -- the
+                               # variety that reads comes from per-instance yaw and
+                               # scale, not from many different tufts.
+    build_near_meshes: true   # false = crossed cards at every distance (skips the
+                               # per-bucket 3D generation; much faster to iterate on)
+
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
     billboard_distance_m: 30.0

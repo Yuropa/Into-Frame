@@ -26,9 +26,63 @@ material, so the cutout is declared on it directly (alphaMode MASK, cutoff 0.5).
 
 import numpy as np
 import trimesh
-from PIL import Image as PILImage
+from PIL import Image as PILImage, ImageFilter
 
 from scene.mesh import Mesh
+
+
+def apply_tuft_silhouette(
+    patch: PILImage.Image,
+    rng: np.random.Generator,
+    *,
+    blade_count: int = 26,
+    base_fraction: float = 0.18,
+    feather_px: float = 1.5,
+) -> PILImage.Image:
+    """Carve a grass-tuft silhouette into `patch`'s alpha channel.
+
+    The alpha a reference patch arrives with is PanoramaRegionStage's *semantic
+    region* mask -- "is this pixel part of the meadow" -- not a per-blade matte.
+    Inside a meadow that is essentially all-ones (measured 90-98% coverage on the
+    Rainier capture's three exemplars), so a card built straight from it is an
+    opaque rectangle of grass texture, and a crossed pair of them reads as two
+    intersecting green boards rather than as a tuft.
+
+    Nothing upstream produces a real per-blade matte, and nothing reasonably
+    could -- the blades are a few pixels wide at this distance. So the silhouette
+    is synthesized: a run of blades of randomized height and width, densest at
+    the base, tapering to isolated tips. The photographic detail still comes
+    entirely from the patch's own pixels; this only decides where the card stops.
+
+    base_fraction of the height stays solid so the tuft has a body to sit on the
+    ground with, rather than dissolving into disconnected blade tips.
+    """
+    rgba = np.array(patch.convert("RGBA"))
+    height, width = rgba.shape[:2]
+
+    # Per-column blade profile: a blade's tip height, linearly interpolated
+    # between blade_count control points so neighbouring columns belong to the
+    # same blade instead of each being independent noise.
+    controls = rng.uniform(0.35, 1.0, size=max(2, blade_count))
+    profile = np.interp(
+        np.linspace(0.0, len(controls) - 1, width),
+        np.arange(len(controls)),
+        controls,
+    )
+    # Fine jitter so blade edges aren't perfectly smooth curves.
+    profile = np.clip(profile + rng.normal(0.0, 0.02, size=width), 0.05, 1.0)
+
+    # Row 0 is the image top; a blade occupies the bottom `profile` fraction.
+    rows = np.arange(height)[:, None] / max(1, height - 1)
+    keep = rows >= (1.0 - profile[None, :])
+    keep |= rows >= (1.0 - base_fraction)
+
+    silhouette = PILImage.fromarray((keep * 255).astype(np.uint8), "L")
+    if feather_px > 0:
+        silhouette = silhouette.filter(ImageFilter.GaussianBlur(feather_px))
+
+    rgba[..., 3] = (rgba[..., 3].astype(np.float32) * (np.array(silhouette, dtype=np.float32) / 255.0)).astype(np.uint8)
+    return PILImage.fromarray(rgba, "RGBA")
 
 
 def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:

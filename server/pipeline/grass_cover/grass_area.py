@@ -15,8 +15,10 @@ than that across the entire lower hemisphere. Measured on an alpine-meadow
 capture (Mount Rainier, 4096x2048 panorama): the removal mask covered 48.5% of
 the whole panorama and 100% of every row below ~60% height, and the meadow it
 erased came back as bare gravel. Sampled through this module's own projection
-over the 2091 m2 of grid cells HEIGHT_MAP_OBSERVED_MASK marks as genuinely
-measured:
+over the 2091 m2 of grid cells HEIGHT_MAP_OBSERVED_MASK marks as directly
+measured (a strict subset of the cells this module actually samples -- see
+`sampled_mask` below -- chosen here only because it is the most conservative
+evidence available):
 
                 original panorama      inpainted panorama
     vegetation     1000 m2 (47.8%)          47 m2 ( 2.2%)
@@ -65,7 +67,7 @@ def grass_area_mask(
     pano_u: np.ndarray,
     pano_v: np.ndarray,
     region_type_map: np.ndarray,
-    observed_mask: np.ndarray,
+    sampled_mask: np.ndarray,
     *,
     max_radius_m: float,
     grid_size_meters: float,
@@ -86,27 +88,32 @@ def grass_area_mask(
                           mountain, and the whole near field comes back "not grass".
     region_type_map    -- PANORAMA_REGION_TYPE_MAP (the ORIGINAL panorama's, not
                           the _terrain one), (H, W) of RegionType indices.
-    observed_mask      -- HEIGHT_MAP_OBSERVED_MASK. The cached UV is only trusted
-                          where this is set (see _panorama_uv_from_height's call
-                          site); elsewhere it was re-derived from a solved/diffused
-                          height and can point anywhere. Cells outside it are
-                          resolved by the nadir fill below or dropped.
+    sampled_mask       -- HEIGHT_MAP_REAL_SAMPLE_MASK. The cached UV is only
+                          trustworthy where a cell came from a genuine depth
+                          sample; elsewhere it was re-derived from a solved/
+                          diffused height and can point anywhere. This is the
+                          right key for that question rather than the narrower
+                          HEIGHT_MAP_OBSERVED_MASK, which additionally excludes
+                          the nadir ramp band for height-pinning reasons that
+                          don't apply to UV (see its ContextKey comment). On the
+                          Rainier capture that difference is 30.8% of the grid
+                          versus 5.2%, and -- decisively for grass -- 100% versus
+                          0% of the 2-6 m ring the user is standing in.
     max_radius_m       -- hard cap on distance from the camera. Grass is scattered
                           as individual instances with no client-side instancing
                           (see GrassCoverStage.max_radius_m), so the population has
                           to be bounded somewhere; beyond this the terrain texture
                           carries the ground on its own.
 
-    Everything inside nadir_fill_radius_m is unobserved by construction --
-    HeightMapStage's own nadir exclusion drops the near-vertical band where the
-    equirectangular depth model is unreliable, so on the Rainier capture no cell
-    within ~4 m of the camera has a measurement at all. That disc is precisely
-    the ground the user is standing on, so it can't just be left bare; it's
-    filled from the ring immediately outside it, the same way RegionMapStage
-    fills its own nadir exclusion inward rather than flood-filling from afar.
+    HeightMapStage's nadir exclusion still leaves the innermost cells unsampled
+    even under HEIGHT_MAP_REAL_SAMPLE_MASK (46% coverage inside 2 m on the
+    Rainier capture), and that disc is precisely the ground the user is standing
+    on, so it can't be left bare. Whatever remains unsampled there is filled from
+    the ring immediately outside it, the same way RegionMapStage fills its own
+    nadir exclusion inward rather than flood-filling from afar.
     """
     resolution = pano_u.shape[0]
-    observed = observed_mask.astype(bool) & np.isfinite(pano_u) & np.isfinite(pano_v)
+    sampled = sampled_mask.astype(bool) & np.isfinite(pano_u) & np.isfinite(pano_v)
 
     pano_h, pano_w = region_type_map.shape
     row = np.zeros(pano_u.shape, dtype=np.intp)
@@ -114,13 +121,13 @@ def grass_area_mask(
     # Only index with the finite entries -- casting NaN to an integer is
     # undefined and, in practice, produces a garbage index that silently reads
     # some unrelated corner of the panorama.
-    row[observed] = np.clip(((1.0 - pano_v[observed]) * (pano_h - 1)).astype(np.intp), 0, pano_h - 1)
-    col[observed] = np.clip((pano_u[observed] * (pano_w - 1)).astype(np.intp), 0, pano_w - 1)
+    row[sampled] = np.clip(((1.0 - pano_v[sampled]) * (pano_h - 1)).astype(np.intp), 0, pano_h - 1)
+    col[sampled] = np.clip((pano_u[sampled] * (pano_w - 1)).astype(np.intp), 0, pano_w - 1)
 
     cell_type = np.full(pano_u.shape, int(RegionType.OTHER), dtype=np.int16)
-    cell_type[observed] = region_type_map[row[observed], col[observed]].astype(np.int16)
+    cell_type[sampled] = region_type_map[row[sampled], col[sampled]].astype(np.int16)
 
-    mask = observed & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
+    mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
 
     # The per-cell UV is an equirectangular projection fanned out along rays, so
     # an unmeasured column between two measured ones shows up as a thin radial
@@ -131,7 +138,7 @@ def grass_area_mask(
 
     radius = _radius_grid(resolution, grid_size_meters)
     mask = _fill_nadir_disc(
-        mask, radius, observed,
+        mask, radius, sampled,
         fill_radius_m=nadir_fill_radius_m,
         min_fraction=nadir_fill_min_fraction,
     )
@@ -153,7 +160,7 @@ def grass_area_mask(
 def _fill_nadir_disc(
     mask: np.ndarray,
     radius: np.ndarray,
-    observed: np.ndarray,
+    sampled: np.ndarray,
     *,
     fill_radius_m: float,
     min_fraction: float,
@@ -166,17 +173,17 @@ def _fill_nadir_disc(
     ring is one fill_radius_m-wide band rather than the whole scene: a meadow
     that stops 30 m away shouldn't vote on what's underfoot.
 
-    Only cells that are actually unmeasured get filled, so a measured cell inside
+    Only cells that are actually unsampled get filled, so a sampled cell inside
     the radius that genuinely isn't grass (standing water, a rock slab) keeps its
     own answer.
     """
     disc = radius <= fill_radius_m
-    ring = (radius > fill_radius_m) & (radius <= fill_radius_m * 2.0) & observed
+    ring = (radius > fill_radius_m) & (radius <= fill_radius_m * 2.0) & sampled
     if not ring.any():
         return mask
     if mask[ring].mean() < min_fraction:
         return mask
-    return mask | (disc & ~observed)
+    return mask | (disc & ~sampled)
 
 
 def _disc(radius: int) -> np.ndarray:

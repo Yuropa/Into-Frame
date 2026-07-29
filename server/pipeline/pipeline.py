@@ -46,6 +46,7 @@ from pipeline.object_detection.object_detection import ObjectDetectionStage
 from pipeline.object_instance_refinement.refinement import ObjectInstanceRefinementStage
 from pipeline.object_clustering.clustering import ObjectCategoryClusteringStage
 from pipeline.object_distribution.object_distribution import ObjectDistributionStage
+from pipeline.grass_cover.grass_cover import GrassCoverStage
 from pipeline.distribution_synthesis.distribution_synthesis import DistributionSynthesisStage
 from pipeline.panorama_segmentation.panorama_segmentation import PanoramaRegionStage
 from pipeline.region_map.region_map import RegionMapStage, RegionMapConfiguration
@@ -349,6 +350,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ObjectCategoryClusteringStage": ObjectCategoryClusteringStage,
     "ObjectDistributionStage": ObjectDistributionStage,
     "DistributionSynthesisStage": DistributionSynthesisStage,
+    "GrassCoverStage": GrassCoverStage,
     "LinearStructureStage": LinearStructureStage,
     "TerrainReconstructionStage": TerrainReconstructionStage,
     "TerrainNoiseRefinementStage": TerrainNoiseRefinementStage,

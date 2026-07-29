@@ -5,6 +5,7 @@ import numpy as np
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.object_typing.categories import VEGETATION_CATEGORIES
 from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
 
 
@@ -128,6 +129,23 @@ class ObjectMotionClassificationStage(PipelineStage):
             centered = valid_centroids - valid_centroids.mean(axis=0)
             drift = float(np.max(np.linalg.norm(centered, axis=1))) * 2.0
             stationary = (drift / diagonal) < self.config.stationary_drift_ratio
+
+            # Vegetation is rooted. Whatever drift its centroid shows is the
+            # tracker following the plant's own sway (or the mask breathing as
+            # leaves move), never the plant translating through the scene, so the
+            # drift test has no valid "moving" answer to give here and its false
+            # positives are pure cost: the moving branch emits `motion` and no
+            # `sway`, and SceneAnimationStage turns that into a PhysicsHandoff --
+            # a Rigidbody and a collider bolted onto a flower, which then sits
+            # frozen next to its swaying siblings because nothing gave it sway.
+            # Observed on the Rainier capture: a flower classified moving at a
+            # measured velocity of 0.0014 m/s, i.e. indistinguishable from
+            # stationary except in which branch it took.
+            if not stationary and metadata.get("class") in VEGETATION_CATEGORIES:
+                self.log_info(
+                    f"  {idx} ({metadata.get('class')}): drift {drift / diagonal:.2f} treated as sway, not translation"
+                )
+                stationary = True
 
             updates: dict[str, Any] = {"stationary": stationary}
             if stationary:
