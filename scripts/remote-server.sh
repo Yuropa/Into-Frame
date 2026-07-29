@@ -78,6 +78,7 @@ while [[ $# -gt 0 ]]; do
     --config)      CONFIG="$2";       shift 2 ;;
     --seed)        SEEDS+=("$2");     shift 2 ;;
     -o|--output)   OUTPUT="$2";       shift 2 ;;
+    -i|--input)    INPUT="$2";        shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
   esac
@@ -95,7 +96,31 @@ case "$ACTION" in
       SEED_ARGS="$SEED_ARGS --seed $s"
     done
 
-    REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT}"
+    # --output was parsed above but never forwarded, so `remote --output X` silently
+    # did nothing and the server fell back to main.py's default of "./output",
+    # relative to REMOTE_DIR (the *server* subdir). Whether that resolves to the same
+    # cache `frame.sh run` wrote depends entirely on server/output being a symlink to
+    # ../output -- which is gitignored and therefore absent on a fresh clone, so
+    # main.py just mkdir'd an empty server/output and regenerated the whole pipeline.
+    # Resolved against REMOTE_DIR exactly as the clear action below does, so the two
+    # can no longer disagree about which directory they mean.
+    REMOTE_OUT="${OUTPUT}"
+    [[ "$REMOTE_OUT" != /* ]] && REMOTE_OUT="${REMOTE_DIR}/${OUTPUT#./}"
+
+    # Same story as --output: the pipeline cache lives at output/<md5 of the input
+    # file's bytes>, so a server started without --input silently serves main.py's
+    # default (Mount Rainier.jpg) and lands on a different cache key than whatever
+    # `frame.sh run` generated -- which looks exactly like the cache being ignored.
+    # Relative paths resolve against REMOTE_DIR, since the remote cd's there first.
+    # Default mirrors frame.sh's own INPUT default (samples/Paris.jpg) so that
+    # `frame.sh run` and `frame.sh remote` land on the SAME cache key by
+    # construction, resolved against the remote repo root rather than a local path.
+    REMOTE_IN="${INPUT:-$(dirname "$REMOTE_DIR")/samples/Paris.jpg}"
+    [[ -n "$REMOTE_IN" && "$REMOTE_IN" != /* && "$REMOTE_IN" != "~"* ]] \
+      && REMOTE_IN="${REMOTE_DIR}/${REMOTE_IN#./}"
+
+    REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT} --output ${REMOTE_OUT}"
+    [[ -n "$REMOTE_IN" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --input ${REMOTE_IN}"
     [[ -n "$DEBUG"  ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --debug $DEBUG"
     [[ -n "$CONFIG" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --config $CONFIG"
 

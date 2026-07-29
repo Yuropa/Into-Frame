@@ -242,6 +242,7 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
       --port)       PORT="$2";       shift 2 ;;
       --asset-port) ASSET_PORT="$2"; shift 2 ;;
       -o|--output)  OUTPUT="$2";     shift 2 ;;
+      -i|--input)   INPUT="$2";      shift 2 ;;
       -d|--debug)   DEBUG="$2";      shift 2 ;;
       --config)     CONFIG="$2";     shift 2 ;;
       -h|--help)    usage; exit 0 ;;
@@ -255,11 +256,17 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
 
   [[ -n "$OUTPUT" && "$OUTPUT" != /* ]] && OUTPUT="$PWD/$OUTPUT"
   [[ -n "$CONFIG" && "$CONFIG" != /* ]] && CONFIG="$PWD/$CONFIG"
+  [[ -n "$INPUT"  && "$INPUT"  != /* ]] && INPUT="$PWD/$INPUT"
 
   check_env "$ENV"
   cd "$SERVER_DIR"
 
   ARGS=($(build_global_args) server --host "$HOST" --port "$PORT" --asset-port "$ASSET_PORT" --output "$OUTPUT")
+  # Without this the server falls back to main.py's default input (Mount Rainier.jpg).
+  # The pipeline cache directory is output/<md5 of the input file's bytes>, so serving
+  # a different image than the one `frame.sh run` generated means a different cache
+  # directory and a full regeneration -- not a cache bug, a different cache key.
+  [[ -n "$INPUT"  ]] && ARGS+=(--input "$INPUT")
   [[ -n "$DEBUG"  ]] && ARGS+=(--debug "$DEBUG")
   [[ -n "$CONFIG" ]] && ARGS+=(--config "$CONFIG")
 
