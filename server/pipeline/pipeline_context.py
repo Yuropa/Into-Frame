@@ -563,16 +563,37 @@ class PipelineContext():
 
         order_file = path / _STAGE_ORDER_FILE
         if order_file.exists():
-            # The order stages actually ran in, last time this was saved, takes
-            # precedence over the current config's order -- a stage disabled (or
-            # removed) since then must keep its original position rather than be
-            # treated as unrecognised and appended at the end (see save() above).
-            # Any stage the saved order never saw (newly added to config.yaml) is
-            # appended after it, in the current config's order.
-            self._stage_order = list(parse_json(order_file.read_text()))
-            for name in stage_order:
-                if name not in self._stage_order:
-                    self._stage_order.append(name)
+            # The saved order records where stages actually ran last time. It is
+            # authoritative ONLY for stages the current config no longer declares
+            # (disabled or removed since): those must keep their original position
+            # rather than be treated as unrecognised and appended at the end (see
+            # save() above). For every stage the current config DOES declare, the
+            # current config wins.
+            #
+            # Letting the saved order win outright silently defeated reordering a
+            # stage in config.yaml: _value() bounds its search at the *current*
+            # stage's index in this list, so a stage moved earlier in the config
+            # still sat late here and stayed invisible to everything that now runs
+            # after it. Observed on the Rainier capture -- Object Distribution /
+            # Distribution Synthesis / Grass Cover were moved ahead of Scene
+            # Generation, but the cache still ordered them after Scene Animation,
+            # so Scene Generation read OBJECT_COUNT = 417 (Object Instance
+            # Refinement's) instead of 7078 and dropped all 6,661 painted grass
+            # instances plus every synthesized distribution point on the floor.
+            saved = list(parse_json(order_file.read_text()))
+            self._stage_order = list(stage_order)
+            placed = set(self._stage_order)
+            for i, name in enumerate(saved):
+                if name in placed:
+                    continue
+                # Anchor a saved-only stage against the next stage after it in the
+                # saved order that we've already placed, so it lands in the same
+                # relative spot it originally ran in. Previously-inserted saved-only
+                # stages count as anchors too, which keeps runs of them in order.
+                anchor = next((s for s in saved[i + 1:] if s in placed), None)
+                position = self._stage_order.index(anchor) if anchor is not None else len(self._stage_order)
+                self._stage_order.insert(position, name)
+                placed.add(name)
         else:
             # No saved order (cache predates this fix). Best effort: use the
             # currently-enabled order as a base, then place anything unrecognised

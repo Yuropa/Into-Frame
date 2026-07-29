@@ -4,7 +4,7 @@ from typing import NamedTuple
 
 import numpy as np
 from PIL import Image as PILImage
-from scipy.ndimage import uniform_filter1d
+from scipy.ndimage import uniform_filter1d, zoom as ndimage_zoom
 
 from remote_connection.remote_client import RemoteClient
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -250,6 +250,48 @@ def _clean_nadir_band(
     return cleaned
 
 
+def _reject_unreferenced_water(
+    type_idx_map: np.ndarray,
+    runnerup_type_idx_map: np.ndarray,
+    reference_type_idx_map: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Drop WATER pixels that a reference segmentation of the same scene doesn't also
+    call water, replacing each with its own runner-up type (GROUND if that's water
+    too). Returns (corrected map, mask of corrected pixels).
+
+    This exists for the terrain-scoped pass, whose input is the object-removed +
+    LoRA-corrected panorama. Removing foreground objects is meant to reveal the
+    ground behind them -- it must never be able to CREATE water that the actual
+    photograph never showed. It reliably does: on the Rainier capture, inpainting
+    replaced a wildflower meadow with a smooth grey gravel wash, which SegFormer
+    then called "water"/"sea" across whole tiles of the near field. Those calls
+    weren't low-margin enough for AMBIGUITY_CONFIDENCE to catch (0.43-0.67, well
+    over the 0.2 threshold) and _clean_nadir_band then extended them straight down
+    every affected column, so 21.7% of the nadir band read as water. Downstream
+    that became a lake surface half a metre ABOVE its own shoreline, directly
+    under the viewer, with every near-field flower and tree submerged beneath it.
+
+    The original panorama is the right reference: it's the same scene, same
+    geometry, same model, but with the pixels that were actually photographed.
+    Water it doesn't see isn't there.
+    """
+    reference = reference_type_idx_map
+    if reference.shape != type_idx_map.shape:
+        zoom = (type_idx_map.shape[0] / reference.shape[0], type_idx_map.shape[1] / reference.shape[1])
+        reference = ndimage_zoom(reference, zoom, order=0)
+
+    water = int(RegionType.WATER)
+    unreferenced = (type_idx_map == water) & (reference != water)
+    if not unreferenced.any():
+        return type_idx_map, unreferenced
+
+    corrected = type_idx_map.copy()
+    fallback = np.where(runnerup_type_idx_map == water, int(RegionType.GROUND), runnerup_type_idx_map)
+    corrected[unreferenced] = fallback[unreferenced].astype(corrected.dtype)
+    return corrected, unreferenced
+
+
 def _dominant_label_name(
     label_map: np.ndarray,
     type_mask: np.ndarray,
@@ -279,10 +321,17 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         nadir_cutoff_deg: float = -55.0,
         nadir_band_deg: float = 15.0,
         confidence_margin_threshold: float = 0.2,
+        water_reference_type_map: str | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_band_deg = nadir_band_deg
+        # Context key of another already-computed region type map to sanity-check
+        # this one's WATER calls against -- see _reject_unreferenced_water. Only
+        # meaningful for a pass over a DERIVED panorama (the terrain-scoped run over
+        # the object-removed + LoRA-corrected image), pointed at the pass over the
+        # original photograph. None disables the check entirely.
+        self.water_reference_type_map = water_reference_type_map
         # AMBIGUITY_CONFIDENCE threshold (see panorama_region_result.py):
         # below this top1-vs-runner-up softmax margin, a region using that
         # strategy (currently VEGETATION) is considered a genuinely close
@@ -398,12 +447,40 @@ class PanoramaRegionStage(PipelineStage):
 
         seg = _build_result(raw, confidence_margin_threshold=cfg.confidence_margin_threshold)
         result = seg.result
+
+        resolved_type_idx_map = seg.resolved_type_idx_map
+        # Before the nadir band is filled in, not after: _clean_nadir_band extends
+        # the ring just above the cutoff straight down every column, so a phantom
+        # water call anywhere in that ring gets smeared across the ground directly
+        # under the viewer. Correcting the ring first stops it at the source.
+        water_reference = (
+            context.input_depth(cfg.water_reference_type_map)
+            if cfg.water_reference_type_map else None
+        )
+        if water_reference is not None:
+            resolved_type_idx_map, rejected = _reject_unreferenced_water(
+                resolved_type_idx_map,
+                seg.runnerup_type_idx_map,
+                water_reference.depth.astype(resolved_type_idx_map.dtype),
+            )
+            n_rejected = int(rejected.sum())
+            if n_rejected > 0:
+                self.log_info(
+                    f"  Rejected {n_rejected / rejected.size * 100:.2f}% of panorama "
+                    f"labelled water with no support in '{cfg.water_reference_type_map}'"
+                )
+        elif cfg.water_reference_type_map:
+            self.log_warning(
+                f"water_reference_type_map '{cfg.water_reference_type_map}' not in "
+                f"context — skipping the water cross-check"
+            )
+
         # Nadir cleanup only needs to run on the map that actually becomes the
         # canonical output; the raw map is kept purely for debugging (see
         # the type_map_raw output / regions.json, both intentionally left
         # un-nadir-cleaned, matching this stage's existing convention).
         resolved_type_idx_map = _clean_nadir_band(
-            seg.resolved_type_idx_map, cfg.nadir_cutoff_deg, cfg.nadir_band_deg
+            resolved_type_idx_map, cfg.nadir_cutoff_deg, cfg.nadir_band_deg
         )
         context.add_panorama_regions(regions_key, result)
         context.add_depth(type_map_key, resolved_type_idx_map.astype(np.float32))

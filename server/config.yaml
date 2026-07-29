@@ -169,6 +169,13 @@ stages:
     # Foreground Inpainting removed no longer shows up as VEGETATION/BUILT and
     # can't punch a hole in the ridgeline, get anchored as a fake crest, or get
     # picked as a texture reference crop.
+    water_reference_type_map: panorama_region_type_map
+    # Cross-check this pass's WATER calls against the pass over the ORIGINAL photo
+    # above: inpainting may reveal ground, never create water. Without it, the bare
+    # gravel wash foreground inpainting leaves behind reads as "water"/"sea" to
+    # SegFormer, _clean_nadir_band smears that down every affected column, and the
+    # terrain mesh grows a lake surface directly under the viewer -- half a metre
+    # above its own shoreline, with the near-field flowers submerged under it.
     keys:
       input: panorama_terrain
       regions: panorama_regions_terrain
@@ -858,6 +865,15 @@ stages:
     # by raising the effective spacing (keeping both candidate grids at equal
     # points-per-area, which the count inference depends on), not by clamping.
     max_exemplar_candidates: 4000    # 0 disables
+    cli_timeout_s: 120.0             # per-tile wall-clock budget for synthesize_cli. A tile
+                                      # carries max_exemplar_candidates + max_candidates_per_tile
+                                      # candidates through an O(candidates²)-per-iteration
+                                      # optimizer for max_iters iterations, so raising any of
+                                      # those three without raising this just turns painted
+                                      # instances into timeouts. Failures are now logged with
+                                      # a count and a reason -- if the run reports "N/M tiles
+                                      # failed", either raise this or lower the candidate
+                                      # budgets; it is NOT the same as the data being sparse.
     # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
     # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
                         # default (unset) is os.cpu_count()
@@ -957,6 +973,9 @@ stages:
     # Final pass: annotates Scene Generation's already-placed objects with animated-
     # billboard video, sway parameters, or rigid-body physics handoff, based on the
     # classification above. Purely additive -- placement itself is unchanged.
+    sway_frequency_scale: 0.5   # global multiplier on every sway frequency (measured
+                                 # and default alike). Raise toward 1.0 for a windier
+                                 # scene; lower for stiller air.
 
   - name: Report
     stage: ReportGenerationStage

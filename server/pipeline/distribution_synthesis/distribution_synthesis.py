@@ -118,7 +118,12 @@ def _run_synthesize_cli(
     bin_count: int,
     max_iters: int,
     seed: int,
-) -> dict | None:
+    timeout_s: float,
+) -> tuple[dict | None, str | None]:
+    """Run one tile through synthesize_cli. Returns (result, failure_reason) -- the
+    reason is None on success and a short human-readable string otherwise, so the
+    caller can report WHY a group painted nothing instead of silently reporting
+    that it painted nothing (which is indistinguishable from "the data said so")."""
     lines = [f"{bin_count} {n_points} {max_iters} {seed}"]
 
     def emit(pts: np.ndarray):
@@ -138,13 +143,23 @@ def _run_synthesize_cli(
             input=stdin_data,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout_s,
         )
-        if result.returncode != 0:
-            return None
-        return json.loads(result.stdout.strip())
-    except Exception:
-        return None
+    except subprocess.TimeoutExpired:
+        return None, (
+            f"timed out after {timeout_s:.0f}s with "
+            f"{len(domain_points):,} candidates x {max_iters} iters"
+        )
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip().splitlines()
+        return None, f"exit {result.returncode}: {stderr[-1] if stderr else 'no stderr'}"
+    try:
+        return json.loads(result.stdout.strip()), None
+    except json.JSONDecodeError as e:
+        return None, f"unparseable stdout ({e})"
 
 
 class DistributionSynthesisConfiguration(PipelineStageConfiguration):
@@ -169,6 +184,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_exemplar_candidates: int = 4000,
         synthesize_cli_path: str | None = None,
         max_workers: int | None = None,
+        cli_timeout_s: float = 120.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.min_blob_area_cells = min_blob_area_cells
@@ -229,6 +245,11 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # releases the GIL while the child process runs, so this gets real OS-level
         # parallelism across cores despite being threads, not processes. None -> os.cpu_count().
         self.max_workers = max_workers
+        # Per-tile wall-clock budget for synthesize_cli. The optimizer is
+        # O(candidates^2) per iteration over max_iters, and a tile's candidate count
+        # is max_exemplar_candidates + max_candidates_per_tile, so raising either of
+        # those without raising this just converts painted instances into timeouts.
+        self.cli_timeout_s = float(cli_timeout_s)
 
 
 class DistributionSynthesisStage(PipelineStage):
@@ -538,6 +559,7 @@ class DistributionSynthesisStage(PipelineStage):
             # OS-level parallelism across cores here without process-pool overhead or
             # having to pickle the (potentially large) domain-point arrays.
             results: list[dict | None] = [None] * len(jobs)
+            failures: list[str] = []
             with ThreadPoolExecutor(max_workers=max_workers) as pool:
                 futures = {
                     pool.submit(
@@ -551,16 +573,36 @@ class DistributionSynthesisStage(PipelineStage):
                         bin_count=job["bin_count"],
                         max_iters=cfg.max_iters,
                         seed=job["seed"],
+                        timeout_s=cfg.cli_timeout_s,
                     ): i
                     for i, job in enumerate(jobs)
                 }
                 for future in as_completed(futures):
                     i = futures[future]
                     try:
-                        results[i] = future.result()
+                        results[i], reason = future.result()
                     except Exception as e:
-                        self.log_warning(f"synthesize_cli tile {i} failed: {e}")
+                        results[i], reason = None, f"{type(e).__name__}: {e}"
+                    if reason is not None:
+                        failures.append(reason)
+                        # Only the first few, verbatim -- a systematic failure (the
+                        # usual case: every tile times out on the same candidate
+                        # budget) produces one identical line per tile otherwise.
+                        if len(failures) <= 3:
+                            self.log_warning(f"  synthesize_cli tile {i} failed: {reason}")
                     self.advance_progress(task)
+
+            if failures:
+                # Loud on purpose. A wholly-failed synthesis is invisible otherwise:
+                # the stage completes, writes its debug images, and reports "painted
+                # 0 instances" for every group -- which reads as "the distribution
+                # had nothing to say" rather than "the optimizer never returned".
+                # That is exactly how the Rainier capture shipped a scene with no
+                # painted population at all.
+                self.log_warning(
+                    f"{len(failures)}/{len(jobs)} synthesize_cli tile(s) failed — "
+                    f"those tiles paint nothing. Most common: {max(set(failures), key=failures.count)}"
+                )
 
             # Phase 3: consume results back in the original deterministic job order
             # (not completion order) so RNG draws for size/jitter stay reproducible.

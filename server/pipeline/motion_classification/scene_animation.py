@@ -33,6 +33,7 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         wind_axis_degrees: "float | None" = None,
         default_sway_amplitude: float = 0.16,
         default_sway_frequency_hz: float = 0.6,
+        sway_frequency_scale: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Fallback sway for a stationary mesh whose own instance was never tracked
@@ -50,6 +51,16 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         # flowers came back at amplitude 0.17-0.35 and 0.57-0.71 Hz.
         self.default_sway_amplitude = float(default_sway_amplitude)
         self.default_sway_frequency_hz = float(default_sway_frequency_hz)
+        # Global multiplier on every sway frequency, measured and default alike --
+        # a single knob for how fast the whole scene moves. Applied last, after the
+        # per-instance jitter, so the spread between instances scales with it.
+        #
+        # ObjectMotionClassificationStage derives frequency from zero-crossings of a
+        # tracked crop's horizontal centroid, which counts a full there-and-back
+        # sway as two events and so reads roughly double the real rate; on the
+        # Rainier capture that put placed vegetation at a median 1.24 Hz, fast
+        # enough to look like it's being shaken rather than blown. 0.5 halves it.
+        self.sway_frequency_scale = float(sway_frequency_scale)
         # A single wind direction for the whole scene reads more physically
         # plausible than each tree leaning its own random way -- fixed at
         # construction (derived from `seed` below when left None) so re-running
@@ -136,7 +147,10 @@ class SceneAnimationStage(PipelineStage):
                         # sheet -- phase alone desynchronises the timing but leaves
                         # every blade tracing an identical arc.
                         "amplitude": amplitude * float(phase_rng.uniform(0.75, 1.25)),
-                        "frequencyHz": frequency * float(phase_rng.uniform(0.8, 1.2)),
+                        "frequencyHz": (
+                            frequency * float(phase_rng.uniform(0.8, 1.2))
+                            * self.config.sway_frequency_scale
+                        ),
                         "phase": float(phase_rng.uniform(0.0, 2.0 * np.pi)),
                         "axisDegrees": wind_axis,
                     }

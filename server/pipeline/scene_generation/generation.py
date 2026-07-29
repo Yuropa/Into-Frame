@@ -117,6 +117,22 @@ class SceneGenerationStage(PipelineStage):
         panorama = context.input_panorama(panorama_key)
         terrain_mesh = context.input_mesh(ContextKey.TERRAIN_MESH)
 
+        # Every mesh an object can stand on. Formations are separate landmasses sitting
+        # ON TOP of the base terrain, which is deliberately depressed beneath them (see
+        # TerrainMeshGenerator's formation_depression_m) -- snapping to terrain_mesh
+        # alone therefore buries anything standing on one, by the depression depth plus
+        # the formation's own height. Highest surface at the query point wins.
+        ground_meshes = [terrain_mesh]
+        for formation in context.input_object(ContextKey.TERRAIN_FORMATIONS) or []:
+            ground_meshes.append(context.input_mesh(formation["mesh_key"]))
+        ground_meshes = [m for m in ground_meshes if m is not None]
+
+        def ground_y_at(world_x: float, world_z: float, yaw_degrees: float) -> float | None:
+            local_x, local_z = terrain_local_xz(world_x, world_z, yaw_degrees)
+            hits = [mesh_y_at(local_x, local_z, m) for m in ground_meshes]
+            hits = [y for y in hits if y is not None]
+            return max(hits) if hits else None
+
         scene = Scene()
         scene.extrinsics = extrinsics
         # camera_height = world Y of the camera = terrain_y_at_nadir + camera_height_meters.
@@ -235,19 +251,18 @@ class SceneGenerationStage(PipelineStage):
                 #
                 # position[0]/position[2] are in WORLD space (extrinsics.rotation is
                 # already baked in by unproject_bbox/unproject_bbox_equirect above),
-                # but terrain_mesh's own vertices are stored in its native, unrotated
-                # frame (+Z = panorama theta 0) — the same yaw compensation applied to
-                # the terrain Object3D's own rotation (see scene.skybox_rotation
-                # above) has to be undone here before raycasting, or the query lands
-                # at the wrong point whenever that yaw isn't ~0: near the finite
-                # terrain grid's edges this misses the mesh outright (silently
-                # falling back to the object's raw unprojected Y below — the floating/
-                # sinking objects this was reported as), and even where it still hits
-                # the mesh, it samples the wrong patch of terrain relief.
-                terrain_y = None
-                if terrain_mesh is not None:
-                    local_x, local_z = terrain_local_xz(position[0], position[2], scene.skybox_rotation)
-                    terrain_y = mesh_y_at(local_x, local_z, terrain_mesh)
+                # but the ground meshes' own vertices are stored in their native,
+                # unrotated frame (+Z = panorama theta 0) — the same yaw compensation
+                # applied to the terrain Object3D's own rotation (see
+                # scene.skybox_rotation above) has to be undone before raycasting, or
+                # the query lands at the wrong point whenever that yaw isn't ~0: near
+                # the finite terrain grid's edges this misses the mesh outright
+                # (silently falling back to the object's raw unprojected Y below — the
+                # floating/sinking objects this was reported as), and even where it
+                # still hits the mesh, it samples the wrong patch of terrain relief.
+                # ground_y_at handles that, and takes the highest of the base terrain
+                # and every formation standing on it.
+                terrain_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
 
                 place_y = terrain_y + height / 2.0 if terrain_y is not None else position[1]
 
