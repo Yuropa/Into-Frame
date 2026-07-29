@@ -127,7 +127,8 @@ public class SceneParamManager : MonoBehaviour
         if (!string.IsNullOrEmpty(sun.color) && ColorUtility.TryParseHtmlString(sun.color, out Color sunColor))
             _targetColor = sunColor;
 
-        Debug.Log($"[SceneParamManager] Sun: dir {toSun}, intensity {sun.intensity}, color {sun.color}");
+        Debug.Log($"[SceneParamManager] Sun: dir {toSun}, intensity {sun.intensity}, color {sun.color}"
+                  + (sun.hdr ? "" : " (no HDR merge — intensity/colour approximate)"));
     }
 
     private void Update()

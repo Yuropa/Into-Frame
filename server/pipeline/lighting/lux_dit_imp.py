@@ -87,6 +87,72 @@ class LuxDiTServer(RemoteServer):
         self.pipeline_cfg = pipeline_cfg
         print(f"LuxDiT pipeline loaded from {checkpoint_dir}")
 
+        # LuxDiT's own HDR merger. The two maps the diffusion pipeline emits are
+        # both 8-bit: env_ldr is tonemapped and env_log is a *learned* log-domain
+        # encoding, and there is no closed-form inverse for the latter -- the
+        # repo's hdr_merger.py reconstructs radiance with this small trained
+        # network, not a formula. Skipping it (as this server previously did)
+        # leaves everything downstream reasoning about lighting from compressed
+        # 8-bit pixels, where the sun is only ~6x the map mean instead of the
+        # ~30x+ it really is, so no honest intensity can be recovered.
+        #
+        # Weights ship in the same nvidia/LuxDiT snapshot setup.sh already
+        # downloads (the `hdr_merge_mlp` folder), so this costs no extra setup.
+        self.hdr_model = None
+        merger_dir = checkpoint_dir / "hdr_merge_mlp"
+        if merger_dir.is_dir():
+            try:
+                from src.models.hdr_model import HDR_MLP
+                self.hdr_model = HDR_MLP.from_pretrained(str(merger_dir)).to(self.device).eval()
+                print(f"LuxDiT HDR merger loaded from {merger_dir}")
+            except Exception as e:
+                print(f"LuxDiT HDR merger failed to load ({e}) — falling back to LDR-only lighting")
+        else:
+            print(f"No HDR merger at {merger_dir} — falling back to LDR-only lighting")
+
+    def _merge_hdr(self, ldr_img: PILImage.Image, log_img: PILImage.Image):
+        """Reconstruct linear HDR radiance from the (env_ldr, env_log) pair.
+
+        Mirrors hdr_merger.py: both maps are normalised to [-1, 1] and fed to the
+        merger together. HDR_MLP is a *per-channel scalar* network -- its
+        `in_dim=2` counts the concatenation of one LDR sample with one log sample
+        (`torch.cat((x_ldr, x_hdr), dim=-1)`), and `out_dim=1` -- so the maps are
+        flattened to (N, 1) per channel rather than passed as (H, W, 3), which
+        would present 6 channels and only fit the HDR_CNN variant the released
+        weights are not.
+
+        Returns float32 (H, W, 3) linear radiance, or None if anything about the
+        result doesn't look like radiance -- a silently wrong reconstruction here
+        would poison every lighting decision downstream, so this fails loudly and
+        lets the caller fall back rather than shipping plausible-looking garbage.
+        """
+        if self.hdr_model is None:
+            return None
+        try:
+            ldr = np.asarray(ldr_img.convert("RGB"), dtype=np.float32) / 255.0 * 2.0 - 1.0
+            log = np.asarray(log_img.convert("RGB"), dtype=np.float32) / 255.0 * 2.0 - 1.0
+            if ldr.shape != log.shape:
+                print(f"HDR merge skipped: shape mismatch {ldr.shape} vs {log.shape}")
+                return None
+
+            shape = ldr.shape
+            with torch.no_grad():
+                x_ldr = torch.from_numpy(ldr.reshape(-1, 1)).to(self.device)
+                x_log = torch.from_numpy(log.reshape(-1, 1)).to(self.device)
+                hdr = self.hdr_model(x_ldr, x_log).float().cpu().numpy().reshape(shape)
+
+            if not np.isfinite(hdr).all() or hdr.min() < 0.0 or hdr.max() <= 0.0:
+                print(f"HDR merge rejected: range [{hdr.min()}, {hdr.max()}] is not radiance")
+                return None
+            print(
+                f"HDR merged: radiance range [{hdr.min():.4f}, {hdr.max():.2f}], "
+                f"peak/mean {hdr.max() / max(float(hdr.mean()), 1e-9):.1f}x"
+            )
+            return hdr.astype(np.float32)
+        except Exception as e:
+            print(f"HDR merge failed ({e}) — falling back to LDR-only lighting")
+            return None
+
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "estimate":
             return self.estimate(input)
@@ -157,8 +223,13 @@ class LuxDiTServer(RemoteServer):
         frames_ldr = pred[0][0]
         frames_log = pred[1][0]
 
+        self.report_progress(0.9, "Merging HDR…")
+        hdr = self._merge_hdr(frames_ldr[0], frames_log[0])
+
         self.report_progress(1.0, "Done")
-        return {"ldr": frames_ldr[0], "log": frames_log[0]}
+        # hdr is None when the merger is unavailable or produced something that
+        # isn't radiance; SceneLighting falls back to the compressed maps then.
+        return {"ldr": frames_ldr[0], "log": frames_log[0], "hdr": hdr}
 
 
 if __name__ == "__main__":

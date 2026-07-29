@@ -298,10 +298,14 @@ public class SunData
     // frame — apply skyboxRotation before use, same as the skybox.
     public float[] direction;   // 3
     public string  color;       // "#rrggbb", tint only; brightness is `intensity`
-    // Relative, not photometric: the environment maps are LDR/log-compressed with
-    // no absolute calibration, so this is a directionality heuristic scaled so a
-    // typical clear sky lands near 1. See SceneLighting.sun's docstring.
+    // Share of the scene's total irradiance arriving from the sun, scaled onto
+    // Unity's directional-light scale (a normal sunny day lands near 1). The
+    // reflection probe's ambient SH carries the diffuse remainder.
     public float   intensity;
+    // False = LuxDiT's HDR merger didn't run, so the values above came from
+    // tonemapped 8-bit pixels: direction still holds, but intensity understates
+    // a harsh sun and colour loses its warmth. See SceneLighting._radiance.
+    public bool    hdr;
 }
 
 [Serializable]

@@ -84,14 +84,18 @@ class PanoramaLightingStage(PipelineStage):
             on_progress=self.make_progress_callback(task),
         )
 
-        lighting = SceneLighting(ldr=result.ldr, log=result.log)
+        lighting = SceneLighting(ldr=result.ldr, log=result.log, hdr=result.hdr)
 
         if self.temp is not None:
             result.ldr.save(self.temp / "lighting_ldr.png")
             result.log.save(self.temp / "lighting_log.png")
 
+        sun = lighting.sun()
         self.log_info(
             f"Lighting estimated: env map {lighting.width}×{lighting.height}"
+            + (f", HDR radiance recovered (peak {float(result.hdr.max()):.1f})" if result.hdr is not None
+               else ", no HDR merge — sun intensity will be approximate")
+            + (f", sun {sun['intensity']:.2f}x @ {sun['color']}" if sun else ", no directional sun")
         )
         context.add_lighting(output_key, lighting)
 
