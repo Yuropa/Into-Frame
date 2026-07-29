@@ -98,7 +98,7 @@ def _local_grid(bbox_min: np.ndarray, bbox_max: np.ndarray, target_count: int) -
 # produced by a different config revision than the checkout it's run from.
 MIN_BLOB_AREA_CELLS = 64
 MAX_CANDIDATES_PER_TILE = 900
-MAX_ITERS = 400
+MAX_ITERS = 100
 INPUT_BOUNDARY_PAD_FACTOR = 1.5
 MIN_EXEMPLAR_SPACING_M = 0.25
 MAX_PAINT_RADIUS_M = 30.0

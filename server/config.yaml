@@ -848,7 +848,18 @@ stages:
     # is the compromise; drop to 400 if tiles still time out, raise toward 2000 if the
     # painted pattern starts showing tile-grid structure.
     max_candidates_per_tile: 900
-    max_iters: 400
+    # Measured, not guessed: a tile's runtime is flat from 50 iterations to 400 (8.2s
+    # vs 8.2s at n=166; 28.3s vs 28.4s at n=332), because the optimizer converges and
+    # breaks out long before the cap -- 34 iterations on the tile that was profiled.
+    # So this was never the cost lever, and raising it buys nothing.
+    #
+    # It is still worth bounding. A cap that is never reached costs nothing when the
+    # tile converges, but turns a pathological non-converging tile from "hit
+    # cli_timeout_s and paint NOTHING" into "paint a slightly under-converged pattern",
+    # which is strictly the better failure. 100 leaves ~2x headroom over the observed
+    # convergence point; below ~50 it starts truncating the largest tiles for real
+    # (n=332 needs somewhere between 25 and 50, since 25 iters finishes in 16.5s).
+    max_iters: 100
     size_jitter: 0.15
     input_boundary_pad_factor: 1.5
     # synthesize_cli is handed n_points=-1, so the painted count is INFERRED from the
@@ -883,15 +894,18 @@ stages:
     # by raising the effective spacing (keeping both candidate grids at equal
     # points-per-area, which the count inference depends on), not by clamping.
     max_exemplar_candidates: 4000    # 0 disables
-    cli_timeout_s: 120.0             # per-tile wall-clock budget for synthesize_cli. A tile
-                                      # carries max_exemplar_candidates + max_candidates_per_tile
-                                      # candidates through an O(candidates²)-per-iteration
-                                      # optimizer for max_iters iterations, so raising any of
-                                      # those three without raising this just turns painted
-                                      # instances into timeouts. Failures are now logged with
-                                      # a count and a reason -- if the run reports "N/M tiles
-                                      # failed", either raise this or lower the candidate
-                                      # budgets; it is NOT the same as the data being sparse.
+    cli_timeout_s: 120.0             # per-tile wall-clock budget for synthesize_cli.
+                                      # Profiled on the Rainier capture at the settings above:
+                                      # cost per tile is ~1s of fixed O(candidates²) precompute
+                                      # plus a term growing as roughly n_points^2.3 -- 41 pts
+                                      # =1.2s, 83=3.0s, 166=8.2s, 332=28.4s. The largest tile in
+                                      # that scene asks for 332, so this leaves ~4x headroom.
+                                      # That steep exponent is why the point count, not the
+                                      # iteration budget, is the thing to watch: a 2x rise in
+                                      # points is a ~5x rise in time.
+                                      # Timeouts are logged with a count and a reason -- "N/M
+                                      # tiles produced no points" is NOT the same as the data
+                                      # being sparse. Lower max_candidates_per_tile first.
     # synthesize_cli_path: /path/to/pattern-synthesis/build/synthesize_cli  # override if needed
     # max_workers: 16  # concurrent synthesize_cli subprocesses (one per grid tile);
                         # default (unset) is os.cpu_count()
