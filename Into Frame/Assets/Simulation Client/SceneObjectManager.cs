@@ -322,7 +322,14 @@ public class SceneObjectManager : MonoBehaviour
                 container.AddComponent<WindSway>().Apply(data.sway);
 
             if (data.physics != null)
+            {
+                // Worth a log line: this is the only path that puts a gravity-enabled
+                // Rigidbody on a scene object, so "why did that thing fall?" should be
+                // answerable from the console without attaching a debugger.
+                Debug.Log($"[SceneObjectManager] Physics handoff on '{data.name}' ({data.id[..6]}) — " +
+                          $"Rigidbody with server velocity; it will fall if unsupported.");
                 container.AddComponent<PhysicsHandoff>().Apply(data.physics);
+            }
         }
     }
 

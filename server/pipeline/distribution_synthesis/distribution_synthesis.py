@@ -2,6 +2,7 @@ import json
 import math
 import os
 import subprocess
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -121,9 +122,17 @@ def _run_synthesize_cli(
     timeout_s: float,
 ) -> tuple[dict | None, str | None]:
     """Run one tile through synthesize_cli. Returns (result, failure_reason) -- the
-    reason is None on success and a short human-readable string otherwise, so the
-    caller can report WHY a group painted nothing instead of silently reporting
-    that it painted nothing (which is indistinguishable from "the data said so")."""
+    reason is None only when the tile actually produced points, so the caller can
+    report WHY a group painted nothing instead of silently reporting that it painted
+    nothing (which is indistinguishable from "the data said so").
+
+    Crucially that includes a SUCCESSFUL exit that produced no points. synthesize_cli
+    returns 0 and prints a well-formed {"output_points":[]} for every one of
+    synthesize_pattern's four bail-outs -- too few exemplars inside the input
+    boundary, too few candidate positions in the output boundary, exemplar PCF
+    failure, initial placement failure -- and names which one on STDERR. Judging the
+    call by its exit code alone throws that diagnosis away and makes a total
+    synthesis failure look exactly like an empty distribution."""
     lines = [f"{bin_count} {n_points} {max_iters} {seed}"]
 
     def emit(pts: np.ndarray):
@@ -153,13 +162,23 @@ def _run_synthesize_cli(
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
+    stderr_lines = (result.stderr or "").strip().splitlines()
+    last_stderr = stderr_lines[-1].strip() if stderr_lines else ""
+
     if result.returncode != 0:
-        stderr = (result.stderr or "").strip().splitlines()
-        return None, f"exit {result.returncode}: {stderr[-1] if stderr else 'no stderr'}"
+        return None, f"exit {result.returncode}: {last_stderr or 'no stderr'}"
     try:
-        return json.loads(result.stdout.strip()), None
+        parsed = json.loads(result.stdout.strip())
     except json.JSONDecodeError as e:
         return None, f"unparseable stdout ({e})"
+
+    if not parsed.get("output_points"):
+        # Clean exit, empty result -- the interesting case. synthesize_pattern already
+        # said why on stderr; pass that through verbatim rather than inventing a
+        # summary, since the four reasons call for completely different responses
+        # (boundary geometry vs. candidate density vs. exemplar quality).
+        return None, last_stderr or "exited 0 but produced no points (no stderr)"
+    return parsed, None
 
 
 class DistributionSynthesisConfiguration(PipelineStageConfiguration):
@@ -586,23 +605,27 @@ class DistributionSynthesisStage(PipelineStage):
                     if reason is not None:
                         failures.append(reason)
                         # Only the first few, verbatim -- a systematic failure (the
-                        # usual case: every tile times out on the same candidate
-                        # budget) produces one identical line per tile otherwise.
+                        # usual case: every tile hits the same bail-out on the same
+                        # inputs) produces one identical line per tile otherwise.
                         if len(failures) <= 3:
-                            self.log_warning(f"  synthesize_cli tile {i} failed: {reason}")
+                            self.log_warning(f"  synthesize_cli tile {i} produced nothing: {reason}")
                     self.advance_progress(task)
 
             if failures:
                 # Loud on purpose. A wholly-failed synthesis is invisible otherwise:
                 # the stage completes, writes its debug images, and reports "painted
                 # 0 instances" for every group -- which reads as "the distribution
-                # had nothing to say" rather than "the optimizer never returned".
+                # had nothing to say" rather than "every single call bailed out".
                 # That is exactly how the Rainier capture shipped a scene with no
                 # painted population at all.
-                self.log_warning(
-                    f"{len(failures)}/{len(jobs)} synthesize_cli tile(s) failed — "
-                    f"those tiles paint nothing. Most common: {max(set(failures), key=failures.count)}"
+                by_reason = Counter(failures)
+                level = self.log_error if len(failures) == len(jobs) else self.log_warning
+                level(
+                    f"{len(failures)}/{len(jobs)} synthesize_cli tile(s) produced no points"
+                    + (" — NOTHING was painted" if len(failures) == len(jobs) else "")
                 )
+                for reason, count in by_reason.most_common(4):
+                    level(f"    {count}x  {reason}")
 
             # Phase 3: consume results back in the original deterministic job order
             # (not completion order) so RNG draws for size/jitter stay reproducible.

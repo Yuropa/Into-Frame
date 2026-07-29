@@ -263,7 +263,19 @@ public class TerrainMaterialManager : MonoBehaviour
             return Texture2D.whiteTexture;
         }
 
-        var tex = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false, linear: linear);
+        // mipChain MUST be true. Terrain is the one surface in this scene viewed at
+        // every scale at once: near ground sits at roughly one texel per pixel, while
+        // the far slopes of a mountain compress hundreds of texels of a 4096x2048
+        // panorama layer into a single pixel. Sampling mip 0 there is a textbook
+        // undersample, and it rendered as heavy swirling contour moire across the
+        // whole mountain -- with the fine snow/rock detail aliased into grey mush,
+        // which is also why the terrain read as washed out next to the skybox built
+        // from the very same photo (PanoramaSkybox goes through DownloadHandlerTexture,
+        // which does build a mip chain, and asks for trilinear + aniso on top).
+        //
+        // Note that Apply(updateMipmaps: true) below cannot rescue this: it only
+        // refreshes an existing chain, so with mipChain: false it silently did nothing.
+        var tex = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: true, linear: linear);
         if (!tex.LoadImage(bytes))
         {
             Debug.LogError($"[TerrainMaterialManager] PNG decode failed for '{label}'.");
@@ -272,7 +284,12 @@ public class TerrainMaterialManager : MonoBehaviour
 
         tex.name        = label;
         tex.wrapMode    = TextureWrapMode.Repeat;
-        tex.filterMode  = FilterMode.Bilinear;
+        // Trilinear, not bilinear: without it the mip transition is a visible band
+        // sweeping across the terrain as the viewer's head moves. Anisotropy matters
+        // more here than almost anywhere else -- terrain is seen at grazing angles by
+        // definition, which is exactly the case isotropic mip selection over-blurs.
+        tex.filterMode  = FilterMode.Trilinear;
+        tex.anisoLevel  = 8;
         tex.Apply(updateMipmaps: true, makeNoLongerReadable: false);
         return tex;
     }
