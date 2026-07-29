@@ -39,6 +39,15 @@ public class SceneParamManager : MonoBehaviour
             _targetColor = c;
         }
 
+        // Key light from the estimated environment map (SceneLighting.sun on the
+        // server). Without this the directional light kept whatever direction and
+        // intensity the prefab shipped with, entirely unrelated to where the light
+        // in the panorama actually comes from -- so every billboard and category
+        // mesh, whose textures are photo crops with the real sun already baked
+        // into their albedo, got lit a second time from the wrong angle and read
+        // as a different colour and exposure from the terrain around them.
+        ApplySun(p.lighting != null ? p.lighting.sun : null, p.skyboxRotation);
+
 
         Camera cam = camera != null ? camera.GetComponent<Camera>() : Camera.main;
         if (cam != null)
@@ -83,6 +92,43 @@ public class SceneParamManager : MonoBehaviour
 
         if (environmentLighting != null)
             environmentLighting.Apply(p.lighting);
+    }
+
+    /// <summary>
+    /// Point the directional light along the estimated sun direction and take its
+    /// colour/intensity, then hand ambientColor to the ambient slot it actually
+    /// describes.
+    ///
+    /// The server sends the direction in the panorama's own frame, so it needs the
+    /// same skyboxRotation yaw the skybox itself gets (see PanoramaSkybox) --
+    /// otherwise the light and the sky it was extracted from point different ways,
+    /// which is more obviously wrong than no sun at all.
+    /// </summary>
+    private void ApplySun(SunData sun, float skyboxRotation)
+    {
+        if (directionalLight == null) return;
+
+        if (sun == null || sun.direction == null || sun.direction.Length != 3)
+        {
+            // Overcast, or a degenerate environment map with no identifiable key
+            // light. Leave the prefab's light alone rather than inventing a sun.
+            Debug.Log("[SceneParamManager] No sun in lighting data — leaving directional light as authored");
+            return;
+        }
+
+        Vector3 toSun = new Vector3(sun.direction[0], sun.direction[1], sun.direction[2]);
+        if (toSun.sqrMagnitude < 1e-6f) return;
+        toSun = Quaternion.Euler(0f, skyboxRotation, 0f) * toSun.normalized;
+
+        // A directional light shines along its own forward axis, so it has to face
+        // the opposite way from "towards the sun".
+        directionalLight.transform.rotation = Quaternion.LookRotation(-toSun);
+        if (sun.intensity > 0f) directionalLight.intensity = sun.intensity;
+        if (!string.IsNullOrEmpty(sun.color) && ColorUtility.TryParseHtmlString(sun.color, out Color sunColor))
+            _targetColor = sunColor;
+
+        Debug.Log($"[SceneParamManager] Sun: dir {toSun}, intensity {sun.intensity}, color {sun.color}"
+                  + (sun.hdr ? "" : " (no HDR merge — intensity/colour approximate)"));
     }
 
     private void Update()

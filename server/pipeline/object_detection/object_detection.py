@@ -26,10 +26,24 @@ class ObjectDetectionConfiguration(PipelineStageConfiguration):
         # crops outside this bounding-box-area range are dropped before being stored.
         min_area_fraction: float = 0.0003,
         max_area_fraction: float = 0.20,
+        confident_score: float = 0.45,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.min_area_fraction = min_area_fraction
         self.max_area_fraction = max_area_fraction
+        # Grounding DINO score at or above which a detection is trusted for its
+        # identity, not just its position -- i.e. allowed to anchor a visual
+        # bucket in ObjectCategoryClusteringStage. Below it the detection is
+        # marked low_confidence and has to earn its class by DINOv2 similarity to
+        # a confident crop, the same bar a weak CLIP typing result faces.
+        #
+        # 0.45 sits above the detector's own box threshold (which decides "is
+        # there an object here at all") but below the scores a clean, unambiguous
+        # detection reaches -- on the Rainier capture the placed flowers scored
+        # 0.35-0.55, straddling it, which is the intended behaviour rather than a
+        # coincidence: those weaker boxes are real objects whose *labels* are not
+        # independently trustworthy.
+        self.confident_score = confident_score
 
 
 class ObjectDetectionStage(PipelineStage):
@@ -161,6 +175,22 @@ class ObjectDetectionStage(PipelineStage):
                     "score": float(det["score"]),
                     "class": det["label"],
                     "source": "grounding_dino",
+                    # These detections are minted AFTER ObjectTypingStage has run,
+                    # so they never receive its 'low_confidence' verdict. That
+                    # absence is not neutral: ObjectCategoryClusteringStage reads
+                    # a missing flag as falsy, i.e. fully confident, so a weak
+                    # box would silently get to anchor a visual bucket with more
+                    # authority than a CLIP-verified crop. (Before the typing
+                    # confidence metric was fixed, that accident was the only
+                    # reason anything survived clustering at all -- which is
+                    # exactly why it can't be left implicit now that it doesn't
+                    # have to carry the scene.)
+                    #
+                    # Grounding DINO's own score is real image-grounded evidence,
+                    # just from a different model, so it answers the question
+                    # directly rather than deferring to a pass that will never
+                    # see these crops.
+                    "low_confidence": float(det["score"]) < cfg.confident_score,
                 }
 
                 context.add_image(f"crop_{next_idx}", crop.image)

@@ -152,6 +152,18 @@ class SceneGenerationStage(PipelineStage):
             # poorly-scored/occluded crops with no ranking).
             billboard_pools: dict[str, list[int]] = context.input_object("billboard_pools") or {}
 
+            # Which visual variants each class actually has, taken from the pool
+            # keys Panorama Asset Generation just wrote ("{class}::{bucket}").
+            # Used only to give an unbucketed instance a plausible variant to
+            # render -- see the `bucket is None` branch below.
+            class_variants: dict[str, list[int]] = {}
+            for pool_key in billboard_pools:
+                pool_class, _, pool_bucket = pool_key.rpartition("::")
+                if pool_class and pool_bucket.isdigit():
+                    class_variants.setdefault(pool_class, []).append(int(pool_bucket))
+            for variants in class_variants.values():
+                variants.sort()
+
             camera_position = (
                 np.array(extrinsics.translation, dtype=float) if extrinsics is not None else np.zeros(3)
             )
@@ -246,10 +258,45 @@ class SceneGenerationStage(PipelineStage):
                     "world_height": float(height),
                 })
 
-                bucket = int(metadata.get("bucket") or 0)
+                # An unbucketed instance is one ObjectCategoryClusteringStage never
+                # reached -- it had no crop to embed, or it was created after that
+                # stage ran (Object Detection / Instance Refinement splits). It is
+                # NOT a member of variant 0.
+                #
+                # Reading it as `metadata.get("bucket") or 0` made it one anyway,
+                # and that silently collapsed the whole population onto a single
+                # asset: on the Rainier capture 11 of 17 placed flowers had no
+                # bucket, so every one of them rendered category_mesh_flower_0
+                # while the other 22 generated flower meshes went unused. Spread
+                # them instead, deterministically per index, across the variants
+                # this class actually has -- an arbitrary-but-stable variant is a
+                # far better guess than "always the first one".
+                bucket = metadata.get("bucket")
+                if bucket is None:
+                    variants = class_variants.get(cls)
+                    bucket = (
+                        variants[np.random.default_rng((self.seed, idx)).integers(len(variants))]
+                        if variants else 0
+                    )
+                bucket = int(bucket)
                 mesh_key = f"category_mesh_{cls}_{bucket}"
                 pool_key = f"{cls}::{bucket}"
                 category_mesh = context.input_mesh(mesh_key)
+
+                # Optional far-LOD mesh for classes a camera-facing billboard
+                # can't represent. Ground cover is the case this exists for: a
+                # billboard is a single quad that turns to face the viewer, which
+                # works for an upright subject seen from eye level and collapses
+                # to a line -- then swings through the ground plane -- for grass
+                # underfoot. GrassCoverStage builds a fixed-orientation crossed-
+                # card mesh under this key instead (see grass_cover/cards.py).
+                #
+                # Kept generic rather than special-cased on the class: any group
+                # that publishes a _card mesh gets the same treatment, and any
+                # group that doesn't falls through to the billboard pool exactly
+                # as before.
+                card_mesh_key = f"{mesh_key}_card"
+                card_mesh = context.input_mesh(card_mesh_key)
 
                 # Bake-time distance-based LOD: mesh if this instance is close
                 # enough to the camera AND its bucket actually has one (a
@@ -263,6 +310,14 @@ class SceneGenerationStage(PipelineStage):
                     np.array((position[0], place_y, position[2]), dtype=float) - camera_position
                 ))
                 use_mesh = category_mesh is not None and camera_distance <= self.config.mesh_lod_distance_m
+                if not use_mesh and card_mesh is not None:
+                    # Beyond the mesh LOD distance (or this bucket never got a
+                    # reconstructed mesh at all) but a card LOD exists -- take it
+                    # rather than the billboard. Everything below is shared: the
+                    # card is an ordinary mesh, so it gets the same base snap,
+                    # random yaw and uniform scale, and CategoryMeshRiggingStage
+                    # will rig it for sway just like the near-LOD asset.
+                    category_mesh, mesh_key, use_mesh = card_mesh, card_mesh_key, True
 
                 if use_mesh:
                     # Use the shared bucket mesh with a random Y rotation.

@@ -226,8 +226,37 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                 # stages could read.
                 context.add_image(ContextKey.PANORAMA_FOREGROUND_MASK, Image(mask_pil))
 
+                # The occluder-only half of that mask, persisted separately.
+                #
+                # The full mask above conflates two very different things: real
+                # occluders standing between the camera and the ground (the
+                # _extracted_object_mask categories -- a tree, a building), and
+                # the ground *itself*, swept in wholesale by the
+                # foreground_distance_m depth test because in a ground-level
+                # capture the ground is within a few metres across the entire
+                # lower hemisphere. On the Rainier capture that test covered 48.5%
+                # of the panorama and 100% of every row below ~60% height, and the
+                # wildflower meadow it erased came back as bare gravel.
+                #
+                # For geometry that conflation is harmless -- both cases want the
+                # occluder gone before height solving. For *colour* it is not:
+                # TerrainTextureGenerationStage was left texturing the ground with
+                # fabricated gravel when a real photograph of that same ground was
+                # sitting in the original panorama the whole time. Splitting the
+                # mask lets it take real colour back for the ground while still
+                # keeping genuine occluders removed.
+                occluder_pil = PILImage.fromarray(
+                    (binary_dilation(
+                        extracted_mask if extracted_mask is not None else np.zeros_like(near_mask),
+                        iterations=self.config.mask_dilation_px,
+                    ).astype(np.uint8)) * 255,
+                    mode="L",
+                )
+                context.add_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK, Image(occluder_pil))
+
                 if self.temp is not None:
                     mask_pil.save(self.temp / "foreground_mask.png")
+                    occluder_pil.save(self.temp / "foreground_occluder_mask.png")
 
                 objectclear_pil = self._objectclear.inpaint(
                     original_pil,

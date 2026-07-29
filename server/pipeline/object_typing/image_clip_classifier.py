@@ -1,3 +1,5 @@
+import math
+
 from util.image_utils import Image, make_context_composite, flatten_alpha_with_mean_fill
 from pipeline.object_typing.categories import OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES
 from transformers import CLIPProcessor, CLIPModel
@@ -7,21 +9,56 @@ _OBJECT_LABELS = frozenset(OBJECT_CATEGORIES.keys())
 _ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 
 
+def _pairwise_certainty(winner_score: float, runner_up_score: float, logit_scale: float) -> float:
+    """How decisively `winner_score` beats `runner_up_score`, in [0, 1].
+
+    This is the two-way softmax between the pair, evaluated at CLIP's own
+    learned `logit_scale`, then rescaled from its natural [0.5, 1] range:
+
+        p_winner = exp(T*a) / (exp(T*a) + exp(T*b))   ->   (p - 0.5) * 2
+                 = tanh(T * (a - b) / 2)
+
+    The temperature is what makes this a meaningful measure at all. An earlier
+    version compared the two *raw cosine similarities* directly, as
+    `(max/(a+b) - 0.5) * 2`. CLIP's image-text cosines all live in a narrow
+    band well away from zero (0.55-0.90 across a measured alpine-meadow
+    capture), so that ratio is pinned near 0.5 and the rescaled value near 0
+    no matter how decisive the win: clearing a 0.1 threshold would have
+    required the winner to score 1.22x the runner-up, which never happens.
+    Measured on that capture, 2 of 359 crops cleared the two gates below --
+    i.e. every object in the scene was flagged low_confidence, every class was
+    dropped by ObjectCategoryClusteringStage for want of a confident bucket to
+    corroborate against, and the scene came out with 21 objects in it.
+
+    A *difference* of cosines is the quantity that actually carries signal
+    (p5 0.002, median 0.032, p95 0.099 for the object-vs-runner-up gap on that
+    same capture); exponentiating it at the model's own calibrated temperature
+    turns it back into a probability the thresholds can be stated against.
+    """
+    return math.tanh(logit_scale * (winner_score - runner_up_score) / 2.0)
+
+
 class ImageClipClassifier:
     MODEL_NAME = "openai/clip-vit-base-patch32"
 
     def __init__(
         self,
         device: torch.device,
-        confidence_threshold: float = 0.1,
-        object_margin_threshold: float = 0.08,
+        confidence_threshold: float = 0.9,
+        object_margin_threshold: float = 0.9,
         min_confident_area_fraction: float = 0.01,
     ):
         self.device = device
+        # Both thresholds are stated on _pairwise_certainty's scale: a
+        # softmax probability rescaled so 0 = a perfect tie and 1 = one-sided.
+        # They sit high (0.9 == a ~0.029 raw-cosine win at ViT-B/32's
+        # temperature) because that scale saturates fast by design -- see
+        # _pairwise_certainty for the units, and for what the pre-temperature
+        # version of these gates did to a real scene.
         self._confidence_threshold = confidence_threshold
         # Required gap between the winning object label's score and the
-        # runner-up object label's score (same [0, 1]-rescaled unit as
-        # `confidence` below) before a specific object label is trusted.
+        # runner-up object label's score (same rescaled unit as `confidence`
+        # below) before a specific object label is trusted.
         # Without this, `confidence` only measures object-vs-environment
         # dominance -- a crop that's a near-tie between e.g. "tree" and
         # "statue" still passed that check confidently, because both clearly
@@ -37,6 +74,11 @@ class ImageClipClassifier:
         self.processor = CLIPProcessor.from_pretrained(self.MODEL_NAME)
         self.model = CLIPModel.from_pretrained(self.MODEL_NAME).to(device)
         self.model.eval()
+        # CLIP's own learned inverse-temperature (100.0 for ViT-B/32) -- the
+        # scale its contrastive objective calibrated cosine gaps against. Read
+        # from the checkpoint rather than hard-coded so swapping MODEL_NAME
+        # doesn't silently change what the thresholds above mean.
+        self._logit_scale = float(self.model.logit_scale.exp().item())
 
         # Pre-compute text embeddings once — reused for every image
         all_prompts: list[str] = []
@@ -73,7 +115,8 @@ class ImageClipClassifier:
         """Returns (label, confidence, top_candidates, criteria).
 
         label          — winning category or 'indeterminate'
-        confidence     — rescaled to [0, 1]: 0 = perfectly tied, 1 = one-sided
+        confidence     — see _pairwise_certainty: 0 = perfectly tied between the
+                         best object and best environment label, 1 = one-sided
         top_candidates — top_n (label, raw_score) pairs sorted best-first
         criteria       — dict with best_obj_label, best_obj_score, best_env_label,
                          best_env_score for debugging the decision
@@ -153,20 +196,22 @@ class ImageClipClassifier:
                 if score > best_env_score:
                     best_env_score, best_env_label = score, label
 
-        obj_s = max(0.0, best_obj_score)
-        env_s = max(0.0, best_env_score)
-        total = obj_s + env_s
-        # Raw ratio is in [0.5, 1.0]; rescale to [0, 1] so the threshold is meaningful.
-        confidence = (max(obj_s, env_s) / total - 0.5) * 2.0 if total > 0 else 0.0
+        # How decisively the object pool's best beats the environment pool's
+        # best (or vice versa) -- "is this a thing, or is it scenery".
+        confidence = _pairwise_certainty(
+            max(best_obj_score, best_env_score),
+            min(best_obj_score, best_env_score),
+            self._logit_scale,
+        )
 
-        # Same rescaling as `confidence` above, but within the object pool only:
-        # how one-sided is the winning object label against its runner-up. This
-        # is what `confidence` alone misses -- a crop can be unambiguously
-        # "an object, not scenery" while the specific object label chosen is
-        # nearly a coin flip.
-        second_s = max(0.0, second_obj_score) if second_obj_label is not None else 0.0
-        obj_total = obj_s + second_s
-        object_margin = (obj_s / obj_total - 0.5) * 2.0 if obj_total > 0 else 1.0
+        # Same measure, but within the object pool only: how one-sided is the
+        # winning object label against its runner-up. This is what `confidence`
+        # alone misses -- a crop can be unambiguously "an object, not scenery"
+        # while the specific object label chosen is nearly a coin flip.
+        object_margin = (
+            _pairwise_certainty(best_obj_score, second_obj_score, self._logit_scale)
+            if second_obj_label is not None else 1.0
+        )
 
         top_candidates = sorted(per_label, key=lambda x: x[1], reverse=True)[:top_n]
 

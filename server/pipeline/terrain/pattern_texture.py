@@ -65,6 +65,7 @@ from typing import Optional
 from scipy.ndimage import distance_transform_edt, gaussian_filter, map_coordinates
 
 from util.panorama_utils import Panorama
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
 # ── Library construction ────────────────────────────────────────────────────
@@ -172,6 +173,7 @@ def bake_real_layer(
     x_center: float = 0.0,
     z_center: float = 0.0,
     sky_mask: Optional[np.ndarray] = None,
+    exclude_mask: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """
     Dewarped real-photo colour, sampled directly in world space (no
@@ -181,6 +183,10 @@ def bake_real_layer(
     sky_mask (optional PANORAMA_SKY_MASK) is forwarded to sample_3d so real
     terrain above the horizon (a mountain slope, a nearby rock formation taller
     than the camera) is sampled directly instead of being treated as sky.
+
+    exclude_mask (optional, panorama pixel space) is forwarded alongside it as a
+    second class of hole -- see vegetation_bleed_mask, which is what builds it
+    for a rock formation.
 
     This is the same "real content everywhere" bake synthesize_region_layer
     uses as its base layer and feather target; factored out here so it can
@@ -208,8 +214,72 @@ def bake_real_layer(
     Y = np.nan_to_num(Y, nan=0.0)
     world_pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3).astype(np.float32)
     return (
-        panorama.sample_3d(world_pts, sky_mask=sky_mask)[:, :3].astype(np.float32) / 255.0
+        panorama.sample_3d(world_pts, sky_mask=sky_mask, exclude_mask=exclude_mask)[:, :3]
+        .astype(np.float32) / 255.0
     ).reshape(canvas_size, canvas_size, 3)
+
+
+def vegetation_bleed_mask(
+    panorama: Panorama,
+    height_map: np.ndarray,
+    region_type_map: np.ndarray,
+    terrain_half: float,
+    x_half: float,
+    z_far: float,
+    canvas_size: int,
+    x_center: float,
+    z_center: float,
+    max_vegetation_fraction: float = 0.4,
+) -> Optional[np.ndarray]:
+    """Panorama-space mask of foliage that would bleed onto a rock formation.
+
+    The elevation angle bake_real_layer derives for each canvas pixel is
+    atan2(Y, horizontal distance) against the FINAL height map, so its
+    sensitivity to a height error grows with steepness. On a formation -- which
+    is where the steep geometry lives -- a modest error slides the sampled
+    panorama row across the tree line and paints forest onto the peak. That is
+    the green banding visible in the baked terrain_formation_*_texture.png
+    images, and it does not need the height error to be large.
+
+    Rather than trying to correct the angle (the measured-UV route was tried and
+    is worse here: a distant formation has only 20-33% of its cells directly
+    sampled, so preferring cached UV where it exists produces hard radial seams
+    between the two sources), this rejects the *outcome*. A sample landing on a
+    VEGETATION-typed panorama pixel is marked as a hole, and sample_3d's existing
+    nearest-valid-neighbour fill substitutes real rock colour from nearby -- the
+    same treatment sky already gets.
+
+    Returns None, meaning "don't exclude anything", when vegetation accounts for
+    more than max_vegetation_fraction of what this formation samples. Past that
+    point the foliage is not bleed, it is what the formation is actually covered
+    in (a wooded island, a scrubby hillock), and blanking it would erase the
+    formation's real appearance rather than repair it.
+    """
+    ys, xs = np.mgrid[0:canvas_size, 0:canvas_size].astype(np.float64)
+    Z = ys / canvas_size * (2.0 * z_far) - z_far + z_center
+    X = xs / canvas_size * (2.0 * x_half) - x_half + x_center
+    hm_h, hm_w = height_map.shape
+    row_c = ((Z + terrain_half) / (2.0 * terrain_half) * (hm_h - 1)).clip(0, hm_h - 1)
+    col_c = ((X + terrain_half) / (2.0 * terrain_half) * (hm_w - 1)).clip(0, hm_w - 1)
+    Y = np.nan_to_num(
+        map_coordinates(height_map, [row_c, col_c], order=1, mode="nearest").astype(np.float32),
+        nan=0.0,
+    )
+    world_pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3).astype(np.float32)
+
+    pu, pv, _ = panorama._project_vertices(world_pts)
+    pano_h, pano_w = region_type_map.shape
+    # _project_vertices works in this panorama's own pixel space; the region map
+    # may have been produced at a different resolution.
+    pu_i = np.clip(np.round(pu / max(1, panorama.width - 1) * (pano_w - 1)).astype(np.int64), 0, pano_w - 1)
+    pv_i = np.clip(np.round(pv / max(1, panorama.height - 1) * (pano_h - 1)).astype(np.int64), 0, pano_h - 1)
+
+    sampled_types = region_type_map[pv_i, pu_i]
+    vegetation_fraction = float((sampled_types == int(RegionType.VEGETATION)).mean())
+    if vegetation_fraction > max_vegetation_fraction:
+        return None
+
+    return region_type_map == int(RegionType.VEGETATION)
 
 
 # ── Real-content baking (mesh-projected) ──────────────────────────────────────

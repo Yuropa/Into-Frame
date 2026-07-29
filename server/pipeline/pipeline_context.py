@@ -38,6 +38,12 @@ class ContextKey:
     PANORAMA_TERRAIN = "panorama_terrain"
     PANORAMA_FOREGROUND_REMOVED = "panorama_foreground_removed"
     PANORAMA_FOREGROUND_MASK = "panorama_foreground_mask"
+    # The occluder-only half of PANORAMA_FOREGROUND_MASK: just the pixels covered
+    # by a genuine occluder crop (tree/building/...), without the near-field ground
+    # the foreground_distance_m depth test also sweeps in. Written by
+    # PanoramaForegroundInpaintingStage, read by TerrainTextureGenerationStage to
+    # recover real ground colour without recovering the occluders with it.
+    PANORAMA_FOREGROUND_OCCLUDER_MASK = "panorama_foreground_occluder_mask"
     PANORAMA_SKY_MASK = "panorama_sky_mask"
     PANORAMA_SKY = "panorama_sky"
     HEIGHT_MAP = "height_map"

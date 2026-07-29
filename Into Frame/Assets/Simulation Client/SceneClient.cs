@@ -287,6 +287,25 @@ public class SceneLightingData
     public string log;    // base64 PNG — log-domain environment map
     public int    width;
     public int    height;
+    public SunData sun;   // dominant directional light, or null when overcast
+}
+
+// Key light extracted from the environment map (server SceneLighting.sun).
+[Serializable]
+public class SunData
+{
+    // Unit vector pointing FROM the scene TOWARD the sun, in the panorama's own
+    // frame — apply skyboxRotation before use, same as the skybox.
+    public float[] direction;   // 3
+    public string  color;       // "#rrggbb", tint only; brightness is `intensity`
+    // Share of the scene's total irradiance arriving from the sun, scaled onto
+    // Unity's directional-light scale (a normal sunny day lands near 1). The
+    // reflection probe's ambient SH carries the diffuse remainder.
+    public float   intensity;
+    // False = LuxDiT's HDR merger didn't run, so the values above came from
+    // tonemapped 8-bit pixels: direction still holds, but intensity understates
+    // a harsh sun and colour loses its warmth. See SceneLighting._radiance.
+    public bool    hdr;
 }
 
 [Serializable]
