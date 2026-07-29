@@ -1,7 +1,26 @@
 from typing import Final
 
+# Ground-cover grass, as a *scatterable object* rather than a surface type.
+#
+# Deliberately not the string "grass": that one already exists in
+# ENVIRONMENT_CATEGORIES (a CLIP prompt set) and in
+# panorama_region_result._LABEL_RULES (where ADE20K's "grass" folds into
+# RegionType.GROUND alongside earth/sand/dirt/snow), and both of those meanings
+# are load-bearing for region typing and terrain texturing. Reusing the name
+# would make every grass *region* look like an object to Panorama Asset
+# Generation and Scene Generation, which filter on ENVIRONMENT_CATEGORIES.
+#
+# GrassCoverStage synthesizes instances of this class directly from the grass
+# area it derives (see that stage); it is never produced by CLIP typing or by
+# any detector, which is why it is absent from OBJECT_CATEGORIES below and only
+# registered in _ALL_KNOWN. Membership in VEGETATION_CATEGORIES is what earns it
+# the rest of the vegetation pipeline for free: DISTRIBUTABLE_CATEGORIES,
+# ANIMATABLE_CATEGORIES, CategoryMeshRiggingStage's sway skeleton, and
+# VideoObjectExtractionStage's per-bucket tracking cap.
+GRASS_TUFT_CATEGORY: Final[str] = "grass_tuft"
+
 VEGETATION_CATEGORIES: Final[frozenset[str]] = frozenset({
-    "tree", "forest", "bush", "flower", "plant"
+    "tree", "forest", "bush", "flower", "plant", GRASS_TUFT_CATEGORY,
 })
 
 # Structures that SAM2/Grounding DINO frequently fragment into multiple
@@ -136,6 +155,11 @@ ANIMATABLE_CATEGORIES: Final[frozenset[str]] = VEGETATION_CATEGORIES | frozenset
 })
 
 _ALL_KNOWN: Final[frozenset[str]] = frozenset(OBJECT_CATEGORIES) | frozenset({
+    # Synthesized, never classified -- see GRASS_TUFT_CATEGORY. Listed here so
+    # CategoryFilter include/exclude lists can name it without tripping
+    # validate_categories, but kept out of OBJECT_CATEGORIES so CLIP is never
+    # offered it as a label for a real crop.
+    GRASS_TUFT_CATEGORY,
     "sky", "clouds", "fog", "haze", "sunset", "aurora", "rainbow", "moon", "stars",
     "water", "river", "ocean", "lake", "beach", "ground", "dirt", "grass", "field",
     "sand", "snow", "ice", "mountain", "cliff", "trail", "road", "wall", "mud",

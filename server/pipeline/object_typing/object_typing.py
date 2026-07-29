@@ -16,8 +16,8 @@ class ObjectTypingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        confidence_threshold: float = 0.1,
-        object_margin_threshold: float = 0.08,
+        confidence_threshold: float = 0.9,
+        object_margin_threshold: float = 0.9,
         min_confident_area_fraction: float = 0.01,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -57,8 +57,15 @@ class ObjectTypingStage(PipelineStage):
             fallback rather than the image itself; see ObjectCategoryClusteringStage
             for how this gates downstream trust)
     Debug:  typing_debug.json
-    Config: confidence_threshold (default 0.1), object_margin_threshold (default 0.08),
+    Config: confidence_threshold (default 0.9), object_margin_threshold (default 0.9),
             min_confident_area_fraction (default 0.01)
+
+            Both gates are stated on ImageClipClassifier._pairwise_certainty's
+            scale (a temperature-calibrated softmax probability, rescaled so
+            0 = tied and 1 = one-sided), which saturates fast -- hence the high
+            defaults. They are NOT comparable to the pre-temperature values
+            these replaced; see _pairwise_certainty for why those were
+            unreachable.
     """
 
     @classmethod

@@ -76,8 +76,13 @@ stages:
 
   - name: Object Typing
     stage: ObjectTypingStage
-    # Tune both against typing_debug.json's per-crop top_candidates/object_margin:
-    object_margin_threshold: 0.08     # required gap between the winning and runner-up
+    # Tune both against typing_debug.json's per-crop top_candidates/object_margin.
+    # Units are ImageClipClassifier._pairwise_certainty's: a softmax probability at
+    # CLIP's own temperature, rescaled so 0 = a perfect tie and 1 = one-sided. It
+    # saturates fast, so useful values live near the top of the range -- 0.9 is a
+    # ~0.029 raw-cosine win at ViT-B/32. Do not carry the old sub-0.1 values
+    # forward; those predate the temperature and no crop could ever clear them.
+    object_margin_threshold: 0.9      # required gap between the winning and runner-up
                                        # object label (large crops only) before a specific
                                        # label is trusted; below this -> indeterminate
                                        # (or the scene-prior-corroborated runner-up)

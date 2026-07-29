@@ -4,7 +4,7 @@ from typing import Any
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import CategoryFilter, VEGETATION_CATEGORIES
+from pipeline.object_typing.categories import CategoryFilter, VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY
 from pipeline.tree_generation.model_generation_treed import ModelGeneratorTreeD
 from util.device_utils import DeviceStrategy, preferred_device
 
@@ -22,9 +22,12 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         exclude_categories: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
-        # Default to vegetation only when no filter is specified.
+        # Default to vegetation only when no filter is specified. GRASS_TUFT_CATEGORY
+        # is in VEGETATION_CATEGORIES for the sway/scatter machinery, but it is ground
+        # cover with no trunk or branch structure for Tree-D Fusion to reconstruct --
+        # GrassCoverStage builds its assets itself.
         if include_categories is None and exclude_categories is None:
-            include_categories = list(VEGETATION_CATEGORIES)
+            include_categories = sorted(VEGETATION_CATEGORIES - {GRASS_TUFT_CATEGORY})
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
 
 
