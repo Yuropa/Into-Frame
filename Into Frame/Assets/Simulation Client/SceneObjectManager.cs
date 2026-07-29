@@ -41,6 +41,21 @@ public class SceneObjectManager : MonoBehaviour
     private readonly Dictionary<string, Texture2D> _textureCache = new();
     private readonly Dictionary<string, List<GameObject>> _textureWaiters = new();
 
+    // Parsed GLBs, keyed by mesh id. A scene references far fewer distinct meshes than
+    // it has objects -- every instance of a category mesh names the same asset -- so
+    // without this each instance re-downloaded AND re-parsed the same file into its own
+    // GltfImport, holding its own copy of the meshes and textures.
+    //
+    // Ground cover is what makes that fatal rather than merely wasteful. GrassCoverStage
+    // places 6,661 instances across 6 distinct GLBs totalling 22 MB; uncached that is
+    // ~25 GB of transfer and 6,661 separate copies of the geometry in memory, streamed
+    // one at a time through the serial queue below, with sceneRoot hidden until the last
+    // one lands. It reads as the app hanging on download, which is exactly what it is.
+    //
+    // GltfImport supports instantiating the same import repeatedly -- that is GLTFast's
+    // own documented instancing path -- so the cached entry is reused directly.
+    private readonly Dictionary<string, GltfImport> _meshCache = new();
+
     // ── Public API ─────────────────────────────────────────────────────────
 
     public void ApplySceneInit(SceneInitPayload init)
@@ -53,6 +68,12 @@ public class SceneObjectManager : MonoBehaviour
         foreach (var t in _tracked.Values)
             if (t.go != null) Destroy(t.go);
         _tracked.Clear();
+
+        // Only after every instance is destroyed: disposing a GltfImport destroys the
+        // meshes/textures it created, which the instances were still referencing.
+        foreach (var import in _meshCache.Values)
+            import?.Dispose();
+        _meshCache.Clear();
 
         if (sceneRoot != null) sceneRoot.SetActive(false); // hide at start
 
@@ -159,19 +180,40 @@ public class SceneObjectManager : MonoBehaviour
     }
 
 
+    // How long the queue may keep working within a single frame. The unconditional
+    // `yield return null` after every task used to cap throughput at one object per
+    // frame, which is invisible for a few dozen objects and crippling for ground cover:
+    // 6,661 grass instances is 6,661 frames, over a minute of nothing on screen even
+    // once the meshes are cached and each instantiation costs under a millisecond.
+    // Draining on a time budget instead keeps the frame responsive (this runs on the
+    // main thread, and on visionOS a dropped frame is felt) while letting cheap tasks
+    // batch up. Cache misses still cost a web request each and yield internally, so
+    // they cannot monopolise the budget.
+    private const float QueueFrameBudgetSeconds = 0.008f;
+
     private IEnumerator ProcessQueue()
     {
         _isProcessingQueue = true;
 
+        var frameStart = Time.realtimeSinceStartup;
         while (_taskQueue.Count > 0)
         {
             var task = _taskQueue.Dequeue();
             yield return StartCoroutine(task());
-
             _completedTasks++;
-            progress?.ReportSceneProgress(_completedTasks, _totalTasks);
 
-            yield return null;
+            if (Time.realtimeSinceStartup - frameStart >= QueueFrameBudgetSeconds)
+            {
+                // Once per frame, not once per task. ReportSceneProgress assigns to a
+                // UI label's text, which forces a mesh rebuild -- fine at one call per
+                // frame, but now that the loop batches, calling it per task would mean
+                // hundreds of rebuilds per frame and would cost more than the work it
+                // is reporting on. Nothing can observe the intermediate values anyway;
+                // the display only updates when a frame is presented.
+                progress?.ReportSceneProgress(_completedTasks, _totalTasks);
+                yield return null;
+                frameStart = Time.realtimeSinceStartup;
+            }
         }
 
         // Only reveal once the queue is fully drained
@@ -347,42 +389,62 @@ public class SceneObjectManager : MonoBehaviour
     {
         if (string.IsNullOrEmpty(meshId)) yield break;
 
-        using var req = assetServer().GetResource(meshId);
-        yield return req.SendWebRequest();
-
-        if (generation != _queueGeneration)
+        // Cache hit: skip the download and the parse entirely and go straight to
+        // instantiation. Safe to check without any in-flight bookkeeping because
+        // ProcessQueue awaits each task to completion before starting the next, so
+        // two loads of the same mesh can never overlap. If that queue is ever made
+        // concurrent, this needs an in-flight table like _textureWaiters.
+        if (!_meshCache.TryGetValue(meshId, out var gltf))
         {
-            Debug.Log($"[SceneObjectManager] Discarding stale load for '{meshId}'");
-            yield break;
-        }
+            using var req = assetServer().GetResource(meshId);
+            yield return req.SendWebRequest();
 
-        if (req.result != UnityWebRequest.Result.Success)
-        {
-            Debug.LogError($"[SceneObjectManager] Failed to download '{meshId}': {req.error}");
-            yield break;
-        }
+            if (generation != _queueGeneration)
+            {
+                Debug.Log($"[SceneObjectManager] Discarding stale load for '{meshId}'");
+                yield break;
+            }
 
-        byte[] glbBytes = req.downloadHandler.data.ToArray();
-        var logger = new GLTFastLogger();
-        var gltf = new GltfImport(logger: logger);
-        var glbTask = gltf.Load(glbBytes, new System.Uri(req.url));
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogError($"[SceneObjectManager] Failed to download '{meshId}': {req.error}");
+                yield break;
+            }
 
-        while (!glbTask.IsCompleted)
-            yield return null;
+            byte[] glbBytes = req.downloadHandler.data.ToArray();
+            var logger = new GLTFastLogger();
+            gltf = new GltfImport(logger: logger);
+            var glbTask = gltf.Load(glbBytes, new System.Uri(req.url));
 
-        if (generation != _queueGeneration) yield break;
+            while (!glbTask.IsCompleted)
+                yield return null;
 
-        if (glbTask.IsFaulted)
-        {
-            Debug.LogError($"[SceneObjectManager] GLTFast exception on '{meshId}': {glbTask.Exception}");
-            yield break;
-        }
+            if (generation != _queueGeneration)
+            {
+                gltf.Dispose();
+                yield break;
+            }
 
-        if (!glbTask.Result)
-        {
-            Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'. " +
-                           $"Errors: {string.Join(" | ", logger.Errors)}");
-            yield break;
+            if (glbTask.IsFaulted)
+            {
+                Debug.LogError($"[SceneObjectManager] GLTFast exception on '{meshId}': {glbTask.Exception}");
+                gltf.Dispose();
+                yield break;
+            }
+
+            if (!glbTask.Result)
+            {
+                Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'. " +
+                               $"Errors: {string.Join(" | ", logger.Errors)}");
+                gltf.Dispose();
+                yield break;
+            }
+
+            // Only cached once it is known-good, so a transient failure doesn't poison
+            // every later instance of the same mesh.
+            _meshCache[meshId] = gltf;
+            Debug.Log($"[SceneObjectManager] Loaded '{meshId}' ({glbBytes.Length / 1024} KB) " +
+                      $"— {_meshCache.Count} distinct mesh(es) cached");
         }
 
         var instantiateTask = gltf.InstantiateMainSceneAsync(container.transform);
@@ -395,7 +457,10 @@ public class SceneObjectManager : MonoBehaviour
             yield break;
         }
 
-        Debug.Log($"[SceneObjectManager] Mesh '{meshId}' loaded into {container.name}");
+        // Deliberately not logged per instance. At ground-cover scale that is thousands
+        // of identical lines a second; Unity's logger is main-thread and synchronous, so
+        // it becomes a real share of the load time on its own. The cache-miss log below
+        // fires once per distinct asset, which is the interesting event anyway.
 
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
