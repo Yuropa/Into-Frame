@@ -829,7 +829,25 @@ stages:
                              # one of them is dropped at Scene Generation with a "no
                              # billboard crop available" warning.
     min_blob_area_cells: 64
-    max_candidates_per_tile: 2000
+    # THE cost knob, and the cheapest one to turn. Before a single iteration runs,
+    # synthesize_pattern precomputes an O(candidates²) support table -- one Delaunay
+    # walk per candidate pair -- so this sets a floor on tile cost that no point-count
+    # or iteration change can get under. At 2000 that floor is ~4200² ≈ 17M walks per
+    # tile, which is what put every near-field tile over the 120 s timeout.
+    #
+    # Lowering it does NOT coarsen placement: tile_side_m is tile_res × spacing and the
+    # tile's candidate grid is tile_res² points over that area, so candidate SPACING is
+    # invariant -- tiles just get smaller and more numerous (which also parallelises
+    # better). Total work scales as tiles × candidates² ≈ linear in this value.
+    # Measured on the Rainier capture:
+    #     2000 -> 55 tiles,  6679 points requested, 220M relative precompute
+    #      900 -> 92 tiles,  5574 points requested,  74M   (3x cheaper)
+    #      400 -> 170 tiles, 4359 points requested,  27M   (8x cheaper)
+    # The real trade-off is boundary effects: points near a tile edge see a truncated
+    # neighbourhood, so more tiles means more of the population sitting on a seam. 900
+    # is the compromise; drop to 400 if tiles still time out, raise toward 2000 if the
+    # painted pattern starts showing tile-grid structure.
+    max_candidates_per_tile: 900
     max_iters: 400
     size_jitter: 0.15
     input_boundary_pad_factor: 1.5

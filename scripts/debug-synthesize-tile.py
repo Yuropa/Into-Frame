@@ -22,6 +22,7 @@ import json
 import math
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -96,13 +97,15 @@ def _local_grid(bbox_min: np.ndarray, bbox_max: np.ndarray, target_count: int) -
 # rather than parsed from the YAML so this script stays runnable against a bundle
 # produced by a different config revision than the checkout it's run from.
 MIN_BLOB_AREA_CELLS = 64
-MAX_CANDIDATES_PER_TILE = 2000
+MAX_CANDIDATES_PER_TILE = 900
 MAX_ITERS = 400
 INPUT_BOUNDARY_PAD_FACTOR = 1.5
 MIN_EXEMPLAR_SPACING_M = 0.25
 MAX_PAINT_RADIUS_M = 30.0
 MAX_EXEMPLAR_CANDIDATES = 4000
 MIN_PAD_M = 0.5
+SWEEP_ITERS = (25, 50, 100, 400)
+SWEEP_POINT_FRACTIONS = (0.125, 0.25, 0.5, 1.0)
 FULL_DENSITY_RADIUS_M = 6.0
 DENSITY_FALLOFF_EXPONENT = 2.0
 SEED = 0
@@ -228,13 +231,53 @@ def build_jobs(ctx: Path, only_group: str | None):
     return jobs
 
 
-def to_stdin(job) -> str:
-    lines = [f"{job['bin_count']} {job['n_points']} {MAX_ITERS} {SEED}"]
+def to_stdin(job, n_points=None, max_iters=None) -> str:
+    n = job["n_points"] if n_points is None else n_points
+    iters = MAX_ITERS if max_iters is None else max_iters
+    lines = [f"{job['bin_count']} {n} {iters} {SEED}"]
     for key in ("domain_points", "exemplar_points", "input_boundary", "output_boundary"):
         pts = job[key]
         lines.append(str(len(pts)))
         lines.extend(f"{x:.6f} {z:.6f}" for x, z in pts)
     return "\n".join(lines) + "\n"
+
+
+def run_sweep(job, cli: Path, timeout: float):
+    """Time one tile across a grid of (n_points, max_iters).
+
+    Separates the two cost terms that get conflated otherwise. Before any iteration
+    runs, synthesize_pattern precomputes an O(candidates^2) support table, so every
+    cell of a row pays the same fixed floor; the growth ACROSS a row is the iteration
+    cost, and the growth DOWN a column is the point count. A row that is flat and
+    already over budget means the floor is the problem and only --candidates helps.
+    """
+    n_full = job["n_points"]
+    print(f"    sweep (per-cell timeout {timeout:.0f}s; '>' = hit it)")
+    print(f"    {'n_points':>10} | " + " | ".join(f"{it:>5} iters" for it in SWEEP_ITERS))
+    for n in [max(2, int(n_full * f)) for f in SWEEP_POINT_FRACTIONS]:
+        cells = []
+        for iters in SWEEP_ITERS:
+            stdin_data = to_stdin(job, n_points=n, max_iters=iters)
+            start = time.monotonic()
+            try:
+                proc = subprocess.run([str(cli)], input=stdin_data, capture_output=True,
+                                      text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                cells.append(f">{timeout:.0f}s".rjust(11))
+                # Longer iteration budgets on this row can only be slower; skip them.
+                cells.extend(["  -".rjust(11)] * (len(SWEEP_ITERS) - len(cells)))
+                break
+            elapsed = time.monotonic() - start
+            placed = ""
+            for line in reversed(proc.stdout.strip().splitlines()):
+                if line.strip().startswith("{"):
+                    try:
+                        placed = f"/{json.loads(line).get('n_points')}"
+                    except json.JSONDecodeError:
+                        pass
+                    break
+            cells.append(f"{elapsed:6.1f}s{placed}".rjust(11))
+        print(f"    {n:>10} | " + " | ".join(cells))
 
 
 def main():
@@ -250,7 +293,21 @@ def main():
                          "enumeration order has no relationship to cost.")
     ap.add_argument("--out", type=Path, help="directory to write tile stdin files to")
     ap.add_argument("--timeout", type=float, default=120.0)
+    ap.add_argument("--candidates", type=int,
+                    help="override max_candidates_per_tile. The optimizer precomputes an "
+                         "O(candidates^2) support table before any iteration runs, so this "
+                         "sets a floor on tile cost that no point-count or iteration change "
+                         "can get under.")
+    ap.add_argument("--sweep", action="store_true",
+                    help="run each selected tile across a grid of (n_points, max_iters) and "
+                         "report wall time for each, so the cost curve is measured rather "
+                         "than guessed. Uses --timeout per cell; keep it short (~30s).")
     args = ap.parse_args()
+
+    global MAX_CANDIDATES_PER_TILE
+    if args.candidates:
+        MAX_CANDIDATES_PER_TILE = args.candidates
+        print(f"max_candidates_per_tile overridden to {MAX_CANDIDATES_PER_TILE}")
 
     jobs = build_jobs(args.context_dir, args.group)
     print(f"\n=== {len(jobs)} tile job(s) total, "
@@ -271,6 +328,13 @@ def main():
               f"domain={len(job['domain_points'])} exemplars={len(job['exemplar_points'])} "
               f"input_boundary={len(job['input_boundary'])} output_boundary={len(job['output_boundary'])} "
               f"dist={job['distance_m']:.1f}m requested_n={job['n_points']}")
+
+        if args.sweep:
+            if not args.run:
+                raise SystemExit("--sweep needs --run <path to synthesize_cli>")
+            run_sweep(job, args.run, args.timeout)
+            continue
+
         if args.out:
             args.out.mkdir(parents=True, exist_ok=True)
             path = args.out / f"tile_{i}.txt"
