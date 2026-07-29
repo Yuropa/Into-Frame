@@ -959,6 +959,25 @@ stages:
     mesh_lod_distance_m: 30.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
                                # Panorama Asset Generation's billboard_distance_m above (kept
                                # in sync manually; each stage parses its own isolated config)
+    mesh_lod_distance_overrides:
+      # Ground cover needs its own, far shorter cutoff. The global value is tuned for
+      # subjects you look AT -- a tree at 25 m earns its mesh. Grass does not: Grass
+      # Cover scatters 6,661 tufts, every one of them inside its own max_radius_m of
+      # 25 m, so under the global 30 m cutoff all of them took the reconstructed near
+      # mesh and the 12-triangle crossed-card LOD never rendered once.
+      #
+      # That reconstructed tuft is ~275,000 triangles (SAM3D output, undecimated).
+      # Measured totals for the whole grass population at various cutoffs:
+      #     25 m -> 6659 tufts + 2 cards    = 1831 M triangles   (what shipped)
+      #     10 m -> 1536 tufts + 5125 cards =  422 M
+      #      5 m ->  468 tufts + 6193 cards =  129 M
+      #      3 m ->  174 tufts + 6487 cards =   48 M
+      # 3 m keeps real 3D geometry underfoot, where a flat card would read as a
+      # sticker, and hands everything past arm's reach to the cards.
+      #
+      # NOTE this only bounds the damage. 275k triangles for one grass tuft is the
+      # real defect -- decimating that asset would buy far more than any cutoff here.
+      grass_tuft: 3.0
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting

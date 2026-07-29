@@ -23,6 +23,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         eye_height_meters: float = 1.8,
         mesh_lod_distance_m: float = 30.0,
+        mesh_lod_distance_overrides: dict[str, float] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Sent to the client as the target world-space depth of the terrain
@@ -37,6 +38,17 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # bake-time cutoff (vs. runtime client-side LOD) is fine here since
         # expected player movement is small (~2 m).
         self.mesh_lod_distance_m = mesh_lod_distance_m
+        # Per-class override of that cutoff, {class_name: metres}. The single global
+        # value is tuned for subjects you look AT -- a tree at 25 m is worth its mesh.
+        # It is badly wrong for ground cover at your feet, where the same distance
+        # covers thousands of instances.
+        #
+        # Measured on the Rainier capture: GrassCoverStage places 6,661 tufts, all of
+        # them inside its own max_radius_m of 25 m, so with a global 30 m cutoff every
+        # single one took the reconstructed near mesh -- ~275,000 triangles each, 1.83
+        # BILLION in total -- and the 12-triangle crossed-card LOD that exists for
+        # exactly this purpose never rendered once.
+        self.mesh_lod_distance_overrides = dict(mesh_lod_distance_overrides or {})
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -324,7 +336,10 @@ class SceneGenerationStage(PipelineStage):
                 camera_distance = float(np.linalg.norm(
                     np.array((position[0], place_y, position[2]), dtype=float) - camera_position
                 ))
-                use_mesh = category_mesh is not None and camera_distance <= self.config.mesh_lod_distance_m
+                lod_distance = self.config.mesh_lod_distance_overrides.get(
+                    cls, self.config.mesh_lod_distance_m
+                )
+                use_mesh = category_mesh is not None and camera_distance <= lod_distance
                 if not use_mesh and card_mesh is not None:
                     # Beyond the mesh LOD distance (or this bucket never got a
                     # reconstructed mesh at all) but a card LOD exists -- take it

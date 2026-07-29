@@ -120,6 +120,14 @@ public class SceneParamManager : MonoBehaviour
         if (toSun.sqrMagnitude < 1e-6f) return;
         toSun = Quaternion.Euler(0f, skyboxRotation, 0f) * toSun.normalized;
 
+        // Same world-space vector the light uses, handed to the sky as its axis of
+        // rotation: spinning about the sun keeps the sun (and therefore this light)
+        // exactly where it is while the rest of the sky turns around it. Set here
+        // rather than in PanoramaSkybox so the yaw correction is applied once, in the
+        // one place that already reasons about it.
+        if (skybox != null && skybox.TryGetComponent(out PanoramaSkybox panoramaSkybox))
+            panoramaSkybox.SetSpinAxis(toSun);
+
         // A directional light shines along its own forward axis, so it has to face
         // the opposite way from "towards the sun".
         directionalLight.transform.rotation = Quaternion.LookRotation(-toSun);

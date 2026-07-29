@@ -9,8 +9,21 @@ public class PanoramaSkybox : MonoBehaviour
     public float exposure = 1.0f;
     public float rotation = 0.0f;
 
+    [Header("Sky Motion")]
+    [Tooltip("Seconds for one full revolution of the sky. 0 disables the animation.")]
+    public float spinPeriodSeconds = 90f;
+
     private Material skyboxMaterial;
     private Texture2D currentTexture;
+
+    // Axis the sky turns about, in world space. Set to the direction of the sun by
+    // SetSpinAxis; rotating about it leaves the sun itself stationary while everything
+    // else wheels around it, so the directional light extracted from this same panorama
+    // stays consistent with what's drawn. Defaults to up (a plain yaw drift) until the
+    // lighting payload arrives, and stays there if the scene has no identifiable sun.
+    private Vector3 _spinAxis = Vector3.up;
+    private bool _canSpin;      // false when the spin shader isn't available
+    private float _spinDegrees; // accumulated, so changing the period never jumps
 
     [Header("Assets")]
     public GameObject server;
@@ -69,6 +82,18 @@ public class PanoramaSkybox : MonoBehaviour
         }
     }
 
+    /// <summary>
+    /// Point the sky's axis of rotation at the sun, in world space. Pass Vector3.zero
+    /// (or nothing at all) for a scene with no identifiable sun and the sky keeps its
+    /// default yaw drift about up.
+    /// </summary>
+    public void SetSpinAxis(Vector3 worldTowardSun)
+    {
+        if (worldTowardSun.sqrMagnitude < 1e-6f) return;
+        _spinAxis = worldTowardSun.normalized;
+        Debug.Log($"[Skybox] Spin axis set to sun direction {_spinAxis}");
+    }
+
     private void ApplySkybox(Texture2D texture)
     {
         // Panorama textures need to wrap horizontally
@@ -78,13 +103,28 @@ public class PanoramaSkybox : MonoBehaviour
         texture.anisoLevel = 4;
         texture.Apply();
 
-        // Create a Panoramic skybox material
-        skyboxMaterial = new Material(Shader.Find("Skybox/Panoramic"));
-        skyboxMaterial.SetFloat("_Mapping", 0);
+        // Prefer the arbitrary-axis variant; fall back to Unity's built-in when it
+        // isn't in the build (e.g. stripped for not being referenced by any material in
+        // a scene asset -- see the note in SkyboxSpin's shader). The fallback keeps the
+        // static sky working rather than leaving a magenta dome, at the cost of the
+        // animation. Both take _MainTex/_Exposure/_Rotation with the same meaning.
+        Shader spinShader = Shader.Find("Skybox/PanoramaSpin");
+        _canSpin = spinShader != null;
+        if (!_canSpin)
+        {
+            Debug.LogWarning("[Skybox] 'Skybox/PanoramaSpin' not found — falling back to the " +
+                             "static Skybox/Panoramic. Add it to Always Included Shaders in " +
+                             "Graphics settings if the animation is wanted.");
+            spinShader = Shader.Find("Skybox/Panoramic");
+        }
+
+        skyboxMaterial = new Material(spinShader);
+        if (!_canSpin) skyboxMaterial.SetFloat("_Mapping", 0);
         currentTexture = texture;
         skyboxMaterial.SetTexture("_MainTex", texture);
         skyboxMaterial.SetFloat("_Exposure", exposure);
         skyboxMaterial.SetFloat("_Rotation", rotation);
+        if (_canSpin) skyboxMaterial.SetMatrix("_SkyRotation", Matrix4x4.identity);
 
         // Apply to the scene
         RenderSettings.skybox = skyboxMaterial;
@@ -92,7 +132,24 @@ public class PanoramaSkybox : MonoBehaviour
         // Force skybox to update
         DynamicGI.UpdateEnvironment();
 
-        Debug.Log("[Skybox] Panorama applied successfully");
+        Debug.Log($"[Skybox] Panorama applied ({(_canSpin ? "animated" : "static")})");
+    }
+
+    private void Update()
+    {
+        if (!_canSpin || skyboxMaterial == null || spinPeriodSeconds <= 0f) return;
+
+        // Accumulated rather than derived from Time.time, so editing spinPeriodSeconds
+        // at runtime changes the RATE without teleporting the sky to wherever the new
+        // period says it should already be.
+        _spinDegrees = Mathf.Repeat(_spinDegrees + 360f * Time.deltaTime / spinPeriodSeconds, 360f);
+        skyboxMaterial.SetMatrix("_SkyRotation",
+            Matrix4x4.Rotate(Quaternion.AngleAxis(_spinDegrees, _spinAxis)));
+
+        // Deliberately NOT calling DynamicGI.UpdateEnvironment() here. It re-bakes the
+        // ambient probe from the skybox, which is far too expensive per frame, and the
+        // result barely changes anyway: rotating about the sun axis leaves the sun --
+        // the overwhelming majority of the irradiance -- exactly where it was.
     }
 
     void OnDestroy()
