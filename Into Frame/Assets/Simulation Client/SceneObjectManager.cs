@@ -31,6 +31,14 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Terrain")]
     public TerrainMaterialManager terrainMaterialManager;
 
+    [Header("Debug")]
+    [Tooltip("Attach SwayDiagnostics once the scene finishes loading, to report why " +
+             "objects are or aren't visibly animating. Every animated object is created " +
+             "at runtime, so there is nothing to attach it to at author time. Off by " +
+             "default: it sweeps every WindSway in the scene on a timer, which is not " +
+             "free at ground-cover counts.")]
+    public bool logSwayDiagnostics = false;
+
     private void Start()
     {
         if (terrainMaterialManager == null)
@@ -222,6 +230,16 @@ public class SceneObjectManager : MonoBehaviour
 
         _isProcessingQueue = false;
         Debug.Log("[SceneObjectManager] Scene ready");
+
+        // Attached here rather than at author time because every object it inspects is
+        // created at runtime, and only now are they all spawned AND active -- WindSway
+        // discovers its bones in LateUpdate, which never ran while sceneRoot was hidden.
+        if (logSwayDiagnostics && GetComponent<SwayDiagnostics>() == null)
+        {
+            gameObject.AddComponent<SwayDiagnostics>();
+            Debug.Log("[SceneObjectManager] SwayDiagnostics attached — select this GameObject " +
+                      "to reach its Amplitude Scale slider while running.");
+        }
     }
 
     // ── Spawn Helpers ──────────────────────────────────────────────────────

@@ -248,4 +248,24 @@ class Mesh:
         loaded = trimesh.load(str(path), force="mesh")
         if not isinstance(loaded, trimesh.Trimesh):
             raise ValueError(f"Expected a single Trimesh at {path}, got {type(loaded).__name__}")
-        return cls(loaded)
+        mesh = cls(loaded)
+
+        # trimesh models one UV set and no skinning, so loading through it drops both
+        # the TEXCOORD_1 panorama UV and the sway skeleton that save() injected. Left
+        # unrecovered, extra_uv/skin_bone_heights come back None and the very next
+        # export writes a file missing both -- which is what the asset server does on a
+        # cache miss, so every resumed run served boneless meshes (WindSway never finds
+        # SwayBone_0 and nothing sways) and UV-less terrain. Read them back out of the
+        # file instead; see util.gltf_attachments.
+        if str(path).lower().endswith(".glb"):
+            from util.gltf_attachments import read_skin, read_texcoord1
+
+            extra_uv = read_texcoord1(path)
+            if extra_uv is not None and len(extra_uv) == len(loaded.vertices):
+                mesh.extra_uv = extra_uv
+
+            skin = read_skin(path)
+            if skin is not None:
+                mesh.skin_bone_heights, mesh.skin_bone_names = skin
+
+        return mesh
