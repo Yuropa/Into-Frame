@@ -109,6 +109,8 @@ remote options (SSH + port forwarding, then starts server on the remote):
   --asset-port PORT  Asset server port         (default: ${ASSET_PORT})
   --ssh-port PORT    SSH port                  (default: 22)
   --key PATH         SSH private key path      (default: none)
+  -i, --input PATH   Image to generate from, RELATIVE TO --dir unless absolute
+                     (default: samples/Mount Rainier.jpg)          [server only]
   -d, --debug BOOL   Save intermediate files on remote   [server only]
   --config PATH      Remote pipeline config YAML         [server only]
   -o, --output DIR   Output directory to clear           [clear only]
@@ -131,6 +133,7 @@ Examples:
   $(basename "$0") server --port 9090
   $(basename "$0") download
   $(basename "$0") remote --host 192.168.1.10 --user admin
+  $(basename "$0") remote --host 192.168.1.10 --input "samples/Paris.jpg"
   $(basename "$0") remote --host 192.168.1.10 --ssh-port 2222 --key ~/.ssh/id_rsa
   $(basename "$0") remote pull --host 192.168.1.10
   $(basename "$0") remote clear --host 192.168.1.10
