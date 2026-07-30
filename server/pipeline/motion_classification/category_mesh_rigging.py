@@ -18,12 +18,23 @@ class CategoryMeshRiggingConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
-        rig_categories: frozenset[str] = VEGETATION_CATEGORIES,
+        rig_categories=VEGETATION_CATEGORIES,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Only categories where wind sway actually makes sense -- rigging e.g. a
         # bench or fire hydrant would just be a skeleton nothing ever moves.
-        self.rig_categories = rig_categories
+        #
+        # It is also a COST control, which is the less obvious half. A rigged mesh
+        # becomes a SkinnedMeshRenderer on the client: skinned every frame, no GPU
+        # instancing, no static batching, plus a WindSway.LateUpdate writing three bone
+        # transforms per instance. That is fine for the few dozen trees and flowers it
+        # was designed around and ruinous for ground cover -- GrassCoverStage alone
+        # places 6,661 instances, so including grass_tuft here turns the whole scene
+        # into ~6,700 skinned meshes. Drop it from this list and grass renders as plain
+        # (static) MeshRenderers instead.
+        #
+        # Coerced from whatever config.yaml supplies, which is a list.
+        self.rig_categories = frozenset(rig_categories)
 
 
 class CategoryMeshRiggingStage(PipelineStage):

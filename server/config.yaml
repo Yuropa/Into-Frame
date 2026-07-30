@@ -1026,6 +1026,20 @@ stages:
     # Bakes a 3-bone sway skeleton into each shared category_mesh_{cls} (Panorama
     # Asset Generation) that has at least one stationary instance, for Scene
     # Animation's per-instance sway params to drive at runtime.
+    #
+    # This list is a performance budget as much as a taste judgement. Rigging makes an
+    # asset a SkinnedMeshRenderer on the client -- skinned every frame, no GPU
+    # instancing, no static batching, plus a WindSway.LateUpdate writing 3 bone
+    # transforms per instance. Sensible for the ~60 trees and flowers it was designed
+    # around; with grass_tuft included, Grass Cover's 6,661 instances make the entire
+    # scene ~6,700 skinned meshes, which is what pins the frame rate to single digits
+    # (and then reads as "nothing is animated", because the motion is too choppy to see).
+    #
+    # Comment grass_tuft out to render grass as plain static MeshRenderers. That is the
+    # quickest way to confirm the frame rate is the problem, and a reasonable shipping
+    # state until grass sway moves into a vertex shader, which is where ground-cover
+    # wind belongs anyway -- no skinning, no per-instance CPU work.
+    rig_categories: [tree, forest, bush, flower, plant, grass_tuft]
 
   - name: Scene Animation
     stage: SceneAnimationStage

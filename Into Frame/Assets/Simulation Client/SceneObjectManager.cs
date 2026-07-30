@@ -256,7 +256,7 @@ public class SceneObjectManager : MonoBehaviour
         go.name = $"[billboard] {data.id[..6]}";
 
         GameObject root = go;
-        if (data.physics != null)
+        if (HasPhysics(data))
         {
             // A physics-driven billboard tumbles with its own Rigidbody instead of
             // always facing camera (see Billboard.cs) -- the visible quad becomes a
@@ -302,9 +302,34 @@ public class SceneObjectManager : MonoBehaviour
         else if (!string.IsNullOrEmpty(data.texture))
             StartCoroutine(ApplyTexture(go, data.texture));
 
-        if (data.physics != null)
+        if (HasPhysics(data))
             root.AddComponent<PhysicsHandoff>().Apply(data.physics);
     }
+
+    // ── Payload presence tests ─────────────────────────────────────────────
+    //
+    // JsonUtility CANNOT represent null for a nested [Serializable] field. An absent
+    // "physics" key does not deserialize to null -- it default-constructs a PhysicsData
+    // with zeroed members. So `data.physics != null` is ALWAYS true, for every object,
+    // and using it as a presence test attached a Rigidbody and a collider to every mesh
+    // in the scene: 6,722 of them on the Rainier capture, all interpenetrating each
+    // other and the terrain, which the solver then resolves by shoving them apart. That
+    // is the falling, rolling and drifting -- not the server sending physics (it sends
+    // none: scene.json contains zero physics blocks) and not a stale cache.
+    //
+    // This also means the IsEnvironmentMesh guard below was firing its "likely a stale
+    // cached scene.json" warning on every run for every terrain/water/formation mesh,
+    // which is what made a stale cache look like the culprit.
+    //
+    // Test a field the server always populates when the block is genuinely present, and
+    // that a default-constructed instance cannot have: SceneAnimationStage always writes
+    // colliderShape ("box"/"capsule") alongside physics, and always writes a non-zero
+    // frequencyHz alongside sway.
+    private static bool HasPhysics(SceneObject data) =>
+        data?.physics != null && !string.IsNullOrEmpty(data.physics.colliderShape);
+
+    private static bool HasSway(SceneObject data) =>
+        data?.sway != null && data.sway.frequencyHz > 0f;
 
     // Terrain/water/formation meshes (see server scene_generation.py) are never meant
     // to get sway or physics -- the server already guards this by leaving their
@@ -355,15 +380,15 @@ public class SceneObjectManager : MonoBehaviour
 
         if (IsEnvironmentMesh(data.name))
         {
-            if (data.sway != null || data.physics != null)
+            if (HasSway(data) || HasPhysics(data))
                 Debug.LogWarning($"[SceneObjectManager] Ignoring sway/physics sent for environment mesh '{data.name}' ({data.id[..6]}) -- likely a stale cached scene.json.");
         }
         else
         {
-            if (data.sway != null)
+            if (HasSway(data))
                 container.AddComponent<WindSway>().Apply(data.sway);
 
-            if (data.physics != null)
+            if (HasPhysics(data))
             {
                 // Worth a log line: this is the only path that puts a gravity-enabled
                 // Rigidbody on a scene object, so "why did that thing fall?" should be
