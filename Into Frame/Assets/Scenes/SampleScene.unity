@@ -559,6 +559,7 @@ MonoBehaviour:
   imageName: 
   exposure: 1
   rotation: 0
+  spinPeriodSeconds: 800
   server: {fileID: 2130367361}
 --- !u!4 &341509120
 Transform:
@@ -3142,11 +3143,6 @@ RectTransform:
   m_CorrespondingSourceObject: {fileID: 1035790433963668018, guid: 085ce58b196caa446a8545c9dd388793, type: 3}
   m_PrefabInstance: {fileID: 1556058166}
   m_PrefabAsset: {fileID: 0}
---- !u!1 &1765174497 stripped
-GameObject:
-  m_CorrespondingSourceObject: {fileID: 8806329115733545877, guid: 77e7c27b2c5525e4aa8cc9f99d654486, type: 3}
-  m_PrefabInstance: {fileID: 1373153106}
-  m_PrefabAsset: {fileID: 0}
 --- !u!1 &1783572213
 GameObject:
   m_ObjectHideFlags: 0
@@ -3501,6 +3497,10 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::TerrainMaterialManager
   terrainNamePattern: terrain
+  terrainNameExclusions:
+  - formation
+  - physics
+  - water
   splatMaterial: {fileID: 2100000, guid: e4f5a6b7c8d90000e4f5a6b7c8d90001, type: 2}
 --- !u!1 &2046629158
 GameObject:
