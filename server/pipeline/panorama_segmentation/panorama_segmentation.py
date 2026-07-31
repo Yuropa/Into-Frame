@@ -292,6 +292,93 @@ def _reject_unreferenced_water(
     return corrected, unreferenced
 
 
+def _reject_snow_water(
+    type_idx_map: np.ndarray,
+    runnerup_type_idx_map: np.ndarray,
+    panorama_rgb: np.ndarray,
+    value_threshold: float,
+    saturation_threshold: float,
+    min_snow_fraction: float,
+    min_ground_runnerup_fraction: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Reclassify WATER regions that are really SNOW, per connected component.
+    Returns (corrected map, mask of corrected pixels).
+
+    ADE20K has a `snow` class and _LABEL_RULES already maps it to GROUND, so the
+    taxonomy is not the problem -- SegFormer simply calls a sunlit snowfield
+    "water"/"lake"/"sea". On the Rainier capture that is 8.9% of the raw panorama,
+    concentrated at -6 to -28 degrees elevation, exactly where the mid-ground snow
+    patches are. Nothing downstream questions it: WATER carries no ambiguity
+    strategy (it is the type everything else is checked against), the regions'
+    own margins are 0.59-0.81 so a confidence test would clear them comfortably,
+    and _reject_unreferenced_water only guards the terrain pass against the
+    original-photo pass -- here the original photo pass is the one that is wrong,
+    so there is no reference that disagrees.
+
+    Downstream it became a water chain 10 m from the viewer and, after
+    RegionMapRefinementStage's elevation-based water growth, reached the viewer's
+    own grid cell.
+
+    TWO signals, both required, because each on its own is unsafe. Measured over
+    the four captures in the sample set that have any WATER at all:
+
+        capture                 snow-like %   runner-up=GROUND %
+        Paris (real Seine)            11.0                  0.3
+        Shark Fin (real ocean)         6.9                 30.1
+        Irises                         0.9                  0.9
+        Mount Rainier (snow)          46.6                 75.9
+
+    Snow-like colour alone would put the real Seine at 11% -- bright sky glare on
+    open water is genuinely snow-coloured, and that is uncomfortably close for a
+    test that deletes water. Runner-up alone would put the real ocean at 30% --
+    a coastline's second choice is legitimately the land beside it. Neither
+    capture is close to Rainier on BOTH, and requiring both is what makes the
+    test specific rather than merely sensitive.
+
+    Per connected component, not globally: a capture can hold a real lake and a
+    snowfield at once, and a whole-map average would either spare both or delete
+    both. Corrected pixels take their own runner-up type (GROUND when the runner-up
+    is itself WATER), matching _reject_unreferenced_water's convention.
+    """
+    water = int(RegionType.WATER)
+    water_mask = type_idx_map == water
+    if not water_mask.any():
+        return type_idx_map, np.zeros_like(water_mask)
+
+    rgb = panorama_rgb.astype(np.float32) / 255.0
+    if rgb.shape[:2] != type_idx_map.shape:
+        zoom_factors = (
+            type_idx_map.shape[0] / rgb.shape[0],
+            type_idx_map.shape[1] / rgb.shape[1],
+            1.0,
+        )
+        rgb = ndimage_zoom(rgb, zoom_factors, order=1)
+
+    # HSV value/saturation without a full colourspace conversion: snow is bright
+    # and achromatic, and those are exactly max(RGB) and the normalised spread.
+    mx = rgb.max(axis=2)
+    mn = rgb.min(axis=2)
+    value = mx
+    saturation = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
+    snow_like = (value > value_threshold) & (saturation < saturation_threshold)
+
+    labels, n_components = _connected_components(water_mask)
+    corrected = type_idx_map.copy()
+    rejected = np.zeros_like(water_mask)
+    fallback = np.where(runnerup_type_idx_map == water, int(RegionType.GROUND), runnerup_type_idx_map)
+
+    for component in range(1, n_components + 1):
+        comp_mask = labels == component
+        snow_fraction = float(snow_like[comp_mask].mean())
+        ground_fraction = float((runnerup_type_idx_map[comp_mask] == int(RegionType.GROUND)).mean())
+        if snow_fraction >= min_snow_fraction and ground_fraction >= min_ground_runnerup_fraction:
+            corrected[comp_mask] = fallback[comp_mask].astype(corrected.dtype)
+            rejected |= comp_mask
+
+    return corrected, rejected
+
+
 def _dominant_label_name(
     label_map: np.ndarray,
     type_mask: np.ndarray,
@@ -322,6 +409,13 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         nadir_band_deg: float = 15.0,
         confidence_margin_threshold: float = 0.2,
         water_reference_type_map: str | None = None,
+        # Snow-mislabelled-as-water rejection -- see _reject_snow_water for the
+        # cross-capture measurements behind every one of these four numbers.
+        reject_snow_water: bool = True,
+        snow_water_value_threshold: float = 0.60,
+        snow_water_saturation_threshold: float = 0.25,
+        snow_water_min_snow_fraction: float = 0.30,
+        snow_water_min_ground_runnerup_fraction: float = 0.50,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.nadir_cutoff_deg = nadir_cutoff_deg
@@ -340,6 +434,14 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         # calibrate (broken scipy in the local dev env); revisit once this
         # has run against real captures.
         self.confidence_margin_threshold = confidence_margin_threshold
+        # Unlike water_reference_type_map above, this one is meaningful on EVERY pass,
+        # including the original-photo one -- a snowfield is mislabelled in the real
+        # photograph, so no cross-check against that photograph can catch it.
+        self.reject_snow_water = reject_snow_water
+        self.snow_water_value_threshold = snow_water_value_threshold
+        self.snow_water_saturation_threshold = snow_water_saturation_threshold
+        self.snow_water_min_snow_fraction = snow_water_min_snow_fraction
+        self.snow_water_min_ground_runnerup_fraction = snow_water_min_ground_runnerup_fraction
 
 
 class PanoramaRegionStage(PipelineStage):
@@ -474,6 +576,28 @@ class PanoramaRegionStage(PipelineStage):
                 f"water_reference_type_map '{cfg.water_reference_type_map}' not in "
                 f"context — skipping the water cross-check"
             )
+
+        # Also before the nadir fill, and for the same reason as the cross-check
+        # above. Unlike that check this one runs on every pass: it needs no
+        # reference map, because a snowfield is mislabelled in the original
+        # photograph itself and there is no second opinion to appeal to.
+        if cfg.reject_snow_water:
+            resolved_type_idx_map, snow_rejected = _reject_snow_water(
+                resolved_type_idx_map,
+                seg.runnerup_type_idx_map,
+                np.asarray(panorama.rgb()),
+                value_threshold=cfg.snow_water_value_threshold,
+                saturation_threshold=cfg.snow_water_saturation_threshold,
+                min_snow_fraction=cfg.snow_water_min_snow_fraction,
+                min_ground_runnerup_fraction=cfg.snow_water_min_ground_runnerup_fraction,
+            )
+            n_snow = int(snow_rejected.sum())
+            if n_snow > 0:
+                self.log_info(
+                    f"  Reclassified {n_snow / snow_rejected.size * 100:.2f}% of panorama "
+                    f"from water to its runner-up type: bright, desaturated, and "
+                    f"second-guessed as ground — snow, not water"
+                )
 
         # Nadir cleanup only needs to run on the map that actually becomes the
         # canonical output; the raw map is kept purely for debugging (see

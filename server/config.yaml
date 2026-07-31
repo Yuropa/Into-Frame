@@ -150,6 +150,34 @@ stages:
                             # SegFormer's raw output and replaced by the reliable ring above.
     nadir_band_deg: 15.0    # degrees of ring immediately above the cutoff used for the
                             # per-column majority vote that replaces the excluded band.
+
+    # Snow mislabelled as water. SegFormer calls a sunlit snowfield "water"/"lake",
+    # and on the Rainier capture that reached the client as a water chain 10 m from
+    # the viewer that RegionMapRefinementStage then grew to the viewer's own cell.
+    # The cross-check below can't catch it: that compares the terrain pass against
+    # THIS one, and here it is this one -- the pass over the real photograph -- that
+    # is wrong. A snowfield is mislabelled in the photo itself, so there is no second
+    # opinion to appeal to; only the pixels themselves say snow.
+    #
+    # Requires BOTH a snow-like colour AND a ground-ish runner-up, per connected
+    # component. Measured over every capture in server/samples with any water:
+    #
+    #   capture                 snow-like %   runner-up=GROUND %   reclassified
+    #   Paris (real Seine)            11.0                  0.3          0.00%
+    #   Shark Fin (real ocean)         6.9                 30.1          0.00%
+    #   Irises                         0.9                  0.9          0.00%
+    #   Mount Rainier (snow)          46.6                 75.9          2.08%
+    #
+    # Either signal alone is unsafe -- sky glare on open water is genuinely
+    # snow-coloured (Paris 11%), and a coastline's second choice is legitimately the
+    # land beside it (Shark Fin 30%). Requiring both is what makes this specific:
+    # Rainier loses 69% of its water, the three real-water captures lose nothing.
+    reject_snow_water: true
+    snow_water_value_threshold: 0.60            # HSV value above which a pixel is "bright"
+    snow_water_saturation_threshold: 0.25       # HSV saturation below which it is "achromatic"
+    snow_water_min_snow_fraction: 0.30          # component must be this snow-like...
+    snow_water_min_ground_runnerup_fraction: 0.50 # ...AND second-guessed as ground this often
+
     # Default keys (ContextKey.PANORAMA, ContextKey.PANORAMA_REGION_TYPE_MAP, ...)
     # -- classifies the ORIGINAL, with-objects panorama. Object detection/
     # distribution and skybox inpainting need this version: they care what was
@@ -160,6 +188,17 @@ stages:
     stage: PanoramaRegionStage
     nadir_cutoff_deg: -55.0
     nadir_band_deg: 15.0
+    # Same snow rejection as the original-photo pass above -- this one is the map
+    # RegionMapStage and HeightMapStage actually read, and the snow is still snow
+    # after foreground removal. Measured on Rainier: water 0.83% -> 0.19%, and the
+    # surviving components are the ones where the two signals disagree (2.6% snow-like
+    # with a ground runner-up, or 61% snow-like with only a 32% ground runner-up),
+    # which is the conservative outcome this pairing is designed to produce.
+    reject_snow_water: true
+    snow_water_value_threshold: 0.60
+    snow_water_saturation_threshold: 0.25
+    snow_water_min_snow_fraction: 0.30
+    snow_water_min_ground_runnerup_fraction: 0.50
     # Same model, same settings, run a second time against the object-removed +
     # LoRA-corrected panorama instead of the original -- mirrors how Panorama
     # Depth below is itself a second pass over PANORAMA_OBJECT_DEPTH's own
