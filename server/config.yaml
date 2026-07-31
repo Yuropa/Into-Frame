@@ -967,6 +967,36 @@ stages:
     mesh_lod_distance_m: 30.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
                                # Panorama Asset Generation's billboard_distance_m above (kept
                                # in sync manually; each stage parses its own isolated config)
+
+    # Object size is derived from panorama depth (world_size = angular_extent x depth,
+    # see scene_generation/projection.py), so it inherits every compression that depth
+    # map carries -- the capped extrapolation past the hero-photo overlap, and
+    # _compress_far_range folding everything above 0.6 * max_depth_m into max_depth_m.
+    # Both are deliberate and both are needed by terrain reconstruction, so neither is
+    # touched. The result is angularly correct (the panorama still lines up) but
+    # metrically shrunk with distance, which mono viewing cannot detect and stereo
+    # can: disparity says one distance, retinal size says a smaller object, and the
+    # scene reads as a scale model.
+    #
+    # This recovers the lost scale from semantics instead: classes with tight
+    # real-world height priors (person, car, bench...) each measure the compression at
+    # their own depth, those measurements are pooled and binned into a depth ->
+    # correction curve, and placed objects' extents are multiplied by it. Positions,
+    # terrain snapping and both depth maps are unchanged -- only object size moves.
+    # See scene_generation/object_scale.py, and object_scale_debug.json in the stage's
+    # temp dir for the per-anchor breakdown of any given run.
+    object_scale_correction: true
+    object_scale_max_correction: 8.0 # ceiling (and 1/x floor) on the fitted factor -- bounds
+                                      # the damage from a scene whose few anchors are
+                                      # unrepresentative, since an unbounded correction can
+                                      # throw an object clear across the terrain grid
+    object_scale_min_anchors: 6      # below this many usable anchors, skip the fit entirely and
+                                      # leave sizes uncorrected. A wilderness capture with no
+                                      # person/car/bench anywhere is an expected outcome, and
+                                      # "leave it alone" is the right answer there, not a guess
+    object_scale_num_bins: 6         # depth bins used to resolve the correction's depth
+                                      # dependence; adapts down automatically when anchors are
+                                      # too few, collapsing to a single global factor
     mesh_lod_distance_overrides:
       # Ground cover needs its own, far shorter cutoff. The global value is tuned for
       # subjects you look AT -- a tree at 25 m earns its mesh. Grass does not: Grass

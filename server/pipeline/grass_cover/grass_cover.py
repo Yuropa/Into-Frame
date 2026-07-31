@@ -501,6 +501,13 @@ class GrassCoverStage(PipelineStage):
                 "world_position": [float(x), 0.0, float(z)],
                 "world_width": float(height),
                 "world_height": float(height),
+                # Already real-world metric (see _tuft_height -- a configured
+                # constant, deliberately not derived from imagery), so it never
+                # inherited the depth map's compression and must be exempt from
+                # SceneGenerationStage's object scale correction. Without this the
+                # correction treats 0.35 m ground cover like a compressed detection
+                # and inflates it by the scene's far-field factor.
+                "metric_size": True,
             })
             next_idx += 1
 

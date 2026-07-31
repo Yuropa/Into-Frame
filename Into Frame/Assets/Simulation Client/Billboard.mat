@@ -27,6 +27,7 @@ Material:
   m_ValidKeywords:
   - _ALPHATEST_ON
   - _RECEIVE_SHADOWS_OFF
+  - _SPECULAR_COLOR
   - _SURFACE_TYPE_TRANSPARENT
   m_InvalidKeywords:
   - _GLOSSYREFLECTIONS_OFF
@@ -159,7 +160,7 @@ Material:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Color: {r: 1, g: 1, b: 1, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
-    - _SpecColor: {r: 0.19999993, g: 0.19999993, b: 0.19999993, a: 0.5}
+    - _SpecColor: {r: 0.1999999, g: 0.1999999, b: 0.1999999, a: 0}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
 --- !u!114 &8490472560057171736

@@ -7,6 +7,7 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, S
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
 from pipeline.scene_generation.projection import mesh_y_at, terrain_local_xz, unproject_bbox, unproject_bbox_equirect
+from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
 from scene.scene import Scene
 from scene.object import Object3D
 import numpy as np
@@ -24,6 +25,10 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         eye_height_meters: float = 1.8,
         mesh_lod_distance_m: float = 30.0,
         mesh_lod_distance_overrides: dict[str, float] | None = None,
+        object_scale_correction: bool = True,
+        object_scale_max_correction: float = 8.0,
+        object_scale_min_anchors: int = 6,
+        object_scale_num_bins: int = 6,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Sent to the client as the target world-space depth of the terrain
@@ -49,6 +54,21 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # BILLION in total -- and the 12-triangle crossed-card LOD that exists for
         # exactly this purpose never rendered once.
         self.mesh_lod_distance_overrides = dict(mesh_lod_distance_overrides or {})
+        # Learn a depth -> size-correction curve from objects with known real-world
+        # heights and apply it to every placed object's extent. See
+        # scene_generation/object_scale.py for why object size arrives compressed and
+        # why the correction belongs here rather than in the depth map.
+        self.object_scale_correction = object_scale_correction
+        # Ceiling (and, reciprocally, floor) on that correction. Bounds the damage
+        # when a scene's anchors are few and unrepresentative -- a wrong 8x is bad,
+        # an unbounded one takes an object across the whole terrain grid.
+        self.object_scale_max_correction = object_scale_max_correction
+        # Minimum anchors before any correction is attempted. Below this the fit is
+        # skipped entirely and objects keep their uncorrected size.
+        self.object_scale_min_anchors = object_scale_min_anchors
+        # Depth bins used to resolve the correction's depth dependence. Adapts down
+        # automatically when there are too few anchors to fill them.
+        self.object_scale_num_bins = object_scale_num_bins
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -198,6 +218,85 @@ class SceneGenerationStage(PipelineStage):
 
             rng = np.random.default_rng(self.seed)
 
+            def unproject_box(box):
+                """Bbox -> (world position, width, height), in whichever space this run has."""
+                if panorama_depth is not None and panorama is not None:
+                    return unproject_bbox_equirect(
+                        box, panorama.width, panorama.height,
+                        pano_depth=panorama_depth, extrinsics=extrinsics,
+                    )
+                return unproject_bbox(
+                    box, input.width, input.height,
+                    depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics,
+                )
+
+            # Learn the scene's size compression before placing anything, so that
+            # every object -- including the very first -- is corrected against the
+            # whole scene's evidence rather than whatever happened to precede it.
+            #
+            # This re-unprojects the anchor-eligible subset rather than reusing the
+            # placement loop's own results, because the fit has to be complete before
+            # that loop starts. Only classes in OBJECT_HEIGHT_PRIORS qualify, so this
+            # is a small fraction of a typical detection set.
+            scale_model = None
+            if self.config.object_scale_correction:
+                anchors = []
+                for idx in range(object_count):
+                    metadata = context.input_object(f"metadata_{idx}") or {}
+                    box = metadata.get("box")
+                    if not box:
+                        continue
+                    result = unproject_box(box)
+                    if result is None:
+                        continue
+                    anchor_position, _, anchor_height = result
+                    anchor_depth = float(np.linalg.norm(
+                        np.array(anchor_position, dtype=float) - camera_position
+                    ))
+                    anchor = collect_anchor(
+                        idx, metadata.get("class"), metadata, anchor_depth, anchor_height
+                    )
+                    if anchor is not None:
+                        anchors.append(anchor)
+
+                scale_model = fit_object_scale(
+                    anchors,
+                    num_bins=self.config.object_scale_num_bins,
+                    min_anchors=self.config.object_scale_min_anchors,
+                    max_correction=self.config.object_scale_max_correction,
+                )
+
+                if scale_model is None:
+                    self.log_info(
+                        f"Object scale correction: {len(anchors)} usable anchors "
+                        f"(need {self.config.object_scale_min_anchors}) — leaving object sizes uncorrected"
+                    )
+                else:
+                    by_class: dict[str, int] = {}
+                    for a in anchors:
+                        by_class[a.cls] = by_class.get(a.cls, 0) + 1
+                    self.log_info(
+                        f"Object scale correction fitted: {scale_model.describe()}; "
+                        f"anchor classes: {dict(sorted(by_class.items()))}"
+                    )
+                    if self.temp is not None:
+                        import json
+                        debug = {
+                            "model": scale_model.to_dict(),
+                            "anchors": [
+                                {
+                                    "index": a.index, "class": a.cls,
+                                    "depth_m": round(a.depth, 2),
+                                    "measured_height_m": round(a.measured_height, 3),
+                                    "prior_height_m": a.prior_height,
+                                    "ratio": round(a.ratio, 3),
+                                    "weight": round(a.weight, 3),
+                                }
+                                for a in sorted(anchors, key=lambda a: a.depth)
+                            ],
+                        }
+                        (self.temp / "object_scale_debug.json").write_text(json.dumps(debug, indent=2))
+
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in range(object_count):
                 metadata = context.input_object(f"metadata_{idx}") or {}
@@ -238,10 +337,7 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
 
-                    if panorama_depth is not None and panorama is not None:
-                        result = unproject_bbox_equirect(box, panorama.width, panorama.height, pano_depth=panorama_depth, extrinsics=extrinsics)
-                    else:
-                        result = unproject_bbox(box, input.width, input.height, depth_map=depth, intrinsics=intrinsics, extrinsics=extrinsics)
+                    result = unproject_box(box)
                     if result is None:
                         self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                         self.advance_progress(generation_task)
@@ -253,6 +349,27 @@ class SceneGenerationStage(PipelineStage):
                     self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
                     self.advance_progress(generation_task)
                     continue
+
+                # Undo the scene's measured size compression. Deliberately AFTER the
+                # cull above, not before it: the cull's job is to reject things that
+                # were never discrete objects (a mountainside, a hillside, sky), and
+                # that judgement belongs on the raw measurement. Applying it to
+                # corrected sizes would start culling exactly the large-but-legitimate
+                # objects this correction exists to restore, and would make the set of
+                # placed objects depend on the fit -- so the same capture would gain
+                # and lose objects as the anchors changed.
+                #
+                # Size only. Position is untouched, so the object still stands where
+                # the depth map put it and still snaps to the same terrain point --
+                # terrain and both depth maps are left exactly as they were.
+                if scale_model is not None and not is_metric_authored(cls, metadata):
+                    object_depth = float(np.linalg.norm(
+                        np.array(position, dtype=float) - camera_position
+                    ))
+                    scale_factor = scale_model.factor_at(object_depth)
+                    if abs(scale_factor - 1.0) > 1e-3:
+                        width *= scale_factor
+                        height *= scale_factor
 
                 # Snap the object's base to the terrain surface. The Y offset that
                 # lands the *bottom* of the object on the terrain depends on the

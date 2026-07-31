@@ -3438,6 +3438,7 @@ MonoBehaviour:
   server: {fileID: 2130367361}
   progress: {fileID: 605623678}
   terrainMaterialManager: {fileID: 1862969865}
+  logSwayDiagnostics: 0
 --- !u!114 &1862969862
 MonoBehaviour:
   m_ObjectHideFlags: 0
