@@ -748,6 +748,40 @@ stages:
     nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
     nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
     horizon_fade_deg: 1.5       # ramp width below the horizon
+
+    # Withhold the panorama layer from ground texels whose own panorama pixel is
+    # UPRIGHT vegetation rather than ground. Projecting an equirect onto a horizontal
+    # plane assumes the content at elevation phi is the ground at radius h/tan(-phi);
+    # that is true for bare terrain and false for anything standing up, so a 0.5 m
+    # flower gets smeared into a streak metres long. Baking the Rainier result and
+    # viewing it top-down gives a textbook radial pinwheel: a starburst of stretched
+    # wildflowers near the viewer, and by 20 m the conifers are dark spokes crossing
+    # everything. The panorama layer's weight was 1.00 across the entire 0-5 m disc,
+    # so pattern_texture.py -- which exists to supply real ground material with no
+    # projective smear -- contributed nothing at all where the viewer stands. Those
+    # same trees and flowers are also placed as real 3D instances, so the smeared copy
+    # was double-counted too.
+    #
+    # Resulting panorama-layer weight, measured (the far field is deliberately
+    # untouched -- overall mean moves 0.862 -> 0.851):
+    #
+    #     0-2 m   1.00 -> 0.27        10-20 m  0.88 -> 0.60
+    #     2-5 m   1.00 -> 0.50        20-50 m  0.78 -> 0.77
+    #     5-10 m  0.99 -> 0.69       50-142 m  0.88 -> 0.88
+    panorama_upright_gate: true
+    panorama_upright_feather_frac: 0.01  # gaussian feather on the gate, as a fraction of
+                                          # blend_map_size -- a binary mask would stencil
+                                          # the canopy outline into the ground
+    panorama_upright_full_radius_m: 6.0  # gate at full strength inside this...
+    panorama_upright_falloff_radius_m: 25.0 # ...ramping off to nothing by here. The smear
+                                          # is proportional to radius, but its VISIBILITY
+                                          # is not: this layer is exact from the capture
+                                          # point and only parallax reveals the streak, so
+                                          # for the ~2 m of head movement this scene is
+                                          # built for the error is ~40% at 5 m and ~4% at
+                                          # 50 m. Stripping the far field would throw away
+                                          # real photographic detail to fix something no
+                                          # one can see from inside the scene.
     panorama_layer_max_resolution: 4096 # longest-edge cap for the panorama texture layer,
                                  # decoupled from tile_size (that's a FLUX generation
                                  # constraint, not relevant to a plain resize of the real

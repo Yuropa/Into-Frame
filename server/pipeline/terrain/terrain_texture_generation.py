@@ -137,6 +137,13 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
+        # Withhold the panorama layer from ground texels whose own panorama pixel is
+        # upright vegetation/structure rather than ground -- see
+        # _panorama_visibility_weight for the radial-pinwheel failure this fixes.
+        panorama_upright_gate: bool = True,
+        panorama_upright_feather_frac: float = 0.01,
+        panorama_upright_full_radius_m: float = 6.0,
+        panorama_upright_falloff_radius_m: float = 25.0,
         # Longest-edge cap (px) for the panorama layer's own tile -- deliberately
         # decoupled from tile_size, which sizes the *synthetic* FLUX tiles (a real
         # generation constraint that doesn't apply here). This layer is just a
@@ -300,6 +307,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.panorama_blend_power = panorama_blend_power
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_fade_deg = nadir_fade_deg
+        self.panorama_upright_gate = panorama_upright_gate
+        self.panorama_upright_feather_frac = panorama_upright_feather_frac
+        self.panorama_upright_full_radius_m = panorama_upright_full_radius_m
+        self.panorama_upright_falloff_radius_m = panorama_upright_falloff_radius_m
         self.horizon_fade_deg = horizon_fade_deg
         self.panorama_layer_max_resolution = panorama_layer_max_resolution
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
@@ -766,11 +777,36 @@ class TerrainTextureGenerationStage(PipelineStage):
             half = grid_size / 2.0
 
             pano_tile = self._panorama_tile(panorama_terrain, cfg.panorama_layer_max_resolution)
+            # The ORIGINAL-photo typing, not the terrain-scoped one, because this has
+            # to describe the pixels this layer actually paints. _ground_colour_panorama
+            # above puts the original photograph's pixels back wherever foreground
+            # removal ate the ground -- which in a ground-level capture is the entire
+            # near field -- so the tile carries the real, upright wildflower meadow even
+            # though the terrain panorama has fabricated gravel there and types it
+            # GROUND. Asking the terrain pass gives 100% "ground" across the whole 0-5 m
+            # disc and gates nothing; asking the original pass gives 1%, which is the
+            # truth about what is being painted.
+            upright_region_depth = (
+                context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+                if cfg.panorama_upright_gate else None
+            )
+            if cfg.panorama_upright_gate and upright_region_depth is None:
+                self.log_warning(
+                    "panorama_upright_gate is on but PANORAMA_REGION_TYPE_MAP "
+                    "is not in context — the panorama layer will keep painting upright "
+                    "vegetation onto the ground plane"
+                )
             pano_weight = self._panorama_visibility_weight(
                 height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
                 nadir_cutoff_deg=cfg.nadir_cutoff_deg,
                 nadir_fade_deg=cfg.nadir_fade_deg,
                 horizon_fade_deg=cfg.horizon_fade_deg,
+                region_type_map=(
+                    upright_region_depth.depth if upright_region_depth is not None else None
+                ),
+                upright_feather_frac=cfg.panorama_upright_feather_frac,
+                upright_full_radius_m=cfg.panorama_upright_full_radius_m,
+                upright_falloff_radius_m=cfg.panorama_upright_falloff_radius_m,
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -924,10 +960,15 @@ class TerrainTextureGenerationStage(PipelineStage):
         nadir_cutoff_deg: float = -85.0,
         nadir_fade_deg: float = 4.0,
         horizon_fade_deg: float = 1.5,
+        region_type_map: Optional[np.ndarray] = None,
+        upright_feather_frac: float = 0.01,
+        upright_full_radius_m: float = 6.0,
+        upright_falloff_radius_m: float = 25.0,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
-        viewing latitude from the camera (at the world origin).
+        viewing latitude from the camera (at the world origin), and on whether
+        the panorama pixel each ground texel would sample is actually GROUND.
 
         An earlier version weighted by surface-normal facing instead, but for
         typical rolling/flat terrain viewed from a ~1-2 m camera height, the
@@ -964,6 +1005,33 @@ class TerrainTextureGenerationStage(PipelineStage):
         the UV level, once, upstream. Re-gating here on top of that just
         threw away most of the real photo for no remaining benefit.
 
+        The latitude ramp alone is not enough, and this is the failure it misses.
+        Projecting an equirect panorama onto a horizontal ground plane assumes the
+        content at elevation phi IS the ground at radius h/tan(-phi). That holds for
+        bare terrain and fails completely for anything UPRIGHT: a 0.5 m flower spans
+        a range of elevations, and each of those elevations lands at a different
+        ground radius, so one flower is smeared into a streak metres long. Rendering
+        the baked result top-down on the Rainier capture gives a textbook radial
+        pinwheel -- the near field is a starburst of stretched wildflowers, and by
+        20 m the mid-ground conifers have become huge dark spokes crossing everything.
+        It is not confined to the nadir: it happens wherever the panorama holds
+        vertical structure, which in a meadow-and-forest scene is nearly everywhere.
+        Meanwhile the panorama layer's weight was 1.00 across the whole 0-5 m disc,
+        so pattern_texture.py -- which exists precisely to supply real ground material
+        without any projective smear -- contributed exactly nothing where the viewer
+        actually looks.
+
+        The scene also places those same trees and flowers as real 3D instances on
+        top of this terrain, so a smeared copy baked into the ground is not just
+        wrong, it is double-counted.
+
+        RegionType.ground_valid already encodes exactly the needed distinction, for
+        exactly this reason ("Vegetation canopies and built structures occlude the
+        ground"). So where a texel's own panorama pixel is VEGETATION or BUILT, the
+        panorama is not showing that texel's ground and its weight is dropped,
+        handing the texel to the synthetic/pattern layers. Feathered rather than
+        binary, so the handover doesn't produce a hard-edged stencil of the canopy.
+
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
         us = np.linspace(0.0, 1.0, blend_map_size, dtype=np.float32)
@@ -986,6 +1054,59 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_fade_deg=nadir_fade_deg,
             horizon_fade_deg=horizon_fade_deg,
         ).reshape(blend_map_size, blend_map_size)
+
+        if region_type_map is not None:
+            # Same projection HeightMapGenerator._panorama_uv_from_height and
+            # Panorama.mesh_uvs use, so this asks about the very pixel the shader
+            # will sample for this texel -- not an approximation of it.
+            lon = np.arctan2(X, Z)
+            r_xz = np.sqrt(X ** 2 + Z ** 2).clip(1e-6)
+            lat = np.arctan2(Y, r_xz)
+            u = (lon + np.pi) / (2.0 * np.pi)
+            v = 0.5 + lat / np.pi
+
+            rt_h, rt_w = region_type_map.shape
+            # Row from (1 - v): mesh_uvs stores V flipped for glTF, so v = 0 is the
+            # bottom of the image, not the top.
+            rt_row = ((1.0 - v) * (rt_h - 1)).clip(0, rt_h - 1)
+            rt_col = (u * (rt_w - 1)).clip(0, rt_w - 1)
+            sampled = map_coordinates(
+                region_type_map, [rt_row.ravel(), rt_col.ravel()], order=0, mode="nearest"
+            ).reshape(blend_map_size, blend_map_size)
+
+            # VEGETATION/BUILT only, rather than "everything not ground_valid".
+            # SKY deliberately does not gate here: Panorama.mesh_uvs already snaps a
+            # mountainside vertex's UV down off sky to the nearest real content in its
+            # own column, so a texel this function believes samples sky usually does
+            # not. Penalising it here would strip the real photo off exactly the
+            # distant terrain that snap exists to keep -- an error in this estimate,
+            # not a defect in the texture.
+            upright = np.isin(
+                np.rint(sampled).astype(np.int32),
+                [int(RegionType.VEGETATION), int(RegionType.BUILT)],
+            ).astype(np.float32)
+
+            # Distance-weighted, because the artifact is: the panorama layer is a
+            # view-dependent texture that is EXACT from the capture point and decays
+            # as the viewer leaves it. A radial smear pointing away from the origin is
+            # foreshortened to nothing when seen from the origin, so what makes it
+            # visible is parallax from the viewer's own movement -- roughly d/r in
+            # angular terms for a head movement d. At the ~2 m of movement this scene
+            # is built for that is 40% at 5 m and 4% at 50 m. The smear itself is
+            # proportional to radius (dr = r*v/(h-v) for an upright object of height v
+            # under a camera h above ground, so dr/r is constant), but its visibility
+            # is not, and stripping the far field would cost real photographic detail
+            # to fix something nobody can see.
+            if upright_falloff_radius_m > upright_full_radius_m:
+                t = (r_xz - upright_full_radius_m) / (upright_falloff_radius_m - upright_full_radius_m)
+                strength = np.clip(1.0 - t, 0.0, 1.0).astype(np.float32)
+            else:
+                strength = (r_xz <= upright_full_radius_m).astype(np.float32)
+
+            sigma = max(1.0, upright_feather_frac * blend_map_size)
+            keep = np.clip(gaussian_filter(1.0 - upright, sigma=sigma), 0.0, 1.0)
+            # strength 1 -> the gate applies in full; strength 0 -> weight unchanged.
+            weight = weight * (1.0 - strength * (1.0 - keep))
 
         return (weight ** blend_power).astype(np.float32)
 
