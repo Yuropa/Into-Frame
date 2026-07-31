@@ -777,6 +777,15 @@ stages:
                                         # is dropped as a spurious sub-part (e.g. a
                                         # door pulled out of a building) rather than
                                         # kept as its own object
+    dedupe_box_iou_threshold: 0.95     # same-class boxes this similar are the SAME
+                                        # instance detected twice, and all but the
+                                        # lowest index is dropped. Runs after the split
+                                        # pass, which is where the duplicates come from
+                                        # (coalesce runs before it and so never sees
+                                        # them); see _dedupe_pass for the threshold
+                                        # sweep behind this number. Deliberately high:
+                                        # this must not thin a dense meadow, only
+                                        # collapse literal repeats
 
   - name: Object Correlation
     stage: ObjectCorrelationStage

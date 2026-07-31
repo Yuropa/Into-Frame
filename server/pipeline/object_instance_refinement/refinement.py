@@ -47,6 +47,27 @@ class ObjectInstanceRefinementConfiguration(PipelineStageConfiguration):
         split_max_components: int = 12,
         # absorb (drop structural sub-parts) tuning -- COALESCE_CATEGORIES parents
         absorb_containment_threshold: float = 0.85,
+        # dedupe (drop the same instance detected twice) -- runs AFTER the split pass,
+        # deliberately high so it only ever collapses near-identical boxes. See
+        # _dedupe_pass for why the coalesce pass cannot cover this.
+        #
+        # 0.95 measured, not guessed. Swept against the Rainier capture's 404
+        # classed+boxed instances, counting how many objects the pass would drop:
+        #
+        #   IoU >= 0.99 -> 19  (17 tree, 1 flower, 1 sky)
+        #   IoU >= 0.95 -> 19  (17 tree, 1 flower, 1 sky)
+        #   IoU >= 0.90 -> 22  (17 tree, 4 flower, 1 sky)
+        #   IoU >= 0.80 -> 31  (17 tree, 13 flower, 1 sky)
+        #
+        # The tree duplicates are byte-identical boxes (IoU exactly 1.0), so the tree
+        # count is flat from 0.99 all the way to 0.80 -- every threshold in that range
+        # catches all of them, and the choice is purely about how much collateral it
+        # takes with them. Flowers are what moves: a dense meadow has genuinely
+        # adjacent, heavily-overlapping blooms, and by 0.80 the pass is deleting
+        # thirteen of them. Since the complaint this work started from is too FEW
+        # flowers, the flat part of the tree curve is the right place to sit, not the
+        # knee of the flower curve.
+        dedupe_box_iou_threshold: float = 0.95,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.coalesce_box_iou_threshold = coalesce_box_iou_threshold
@@ -59,6 +80,7 @@ class ObjectInstanceRefinementConfiguration(PipelineStageConfiguration):
         self.split_watershed_min_component_fraction = split_watershed_min_component_fraction
         self.split_max_components = split_max_components
         self.absorb_containment_threshold = absorb_containment_threshold
+        self.dedupe_box_iou_threshold = dedupe_box_iou_threshold
 
 
 class ObjectInstanceRefinementStage(PipelineStage):
@@ -149,6 +171,12 @@ class ObjectInstanceRefinementStage(PipelineStage):
         if pano_w is not None:
             splits, next_idx = self._split_pass(context, working, next_idx)
 
+        # After the split pass on purpose -- the duplicates that survive to here are
+        # mostly ones the split pass just created. See _dedupe_pass.
+        duplicates = []
+        if pano_w is not None:
+            duplicates = self._dedupe_pass(context, working, pano_w)
+
         absorptions = []
         if pano_w is not None:
             absorptions = self._absorb_pass(context, working, pano_w)
@@ -158,10 +186,11 @@ class ObjectInstanceRefinementStage(PipelineStage):
 
         self.log_info(
             f"  {len(merges)} coalesce merge(s), {len(splits)} split(s), "
+            f"{len(duplicates)} duplicate(s) dropped, "
             f"{len(absorptions)} absorption(s); count {object_count} -> {next_idx}"
         )
 
-        self._write_debug(context, source_image, pano_w, before_snapshot, working, merges, splits, absorptions, object_count, next_idx)
+        self._write_debug(context, source_image, pano_w, before_snapshot, working, merges, splits, duplicates, absorptions, object_count, next_idx)
         return context
 
     # ------------------------------------------------------------------
@@ -342,6 +371,72 @@ class ObjectInstanceRefinementStage(PipelineStage):
         return splits, next_idx
 
     # ------------------------------------------------------------------
+    # Dedupe pass
+    # ------------------------------------------------------------------
+
+    def _dedupe_pass(self, context: PipelineContext, working: dict[int, dict], pano_w: int) -> list[dict]:
+        """Drop the same instance detected twice: near-identical boxes of the same class.
+
+        This is NOT what _coalesce_pass does, and it cannot be folded into it, for
+        two independent reasons:
+
+          - Ordering. Coalesce runs BEFORE _split_pass, so every duplicate the split
+            pass itself emits is created after the only thing that could have merged
+            it. On the Rainier capture that is where the duplicates come from: eight
+            pairs of split children with byte-identical boxes, identical scores and
+            the same split_from parent, at a constant index offset from each other.
+          - Intent. Coalesce merges *parts of one object* into their union (threshold
+            0.20, plus containment and mask-touch rules), which is the right operation
+            for a tree detected as trunk + canopy and the wrong one for the same tree
+            detected twice -- unioning two copies of one box just reproduces the box
+            while keeping the extra instance alive.
+
+        _absorb_pass does not reach them either: it skips any candidate that is itself
+        in COALESCE_CATEGORIES, so two identical `tree` boxes are each other's parent
+        and neither is ever dropped.
+
+        So: cluster on box IoU alone at a deliberately high threshold, keep the lowest
+        index, and drop the rest outright. No mask union, no box growth -- a duplicate
+        contributes no new extent by definition. Runs over every class with a box, not
+        just COALESCE_CATEGORIES, because the duplicates that matter here are trees and
+        flowers, and a duplicated instance is wrong for any class: it doubles that
+        object's weight in every downstream population, density and scale statistic,
+        and renders two coincident meshes that z-fight.
+        """
+        by_class: dict[str, list[int]] = {}
+        for idx, entry in working.items():
+            cls = entry["metadata"].get("class")
+            if cls and entry["box"] is not None:
+                by_class.setdefault(cls, []).append(idx)
+
+        duplicates = []
+        for cls, indices in by_class.items():
+            if len(indices) < 2:
+                continue
+            dets = [{"idx": i, "box": working[i]["box"]} for i in indices]
+            clusters = cluster_indices(
+                dets,
+                overlap_fn=lambda a, b: wrap_aware_box_iou(a["box"], b["box"], pano_w),
+                threshold=self.config.dedupe_box_iou_threshold,
+            )
+            for members in clusters:
+                if len(members) < 2:
+                    continue
+                member_idxs = sorted(dets[m]["idx"] for m in members)
+                # Lowest index wins: it is the earliest-created instance, so anything
+                # already referring to it (split_from, correlation) stays valid.
+                canonical = member_idxs[0]
+                for i in member_idxs[1:]:
+                    self.log_info(
+                        f"  crop_{i} ({cls}) is a duplicate of crop_{canonical}, dropping"
+                    )
+                    context.add_object(f"metadata_{i}", None)
+                    del working[i]
+                    duplicates.append({"idx": i, "class": cls, "duplicate_of": canonical})
+
+        return duplicates
+
+    # ------------------------------------------------------------------
     # Absorb pass
     # ------------------------------------------------------------------
 
@@ -392,7 +487,7 @@ class ObjectInstanceRefinementStage(PipelineStage):
     # Debug
     # ------------------------------------------------------------------
 
-    def _write_debug(self, context, source_image, pano_w, before_snapshot, working, merges, splits, absorptions, before_count, after_count):
+    def _write_debug(self, context, source_image, pano_w, before_snapshot, working, merges, splits, duplicates, absorptions, before_count, after_count):
         if self.output is None:
             return
 
@@ -401,6 +496,7 @@ class ObjectInstanceRefinementStage(PipelineStage):
             "after_count": after_count,
             "merges": merges,
             "splits": splits,
+            "duplicates": duplicates,
             "absorptions": absorptions,
             "config": {
                 "coalesce_box_iou_threshold": self.config.coalesce_box_iou_threshold,
@@ -409,6 +505,7 @@ class ObjectInstanceRefinementStage(PipelineStage):
                 "split_outlier_area_multiplier": self.config.split_outlier_area_multiplier,
                 "split_max_components": self.config.split_max_components,
                 "absorb_containment_threshold": self.config.absorb_containment_threshold,
+                "dedupe_box_iou_threshold": self.config.dedupe_box_iou_threshold,
             },
         }
         with open(self.output / "refinement_debug.json", "w") as f:

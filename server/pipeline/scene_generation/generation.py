@@ -74,6 +74,13 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
 _MAX_OBJECT_SIZE_M = 40.0
 
+# A category mesh is scaled to match its instance's detected HEIGHT (see the mesh
+# branch in run()), which needs its own vertical extent as the divisor. Below this
+# fraction of its largest extent the mesh is effectively a flat sheet, that divisor
+# is noise, and matching height would blow the other axes up by 1/extent_y -- so the
+# instance falls back to footprint scaling instead.
+_MIN_MESH_HEIGHT_FRACTION = 0.05
+
 
 class SceneGenerationStage(PipelineStage):
     """
@@ -475,15 +482,43 @@ class SceneGenerationStage(PipelineStage):
                     # the terrain. Sample the mesh's actual lowest vertex (bounds[0][1])
                     # and offset by exactly that, so the true bottom -- not an assumed one
                     # -- lands on terrain_y.
-                    # max(), not min(): fit_to_box(1.0, 1.0) preserved the mesh's own
-                    # aspect ratio, so a single uniform scalar can only match one of the
-                    # two estimated real-world dimensions exactly. Using the smaller one
-                    # (e.g. a person's width) left every taller-than-wide object -- people,
-                    # trees, poles, lampposts -- scaled down to a fraction of their real
-                    # height instead. Using the larger one can let the mesh's other axis
-                    # overflow its detected footprint slightly, which reads far better than
-                    # an undersized object.
-                    mesh_scale = float(max(width, height))
+                    # Scale this instance so the mesh's own HEIGHT matches the height
+                    # its 2D box subtends at its own depth -- per instance, not per
+                    # class and not per scene.
+                    #
+                    # Height specifically, for the reason object_scale.py's prior table
+                    # documents: an equirectangular box's horizontal extent depends on
+                    # the object's yaw relative to the camera (a tree seen through a gap
+                    # vs. broadside differ by a lot) while its vertical extent does not.
+                    # Width is the unreliable axis, so it must not be what sets scale.
+                    #
+                    # The previous max(width, height) got this wrong twice over, because
+                    # it treated the scalar as if it were the mesh's height directly.
+                    # fit_to_box(1.0, 1.0) normalises the LARGER of X/Y to 1.0 and leaves
+                    # the other below it, so a uniform scale s renders a height of
+                    # s * extent_y, not s. On this capture 16 of 28 category meshes are
+                    # wider than tall (extent_y median 0.665, min 0.004), and 12 of 59
+                    # mesh-rendered objects came out more than 10% from their detected
+                    # height -- a tree box 2.70 x 1.92 m rendering 2.48 m tall (1.29x),
+                    # another 1.59x, and a flower at 0.08x. Dividing by the mesh's own
+                    # extent_y is exact in every case instead of right only when the mesh
+                    # is tall AND the detection is taller than wide.
+                    mesh_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                    mesh_extent_y = float(mesh_extents[1])
+                    # A mesh that is essentially flat in Y has no meaningful height to
+                    # match, and dividing by it explodes the other two axes (extent_y
+                    # 0.004 would scale a 0.07 m flower into a 17 m wide sheet). That is
+                    # a broken reconstruction, not a scale question -- fall back to the
+                    # old footprint-driven behaviour rather than trusting the ratio.
+                    if mesh_extent_y >= _MIN_MESH_HEIGHT_FRACTION * float(max(mesh_extents)):
+                        mesh_scale = float(height) / mesh_extent_y
+                    else:
+                        self.log_warning(
+                            f"Category mesh {mesh_key} is degenerate in Y "
+                            f"(extent {mesh_extent_y:.4f} of {float(max(mesh_extents)):.4f}); "
+                            f"scaling object {idx} by footprint instead of height"
+                        )
+                        mesh_scale = float(max(width, height))
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
                     self.log_info(f"Creating mesh for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m)")

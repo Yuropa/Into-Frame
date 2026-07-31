@@ -85,11 +85,33 @@ OBJECT_HEIGHT_PRIORS: dict[str, tuple[float, float]] = {
     "bus_stop":     (2.50, 0.40),
     "fence":        (1.50, 0.30),
 
-    # Loose: included because a landscape capture often has nothing else, but
-    # weighted low enough that a handful of tight anchors will always outvote them.
-    "bush":         (1.20, 0.25),
-    "flower":       (0.35, 0.20),
-    "tree":         (8.00, 0.15),
+    # Vegetation (bush/flower/tree) is deliberately ABSENT. It was here on the
+    # reasoning that a landscape capture often has nothing else, weighted low enough
+    # that a handful of tight anchors would outvote it. Both halves of that failed:
+    #
+    #   - "Outvoted by tight anchors" assumes tight anchors exist. In a wilderness
+    #     capture they never do, so the loose classes are not outvoted, they are the
+    #     entire fit. On the Rainier capture all 64 anchors were flower and tree.
+    #
+    #   - The prior has to describe what the DETECTOR boxes, not what the word means.
+    #     `flower: 0.35 m` is a whole flowering plant; GroundingDINO boxes a single
+    #     paintbrush bloom, measured at 0.04-0.17 m. `tree: 8.0 m` is a whole tree;
+    #     after ObjectInstanceRefinementStage's watershed pass a `tree` is frequently
+    #     one fragment of a canopy. Neither ratio is a compression measurement -- it
+    #     is a part-vs-whole mismatch, and it is one-sided, so it always reads as the
+    #     scene being shrunk.
+    #
+    # Together those produced a fitted 4.91x applied to the whole scene, from anchors
+    # sitting at 1.7-2.5 m -- inside the hero-photo overlap, below _compress_far_range's
+    # 60 m knee, in the region where the depth transform is exactly identity and there
+    # is by construction no compression to measure. A 10.4 m tree 11.9 m from the
+    # viewer was rendered 51 m tall.
+    #
+    # Absence is the honest state here, and the module already handles it correctly:
+    # fewer than min_anchors usable anchors returns None, which means "leave every
+    # object exactly the size its own box and depth imply". Re-adding a vegetation
+    # class needs a prior calibrated against what the detector actually emits at that
+    # point in the pipeline, not against the dictionary definition of the word.
 }
 
 
