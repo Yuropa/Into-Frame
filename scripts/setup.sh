@@ -452,6 +452,77 @@ run_step "Creating Conda Environment '$CONDA_NAME'" \
 ##    Pattern Synthesis Lib
 ## ========================
 
+# Smoke-test a freshly built synthesize_cli by actually RUNNING it.
+#
+# A successful cmake build is not evidence that the binary works. It can link fine
+# and still fail at exec time -- a runtime library that moved after the build, a
+# stale CMakeCache in a pre-existing build/ dir that turned `cmake --build` into a
+# no-op over an older broken artifact, an arch mismatch. That is not hypothetical:
+# on the Mount Rainier capture every one of DistributionSynthesisStage's 93
+# synthesize_cli calls failed instantly (the whole stage finished in 3.3s, exactly
+# the cost of building the jobs and running none of them), the scene shipped with
+# zero painted instances instead of ~4,800, and setup.sh had reported success.
+#
+# The check feeds a tiny fixed pattern through the real stdin protocol (see
+# src/synthesize_cli.cpp): a 4x4 unit-spaced domain grid, 3 exemplars, and one
+# square used as both input and output boundary.
+#
+# Severity is deliberately split. "Won't execute, or emits no JSON at all" is the
+# failure this exists to catch and is always a broken install, so it exits. "Ran and
+# returned an empty point set" is only weak evidence -- synthesize_pattern has four
+# legitimate bail-outs and a toy input can trip one after an algorithm change -- so
+# it warns rather than blocking a setup that is probably fine.
+verify_synthesize_cli() {
+    local cli="$1"
+
+    if [ ! -f "$cli" ]; then
+        error "synthesize_cli was not produced at $cli despite a successful build"
+        exit 1
+    fi
+    if [ ! -x "$cli" ]; then
+        error "synthesize_cli exists at $cli but is not executable"
+        exit 1
+    fi
+
+    local stdin_data
+    stdin_data="$(
+        echo "8 4 20 0"
+        echo 16
+        for y in 0 1 2 3; do for x in 0 1 2 3; do echo "$x.0 $y.0"; done; done
+        echo 3;  echo "1.0 1.0"; echo "3.0 1.0"; echo "2.0 3.0"
+        for _ in 1 2; do
+            echo 4; echo "0.5 0.5"; echo "3.5 0.5"; echo "3.5 3.5"; echo "0.5 3.5"
+        done
+    )"
+
+    local out status
+    # Errors are handled explicitly below, so don't let `set -e` abort here first.
+    out="$(printf '%s\n' "$stdin_data" | "$cli" 2>/dev/null)" && status=0 || status=$?
+
+    if [ "$status" -ne 0 ]; then
+        error "synthesize_cli built but exited $status when run — the pattern-synthesis"
+        error "CLIs are installed but unusable, and Distribution Synthesis will paint"
+        error "nothing. Try: $cli < /dev/null   to see the linker/loader error."
+        exit 1
+    fi
+
+    if ! printf '%s' "$out" | grep -q '"output_points"'; then
+        error "synthesize_cli ran but produced no JSON on stdout. Its contract is that"
+        error "stdout is a single JSON object; Distribution Synthesis discards anything"
+        error "else and paints nothing. Got: $(printf '%s' "$out" | head -c 200)"
+        exit 1
+    fi
+
+    if printf '%s' "$out" | grep -q '"output_points":\[\]'; then
+        warn "synthesize_cli runs, but returned no points for the smoke-test pattern."
+        warn "Not fatal (the optimizer has legitimate bail-outs), but if Distribution"
+        warn "Synthesis paints 0 instances, replay a real tile to see which one:"
+        warn "  python scripts/debug-synthesize-tile.py <ctx> --run $cli"
+    else
+        success "synthesize_cli verified: synthesized points from the smoke-test pattern"
+    fi
+}
+
 build_pattern_synthesis() {
     # Install CGAL (required for Delaunay/Voronoi in lloyd_relaxation)
     if command -v apt &>/dev/null; then
@@ -486,6 +557,9 @@ build_pattern_synthesis() {
         || { error "cmake configure failed for pattern-synthesis CLIs"; exit 1; }
     cmake --build "$PS_BUILD_DIR" --target pcf_cli synthesize_cli -j \
         || { error "cmake build failed for pattern-synthesis CLIs"; exit 1; }
+
+    # Building it is not the same as it working -- see verify_synthesize_cli.
+    verify_synthesize_cli "$PS_BUILD_DIR/synthesize_cli"
 }
 
 run_step "Building Pattern Synthesis Library" \

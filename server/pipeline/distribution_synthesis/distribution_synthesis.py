@@ -621,6 +621,9 @@ class DistributionSynthesisStage(PipelineStage):
         # (x, z, width, height, bucket) per painted instance.
         group_placed: list[list[tuple[float, float, float, float, int]]] = [[] for _ in groups]
 
+        # Set when every tile failed -- see the _RAN_MARKER decision at the end of run().
+        total_failure = False
+
         if jobs:
             max_workers = cfg.max_workers or os.cpu_count() or 1
             self.log_info(
@@ -676,10 +679,11 @@ class DistributionSynthesisStage(PipelineStage):
                 # That is exactly how the Rainier capture shipped a scene with no
                 # painted population at all.
                 by_reason = Counter(failures)
-                level = self.log_error if len(failures) == len(jobs) else self.log_warning
+                total_failure = len(failures) == len(jobs)
+                level = self.log_error if total_failure else self.log_warning
                 level(
                     f"{len(failures)}/{len(jobs)} synthesize_cli tile(s) produced no points"
-                    + (" — NOTHING was painted" if len(failures) == len(jobs) else "")
+                    + (" — NOTHING was painted" if total_failure else "")
                 )
                 for reason, count in by_reason.most_common(4):
                     level(f"    {count}x  {reason}")
@@ -771,7 +775,32 @@ class DistributionSynthesisStage(PipelineStage):
                                          region_type, obj_type)
 
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
-        context.add_object(_RAN_MARKER, True)
+        # Deliberately NOT marked complete when every tile failed. The marker is a
+        # cache key -- has_expected_output() returns True on it, so writing it here
+        # tells every later run "this stage is done" and skips it. That is right for
+        # the no-op paths above (no distribution, no region map, no binary, no
+        # non-singleton groups): they are stable properties of the input, rerunning
+        # cannot change them, and leaving the marker off would rerun this stage and
+        # its whole downstream cascade on every single invocation for nothing.
+        #
+        # A total tile failure is the opposite: it is an environment fault (on the
+        # Rainier capture, every one of 93 synthesize_cli calls failed instantly while
+        # the same 93 tiles synthesize 4,844 points fine against a working binary), and
+        # it is FIXABLE. Caching it as success is what let that capture ship a scene
+        # with no painted population and then keep shipping it, because the rerun that
+        # would have picked up a repaired binary skipped the stage instead. Retrying a
+        # genuinely broken stage on every run is the cheap failure here; permanently
+        # remembering a failure as a success is not.
+        if total_failure:
+            self.log_error(
+                "Not marking Distribution Synthesis complete: every synthesize_cli tile "
+                "failed, so this stage will retry on the next run rather than cache the "
+                "failure. Check that pattern-synthesis/build/synthesize_cli exists and "
+                "runs (scripts/setup.sh builds it; scripts/debug-synthesize-tile.py "
+                "--run replays a captured tile through it)."
+            )
+        else:
+            context.add_object(_RAN_MARKER, True)
         self.log_info(f"Object count {object_count} -> {next_idx} after painting")
         return context
 
