@@ -29,6 +29,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         object_scale_max_correction: float = 8.0,
         object_scale_min_anchors: int = 6,
         object_scale_num_bins: int = 6,
+        metric_height_m: dict[str, float] | None = None,
+        metric_height_jitter: float = 0.25,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Sent to the client as the target world-space depth of the terrain
@@ -69,6 +71,15 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Depth bins used to resolve the correction's depth dependence. Adapts down
         # automatically when there are too few anchors to fill them.
         self.object_scale_num_bins = object_scale_num_bins
+        # {class: real-world height in metres}. For classes where the detector boxes a
+        # PART of what has to be placed, so the measurement is accurate but describes
+        # the wrong object -- see the metric-height block in run(). Empty by default:
+        # measuring is the right answer everywhere it works, and each entry here is an
+        # explicit claim that it does not for that class.
+        self.metric_height_m = dict(metric_height_m or {})
+        # Fractional spread around the authored height, so an authored class does not
+        # render as a field of identical clones. Mirrors grass's tuft_height_jitter.
+        self.metric_height_jitter = float(metric_height_jitter)
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -356,6 +367,40 @@ class SceneGenerationStage(PipelineStage):
                     self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
                     self.advance_progress(generation_task)
                     continue
+
+                # Author this class's height in metres instead of measuring it -- the
+                # same call GrassCoverStage._tuft_height already makes for tufts, for
+                # the same reason, and applied here for the classes where the detector
+                # boxes a PART of the thing that has to be placed.
+                #
+                # `flower` is the case this exists for. GroundingDINO boxes the bloom,
+                # not the plant: on the Rainier meadow that is 0.04-0.17 m (median
+                # 0.10), and the measurement is not wrong -- a paintbrush bloom really
+                # is that big, and at 1.7-2.5 m it sits in the depth map's identity
+                # region where there is no compression to blame. But the thing that
+                # belongs in the scene is a plant standing in a meadow, and 33 of 33
+                # flowers came out shorter than the SHORTEST grass tuft around them
+                # (0.25 m, median 0.35 m), so every one of them was placed correctly
+                # and buried completely.
+                #
+                # Deliberately after the size cull, like the scale correction below:
+                # the cull judges whether the raw measurement describes a discrete
+                # object at all, and that judgement belongs on what was measured.
+                #
+                # Width scales with height so the crop keeps its own aspect ratio --
+                # the billboard and the category mesh are both pictures of the bloom,
+                # and stretching one axis alone would shear them.
+                metric_height = self.config.metric_height_m.get(cls) if cls else None
+                if metric_height and height > 1e-6:
+                    jitter = 1.0 + float(rng.uniform(
+                        -self.config.metric_height_jitter, self.config.metric_height_jitter
+                    ))
+                    target = float(metric_height) * jitter
+                    width *= target / height
+                    height = target
+                    # Authored in metres, so it must never also be multiplied by a
+                    # fitted depth->size correction. Same exemption grass already has.
+                    metadata = {**(metadata or {}), "metric_size": True}
 
                 # Undo the scene's measured size compression. Deliberately AFTER the
                 # cull above, not before it: the cull's job is to reject things that

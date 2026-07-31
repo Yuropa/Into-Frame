@@ -1006,6 +1006,28 @@ stages:
     object_scale_num_bins: 6         # depth bins used to resolve the correction's depth
                                       # dependence; adapts down automatically when anchors are
                                       # too few, collapsing to a single global factor
+
+    # Real-world height in metres for classes where the detector boxes a PART of the
+    # thing that must be placed, so the measurement is right but describes the wrong
+    # object. Same call GrassCoverStage makes for tuft_height_m, and the same honesty
+    # about it: a named constant is a guess, labelled as one. Measuring stays the
+    # default everywhere not listed here.
+    #
+    # flower: GroundingDINO boxes the bloom, not the plant. Measured on the Rainier
+    # meadow that is 0.04-0.17 m (median 0.10) -- correct for a paintbrush bloom, and
+    # taken at 1.7-2.5 m where panorama depth is in its identity region, so there is
+    # no compression to blame for it. But GrassCoverStage scatters 0.25-0.45 m tufts
+    # (median 0.35) through the same ground, and 33 of 33 flowers were shorter than
+    # the SHORTEST tuft near them: placed exactly where they belonged and invisible.
+    # 0.50 m clears the tuft median with margin while staying a plausible subalpine
+    # wildflower; raise it if flowers still read as sunk into the grass, and keep it
+    # above grass_cover's tuft_height_m whatever else changes.
+    metric_height_m:
+      flower: 0.50
+    metric_height_jitter: 0.25       # +/- fraction around the authored height, so an
+                                      # authored class isn't a field of identical clones
+                                      # (mirrors grass_cover's tuft_height_jitter)
+
     mesh_lod_distance_overrides:
       # Ground cover needs its own, far shorter cutoff. The global value is tuned for
       # subjects you look AT -- a tree at 25 m earns its mesh. Grass does not: Grass
