@@ -10,10 +10,19 @@ using UnityEngine;
 public class WindSway : MonoBehaviour
 {
     private static readonly string[] BoneNames = { "SwayBone_0", "SwayBone_1", "SwayBone_2" };
-    // Cantilever falloff: rotating the base bone bends everything above it in the
-    // chain, so amplitude has to shrink toward the root or the whole mesh would
-    // swing like a rigid pendulum instead of bending mostly near the tip.
-    private static readonly float[] AmplitudeFalloff = { 0.2f, 0.6f, 1.0f };
+    // Cantilever falloff, per joint, base to tip. Rotations compound down the chain,
+    // so the tip's total deflection is the sum of all three.
+    //
+    // SwayBone_0 MUST stay at 0. It is the root of the chain, pinned at the mesh's
+    // own y_min (see CategoryMeshRiggingStage) -- i.e. at the ground -- and its
+    // transform applies to every vertex in the mesh, including the ones sitting on
+    // the terrain. Rotating it does not bend anything; it swings the whole object
+    // rigidly about its base point. At 0.2 that was ~3 degrees of whole-mesh roll at
+    // a typical amplitude, lifting the outer base edge of a 0.35 m tuft ~1 cm in and
+    // out of the ground every cycle, which is what made grass read as an oscillating
+    // slab rather than as blades moving over a planted base. Bending is what the
+    // joints ABOVE the root are for.
+    private static readonly float[] AmplitudeFalloff = { 0.0f, 0.5f, 1.0f };
 
     private Transform[] _bones;
     private SwayData _data;

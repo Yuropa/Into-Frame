@@ -108,7 +108,18 @@ class CategoryMeshRiggingStage(PipelineStage):
                 self.advance_progress(task)
                 continue
 
-            bone_heights = [y_min, y_min + (y_max - y_min) * 0.5, y_max]
+            # Evenly up the lower two thirds, NOT [base, middle, tip].
+            #
+            # A joint bends what is ABOVE it, so a joint placed at y_max has nothing
+            # left to bend and contributes nothing -- [y_min, mid, y_max] was really a
+            # one-joint rig with a dead bone on the end, hinging the whole upper half
+            # about a single point instead of curving. Placing the last joint at 2/3
+            # gives every joint real geometry above it: the bottom third stays rigid on
+            # the ground, the middle third takes the first bend, and the top third takes
+            # that bend plus its own. WindSway's AmplitudeFalloff pins joint 0 (the root
+            # at y_min) at zero so the base stays planted -- see the comment there.
+            span = y_max - y_min
+            bone_heights = [y_min, y_min + span / 3.0, y_min + span * 2.0 / 3.0]
             mesh.skin_bone_heights = bone_heights
             mesh.skin_bone_names = _BONE_NAMES
             context.add_mesh(mesh_key, mesh)

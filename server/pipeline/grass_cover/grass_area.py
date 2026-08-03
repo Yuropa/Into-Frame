@@ -75,6 +75,7 @@ def grass_area_mask(
     nadir_fill_min_fraction: float = 0.5,
     close_radius_cells: int = 9,
     min_component_cells: int = 64,
+    stats: "dict | None" = None,
 ) -> np.ndarray:
     """Boolean (grid_resolution, grid_resolution) mask of cells that should carry grass.
 
@@ -104,6 +105,16 @@ def grass_area_mask(
                           (see GrassCoverStage.max_radius_m), so the population has
                           to be bounded somewhere; beyond this the terrain texture
                           carries the ground on its own.
+    stats              -- optional dict, filled with a FRONT/BEHIND breakdown of the
+                          funnel below (see _fill_hemisphere_stats). Nothing here is
+                          azimuth-dependent -- every projection this path uses is
+                          arctan2(X, Z), correct in all four quadrants, and both
+                          panorama samplers wrap horizontally -- so grass thinning out
+                          behind the camera can only come from the two INPUTS being
+                          weaker there: the depth samples (sampled_mask) or the
+                          semantic typing (region_type_map). Only ~1/6 of the panorama
+                          is the real photograph; the rest is generated, so that is
+                          entirely possible and this is what tells the two apart.
 
     HeightMapStage's nadir exclusion still leaves the innermost cells unsampled
     even under HEIGHT_MAP_REAL_SAMPLE_MASK (46% coverage inside 2 m on the
@@ -154,7 +165,53 @@ def grass_area_mask(
             sizes = np.bincount(labels.ravel())
             mask &= ~np.isin(labels, np.flatnonzero(sizes < min_component_cells))
 
+    if stats is not None:
+        _fill_hemisphere_stats(
+            stats, resolution, grid_size_meters, radius, max_radius_m,
+            sampled, cell_type, mask,
+        )
+
     return mask
+
+
+def _fill_hemisphere_stats(
+    stats: dict,
+    resolution: int,
+    grid_size_meters: float,
+    radius: np.ndarray,
+    max_radius_m: float,
+    sampled: np.ndarray,
+    cell_type: np.ndarray,
+    mask: np.ndarray,
+) -> None:
+    """Break the grass funnel down by hemisphere, in front of vs behind the camera.
+
+    "In front" is +Z, which is panorama theta 0 -- the direction the original
+    photograph was taken in, and the sixth or so of the equirect that is real rather
+    than generated. Each stage of the funnel is reported for both halves so a
+    shortfall can be attributed: fewer `sampled` cells behind means the panorama
+    DEPTH is thin back there, fewer `grass_typed` means the SEGMENTATION doesn't call
+    it vegetation, and an even split at both means the shortfall is somewhere else
+    entirely.
+    """
+    half = grid_size_meters / 2.0
+    axis = (np.arange(resolution, dtype=np.float32) + 0.5) / resolution * grid_size_meters - half
+    z_grid, _ = np.meshgrid(axis, axis, indexing="ij")
+
+    in_range = radius <= max_radius_m
+    grass_types = [int(rt) for rt in _GRASS_SOURCE_TYPES]
+    cell_area = (grid_size_meters / resolution) ** 2
+
+    for name, hemisphere in (("front", z_grid >= 0), ("behind", z_grid < 0)):
+        here = in_range & hemisphere
+        stats[name] = {
+            "in_range_m2": round(float(here.sum()) * cell_area, 1),
+            "sampled_m2": round(float((here & sampled).sum()) * cell_area, 1),
+            "grass_typed_m2": round(
+                float((here & sampled & np.isin(cell_type, grass_types)).sum()) * cell_area, 1
+            ),
+            "final_m2": round(float((here & mask).sum()) * cell_area, 1),
+        }
 
 
 def _fill_nadir_disc(

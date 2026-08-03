@@ -1013,8 +1013,27 @@ stages:
     bucket_count: 3           # distinct grass variants. Small on purpose -- the
                                # variety that reads comes from per-instance yaw and
                                # scale, not from many different tufts.
-    build_near_meshes: true   # false = crossed cards at every distance (skips the
-                               # per-bucket 3D generation; much faster to iterate on)
+    build_near_meshes: false  # false = crossed cards at every distance (skips the
+                               # per-bucket 3D generation; much faster to iterate on).
+                               #
+                               # Off because the reconstruction has no object to
+                               # reconstruct. What SAM3D is handed is _exemplar_patches'
+                               # output: a square crop of MEADOW, centred on the peak of a
+                               # distance transform over the vegetation region and sized to
+                               # that blob's radius -- i.e. it is chosen for how solidly
+                               # grassy the area is, and it is a picture of ground cover in
+                               # bulk, not of one tuft. A single-object image-to-3D model
+                               # given a photo with no single subject in it returns a lumpy
+                               # sheet of that photo, which is the slab; Poisson repair then
+                               # sealed the sheet into a pillow (see repair_near_meshes).
+                               # Decimating to 4000 faces removes what blade detail survived.
+                               #
+                               # The crossed cards are real 3D geometry -- three intersecting
+                               # planes at fixed orientation, with an alpha-cut blade
+                               # silhouette (see cards.apply_tuft_silhouette) -- and they hold
+                               # up at arm's length far better than a sealed blob does. Turn
+                               # this back on only alongside an exemplar that is actually a
+                               # single tuft.
     max_near_mesh_faces: 4000 # face budget for the reconstructed tuft. SAM3D returns it
                                # undecimated -- measured at 316k/301k/208k faces and ~8 MB
                                # of GLB each, which is hero-object geometry for something
@@ -1023,6 +1042,16 @@ stages:
                                # box diagonal) and takes the asset 8.22 MB -> 100 KB.
                                # Measured error at other budgets: 8000 -> 0.12%,
                                # 2000 -> 0.29%, 1000 -> 0.70%. 0 disables decimation.
+    repair_near_meshes: false # run Mesh.repair() (Poisson reconstruction + MeshFix) on the
+                               # reconstructed tuft. Off, unlike everywhere else that call is
+                               # used: it produces a single watertight shell, which is right
+                               # for a hero object and is precisely what turns a cluster of
+                               # thin blades into a sealed green pillow -- the near tufts
+                               # reading as slabs while the crossed cards behind them read as
+                               # grass. It also discards the texture (returns baked per-vertex
+                               # colour). Nothing downstream needs manifold geometry here.
+                               # Turn back on only if SAM3D's raw surface renders worse than
+                               # the blob did.
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage

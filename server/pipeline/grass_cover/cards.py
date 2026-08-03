@@ -35,9 +35,11 @@ def apply_tuft_silhouette(
     patch: PILImage.Image,
     rng: np.random.Generator,
     *,
-    blade_count: int = 26,
-    base_fraction: float = 0.18,
+    blade_count: int = 28,
+    base_fraction: float = 0.10,
     feather_px: float = 1.5,
+    blade_width: float = 0.016,
+    spread: float = 0.40,
 ) -> PILImage.Image:
     """Carve a grass-tuft silhouette into `patch`'s alpha channel.
 
@@ -50,32 +52,67 @@ def apply_tuft_silhouette(
 
     Nothing upstream produces a real per-blade matte, and nothing reasonably
     could -- the blades are a few pixels wide at this distance. So the silhouette
-    is synthesized: a run of blades of randomized height and width, densest at
-    the base, tapering to isolated tips. The photographic detail still comes
-    entirely from the patch's own pixels; this only decides where the card stops.
+    is synthesized: individual blades, each rasterized as a leaning spike that
+    tapers from `blade_width` at its root to a point at its tip, with real
+    transparent gaps between them. The photographic detail still comes entirely
+    from the patch's own pixels; this only decides where the card stops.
 
-    base_fraction of the height stays solid so the tuft has a body to sit on the
-    ground with, rather than dissolving into disconnected blade tips.
+    Rasterizing blades individually is the whole point, and is what an earlier
+    per-COLUMN version could not do. That one gave every column its own tip
+    height and unioned in a full-width solid band `base_fraction` tall, so each
+    column was opaque from the bottom row up to its own tip -- a single connected
+    mass under a jagged skyline, never a gap. Measured on an all-opaque input it
+    came out 67% opaque overall, 97% across the bottom half, with zero fully
+    transparent columns out of 384. Textured with meadow pixels and crossed three
+    ways that is exactly the slab of intersecting green boards this module's
+    docstring says it exists to avoid. Alpha between the blades is what makes a
+    card read as a tuft, so the silhouette has to be built from blades.
+
+    base_fraction of the height keeps a small rounded clump where the blades
+    root, so the tuft has a body to sit on the ground with rather than dissolving
+    into disconnected spikes -- but it spans only the blades' own footprint and
+    tapers upward out of it, rather than the full card width.
     """
     rgba = np.array(patch.convert("RGBA"))
     height, width = rgba.shape[:2]
 
-    # Per-column blade profile: a blade's tip height, linearly interpolated
-    # between blade_count control points so neighbouring columns belong to the
-    # same blade instead of each being independent noise.
-    controls = rng.uniform(0.35, 1.0, size=max(2, blade_count))
-    profile = np.interp(
-        np.linspace(0.0, len(controls) - 1, width),
-        np.arange(len(controls)),
-        controls,
-    )
-    # Fine jitter so blade edges aren't perfectly smooth curves.
-    profile = np.clip(profile + rng.normal(0.0, 0.02, size=width), 0.05, 1.0)
+    # Normalized card coordinates: `cols` across, `up` from the base row (row
+    # height-1) to the top. Both broadcast against each other as (H, 1) x (1, W).
+    cols = (np.arange(width, dtype=np.float32) / max(1, width - 1))[None, :]
+    up = ((height - 1 - np.arange(height, dtype=np.float32)) / max(1, height - 1))[:, None]
 
-    # Row 0 is the image top; a blade occupies the bottom `profile` fraction.
-    rows = np.arange(height)[:, None] / max(1, height - 1)
-    keep = rows >= (1.0 - profile[None, :])
-    keep |= rows >= (1.0 - base_fraction)
+    blades = max(1, blade_count)
+    # Roots cluster toward the middle of the card so the blades share a base and
+    # fan outward, instead of standing in an evenly-spaced picket line.
+    root_x = np.clip(0.5 + rng.normal(0.0, spread * 0.25, blades), 0.04, 0.96)
+    tip_h = rng.uniform(0.35, 1.0, blades)
+    # Taller blades lean further -- a long blade bends under its own weight.
+    # Clamped so every tip still lands on the card: a blade that leans off the
+    # edge gets cut off flat by the card boundary, which reads as a hard vertical
+    # slice through the silhouette rather than as a blade.
+    lean = np.clip(
+        rng.normal(0.0, spread, blades) * tip_h, 0.02 - root_x, 0.98 - root_x,
+    )
+    root_w = blade_width * rng.uniform(0.6, 1.4, blades)
+
+    keep = np.zeros((height, width), dtype=bool)
+    for i in range(blades):
+        # Position along this blade, 0 at the root and 1 at the tip.
+        t = np.clip(up / max(float(tip_h[i]), 1e-6), 0.0, 1.0)
+        # Exponent > 1 keeps the blade near-vertical where it leaves the ground
+        # and does most of the bending toward the tip.
+        centre = root_x[i] + lean[i] * t ** 1.6
+        half_width = root_w[i] * (1.0 - t) ** 0.65
+        keep |= (np.abs(cols - centre) <= half_width) & (up <= float(tip_h[i]))
+
+    if base_fraction > 0:
+        lo = float(root_x.min()) - blade_width
+        hi = float(root_x.max()) + blade_width
+        mid, span = 0.5 * (lo + hi), 0.5 * (hi - lo)
+        # Narrows to nothing at base_fraction, so the clump reads as the tuft's
+        # root rather than as a plinth the blades are standing on.
+        shrink = np.clip(1.0 - up / base_fraction, 0.0, 1.0) ** 0.5
+        keep |= (up <= base_fraction) & (np.abs(cols - mid) <= span * shrink)
 
     silhouette = PILImage.fromarray((keep * 255).astype(np.uint8), "L")
     if feather_px > 0:

@@ -60,6 +60,7 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         generator_type: str = "SAM3D",
         build_near_meshes: bool = True,
         max_near_mesh_faces: int = 4000,
+        repair_near_meshes: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.max_radius_m = float(max_radius_m)
@@ -100,6 +101,28 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # LOD only renders within Scene Generation's grass mesh_lod_distance override,
         # ~3 m) while cutting the asset ~70x. 0 disables decimation entirely.
         self.max_near_mesh_faces = int(max_near_mesh_faces)
+        # Whether to run Mesh.repair() on the reconstructed tuft. Off, unlike every
+        # other consumer of that call, and this is the single biggest thing standing
+        # between the near LOD and something that reads as grass.
+        #
+        # repair() exists to make a hero object watertight: it samples 50k points off
+        # the surface, runs Poisson reconstruction at depth 8, then closes whatever
+        # that leaves with MeshFix. Every one of those steps is a machine for
+        # destroying exactly what a grass tuft IS. Poisson fits a single closed
+        # isosurface, so thin separated blades -- a couple of voxels wide in its 256^3
+        # grid -- get swallowed into one shell; MeshFix then guarantees that shell is
+        # a single watertight solid. The result is a green pillow, which is what makes
+        # near tufts read as slabs while the crossed cards behind them read as grass.
+        # It also discards the texture entirely (repair() returns baked per-vertex
+        # colour only).
+        #
+        # Nothing downstream needs the mesh to be manifold: it is decimated (open3d's
+        # quadric decimation takes triangle soup, and decimate() already carries a
+        # guard for "highly disconnected input like separate blades of grass"), rigged
+        # by CategoryMeshRiggingStage (which only needs a Y extent), and rendered.
+        # SAM3D's raw output does have broken faces, but a hole in a blade at 3 m is
+        # invisible in a way that a sealed blob is not.
+        self.repair_near_meshes = bool(repair_near_meshes)
 
 
 class GrassCoverStage(PipelineStage):
@@ -162,16 +185,32 @@ class GrassCoverStage(PipelineStage):
             return context
         panorama, type_map, pano_u, pano_v, sampled, grid_size_meters = inputs
 
+        area_stats: dict = {}
         mask = grass_area_mask(
             pano_u, pano_v, type_map, sampled,
             max_radius_m=cfg.max_radius_m,
             grid_size_meters=grid_size_meters,
+            stats=area_stats,
         )
         area_m2 = area_square_meters(mask, grid_size_meters)
         self.log_info(
             f"Grass area: {area_m2:.0f} m2 within {cfg.max_radius_m:.0f} m "
             f"({area_m2 / (np.pi * cfg.max_radius_m ** 2):.0%} of the disc)"
         )
+        # Front/behind funnel. Only ~1/6 of the panorama is the original photograph
+        # and the rest is generated, so grass concentrating in front of the camera is
+        # expected to some degree -- but nothing in grass_area_mask is azimuth-
+        # dependent, so if it happens the cause is one of these two inputs being
+        # weaker behind, and this says which. See _fill_hemisphere_stats.
+        for where in ("front", "behind"):
+            s = area_stats.get(where)
+            if s:
+                self.log_info(
+                    f"  {where:>6}: {s['in_range_m2']:.0f} m2 in range -> "
+                    f"{s['sampled_m2']:.0f} m2 depth-sampled -> "
+                    f"{s['grass_typed_m2']:.0f} m2 typed grass -> "
+                    f"{s['final_m2']:.0f} m2 final"
+                )
         if not mask.any():
             self.log_info("No grass area found, skipping")
             self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
@@ -388,19 +427,41 @@ class GrassCoverStage(PipelineStage):
                 super().clean_up()
                 try:
                     mesh = generator.meshify(Image(representatives[bucket]), temp_path, seed=self.seed + bucket)
-                    mesh = mesh.repair()
+                    if cfg.repair_near_meshes:
+                        mesh = mesh.repair()
                     raw_faces = mesh.face_count
-                    # Decimate after repair (which needs the dense surface to fit a clean
-                    # watertight mesh) and before fit_to_box (pure scale, order-independent).
+                    # Decimate after any repair (which needs the dense surface to fit a
+                    # clean watertight mesh) and before fit_to_box (pure scale,
+                    # order-independent).
                     mesh = mesh.decimate(cfg.max_near_mesh_faces)
                     mesh.fit_to_box(1.0, 1.0)
                 except Exception as e:
                     self.log_info(f"  {key}: meshify failed ({e}), falling back to crossed cards at all distances")
                     continue
+
+                # decimate() returns the input UNCHANGED when quadric decimation
+                # collapses the mesh entirely, which its own comment notes is a real
+                # possibility "on a highly disconnected input like separate blades of
+                # grass" -- i.e. exactly what this path now feeds it, since the
+                # Poisson repair that used to hand it one welded shell is off by
+                # default (see repair_near_meshes). Shipping that fallback here would
+                # mean instancing SAM3D's raw ~275k-face output thousands of times,
+                # which is the billion-triangle scene max_near_mesh_faces exists to
+                # prevent. The crossed cards are a far better asset than a budget
+                # blown by that factor.
+                if 0 < cfg.max_near_mesh_faces < mesh.face_count:
+                    self.log_warning(
+                        f"  {key}: decimation could not reach {cfg.max_near_mesh_faces}f "
+                        f"(still {mesh.face_count}f from {raw_faces}f) — dropping the near "
+                        f"LOD and using crossed cards at all distances for this bucket"
+                    )
+                    continue
+
                 context.add_mesh(key, mesh)
                 self.log_info(
                     f"  {key}: {mesh.vertex_count}v {mesh.face_count}f reconstructed "
-                    f"(decimated from {raw_faces}f)"
+                    f"(decimated from {raw_faces}f"
+                    + (", Poisson-repaired" if cfg.repair_near_meshes else "") + ")"
                 )
         finally:
             generator.close()
