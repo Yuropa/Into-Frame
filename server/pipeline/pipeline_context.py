@@ -555,18 +555,34 @@ class PipelineContext():
         # the directory belongs to a previous run and would otherwise be re-loaded
         # and shadow this run's values on the next invocation.
         #
-        # Files only. A stage's subdirectories are its debug/temp output (build/),
-        # which no lookup ever reads -- purging those would change nothing except to
-        # throw away artifacts that are useful precisely when diagnosing a bad run.
+        # Restricted to CONTEXT VALUES -- files a stage wrote through this class, which
+        # are exactly the ones a later load() would resurrect and shadow with. Every
+        # such file is written by ContextValue.write as a `<key>.<ext>` alongside a
+        # `<key>.meta` sidecar, so the presence of that sidecar is what identifies one.
+        #
+        # Stages also write debug artifacts straight into the same directory
+        # (typing_debug.json, asset_debug.json, distributions.json, ...) with no .meta
+        # and no context key. Those are not part of the context, cannot shadow
+        # anything, and are the entire evidence base for diagnosing a bad run -- an
+        # earlier version of this purge matched on "stem is not a live key" and
+        # deleted every one of them, which is how a debug archive came back with no
+        # typing_debug.json in it. Subdirectories (build/) are skipped for the same
+        # reason.
         for stage_name in self._reset_stages:
             stage_path = path / stage_name
             if not stage_path.is_dir():
                 continue
             live = set(self._stage_state.get(stage_name, {}))
-            for entry in stage_path.iterdir():
-                # Both the value file and its .meta sidecar are named for the key.
-                if entry.is_file() and entry.stem not in live:
-                    entry.unlink(missing_ok=True)
+            # Snapshot before deleting anything: the sidecar test below reads the
+            # directory, and iterdir() yields in filesystem order, so deleting
+            # `<key>.meta` first would make `<key>.<ext>` look like a debug artifact
+            # and leave it behind -- still on disk, still loadable, still shadowing.
+            entries = [e for e in stage_path.iterdir() if e.is_file()]
+            has_sidecar = {e.stem for e in entries if e.suffix == ".meta"}
+            for entry in entries:
+                if entry.stem in live or entry.stem not in has_sidecar:
+                    continue
+                entry.unlink(missing_ok=True)
         self._reset_stages.clear()
 
         # Persist the true, as-run stage order alongside the cached data itself.

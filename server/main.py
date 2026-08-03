@@ -347,6 +347,7 @@ def handle_run(args):
                         input_path=Path(args.input),
                         output_dir=Path(args.output),
                         stage_order=stage_order,
+                        log_paths=runner.log_paths(),
                     )
             print(f"Archive: {archive}")
             if config.debug_archive:

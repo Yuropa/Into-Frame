@@ -97,9 +97,18 @@ def create_debug_frame_archive(
     input_path: Path,
     output_dir: Path,
     stage_order: list[str],
+    log_paths: Sequence[Path] = (),
 ) -> Path:
     """Package every processed sample's context directory (including build/ debug files)
-    into a single .debug.frame archive, nested as context/<sample-uuid>/... per sample."""
+    into a single .debug.frame archive, nested as context/<sample-uuid>/... per sample.
+
+    `log_paths` are the run's own pipeline-*.log files, stored under logs/. They live
+    outside the context directory (PipelineRunner._configure_logging writes them to the
+    pipeline temp dir), so without this a debug archive carries every artifact a stage
+    wrote as a FILE and none of what it wrote as a LOG LINE -- which is where the
+    per-object decisions live: which objects failed the terrain snap, which were
+    rejected for overlap, which components were folded back into the base terrain,
+    the front/behind grass funnel, and the per-crop typing outcomes."""
     stem = Path(input_path).stem
     archive_path = output_dir / f"{stem}{DEBUG_EXTENSION}"
 
@@ -121,6 +130,9 @@ def create_debug_frame_archive(
         tar.addfile(info, io.BytesIO(manifest_bytes))
         for item, context_dir in contexts:
             _add_dir(tar, context_dir, arcname=f"context/{item.uuid_string()}", filter_fn=lambda t: t)
+        for log_path in log_paths:
+            if log_path and Path(log_path).is_file():
+                tar.add(str(log_path), arcname=f"logs/{Path(log_path).name}")
 
     return archive_path
 

@@ -259,11 +259,21 @@ class PipelineConfiguration:
         except Exception:
             pass
 
+    def log_paths(self) -> list[Path]:
+        """This run's own log file(s), for create_debug_frame_archive to bundle.
+
+        The log lives in the pipeline temp dir, outside any context directory, so the
+        debug archive cannot find it on its own -- and a great deal of what a stage
+        reports (per-object snap failures, overlap rejections, formation fold-backs,
+        the grass front/behind funnel) exists only as log lines."""
+        return [p for p in getattr(self, "_log_paths", []) if p and Path(p).is_file()]
+
     def _configure_logging(self, log_mode: str) -> logging.Logger:
         from datetime import datetime
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         filename = f"pipeline-{timestamp}.log"
         log_path = (self.temp / filename) if self.temp is not None else Path(filename)
+        self._log_paths = [log_path]
 
         root = logging.getLogger()
         root.setLevel(logging.INFO)
