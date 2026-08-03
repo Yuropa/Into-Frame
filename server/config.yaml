@@ -82,13 +82,47 @@ stages:
     # saturates fast, so useful values live near the top of the range -- 0.9 is a
     # ~0.029 raw-cosine win at ViT-B/32. Do not carry the old sub-0.1 values
     # forward; those predate the temperature and no crop could ever clear them.
+    confidence_threshold: 0.9         # the object-vs-environment gate, applied ONLY to crops
+                                       # where the ENVIRONMENT pool leads -- "is the scenery
+                                       # reading solid enough to commit to". Its counterpart
+                                       # for object-leading crops is
+                                       # object_lead_confidence_threshold below; the two used
+                                       # to be one symmetric threshold.
     object_margin_threshold: 0.9      # required gap between the winning and runner-up
                                        # object label (large crops only) before a specific
                                        # label is trusted; below this -> indeterminate
                                        # (or the scene-prior-corroborated runner-up)
-    min_confident_area_fraction: 0.01 # crop bbox area / panorama area below which the
+    object_lead_confidence_threshold: 0.0
+                                       # the object-vs-environment gate, applied ONLY to
+                                       # crops where the OBJECT pool leads. The old single
+                                       # symmetric threshold rejected near-ties in both
+                                       # directions, and object-vs-environment is a near-tie
+                                       # for vegetation BY CONSTRUCTION -- the two pools are
+                                       # scored against prompts describing the same pixels
+                                       # ("colorful wildflowers in bloom" vs "a wildflower
+                                       # meadow"; "a cluster of trees" vs "a grassy lawn or
+                                       # meadow"). Measured on the Rainier capture: 68 of 68
+                                       # typed trees came back indeterminate from the crop,
+                                       # all 68 then failed Object Category Clustering's
+                                       # corroboration, and the scene rendered zero trees.
+                                       # 0 = any object lead falls through to the margin gate
+                                       # below, which asks the question that has an answer
+                                       # (WHICH object). Raise toward confidence_threshold to
+                                       # restore the old symmetric strictness.
+    min_confident_area_fraction: 0.001 # crop bbox area / panorama area below which the
                                        # margin gate above is skipped -- small crops just
-                                       # take CLIP's best-effort guess
+                                       # take CLIP's best-effort guess.
+                                       #
+                                       # Lowered 0.01 -> 0.001 (~290x290 px -> ~91x91 px on a
+                                       # 4096x2048 panorama) because the two changes are a
+                                       # pair: with the gate above opened, the margin gate is
+                                       # what remains, and at 0.01 it applied to 5 of 359
+                                       # crops on the Rainier capture (1.4%) -- so on its own
+                                       # the change above would have removed object gating
+                                       # altogether. At 0.001 it applies to 85 of 359 (24%),
+                                       # including most of the trees this is meant to admit.
+                                       # Crop area fractions on that capture: median 0.00049,
+                                       # p90 0.00181, max 0.02217.
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
