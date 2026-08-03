@@ -6,7 +6,13 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
-from pipeline.scene_generation.projection import mesh_y_at, terrain_local_xz, unproject_bbox, unproject_bbox_equirect
+from pipeline.scene_generation.projection import (
+    height_map_y_at,
+    mesh_y_at,
+    terrain_local_xz,
+    unproject_bbox,
+    unproject_bbox_equirect,
+)
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
 from scene.scene import Scene
 from scene.object import Object3D
@@ -123,6 +129,10 @@ class SceneGenerationStage(PipelineStage):
     Optional:
       ContextKey.TERRAIN_MESH        → Mesh        (placed at origin if present)
       ContextKey.WATER_MESH          → Mesh        (placed at origin if present)
+      ContextKey.HEIGHT_MAP          → Depth       (dense grid the terrain mesh was
+                                        built from; sampled as the ground-height
+                                        fallback when the mesh raycast misses)
+      ContextKey.HEIGHT_MAP_PARAMS   → dict        (that grid's extent, for the above)
       ContextKey.TERRAIN_FORMATIONS  → list[dict]  (each references a dynamic
                                         "terrain_formation_{id}" Mesh key, already
                                         in absolute world space -- placed at origin)
@@ -172,16 +182,62 @@ class SceneGenerationStage(PipelineStage):
         # TerrainMeshGenerator's formation_depression_m) -- snapping to terrain_mesh
         # alone therefore buries anything standing on one, by the depression depth plus
         # the formation's own height. Highest surface at the query point wins.
-        ground_meshes = [terrain_mesh]
+        #
+        # The water surface is in here for the same reason. The base terrain is NOT
+        # holed at water -- TerrainMeshGenerator carves its water vertices
+        # water_depression_m (0.5 m) BELOW the water surface so an animated water plane
+        # can never expose the lakebed, and emits WATER_MESH over those same faces at
+        # the un-depressed elevation. So the raycast does hit something at every water
+        # cell; it just hits the lakebed, and everything standing on a shoreline or in
+        # shallow water came out exactly that depression depth underground. Water only
+        # ever wins the max() where that carve happened, since WATER_MESH has no faces
+        # anywhere else.
+        ground_meshes = [terrain_mesh, context.input_mesh(ContextKey.WATER_MESH)]
         for formation in context.input_object(ContextKey.TERRAIN_FORMATIONS) or []:
             ground_meshes.append(context.input_mesh(formation["mesh_key"]))
         ground_meshes = [m for m in ground_meshes if m is not None]
 
+        # Dense grid fallback for the raycast (see height_map_y_at). Same frame as the
+        # ground meshes' own vertices, so it is queried with the same terrain-local XZ.
+        height_map = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_grid_m = float(
+            (context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}).get("grid_size_meters", 0.0)
+        )
+        if height_map is None or height_map_grid_m <= 0.0:
+            height_map = None
+
+        # The camera's own world XZ, which terrain_local_xz has to remove before undoing
+        # the yaw -- the terrain grids are all built with the camera at their origin while
+        # object positions carry the full extrinsics translation.
+        camera_xz = (
+            (float(extrinsics.translation[0]), float(extrinsics.translation[2]))
+            if extrinsics is not None else (0.0, 0.0)
+        )
+
+        # How each placed object got its ground height. A missed raycast used to fall
+        # silently through to the object's raw unprojected Y, which is the one value
+        # guaranteed NOT to agree with the reconstructed terrain -- so a wholesale snap
+        # failure looked identical to a scene that simply had no terrain, and read in
+        # the client as objects floating above or buried under the ground.
+        snap_counts = {"mesh": 0, "height_map": 0, "unsnapped": 0}
+        unsnapped_examples: list[str] = []
+
         def ground_y_at(world_x: float, world_z: float, yaw_degrees: float) -> float | None:
-            local_x, local_z = terrain_local_xz(world_x, world_z, yaw_degrees)
+            local_x, local_z = terrain_local_xz(
+                world_x, world_z, yaw_degrees, camera_x=camera_xz[0], camera_z=camera_xz[1]
+            )
             hits = [mesh_y_at(local_x, local_z, m) for m in ground_meshes]
             hits = [y for y in hits if y is not None]
-            return max(hits) if hits else None
+            if hits:
+                snap_counts["mesh"] += 1
+                return max(hits)
+            if height_map is not None:
+                sampled = height_map_y_at(local_x, local_z, height_map, height_map_grid_m)
+                if sampled is not None:
+                    snap_counts["height_map"] += 1
+                    return sampled
+            snap_counts["unsnapped"] += 1
+            return None
 
         scene = Scene()
         scene.extrinsics = extrinsics
@@ -201,6 +257,16 @@ class SceneGenerationStage(PipelineStage):
         if extrinsics is not None:
             cam_forward = extrinsics.rotation @ np.array([0.0, 0.0, 1.0])
             scene.skybox_rotation = float(np.degrees(np.arctan2(cam_forward[0], cam_forward[2])))
+
+        # Both of these are load-bearing for the terrain snap below (see
+        # terrain_local_xz) and neither is otherwise visible in a run's logs, so a
+        # scene whose objects don't sit on the ground can't currently be told apart
+        # from one where the camera pose was never the problem. One line, once.
+        self.log_info(
+            f"Camera pose: yaw {scene.skybox_rotation:.2f}°, "
+            f"translation ({camera_xz[0]:.3f}, {scene.camera_height:.3f}, {camera_xz[1]:.3f}) m"
+            + ("" if height_map is not None else " — no height map available as a snap fallback")
+        )
 
         if depth is not None:
             valid = depth.depth[np.isfinite(depth.depth) & (depth.depth > 0)]
@@ -445,6 +511,12 @@ class SceneGenerationStage(PipelineStage):
                 # and every formation standing on it.
                 terrain_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
 
+                if terrain_y is None and len(unsnapped_examples) < 5:
+                    unsnapped_examples.append(
+                        f"{idx} ({cls}) at x={position[0]:.1f} z={position[2]:.1f}, "
+                        f"left at its unprojected y={position[1]:.2f}"
+                    )
+
                 place_y = terrain_y + height / 2.0 if terrain_y is not None else position[1]
 
                 context.add_object(f"metadata_{idx}", {
@@ -628,6 +700,29 @@ class SceneGenerationStage(PipelineStage):
                 self.advance_progress(generation_task)
 
             self.finish_progress(generation_task)
+
+            # Loud on purpose, same reasoning as DistributionSynthesisStage's failure
+            # report: an object that never found the ground renders as one floating in
+            # the air or buried in the hillside, and until now that was completely
+            # silent -- indistinguishable from an object the terrain genuinely placed
+            # there. A run where these counts are anything other than "almost all mesh"
+            # is a run whose placement should not be trusted.
+            snapped = snap_counts["mesh"] + snap_counts["height_map"]
+            if snap_counts["height_map"] or snap_counts["unsnapped"]:
+                level = (
+                    self.log_error
+                    if snap_counts["unsnapped"] or snap_counts["mesh"] == 0
+                    else self.log_warning
+                )
+                level(
+                    f"Terrain snap: {snap_counts['mesh']} object(s) hit a ground mesh, "
+                    f"{snap_counts['height_map']} fell back to the height map, "
+                    f"{snap_counts['unsnapped']} found no ground at all"
+                )
+                for example in unsnapped_examples:
+                    level(f"    no ground under object {example}")
+            elif snapped:
+                self.log_info(f"Terrain snap: all {snapped} placed object(s) hit a ground mesh")
 
         # Terrain/water/formation vertices were built directly in the panorama's
         # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --

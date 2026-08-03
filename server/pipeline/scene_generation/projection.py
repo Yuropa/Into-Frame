@@ -17,11 +17,17 @@ def mesh_y_at(world_x: float, world_z: float, terrain_mesh) -> float | None:
     return float(locs[:, 1].max())
 
 
-def terrain_local_xz(world_x: float, world_z: float, yaw_degrees: float) -> tuple[float, float]:
+def terrain_local_xz(
+    world_x: float,
+    world_z: float,
+    yaw_degrees: float,
+    camera_x: float = 0.0,
+    camera_z: float = 0.0,
+) -> tuple[float, float]:
     """Undo the yaw SceneGenerationStage sends to the client as scene.skybox_rotation
     (and applies to the terrain/water/formation Object3Ds) to map an object's WORLD-
     space (x, z) -- produced by unproject_bbox/unproject_bbox_equirect, which bake the
-    full extrinsics rotation into position -- back into the terrain mesh's own native
+    full extrinsics transform into position -- back into the terrain mesh's own native
     frame (+Z = panorama theta 0, no rotation applied), which is the frame terrain_mesh's
     raw vertices are actually stored in.
 
@@ -31,11 +37,68 @@ def terrain_local_xz(world_x: float, world_z: float, yaw_degrees: float) -> tupl
     object's raw unprojected Y, i.e. floating/sinking) or hitting an unrelated part of
     the terrain otherwise. Y is unaffected by a yaw rotation, so mesh_y_at's return
     value needs no corresponding correction back the other way.
+
+    camera_x/camera_z are the extrinsics TRANSLATION's own horizontal components, and
+    have to come off before the rotation is undone. Every grid the terrain is built
+    from -- the height map, the region map, the terrain mesh's own Poisson domain --
+    is authored with the camera at the grid origin by construction (see
+    grid_cell_panorama_uv and DistributionSynthesisStage._grid_to_world), and the
+    terrain/water/formation Object3Ds are correspondingly placed at x=z=0 carrying
+    rotation only. Object positions are not: extrinsics.transform adds the full
+    translation, so a non-zero t.x/t.z offsets every object horizontally relative to
+    the terrain it is about to be snapped against. That offset is invisible on flat
+    ground and reads as floating/buried objects exactly where the terrain has relief,
+    which is the same symptom the yaw compensation above was added for.
     """
     theta = np.radians(yaw_degrees)
-    local_x = world_x * np.cos(theta) - world_z * np.sin(theta)
-    local_z = world_x * np.sin(theta) + world_z * np.cos(theta)
+    rel_x = world_x - camera_x
+    rel_z = world_z - camera_z
+    local_x = rel_x * np.cos(theta) - rel_z * np.sin(theta)
+    local_z = rel_x * np.sin(theta) + rel_z * np.cos(theta)
     return local_x, local_z
+
+
+def height_map_y_at(
+    local_x: float,
+    local_z: float,
+    height_map,
+    grid_size_meters: float,
+) -> float | None:
+    """Bilinearly sample the dense HEIGHT_MAP grid at a terrain-LOCAL (x, z).
+
+    Fallback for when the mesh raycast in mesh_y_at misses. HEIGHT_MAP is the exact
+    surface TerrainMeshGenerator.generate sampled to build terrain_mesh's vertices
+    (Terrain Reconstruction and Terrain Noise Refinement both write their result back
+    under the same key, so what is in the context here is the final one), but it is a
+    complete grid rather than a triangulated sheet -- no finite footprint to fall off,
+    no water/formation depression carved into it, and no gaps between Poisson samples.
+    So wherever the raycast comes back empty this still answers with the reconstructed
+    ground height, which is a far better place to stand an object than its own raw
+    unprojected Y -- that Y comes from the depth map, has never been reconciled with
+    the reconstructed terrain, and is what made a missed raycast render as an object
+    floating in the air or sunk into the hillside.
+
+    Row/column convention matches TerrainMeshGenerator.generate's own sampling of the
+    same array (rows = Z, cols = X, both spanning [-grid_size/2, +grid_size/2]).
+    Returns None outside the grid or where the grid itself has no value.
+    """
+    hm = height_map.depth
+    h, w = hm.shape
+    half = grid_size_meters / 2.0
+    if not (-half <= local_x <= half and -half <= local_z <= half):
+        return None
+
+    row = (local_z + half) / grid_size_meters * (h - 1)
+    col = (local_x + half) / grid_size_meters * (w - 1)
+    r0, c0 = int(np.floor(row)), int(np.floor(col))
+    r1, c1 = min(r0 + 1, h - 1), min(c0 + 1, w - 1)
+    r0, c0 = max(r0, 0), max(c0, 0)
+    fr, fc = row - r0, col - c0
+
+    top = hm[r0, c0] * (1.0 - fc) + hm[r0, c1] * fc
+    bottom = hm[r1, c0] * (1.0 - fc) + hm[r1, c1] * fc
+    value = float(top * (1.0 - fr) + bottom * fr)
+    return value if np.isfinite(value) else None
 
 
 def unproject_bbox(bbox, image_width, image_height, depth_map: Depth, intrinsics: CameraIntrinsics, extrinsics: CameraExtrinsics):
