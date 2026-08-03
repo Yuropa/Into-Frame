@@ -1177,6 +1177,31 @@ stages:
                                       # authored class isn't a field of identical clones
                                       # (mirrors grass_cover's tuft_height_jitter)
 
+    # Rejection sampling on placement: an object whose footprint lands too far inside
+    # one already placed is dropped rather than rendered inside it. Objects reach this
+    # stage from several independent producers -- detections, painted distribution
+    # points, per-class scatter -- and none of them can see what the others put down,
+    # so this is the only point where the question can be asked at all.
+    #
+    # Placement order decides who wins: real detections before painted fill, and within
+    # each, higher detector score first. That is also what makes it robust against two
+    # detections of the same subject -- the weaker one loses the ground instead of being
+    # rendered inside the stronger one.
+    overlap_rejection: true
+    overlap_min_separation: 0.35     # centre distance as a fraction of the two footprint
+                                      # radii summed. 1.0 = exactly touching, 0 = concentric.
+                                      # Well under 1 on purpose: real scenes are full of
+                                      # legitimately overlapping footprints (a chair under a
+                                      # table, a boat against a dock), and the target is the
+                                      # pathological case, not contact. Raise toward 1 for a
+                                      # sparser, more clearly separated scene.
+    overlap_exempt_classes:          # never tested, and never occupy ground themselves
+      - grass_tuft                    # ground cover is placed BY a density -- thousands of
+                                      # instances interpenetrating on purpose to read as
+                                      # continuous. Testing it would reject most of it, and
+                                      # would put the whole population into an O(n^2) check
+                                      # instead of the few dozen discrete objects that matter.
+
     mesh_lod_distance_overrides:
       # Ground cover needs its own, far shorter cutoff. The global value is tuned for
       # subjects you look AT -- a tree at 25 m earns its mesh. Grass does not: Grass
