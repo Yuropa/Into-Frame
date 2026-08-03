@@ -8,6 +8,7 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
+from util.depth_utils import Depth
 
 
 def _uv_debug_texture(size: int = 512, divisions: int = 10) -> PIL.Image.Image:
@@ -80,6 +81,8 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         formation_min_relief_m: float = 1.0,
         formation_max_extent_fraction: float = 0.35,
         formation_max_aspect_ratio: float = 4.0,
+        formation_min_area_m2: float = 200.0,
+        formation_min_fill_fraction: float = 0.15,
         # Debug aid: also export terrain_uv_debug.glb alongside terrain.glb,
         # with its embedded preview material swapped for a synthetic R=U/G=V
         # gradient (see _uv_debug_texture) instead of the real panorama,
@@ -113,6 +116,15 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.formation_min_relief_m = formation_min_relief_m
         self.formation_max_extent_fraction = formation_max_extent_fraction
         self.formation_max_aspect_ratio = formation_max_aspect_ratio
+        # How much actual LAND a component must hold, and how much of its own
+        # bounding box that land must fill. The three gates above all measure the
+        # bounding box; none of them asks how much of it is real ground, so a
+        # sparse wisp inside a plausible-looking box passes all three. Measured on
+        # the Rainier capture: component 4 is 132 m2 of land inside a 31 x 63 m box
+        # (6.7% fill) and still earned its own render mesh, physics mesh and
+        # depression -- one of the "tiny pieces of land" this is here to stop.
+        self.formation_min_area_m2 = formation_min_area_m2
+        self.formation_min_fill_fraction = formation_min_fill_fraction
         self.debug_uv_texture = debug_uv_texture
 
 
@@ -181,6 +193,91 @@ class TerrainMeshStage(PipelineStage):
             SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
             SemanticKey.OUTPUT: ContextKey.TERRAIN_MESH,
         })
+
+
+    def _select_formations(self, component_id, height_map, grid_size: float, cfg):
+        """Decide which non-primary ground components become their own formation.
+
+        Returns (component_id, accepted_ids) where component_id has every rejected
+        component folded back to the primary id, so the caller can hand ONE array to
+        the base terrain, the physics mesh and the formation loop and have all three
+        agree. That is the point of doing this up front: formation_depression_m is
+        carved by component id, so anything still marked as a formation here gets a
+        pit whether or not a mesh is ever built over it.
+
+        Gates, all in the component's own terms and all computable from the mask:
+          relief  -- a formation worth its own mesh rises off the ground; a
+                     forward-projection wedge (a contiguous run of panorama columns
+                     unprojecting into a thin fan from the camera) is a near-flat sheet.
+          extent  -- an "isolated rock formation" spanning half the world is neither.
+          aspect  -- wedges are slivers; real landmasses are compact-ish.
+          area    -- and it has to actually be a landmass, not a wisp.
+          fill    -- the first three all describe the BOUNDING BOX. A sparse scatter
+                     inside a plausible box clears every one of them.
+        """
+        if component_id is None:
+            return component_id, set()
+
+        cid = np.asarray(component_id.depth)
+        ids = np.unique(np.round(cid[np.isfinite(cid)]).astype(np.int32))
+        targets = [int(i) for i in ids if i > 1]
+        if not targets:
+            return component_id, set()
+
+        hm = np.asarray(height_map.depth)
+        rows, cols = cid.shape
+        cell_m = grid_size / rows
+        cell_area = cell_m ** 2
+
+        folded = cid.copy()
+        accepted: set[int] = set()
+        for target in targets:
+            mask = np.round(cid) == target
+            n_cells = int(mask.sum())
+            if n_cells == 0:
+                continue
+            rr, cc = np.nonzero(mask)
+            extent_z = (rr.max() - rr.min() + 1) * cell_m
+            extent_x = (cc.max() - cc.min() + 1) * cell_m
+            long_side = max(extent_x, extent_z)
+            short_side = max(min(extent_x, extent_z), 1e-6)
+            aspect = long_side / short_side
+            area = n_cells * cell_area
+            fill = area / max(extent_x * extent_z, 1e-6)
+            values = hm[mask]
+            values = values[np.isfinite(values)]
+            relief = float(values.max() - values.min()) if values.size else 0.0
+
+            reject = None
+            if relief < cfg.formation_min_relief_m:
+                reject = f"relief {relief:.2f} m < {cfg.formation_min_relief_m:.2f} m"
+            elif long_side > cfg.formation_max_extent_fraction * grid_size:
+                reject = (
+                    f"extent {long_side:.0f} m > "
+                    f"{cfg.formation_max_extent_fraction * grid_size:.0f} m"
+                )
+            elif aspect > cfg.formation_max_aspect_ratio:
+                reject = f"aspect {aspect:.1f} > {cfg.formation_max_aspect_ratio:.1f}"
+            elif area < cfg.formation_min_area_m2:
+                reject = f"area {area:.0f} m2 < {cfg.formation_min_area_m2:.0f} m2"
+            elif fill < cfg.formation_min_fill_fraction:
+                reject = f"fill {fill:.0%} < {cfg.formation_min_fill_fraction:.0%}"
+
+            if reject is None:
+                accepted.add(target)
+                self.log_info(
+                    f"Formation {target}: kept ({area:.0f} m2, {fill:.0%} fill, "
+                    f"{relief:.1f} m relief)"
+                )
+            else:
+                # Back to the primary component, so no depression is carved for it.
+                folded[mask] = 1
+                self.log_info(
+                    f"Formation {target}: rejected ({reject}) — folded into base terrain"
+                )
+
+        return Depth(folded.astype(cid.dtype)), accepted
+
 
     def run(self, context: PipelineContext) -> PipelineContext:
         from scene.splat_material import SplatMaterial
@@ -282,6 +379,22 @@ class TerrainMeshStage(PipelineStage):
         pano_uv_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
         pano_uv_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)
 
+        # Decide which components earn their own formation mesh BEFORE any geometry
+        # is built, and fold the rest back into the base terrain.
+        #
+        # This used to happen after the fact, in the formation loop below, and that
+        # ordering was a bug in its own right: TerrainMeshGenerator.generate (and
+        # generate_physics_mesh) carve formation_depression_m into every cell with
+        # component_id > 1, but acceptance was decided afterwards. A rejected
+        # component therefore kept its 0.5 m depression with no formation mesh over
+        # it -- a pit in the ground the size of the component. Measured on the
+        # Rainier capture: component 2 covers 2,577 m^2, was rejected, and left
+        # exactly that.
+        #
+        # Every gate is computable from the component mask and the height map, so
+        # none of this needs the mesh the old code measured.
+        component_id, formation_ids = self._select_formations(component_id, height_map, grid_size, cfg)
+
         # ── Generate mesh ──────────────────────────────────────────────────────
         mesh, water_mesh, pano_uv = TerrainMeshGenerator.generate(
             height_map=height_map,
@@ -367,8 +480,7 @@ class TerrainMeshStage(PipelineStage):
         # ── Formation meshes (non-primary ground components) ─────────────────────
         formations: list[dict] = []
         if component_id is not None:
-            n_components = int(component_id.depth.max())
-            for target_id in range(2, n_components + 1):
+            for target_id in sorted(formation_ids):
                 result = TerrainMeshGenerator.generate_component_mesh(
                     height_map=height_map,
                     component_id=component_id,
@@ -381,46 +493,6 @@ class TerrainMeshStage(PipelineStage):
                 if result is None:
                     continue
                 formation_mesh, x_center, z_center, x_half, z_half = result
-
-                # Plausibility gate. _label_ground_components only asks "is this
-                # patch of ground connected to the base terrain," which any patch
-                # the depth model severed will fail -- including artifacts that are
-                # not landmasses at all. The characteristic one is a forward-
-                # projection wedge: a contiguous run of panorama columns unprojects
-                # into a thin fan radiating from the camera, gets its own component
-                # id, and is then promoted to a "rock formation" with its own
-                # extracted mesh, its own collision proxy, its own generated FLUX
-                # texture, and a 0.5 m depression carved into the base terrain
-                # underneath it. Measured on one capture: an 89 x 17 m sliver with
-                # 1.3 m of total relief, pinned against the grid edge.
-                #
-                # Three cheap geometric tests, all in the component's own terms:
-                #   relief   -- a formation worth its own mesh rises off the ground;
-                #               a projection wedge is a near-flat sheet.
-                #   extent   -- an "isolated rock formation" spanning half the world
-                #               is not isolated, and is not a rock.
-                #   aspect   -- wedges are slivers; real landmasses are compact-ish.
-                verts = np.asarray(formation_mesh.mesh.vertices, dtype=np.float64)
-                relief = float(verts[:, 1].max() - verts[:, 1].min()) if len(verts) else 0.0
-                extent_x, extent_z = 2.0 * x_half, 2.0 * z_half
-                long_side, short_side = max(extent_x, extent_z), max(min(extent_x, extent_z), 1e-6)
-                aspect = long_side / short_side
-                reject = None
-                if relief < cfg.formation_min_relief_m:
-                    reject = f"relief {relief:.2f} m < {cfg.formation_min_relief_m:.2f} m"
-                elif long_side > cfg.formation_max_extent_fraction * grid_size:
-                    reject = (
-                        f"extent {long_side:.0f} m > "
-                        f"{cfg.formation_max_extent_fraction * grid_size:.0f} m"
-                    )
-                elif aspect > cfg.formation_max_aspect_ratio:
-                    reject = f"aspect {aspect:.1f} > {cfg.formation_max_aspect_ratio:.1f}"
-                if reject is not None:
-                    self.log_info(
-                        f"Formation {target_id}: rejected as a projection artifact ({reject}) — "
-                        f"left as base terrain"
-                    )
-                    continue
 
                 mesh_key = f"terrain_formation_{target_id}"
                 context.add_mesh(mesh_key, formation_mesh)
