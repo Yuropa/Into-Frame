@@ -3,6 +3,12 @@ import numpy as np
 from scene.camera import CameraIntrinsics, CameraExtrinsics
 from util.depth_utils import Depth
 
+# Caps for the tangent-based extent measurement in unproject_bbox_equirect. 85
+# degrees is already an object filling most of the sky above the viewer; past that
+# the tangent runs away faster than any real measurement it could represent.
+_MAX_HALF_ANGLE = np.radians(85.0)
+_MAX_EXTENT_TAN = float(np.tan(_MAX_HALF_ANGLE))
+
 
 def mesh_y_at(world_x: float, world_z: float, terrain_mesh) -> float | None:
     """Return world-space terrain Y at (world_x, world_z) by raycasting down into the mesh."""
@@ -169,12 +175,59 @@ def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, ex
         return np.array(extrinsics.transform((x_cam, y_cam, z_cam)))
 
     position = equirect_point(cx, cy)
-    left     = equirect_point(x1, cy)
-    right    = equirect_point(x2, cy)
-    top      = equirect_point(cx, y1)
-    bottom   = equirect_point(cx, y2)
 
-    width  = float(np.linalg.norm(right - left))
-    height = float(np.linalg.norm(bottom - top))
+    # Extent is measured against a vertical plane at the object's own horizontal
+    # distance -- NOT as the distance between two points on the sphere of radius
+    # `depth`.
+    #
+    # Putting the box's top and bottom both on that sphere and taking |top - bottom|
+    # measures the CHORD subtending the box's angular height. Chord = 2 d sin(dphi/2),
+    # which tracks the real extent only while dphi is small; it falls away from it as
+    # the angle opens up, and it is bounded by 2d no matter how tall the object is.
+    # Angular size grows as an object gets closer, so the error is worst exactly where
+    # objects are most visible. A real 10 m tree, camera at 1.8 m:
+    #
+    #     horizontal distance    chord      correct
+    #             2 m            3.59 m     10.00 m
+    #             4 m            5.92 m     10.00 m
+    #             8 m            8.14 m     10.00 m
+    #            30 m            9.81 m     10.00 m
+    #           100 m            9.98 m     10.00 m
+    #
+    # So the same tree renders 5.92 m at 4 m and 9.95 m at 60 m -- the near one
+    # visibly SMALLER than the far one, which is backwards and is what this fixes.
+    # Nothing downstream could have recovered it either: the error is a smooth
+    # function of distance, so it looks exactly like a depth-compression curve, and
+    # object_scale.py's correction would happily fit it and then apply it to
+    # everything (it declines to fit at all on a wilderness capture, so on those the
+    # raw error stands unmodified).
+    #
+    # A vertical segment at horizontal distance r spanning elevations phi_bot..phi_top
+    # has height r * (tan(phi_top) - tan(phi_bot)), exact at every distance. That is
+    # also precisely what the pinhole path above already computes -- CameraIntrinsics.
+    # unproject maps linearly onto the plane z = depth -- so this brings the two
+    # branches into agreement rather than inventing a third convention.
+    phi_centre = (0.5 - cy / pano_height) * np.pi
+    phi_top    = (0.5 - y1 / pano_height) * np.pi
+    phi_bottom = (0.5 - y2 / pano_height) * np.pi
+    # Horizontal (ground-plane) distance to the point the centre ray lands on.
+    r_horizontal = float(depth * np.cos(phi_centre))
 
-    return tuple(position), width, height
+    # tan diverges at the poles, where a box edge means "this object passes directly
+    # overhead/underfoot" -- a detection that has already failed, not a measurement to
+    # extrapolate. Cap it and let _MAX_OBJECT_SIZE_M cull whatever still comes out
+    # absurd, rather than emitting an infinity.
+    def _tan_capped(angle: float) -> float:
+        return float(np.clip(np.tan(np.clip(angle, -_MAX_HALF_ANGLE, _MAX_HALF_ANGLE)),
+                             -_MAX_EXTENT_TAN, _MAX_EXTENT_TAN))
+
+    height = r_horizontal * (_tan_capped(phi_top) - _tan_capped(phi_bottom))
+
+    # Same correction horizontally: the box's angular width is a rotation about the
+    # camera, so its chord (2 r sin(dtheta/2)) understates the width of a flat
+    # camera-facing object by the same mechanism. Taken from the pixel width directly
+    # so a box straddling the panorama's wrap seam needs no special case.
+    d_theta = (bw / pano_width) * 2.0 * np.pi
+    width = 2.0 * r_horizontal * _tan_capped(d_theta / 2.0)
+
+    return tuple(position), abs(width), abs(height)
