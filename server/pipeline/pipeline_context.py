@@ -205,6 +205,9 @@ class PipelineContext():
         self._stage_order = []
         self._dirty_state: set[str] = set()
         self._dirty_stage_state: dict[str, set[str]] = {}
+        # Stages that are re-running this session and whose previously-cached output
+        # must therefore not survive into it. See reset_stage().
+        self._reset_stages: set[str] = set()
         self._report_sections: list = []
 
     def push_stage(self, name: str):
@@ -498,6 +501,40 @@ class PipelineContext():
         stage = self._current_stage
         return stage in self._stage_state and name in self._stage_state[stage]
 
+    def reset_stage(self, name: str):
+        """Drop everything a PREVIOUS run cached under stage `name`, because it is
+        about to run again and will republish whatever it still produces.
+
+        Called by PipelineRunner._run_stage immediately before stage.run(), and only
+        then -- never on the cache-hit path, where the cached output IS the result.
+
+        Without this, a stage that writes a VARIABLE SUBSET of its keys silently
+        leaks objects across runs. _value() searches _stage_order in REVERSE, so a
+        stage's own cached entry shadows anything an earlier stage wrote this run,
+        and save() only ever writes dirty keys -- it never removes a file for a key
+        the stage has stopped producing. So any index the stage wrote last time but
+        not this time keeps serving last time's value to every later stage.
+
+        That is not hypothetical, and it is not benign, because metadata_{i} is an
+        INDEX into an object list that Object Segmentation rebuilds from scratch on
+        every run. On a Paris capture, Object Category Clustering (which only writes
+        the objects it assigns buckets to -- 91 of 141 that run) still had
+        metadata_20 and metadata_26 on disk from a run a week earlier. This run those
+        two indices were clouds, correctly typed and written by Object Typing. The
+        stale files -- a building and a tower from the older run's completely
+        different indexing -- shadowed them, because Object Category Clustering sorts
+        after Object Typing. Both were placed into the scene on top of the objects
+        they were duplicates of, and both rendered.
+
+        The same mechanism is what let PanoramaAssetGenerationStage's
+        `context.mesh(mesh_key) is not None` skip regenerating meshes that belonged
+        to an older run's bucket numbering: 19 of 25 category meshes in that scene
+        were assets no stage had produced that run.
+        """
+        self._stage_state.pop(name, None)
+        self._dirty_stage_state.pop(name, None)
+        self._reset_stages.add(name)
+
     # Persistence
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
@@ -511,6 +548,26 @@ class PipelineContext():
             for name in dirty_keys:
                 self._stage_state[stage_name][name].write(stage_path)
         self._dirty_stage_state.clear()
+
+        # Delete the on-disk remains of anything a re-run stage no longer produces
+        # (see reset_stage). Done after the dirty write above, so everything this run
+        # published is already back in _stage_state and on disk; whatever is left in
+        # the directory belongs to a previous run and would otherwise be re-loaded
+        # and shadow this run's values on the next invocation.
+        #
+        # Files only. A stage's subdirectories are its debug/temp output (build/),
+        # which no lookup ever reads -- purging those would change nothing except to
+        # throw away artifacts that are useful precisely when diagnosing a bad run.
+        for stage_name in self._reset_stages:
+            stage_path = path / stage_name
+            if not stage_path.is_dir():
+                continue
+            live = set(self._stage_state.get(stage_name, {}))
+            for entry in stage_path.iterdir():
+                # Both the value file and its .meta sidecar are named for the key.
+                if entry.is_file() and entry.stem not in live:
+                    entry.unlink(missing_ok=True)
+        self._reset_stages.clear()
 
         # Persist the true, as-run stage order alongside the cached data itself.
         # load() needs this to correctly place a stage that's since been disabled

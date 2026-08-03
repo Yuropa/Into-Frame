@@ -535,6 +535,13 @@ class Pipeline:
 
                 context.push_stage(stage.name)
                 if force or not stage.has_expected_output(context):
+                    # Strictly after has_expected_output (which legitimately reads
+                    # this stage's cache to decide) and strictly before run(): once
+                    # we've committed to re-running, last run's output for this stage
+                    # is superseded, and leaving it in place lets any key the stage
+                    # no longer writes keep shadowing fresher values. See
+                    # PipelineContext.reset_stage.
+                    context.reset_stage(stage.name)
                     try:
                         context = stage.run(context)
                         stage.log_memory_usage()
