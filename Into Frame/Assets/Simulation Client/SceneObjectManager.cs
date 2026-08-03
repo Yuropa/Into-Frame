@@ -31,6 +31,9 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Terrain")]
     public TerrainMaterialManager terrainMaterialManager;
 
+    [Header("Water")]
+    public WaterMaterialManager waterMaterialManager;
+
     [Header("Debug")]
     [Tooltip("Attach SwayDiagnostics once the scene finishes loading, to report why " +
              "objects are or aren't visibly animating. Every animated object is created " +
@@ -43,6 +46,17 @@ public class SceneObjectManager : MonoBehaviour
     {
         if (terrainMaterialManager == null)
             terrainMaterialManager = FindObjectOfType<TerrainMaterialManager>();
+
+        // No scene wiring required, unlike terrainMaterialManager above -- water needs
+        // no splat data from the server to arrive first, so there's nothing to hold a
+        // reference to it for. Self-provisioning here means dropping this component in
+        // just works without also having to place WaterMaterialManager in every scene.
+        if (waterMaterialManager == null)
+        {
+            waterMaterialManager = FindObjectOfType<WaterMaterialManager>();
+            if (waterMaterialManager == null)
+                waterMaterialManager = gameObject.AddComponent<WaterMaterialManager>();
+        }
     }
 
     private readonly Dictionary<string, TrackedObject> _tracked = new();
@@ -507,6 +521,7 @@ public class SceneObjectManager : MonoBehaviour
 
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
+        waterMaterialManager?.RegisterMeshLoaded(container, container.name);
     }
 
     // Loads a geometry-only GLB (e.g. the terrain's TERRAIN_PHYSICS_MESH) and
