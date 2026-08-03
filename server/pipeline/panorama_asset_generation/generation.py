@@ -293,26 +293,60 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 continue  # nothing close enough to mesh -- billboard-only group
 
             eligible = [s for s in within_threshold if not s["disqualified"]] or within_threshold
-            winner = max(eligible, key=lambda s: s["score"])
 
             # Size gate: a bespoke mesh is only worth generating for a prominent
-            # subject. A close-but-tiny winner (e.g. a single meadow flower) stays
-            # billboard-only -- its pool was already curated above, so it isn't
-            # lost, just not meshified. Skipped when panorama dims or the winning
-            # box are unavailable (can't measure), preserving distance-only
-            # behaviour; disabled entirely at min_mesh_area_fraction == 0.
-            wb = winner.get("box")
-            if self.config.min_mesh_area_fraction > 0 and wb is not None and pano_w and pano_h:
-                win_area_fraction = (wb[2] * wb[3]) / float(pano_w * pano_h)
-                if win_area_fraction < self.config.min_mesh_area_fraction:
+            # subject. A group whose instances are ALL close-but-tiny (e.g. a bucket
+            # of single meadow flowers) stays billboard-only -- its pool was already
+            # curated above, so it isn't lost, just not meshified. Skipped when
+            # panorama dims or a candidate's box are unavailable (can't measure),
+            # preserving distance-only behaviour; disabled entirely at
+            # min_mesh_area_fraction == 0.
+            #
+            # Applied to the CANDIDATE SET, with the winner then chosen among whatever
+            # survives -- deliberately not to the score-winner alone, which is what it
+            # used to do. composite_score ranks on confidence, fill ratio, depth
+            # proximity and occlusion; SIZE IS NOT ONE OF ITS TERMS. So the winner is
+            # routinely a small nearby instance, and testing the gate against it threw
+            # away entire groups that contained a genuinely prominent subject.
+            #
+            # Measured on a Paris capture (4096x2048 panorama, gate = 0.001 ~ 92x92 px),
+            # where this rejected 14 of 17 billboard-only groups:
+            #
+            #     group      score-winner        largest instance in the same group
+            #     tower::1   0.00023 (44x44)     0.00795 (126x529)  <- the Eiffel Tower
+            #     boat::0    0.00021 (46x46)     0.00669 (297x189)
+            #
+            # Both are ~7-8x ABOVE the gate and both were denied a mesh, so every one
+            # of the tower's 14 instances rendered as a billboard. The other 12
+            # rejected groups have largest == winner, i.e. they really are all-tiny,
+            # and they stay billboard-only under this too.
+            if self.config.min_mesh_area_fraction > 0 and pano_w and pano_h:
+                def _area_fraction(s) -> "float | None":
+                    b = s.get("box")
+                    return None if b is None else (b[2] * b[3]) / float(pano_w * pano_h)
+
+                measured = [(s, _area_fraction(s)) for s in eligible]
+                # An unmeasurable box passes, same as before -- "can't measure" has
+                # never meant "reject".
+                prominent = [
+                    s for s, frac in measured
+                    if frac is None or frac >= self.config.min_mesh_area_fraction
+                ]
+                if not prominent:
+                    # Every frac is a real number here (a None would have passed), so
+                    # report the closest this group came to clearing the gate.
+                    best, best_frac = max(measured, key=lambda pair: pair[1])
                     skipped_debug.append({
-                        "idx": winner["idx"],
+                        "idx": best["idx"],
                         "class": obj_class,
                         "reason": "too_small_for_mesh",
                         "bucket": bucket,
-                        "area_fraction": round(win_area_fraction, 5),
+                        "area_fraction": round(best_frac, 5),
                     })
                     continue
+                eligible = prominent
+
+            winner = max(eligible, key=lambda s: s["score"])
 
             group_best[(obj_class, bucket)] = (winner["idx"], winner["depth"], winner["score"])
             for s in within_threshold:

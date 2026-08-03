@@ -166,16 +166,6 @@ def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, ex
 
     depth = float(np.median(valid))
 
-    def equirect_point(px, py):
-        theta = (px / pano_width  - 0.5) * 2.0 * np.pi
-        phi   = (0.5 - py / pano_height) * np.pi
-        x_cam = depth * np.cos(phi) * np.sin(theta)
-        y_cam = depth * np.sin(phi)
-        z_cam = depth * np.cos(phi) * np.cos(theta)
-        return np.array(extrinsics.transform((x_cam, y_cam, z_cam)))
-
-    position = equirect_point(cx, cy)
-
     # Extent is measured against a vertical plane at the object's own horizontal
     # distance -- NOT as the distance between two points on the sphere of radius
     # `depth`.
@@ -207,6 +197,7 @@ def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, ex
     # also precisely what the pinhole path above already computes -- CameraIntrinsics.
     # unproject maps linearly onto the plane z = depth -- so this brings the two
     # branches into agreement rather than inventing a third convention.
+    theta_centre = (cx / pano_width - 0.5) * 2.0 * np.pi
     phi_centre = (0.5 - cy / pano_height) * np.pi
     phi_top    = (0.5 - y1 / pano_height) * np.pi
     phi_bottom = (0.5 - y2 / pano_height) * np.pi
@@ -221,7 +212,28 @@ def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, ex
         return float(np.clip(np.tan(np.clip(angle, -_MAX_HALF_ANGLE, _MAX_HALF_ANGLE)),
                              -_MAX_EXTENT_TAN, _MAX_EXTENT_TAN))
 
-    height = r_horizontal * (_tan_capped(phi_top) - _tan_capped(phi_bottom))
+    tan_top, tan_bottom = _tan_capped(phi_top), _tan_capped(phi_bottom)
+    height = r_horizontal * (tan_top - tan_bottom)
+
+    # Centre the object on that same vertical plane, rather than on the centre RAY.
+    #
+    # The ray puts it at y = depth * sin(phi_centre) = r * tan(phi_centre), but the
+    # plane's own midpoint is r * (tan(phi_top) + tan(phi_bottom)) / 2. tan is convex,
+    # so those agree only for a box small enough (or symmetric enough about the
+    # horizon) that the curvature doesn't bite -- and diverge as it opens up. With the
+    # right height but the wrong centre, the rendered object no longer subtends the
+    # angles its own crop does: measured across a range of boxes, a 4.4-degree box
+    # matched to within 0.000 degrees while a 46.5-degree one was out by 4.1.
+    #
+    # X and Z are unchanged (r_horizontal * sin/cos(theta) is exactly what the centre
+    # ray gave), so terrain snapping, region lookup and distribution all see the same
+    # position they did before -- this moves the object only along Y.
+    y_cam = r_horizontal * 0.5 * (tan_top + tan_bottom)
+    position = np.array(extrinsics.transform((
+        r_horizontal * np.sin(theta_centre),
+        y_cam,
+        r_horizontal * np.cos(theta_centre),
+    )))
 
     # Same correction horizontally: the box's angular width is a rotation about the
     # camera, so its chord (2 r sin(dtheta/2)) understates the width of a flat

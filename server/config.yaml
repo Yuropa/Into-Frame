@@ -1055,17 +1055,31 @@ stages:
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
-    billboard_distance_m: 30.0
-    # A (class, bucket) group only earns a bespoke 3D mesh when its winning crop's
-    # detection box covers at least this fraction of the panorama -- meshing is
-    # otherwise gated on distance alone, which lets a close-but-tiny subject through.
+    # Must stay in sync with Scene Generation's mesh_lod_distance_m below -- a group
+    # meshed here but beyond that cutoff there generates an asset nothing renders,
+    # and a group inside that cutoff without one here falls back to a billboard.
+    billboard_distance_m: 60.0
+    # A (class, bucket) group only earns a bespoke 3D mesh when at least one of its
+    # in-range instances covers this fraction of the panorama -- meshing is otherwise
+    # gated on distance alone, which lets a close-but-tiny subject through.
     # Measured on an alpine-meadow capture: foreground flowers 0.6-1 m from the
     # camera each occupy only ~0.01-0.07% of the frame (20-80 px) yet, split into a
     # bucket per colour, spawned 7 separate flower meshes (several singleton buckets,
     # one a conf-0.03 "sheep in grass" miscrop). Below this they stay billboard-only
-    # (pool still curated -- not dropped). 0.001 (~0.1%, ~92x92 px) clears those while
-    # keeping any genuine close foreground subject. 0 disables (distance-only).
-    min_mesh_area_fraction: 0.001
+    # (pool still curated -- not dropped). 0 disables (distance-only).
+    #
+    # Lowered 0.001 -> 0.0003 (~0.03%, ~50x50 px on a 4096x2048 panorama) to bias
+    # toward real geometry. 0.001 was tuned against that meadow, where the flower
+    # buckets it needed to reject are 15-25 px; on an urban capture it was also
+    # rejecting whole buildings. Measured on a Paris capture: 0.001 meshed 10 of 23
+    # groups (23/53 instances), 0.0003 meshes 13 (40/53), and the groups still
+    # rejected top out at 15x21 px -- too small to reconstruct anything from.
+    #
+    # NOTE this is evaluated per group against its largest qualifying instance, not
+    # against the score-winning crop; see the size-gate block in generation.py for
+    # why (the winner is ranked on confidence/depth/occlusion, never on size, so
+    # gating on it threw away groups containing a genuinely prominent subject).
+    min_mesh_area_fraction: 0.0003
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
 
@@ -1075,9 +1089,20 @@ stages:
       panorama: panorama_sky
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
-    mesh_lod_distance_m: 30.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
+    mesh_lod_distance_m: 60.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
                                # Panorama Asset Generation's billboard_distance_m above (kept
                                # in sync manually; each stage parses its own isolated config)
+                               #
+                               # Raised 30 -> 60 to bias toward real geometry. Panorama depth
+                               # is capped at max_depth_m (100 m) and compressed above 0.6 of
+                               # that, so a whole capture collapses into a fairly short range:
+                               # on a Paris capture every one of 53 detections sat between
+                               # 2.9 m and 63.6 m, which meant a 30 m cutoff billboarded
+                               # roughly half the scene purely on distance. Measured over that
+                               # capture's own groups, mesh-rendered instances go 23/53 -> 40/53
+                               # at 60 m with the size gate below. Ground cover is unaffected --
+                               # mesh_lod_distance_overrides pins grass_tuft at 3 m, which is
+                               # what keeps this from being ruinous (see that block).
 
     # Object size is derived from panorama depth (world_size = angular_extent x depth,
     # see scene_generation/projection.py), so it inherits every compression that depth
@@ -1096,7 +1121,29 @@ stages:
     # terrain snapping and both depth maps are unchanged -- only object size moves.
     # See scene_generation/object_scale.py, and object_scale_debug.json in the stage's
     # temp dir for the per-anchor breakdown of any given run.
-    object_scale_correction: true
+    #
+    # OFF. The whole point of this correction is to break angular fidelity -- it grows
+    # an object's extent while leaving its distance alone, so the object deliberately
+    # stops covering the panorama pixels it was cropped from (object_scale.py's own
+    # docstring: "That trade is the entire point"). The pipeline's contract is now the
+    # opposite: unproject_bbox_equirect measures against a vertical plane at the
+    # object's own horizontal distance, so a placed object subtends EXACTLY its crop's
+    # angles -- verified exact to 0.000 degrees, vertically and in azimuth, from a
+    # 3.5-degree box out to a 131.8-degree one. Multiplying extent afterwards is the
+    # one operation that throws that away.
+    #
+    # It was also never load-bearing in practice, and was actively unsafe when it did
+    # fire. On the Paris capture it found exactly 6 usable anchors (4 tables, 1 car,
+    # 1 bus), all inside a 12.5-18.1 m band with ratios scattered 0.47-5.08 -- the bare
+    # minimum, with no depth spread to resolve a curve from -- and fitted a flat 2.57x
+    # applied at every depth in the scene.
+    #
+    # Note this does NOT make distant objects render at plausible real-world sizes:
+    # a building 300 m away that panorama depth places at 20 m is ~2 m tall, and stays
+    # that way. That is a DEPTH problem (max_depth_m and _compress_far_range), and
+    # scaling objects up to hide it is what made them stop matching the panorama. Fix
+    # it in the depth map, or accept the miniature and keep the picture consistent.
+    object_scale_correction: false
     object_scale_max_correction: 8.0 # ceiling (and 1/x floor) on the fitted factor -- bounds
                                       # the damage from a scene whose few anchors are
                                       # unrepresentative, since an unbounded correction can
