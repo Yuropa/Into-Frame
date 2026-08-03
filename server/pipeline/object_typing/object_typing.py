@@ -18,12 +18,14 @@ class ObjectTypingConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         confidence_threshold: float = 0.9,
         object_margin_threshold: float = 0.9,
-        min_confident_area_fraction: float = 0.01,
+        min_confident_area_fraction: float = 0.001,
+        object_lead_confidence_threshold: float = 0.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.confidence_threshold = confidence_threshold
         self.object_margin_threshold = object_margin_threshold
         self.min_confident_area_fraction = min_confident_area_fraction
+        self.object_lead_confidence_threshold = object_lead_confidence_threshold
 
 
 class ObjectTypingStage(PipelineStage):
@@ -58,7 +60,9 @@ class ObjectTypingStage(PipelineStage):
             for how this gates downstream trust)
     Debug:  typing_debug.json
     Config: confidence_threshold (default 0.9), object_margin_threshold (default 0.9),
-            min_confident_area_fraction (default 0.01)
+            min_confident_area_fraction (default 0.001),
+            object_lead_confidence_threshold (default 0.0 — the confidence gate for
+            crops where the OBJECT pool leads; see ImageClipClassifier)
 
             Both gates are stated on ImageClipClassifier._pairwise_certainty's
             scale (a temperature-calibrated softmax probability, rescaled so
@@ -89,6 +93,7 @@ class ObjectTypingStage(PipelineStage):
                 confidence_threshold=self.config.confidence_threshold,
                 object_margin_threshold=self.config.object_margin_threshold,
                 min_confident_area_fraction=self.config.min_confident_area_fraction,
+                object_lead_confidence_threshold=self.config.object_lead_confidence_threshold,
             )
         self.advance_progress(typing_task)
 

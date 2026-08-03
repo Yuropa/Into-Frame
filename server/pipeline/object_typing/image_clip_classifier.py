@@ -46,7 +46,8 @@ class ImageClipClassifier:
         device: torch.device,
         confidence_threshold: float = 0.9,
         object_margin_threshold: float = 0.9,
-        min_confident_area_fraction: float = 0.01,
+        min_confident_area_fraction: float = 0.001,
+        object_lead_confidence_threshold: float = 0.0,
     ):
         self.device = device
         # Both thresholds are stated on _pairwise_certainty's scale: a
@@ -55,7 +56,29 @@ class ImageClipClassifier:
         # temperature) because that scale saturates fast by design -- see
         # _pairwise_certainty for the units, and for what the pre-temperature
         # version of these gates did to a real scene.
+        # Applied ONLY when the environment pool outscores the object pool -- see
+        # _sims_to_result. It answers "is the scenery reading solid enough to commit
+        # to", which is a question about scenery.
         self._confidence_threshold = confidence_threshold
+        # The same gate for the other direction, when the OBJECT pool leads. Separate,
+        # and 0 by default, because the two directions are not the same question.
+        #
+        # object-vs-environment is a near-tie for most vegetation by construction: the
+        # two pools are scored against prompts that describe the same pixels
+        # ("a photo of colorful wildflowers in bloom" against "a photo of a wildflower
+        # meadow"; "a photo of a cluster of trees" against "a photo of a grassy lawn or
+        # meadow"). On an alpine meadow capture that tie is not ignorance, it is the
+        # correct answer to a question with no answer -- and the useful reading is the
+        # object one. Gating both directions on one symmetric threshold scored those
+        # ties as unknown and discarded them: measured on that capture, 68 of 68 typed
+        # trees came back indeterminate from the crop, every one of them then failed
+        # ObjectCategoryClusteringStage's corroboration for want of a confident bucket
+        # to match against, and the scene rendered zero trees.
+        #
+        # At 0 an object lead of any size passes to the object-margin gate below, which
+        # is the question that DOES have an answer -- which object is it. Raise this
+        # toward confidence_threshold to restore the old symmetric strictness.
+        self._object_lead_confidence_threshold = object_lead_confidence_threshold
         # Required gap between the winning object label's score and the
         # runner-up object label's score (same rescaled unit as `confidence`
         # below) before a specific object label is trusted.
@@ -225,7 +248,18 @@ class ImageClipClassifier:
             "best_env_score": round(best_env_score, 4),
         }
 
-        if confidence < self._confidence_threshold:
+        # Directional. `confidence` is symmetric -- _pairwise_certainty(max, min) --
+        # so a single threshold on it rejects a near-tie whichever pool is ahead. That
+        # is right for a crop leaning scenery (an unresolved "is this even a thing"
+        # should not become an object) and wrong for one leaning object, where the tie
+        # is usually just the two pools describing the same vegetation. See
+        # _object_lead_confidence_threshold.
+        leads_object = best_obj_score >= best_env_score
+        gate = (
+            self._object_lead_confidence_threshold if leads_object
+            else self._confidence_threshold
+        )
+        if confidence < gate:
             return "indeterminate", confidence, top_candidates, criteria
 
         large_crop = area_fraction is None or area_fraction >= self._min_confident_area_fraction

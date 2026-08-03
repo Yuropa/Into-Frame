@@ -6,6 +6,7 @@ import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
+from pipeline.object_typing.categories import GRASS_TUFT_CATEGORY
 from pipeline.scene_generation.projection import (
     height_map_y_at,
     mesh_y_at,
@@ -37,6 +38,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         object_scale_num_bins: int = 6,
         metric_height_m: dict[str, float] | None = None,
         metric_height_jitter: float = 0.25,
+        overlap_rejection: bool = True,
+        overlap_min_separation: float = 0.35,
+        overlap_exempt_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Sent to the client as the target world-space depth of the terrain
@@ -86,6 +90,27 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Fractional spread around the authored height, so an authored class does not
         # render as a field of identical clones. Mirrors grass's tuft_height_jitter.
         self.metric_height_jitter = float(metric_height_jitter)
+        # Drop an object whose footprint lands too far inside one already placed.
+        # Objects arrive from several independent producers -- detections, painted
+        # distribution points, per-class scatter -- none of which can see what the
+        # others put down, so nothing upstream is in a position to prevent two of
+        # them occupying the same ground.
+        self.overlap_rejection = bool(overlap_rejection)
+        # Centre separation as a fraction of the two footprint radii summed: 1.0 is
+        # exactly touching, 0 is concentric. An object is rejected below this.
+        # Deliberately well under 1 -- real scenes are full of legitimately
+        # overlapping footprints (a chair tucked under a table, a boat against a
+        # dock), and the target here is the pathological case, not contact.
+        self.overlap_min_separation = float(overlap_min_separation)
+        # Classes exempt from the test entirely, and from the occupancy set that
+        # feeds it. Ground cover is the case this exists for: it is placed BY a
+        # density, thousands of instances deliberately interpenetrating to read as
+        # continuous cover, and testing it would both reject most of it and make the
+        # check O(n^2) over the whole population instead of over the few dozen
+        # discrete objects that actually matter.
+        self.overlap_exempt_classes = frozenset(
+            overlap_exempt_classes if overlap_exempt_classes is not None else [GRASS_TUFT_CATEGORY]
+        )
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
@@ -381,8 +406,38 @@ class SceneGenerationStage(PipelineStage):
                         }
                         (self.temp / "object_scale_debug.json").write_text(json.dumps(debug, indent=2))
 
+            # Occupancy of the ground, as (x, z, radius, y_low, y_high) per placed
+            # object, and the order they get to claim it in. Whoever is placed first
+            # keeps its spot, so the order decides who survives a collision:
+            # real detections before painted fill (a measured object is evidence, a
+            # synthesized one is decoration), and within each, higher detector score
+            # first. That ordering is also what makes this robust against two
+            # detections of the SAME subject -- the weaker one now loses its ground
+            # instead of being placed inside the stronger one.
+            # Parallel arrays rather than a list of tuples so each test is one
+            # vectorised pass instead of a Python loop over everything placed so far.
+            # The test is inherently O(n^2), and while ground cover is exempt (the
+            # only population in the millions), a painted non-grass distribution is
+            # still capped at DistributionSynthesisStage's max_instances_per_group
+            # (12,000) -- enough that an interpreted inner loop would dominate the
+            # whole stage.
+            occ_x = np.zeros(object_count, dtype=np.float64)
+            occ_z = np.zeros(object_count, dtype=np.float64)
+            occ_r = np.zeros(object_count, dtype=np.float64)
+            occ_y_low = np.zeros(object_count, dtype=np.float64)
+            occ_y_high = np.zeros(object_count, dtype=np.float64)
+            occ_n = 0
+            rejected_overlap = 0
+            rejected_examples: list[str] = []
+
+            def _placement_rank(i: int) -> tuple[int, float, int]:
+                m = context.input_object(f"metadata_{i}") or {}
+                return (1 if m.get("synthetic") else 0, -float(m.get("score") or 0.0), i)
+
+            placement_order = sorted(range(object_count), key=_placement_rank)
+
             generation_task = self.create_progress(object_count, "Creating Objects…")
-            for idx in range(object_count):
+            for idx in placement_order:
                 metadata = context.input_object(f"metadata_{idx}") or {}
 
                 cls = metadata.get("class")
@@ -518,6 +573,46 @@ class SceneGenerationStage(PipelineStage):
                     )
 
                 place_y = terrain_y + height / 2.0 if terrain_y is not None else position[1]
+
+                # Rejection sampling against the ground already claimed. Done here,
+                # after the terrain snap has resolved the object's final footprint and
+                # height, and before anything is added to the scene.
+                #
+                # Footprints are circles of radius width/2 in world XZ, tested only
+                # between objects whose vertical extents actually overlap -- two things
+                # at the same (x, z) but different heights (a lamp head over a bench)
+                # are not intersecting, and rejecting one of them would be wrong.
+                # Exemption is by class alone, deliberately NOT via is_metric_authored:
+                # that answers "was this size authored in metres" (so the scale
+                # correction must skip it), which is a different question from "is this
+                # ground cover that is supposed to interpenetrate".
+                if self.config.overlap_rejection and cls not in self.config.overlap_exempt_classes:
+                    radius = max(float(width) / 2.0, 1e-3)
+                    y_low, y_high = place_y - height / 2.0, place_y + height / 2.0
+                    blocker = None
+                    if occ_n:
+                        reach = np.maximum(occ_r[:occ_n] + radius, 1e-9)
+                        separation = np.hypot(
+                            occ_x[:occ_n] - position[0], occ_z[:occ_n] - position[2]
+                        ) / reach
+                        # Only against objects this one actually shares height with.
+                        overlaps_vertically = (y_high > occ_y_low[:occ_n]) & (y_low < occ_y_high[:occ_n])
+                        conflicting = overlaps_vertically & (separation < self.config.overlap_min_separation)
+                        if conflicting.any():
+                            blocker = float(separation[conflicting].min())
+                    if blocker is not None:
+                        rejected_overlap += 1
+                        if len(rejected_examples) < 5:
+                            rejected_examples.append(
+                                f"{idx} ({cls}) at x={position[0]:.1f} z={position[2]:.1f}, "
+                                f"separation {blocker:.2f} < {self.config.overlap_min_separation:.2f}"
+                            )
+                        self.advance_progress(generation_task)
+                        continue
+                    occ_x[occ_n], occ_z[occ_n] = position[0], position[2]
+                    occ_r[occ_n] = radius
+                    occ_y_low[occ_n], occ_y_high[occ_n] = y_low, y_high
+                    occ_n += 1
 
                 context.add_object(f"metadata_{idx}", {
                     **(metadata or {}),
@@ -723,6 +818,15 @@ class SceneGenerationStage(PipelineStage):
                     level(f"    no ground under object {example}")
             elif snapped:
                 self.log_info(f"Terrain snap: all {snapped} placed object(s) hit a ground mesh")
+
+            if rejected_overlap:
+                self.log_info(
+                    f"Overlap rejection: dropped {rejected_overlap} object(s) landing inside "
+                    f"one already placed (min separation "
+                    f"{self.config.overlap_min_separation:.2f}, {occ_n} kept)"
+                )
+                for example in rejected_examples:
+                    self.log_info(f"    rejected object {example}")
 
         # Terrain/water/formation vertices were built directly in the panorama's
         # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --

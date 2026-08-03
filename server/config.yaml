@@ -82,13 +82,47 @@ stages:
     # saturates fast, so useful values live near the top of the range -- 0.9 is a
     # ~0.029 raw-cosine win at ViT-B/32. Do not carry the old sub-0.1 values
     # forward; those predate the temperature and no crop could ever clear them.
+    confidence_threshold: 0.9         # the object-vs-environment gate, applied ONLY to crops
+                                       # where the ENVIRONMENT pool leads -- "is the scenery
+                                       # reading solid enough to commit to". Its counterpart
+                                       # for object-leading crops is
+                                       # object_lead_confidence_threshold below; the two used
+                                       # to be one symmetric threshold.
     object_margin_threshold: 0.9      # required gap between the winning and runner-up
                                        # object label (large crops only) before a specific
                                        # label is trusted; below this -> indeterminate
                                        # (or the scene-prior-corroborated runner-up)
-    min_confident_area_fraction: 0.01 # crop bbox area / panorama area below which the
+    object_lead_confidence_threshold: 0.0
+                                       # the object-vs-environment gate, applied ONLY to
+                                       # crops where the OBJECT pool leads. The old single
+                                       # symmetric threshold rejected near-ties in both
+                                       # directions, and object-vs-environment is a near-tie
+                                       # for vegetation BY CONSTRUCTION -- the two pools are
+                                       # scored against prompts describing the same pixels
+                                       # ("colorful wildflowers in bloom" vs "a wildflower
+                                       # meadow"; "a cluster of trees" vs "a grassy lawn or
+                                       # meadow"). Measured on the Rainier capture: 68 of 68
+                                       # typed trees came back indeterminate from the crop,
+                                       # all 68 then failed Object Category Clustering's
+                                       # corroboration, and the scene rendered zero trees.
+                                       # 0 = any object lead falls through to the margin gate
+                                       # below, which asks the question that has an answer
+                                       # (WHICH object). Raise toward confidence_threshold to
+                                       # restore the old symmetric strictness.
+    min_confident_area_fraction: 0.001 # crop bbox area / panorama area below which the
                                        # margin gate above is skipped -- small crops just
-                                       # take CLIP's best-effort guess
+                                       # take CLIP's best-effort guess.
+                                       #
+                                       # Lowered 0.01 -> 0.001 (~290x290 px -> ~91x91 px on a
+                                       # 4096x2048 panorama) because the two changes are a
+                                       # pair: with the gate above opened, the margin gate is
+                                       # what remains, and at 0.01 it applied to 5 of 359
+                                       # crops on the Rainier capture (1.4%) -- so on its own
+                                       # the change above would have removed object gating
+                                       # altogether. At 0.001 it applies to 85 of 359 (24%),
+                                       # including most of the trees this is meant to admit.
+                                       # Crop area fractions on that capture: median 0.00049,
+                                       # p90 0.00181, max 0.02217.
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage
@@ -635,7 +669,21 @@ stages:
     # at far sparser spacing, with water/formation depression carried through but
     # no texture/UV or cosmetic noise -- for Unity's MeshCollider.
     physics_inner_min_dist: 0.5   # metres between samples at the origin
-    physics_outer_min_dist: 8.0   # metres between samples at the domain corners
+    physics_outer_min_dist: 3.0   # metres between samples at the domain corners.
+                                   # Lowered 8.0 -> 3.0: this collider is what anything
+                                   # physics-driven stands on, and at 8 m spacing its flat
+                                   # triangles diverge badly from the surface actually
+                                   # rendered. Measured on the Rainier capture against the
+                                   # render mesh (40,558 verts vs the collider's 2,322):
+                                   #    0-5 m   mean 0.005 m   p95 0.010   max 0.41
+                                   #   10-15 m  mean 0.108 m   p95 0.500   max 1.34
+                                   #   26-50 m  mean 0.162 m   p95 0.624   max 1.73
+                                   # i.e. tight underfoot and over a metre out at range,
+                                   # which is exactly the near-fine/far-wrong profile a
+                                   # floating-object report has. Interpolation error goes as
+                                   # the square of edge length, so 8 -> 3 should cut it ~7x
+                                   # for ~7x the triangles -- still trivial for a static
+                                   # MeshCollider.
     physics_n_boundary: 24        # anchor points per edge of the domain rectangle
     # Non-primary connected ground components (HEIGHT_MAP_COMPONENT_ID -- a separate
     # landmass, an isolated rock formation, anything real but genuinely disconnected
@@ -661,6 +709,17 @@ stages:
     formation_max_extent_fraction: 0.35  # reject components whose long side exceeds this fraction of
                                  # the grid -- an "isolated rock formation" spanning half the world
                                  # is neither isolated nor a rock.
+    formation_min_area_m2: 200.0 # a component must hold at least this much actual LAND to
+                                 # earn its own mesh. The three gates below all measure the
+                                 # BOUNDING BOX, so none of them asks how much of it is
+                                 # ground -- a sparse wisp inside a plausible box clears
+                                 # every one. Measured on the Rainier capture: component 4
+                                 # is 132 m2 inside a 31 x 63 m box and still got its own
+                                 # render mesh, physics mesh and 0.5 m depression.
+    formation_min_fill_fraction: 0.15  # and it must fill at least this fraction of its own
+                                 # bounding box, catching the same failure by shape rather
+                                 # than by size. Component 3 (kept) is 33% fill; component 4
+                                 # is 6.7%.
     formation_max_aspect_ratio: 4.0  # reject slivers; projection wedges are long and thin, real
                                  # landmasses are compact-ish.
     debug_uv_texture: true     # true: embed a synthetic R=U/G=V gradient (with gridlines) as the
@@ -1176,6 +1235,31 @@ stages:
     metric_height_jitter: 0.25       # +/- fraction around the authored height, so an
                                       # authored class isn't a field of identical clones
                                       # (mirrors grass_cover's tuft_height_jitter)
+
+    # Rejection sampling on placement: an object whose footprint lands too far inside
+    # one already placed is dropped rather than rendered inside it. Objects reach this
+    # stage from several independent producers -- detections, painted distribution
+    # points, per-class scatter -- and none of them can see what the others put down,
+    # so this is the only point where the question can be asked at all.
+    #
+    # Placement order decides who wins: real detections before painted fill, and within
+    # each, higher detector score first. That is also what makes it robust against two
+    # detections of the same subject -- the weaker one loses the ground instead of being
+    # rendered inside the stronger one.
+    overlap_rejection: true
+    overlap_min_separation: 0.35     # centre distance as a fraction of the two footprint
+                                      # radii summed. 1.0 = exactly touching, 0 = concentric.
+                                      # Well under 1 on purpose: real scenes are full of
+                                      # legitimately overlapping footprints (a chair under a
+                                      # table, a boat against a dock), and the target is the
+                                      # pathological case, not contact. Raise toward 1 for a
+                                      # sparser, more clearly separated scene.
+    overlap_exempt_classes:          # never tested, and never occupy ground themselves
+      - grass_tuft                    # ground cover is placed BY a density -- thousands of
+                                      # instances interpenetrating on purpose to read as
+                                      # continuous. Testing it would reject most of it, and
+                                      # would put the whole population into an O(n^2) check
+                                      # instead of the few dozen discrete objects that matter.
 
     mesh_lod_distance_overrides:
       # Ground cover needs its own, far shorter cutoff. The global value is tuned for

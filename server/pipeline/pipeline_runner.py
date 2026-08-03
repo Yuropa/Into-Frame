@@ -10,6 +10,13 @@ class PipelineRunner:
         # (item, context_dir) for every sample processed by the most recent run() call.
         self.processed: List[Tuple[PipelineInputItem, Optional[Path]]] = []
 
+    def log_paths(self) -> list:
+        """This run's log file(s), for create_debug_frame_archive. Owned by the
+        configuration (which sets up logging); surfaced here so the archive call site
+        doesn't have to reach through the Pipeline to find them."""
+        config = getattr(self.pipeline, "config", None)
+        return config.log_paths() if config is not None else []
+
     def run(self, input: PipelineInput, progress_queue: Optional[queue.SimpleQueue] = None) -> Optional[PipelineContext]:
         total = input.count()
         last_context = None
