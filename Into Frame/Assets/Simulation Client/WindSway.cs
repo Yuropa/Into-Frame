@@ -45,6 +45,10 @@ public class WindSway : MonoBehaviour
     public void Apply(SwayData data)
     {
         _data = data;
+        // Every instance in a scene carries the same server wind_axis_degrees (see
+        // SceneAnimationStage) -- cheap and idempotent to re-set the shared field's
+        // direction from whichever instance happens to apply first.
+        WindField.Instance.SetDirection(data.axisDegrees);
     }
 
     private void LateUpdate()
@@ -64,10 +68,23 @@ public class WindSway : MonoBehaviour
             _bones = found;
         }
 
-        float t = Time.time * _data.frequencyHz * 2f * Mathf.PI + _data.phase;
+        // The per-instance frequency/phase (server-jittered, see SceneAnimationStage)
+        // still drives each instance's own flutter -- that's what keeps a whole field
+        // of grass from moving as one rigid sheet even while a single gust event is
+        // passing over all of it together. WindField layers a shared clock delay on
+        // top: this point's gust envelope AND its oscillation both run "late" by
+        // however long the wind takes to physically reach it, so a gust visibly
+        // starts on one side of the scene and sweeps across to the other instead of
+        // the whole scene flaring up in lockstep -- and between gusts, motion drops
+        // to a low ambient idle rather than continuing forever at constant strength.
+        var wind = WindField.Instance;
+        float delay     = wind.SampleDelaySeconds(transform.position);
+        float envelope  = wind.SampleStrength(transform.position, Time.time);
+
+        float t = (Time.time - delay) * _data.frequencyHz * 2f * Mathf.PI + _data.phase;
         // amplitude is a normalized [0,1] fraction of the object's own footprint --
         // 45 degrees at amplitude=1 is a plain heuristic scale, not a measured unit.
-        float swing = Mathf.Sin(t) * _data.amplitude * 45f * DebugAmplitudeScale;
+        float swing = Mathf.Sin(t) * _data.amplitude * 45f * envelope * DebugAmplitudeScale;
         CurrentSwing = swing;
         PeakSwing = Mathf.Max(PeakSwing, Mathf.Abs(swing));
         Vector3 axis = Quaternion.Euler(0f, _data.axisDegrees, 0f) * Vector3.right;

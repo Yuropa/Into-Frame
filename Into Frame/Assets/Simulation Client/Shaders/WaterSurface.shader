@@ -65,6 +65,20 @@ Shader "IntoFrame/WaterSurface"
                 float  _WaveSpeed;
             CBUFFER_END
 
+            // Scene-global wind (WindField.cs), pushed via Shader.SetGlobalX every
+            // frame -- deliberately declared outside UnityPerMaterial (globals aren't
+            // per-material data; putting them in that cbuffer would just make this
+            // shader SRP-Batcher-incompatible for no benefit). Same gust formula as
+            // WindField.SampleStrength in C#, so the water swells in step with the
+            // same gust front that's sweeping amplitude up on WindSway foliage.
+            float4 _WindDirXZ;
+            float  _WindBaseStrength;
+            float  _WindGustStrength;
+            float  _WindGustInterval;
+            float  _WindGustDuration;
+            float  _WindGustSpeed;
+            float  _WindGustSharpness;
+
             struct Attributes
             {
                 float4 positionOS : POSITION;
@@ -122,6 +136,28 @@ Shader "IntoFrame/WaterSurface"
                 slope = dir1 * dH1 + dir2 * dH2 + dir3 * dH3;
             }
 
+            // Identical shape to WindField.SampleStrength/GustPulse: a single smooth
+            // rise-and-fall pulse recurring every _WindGustInterval seconds, delayed
+            // per-point by how long the wind takes to physically reach it, on top of
+            // an always-on ambient floor. Treated as locally constant across a single
+            // vertex's wave amplitude (its own spatial gradient is a second-order
+            // effect on top of the wave slope above and not worth the extra derivative).
+            float WindEnvelope(float2 posXZ, float time)
+            {
+                float travel = dot(posXZ, _WindDirXZ.xy);
+                float delay  = travel / max(_WindGustSpeed, 0.01);
+
+                float period   = max(_WindGustInterval, 0.01);
+                float u        = time - delay;
+                float phase    = u - floor(u / period) * period; // wrapped into [0, period)
+                float duration = clamp(_WindGustDuration, 0.01, period);
+                float pulse    = phase < duration
+                    ? pow(sin(phase / duration * 3.14159265), _WindGustSharpness)
+                    : 0.0;
+
+                return _WindBaseStrength + _WindGustStrength * pulse;
+            }
+
             Varyings Vert(Attributes IN)
             {
                 Varyings OUT = (Varyings)0;
@@ -133,6 +169,10 @@ Shader "IntoFrame/WaterSurface"
                 float height;
                 float2 slope;
                 ComputeWave(positionWS.xz, _Time.y, height, slope);
+
+                float envelope = WindEnvelope(positionWS.xz, _Time.y);
+                height *= envelope;
+                slope  *= envelope;
 
                 positionWS.y += height;
                 float3 normalWS = normalize(float3(-slope.x, 1.0, -slope.y));

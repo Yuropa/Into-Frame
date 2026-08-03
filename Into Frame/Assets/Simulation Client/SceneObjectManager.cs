@@ -57,6 +57,13 @@ public class SceneObjectManager : MonoBehaviour
             if (waterMaterialManager == null)
                 waterMaterialManager = gameObject.AddComponent<WaterMaterialManager>();
         }
+
+        // Force-create even if this scene turns out to have no sway-bearing objects
+        // (WindSway is what normally triggers WindField.Instance's lazy creation) --
+        // WaterSurface.shader reads the wind globals unconditionally, and an
+        // un-set global float defaults to 0, which would zero the water's wave
+        // amplitude outright rather than just leaving it un-gusted.
+        _ = WindField.Instance;
     }
 
     private readonly Dictionary<string, TrackedObject> _tracked = new();
