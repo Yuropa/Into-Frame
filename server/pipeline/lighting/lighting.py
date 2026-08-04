@@ -1,10 +1,13 @@
 from logging import Logger
 from typing import Any
 
+import numpy as np
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.lighting.lux_dit import LuxDiT
-from scene.lighting import SceneLighting
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
+from scene.lighting import SceneLighting, measure_panorama_sun
 
 
 class PanoramaLightingConfiguration(PipelineStageConfiguration):
@@ -84,7 +87,32 @@ class PanoramaLightingStage(PipelineStage):
             on_progress=self.make_progress_callback(task),
         )
 
-        lighting = SceneLighting(ldr=result.ldr, log=result.log, hdr=result.hdr)
+        # Where the sun actually is, read off the panorama rather than off the
+        # estimate. PanoramaRegionStage runs before this one, so its typing of the
+        # ORIGINAL panorama is available to confine the search to sky -- without it
+        # the brightest pixels are sunlit snowfields (Rainier) or glare off the
+        # river (Paris), not the disc. See scene.lighting.measure_panorama_sun.
+        region_type = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        sky_mask = None
+        if region_type is not None:
+            sky_mask = np.asarray(region_type.depth) == int(RegionType.SKY)
+            if sky_mask.shape != (panorama.height, panorama.width):
+                self.log_info(
+                    f"Region type map {sky_mask.shape[1]}x{sky_mask.shape[0]} != panorama "
+                    f"{panorama.width}x{panorama.height} — searching above the horizon instead"
+                )
+                sky_mask = None
+
+        measured_sun = measure_panorama_sun(np.asarray(panorama.rgb()), sky_mask)
+        if measured_sun is None:
+            self.log_info(
+                "No solar disc in the panorama sky (overcast, or no sky) — "
+                "keeping the environment map's own direction estimate"
+            )
+
+        lighting = SceneLighting(
+            ldr=result.ldr, log=result.log, hdr=result.hdr, measured_sun=measured_sun,
+        )
 
         if self.temp is not None:
             result.ldr.save(self.temp / "lighting_ldr.png")
@@ -95,7 +123,8 @@ class PanoramaLightingStage(PipelineStage):
             f"Lighting estimated: env map {lighting.width}×{lighting.height}"
             + (f", HDR radiance recovered (peak {float(result.hdr.max()):.1f})" if result.hdr is not None
                else ", no HDR merge — sun intensity is an LDR-fallback estimate")
-            + (f", sun {sun['intensity']:.2f}x @ {sun['color']}" if sun else ", no directional sun")
+            + (f", sun {sun['intensity']:.2f}x @ {sun['color']}"
+               f" (direction from {sun['direction_source']})" if sun else ", no directional sun")
         )
         # Says WHICH of the merge's failure modes happened, not just that it did.
         # An LDR-only fallback costs several stops of key light (see

@@ -13,6 +13,44 @@ from scene.mesh import Mesh
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 
+def _prune_small_water(water: np.ndarray, *, grid_size_meters: float, min_area_m2: float) -> np.ndarray:
+    """Drop water components too small to be a body of water.
+
+    Region typing hands this stage every cell it called WATER, with no notion of
+    how big the resulting body is, and a handful of cells is enough to produce a
+    real flat water surface in the scene. Measured on the Mount Rainier capture --
+    an alpine meadow with no lake in it -- the region map carried 402 WATER cells,
+    0.98 m2 in total, ALL of them between 3.0 m and 6.0 m from the camera. They
+    became an 894-vertex water mesh spanning x[-4.3, 5.2] z[-4.7, 4.9] sitting at
+    y -1.70..-2.18 against terrain at -1.92: a puddle wrapped around the viewer's
+    feet, interpenetrating the ground it was drawn on.
+
+    Their source was panorama rows 1218-1362 -- below the horizon, so
+    PanoramaRegionStage's _clean_nadir_band never looks at them, and above the
+    nadir cutoff, so nothing else did either. It is melting snow typed as water,
+    which is a perfectly reasonable per-pixel call and a nonsensical lake.
+
+    Area is the honest discriminator: a lake, river or sea covers tens of square
+    metres at minimum, so anything under min_area_m2 is a typing artifact. Applied
+    per connected component rather than in total, so a genuine lake is never
+    dropped because some speckle elsewhere shares its class -- and 8-connectivity,
+    so a body pinched to a diagonal thread at one point stays one body.
+    """
+    if not water.any() or min_area_m2 <= 0.0:
+        return water
+    from scipy import ndimage
+
+    cell_area = (grid_size_meters / water.shape[0]) * (grid_size_meters / water.shape[1])
+    labels, count = ndimage.label(water, structure=np.ones((3, 3), dtype=bool))
+    if not count:
+        return water
+    areas = np.bincount(labels.ravel()) * cell_area
+    too_small = np.flatnonzero(areas < min_area_m2)
+    if too_small.size == 0:
+        return water
+    return water & ~np.isin(labels, too_small)
+
+
 class TerrainMeshGenerator:
     @staticmethod
     def generate(
@@ -32,6 +70,7 @@ class TerrainMeshGenerator:
         texture_tile_factor: float = 1.0,
         region_map: Optional[Depth] = None,
         water_depression_m: float = 0.5,
+        min_water_area_m2: float = 12.0,
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
@@ -225,8 +264,18 @@ class TerrainMeshGenerator:
             h_rm, w_rm = rm.shape
             row_rm = ((Z_pos + z_far)  / (2.0 * z_far)   * (h_rm - 1)).clip(0, h_rm - 1)
             col_rm = ((X_pos + x_half) / grid_size_meters * (w_rm - 1)).clip(0, w_rm - 1)
-            region_idx = map_coordinates(rm, [row_rm, col_rm], order=0, mode="nearest")
-            is_water = region_idx.astype(np.int16) == int(RegionType.WATER)
+            water_grid = _prune_small_water(
+                rm.astype(np.int16) == int(RegionType.WATER),
+                grid_size_meters=grid_size_meters,
+                min_area_m2=min_water_area_m2,
+            )
+            # order=0 so this stays a nearest-neighbour lookup of a boolean field;
+            # interpolating a mask would produce fractional "water" along every
+            # shoreline and then threshold it back at an arbitrary place.
+            region_idx = map_coordinates(
+                water_grid.astype(np.uint8), [row_rm, col_rm], order=0, mode="nearest"
+            )
+            is_water = region_idx.astype(bool)
             if is_water.any():
                 water_Y = Y_pos.copy()
 
@@ -370,6 +419,7 @@ class TerrainMeshGenerator:
         noise_seed: int = 42,
         region_map: Optional[Depth] = None,
         water_depression_m: float = 0.5,
+        min_water_area_m2: float = 12.0,
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
@@ -399,6 +449,9 @@ class TerrainMeshGenerator:
             noise_seed=noise_seed,
             region_map=region_map,
             water_depression_m=water_depression_m,
+            # Must match generate()'s own value or the collider is carved for a
+            # different set of lakes than the visual mesh shows.
+            min_water_area_m2=min_water_area_m2,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=formation_depression_m,

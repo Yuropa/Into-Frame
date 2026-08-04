@@ -53,6 +53,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         noise_blend_floor: float = 0.15,
         texture_tile_factor: float = 8.0,
         water_depression_m: float = 0.5,
+        min_water_area_m2: float = 12.0,
         # Coarse geometry-only collision mesh (see TerrainMeshGenerator.
         # generate_physics_mesh), written to ContextKey.TERRAIN_PHYSICS_MESH for
         # Unity's MeshCollider -- same Poisson-disc near-camera density bias as
@@ -105,6 +106,12 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         self.noise_blend_floor = noise_blend_floor
         self.texture_tile_factor = texture_tile_factor
         self.water_depression_m = water_depression_m
+        # Smallest connected WATER region that becomes an actual body of water.
+        # Region typing has no notion of scale, and a handful of stray cells is
+        # enough to build a real water surface -- on the Rainier capture, 0.98 m2
+        # of melting snow typed as water produced a puddle around the viewer's
+        # feet. See terrain_generator._prune_small_water. 0 disables the filter.
+        self.min_water_area_m2 = float(min_water_area_m2)
         self.physics_inner_min_dist = physics_inner_min_dist
         self.physics_outer_min_dist = physics_outer_min_dist
         self.physics_n_boundary = physics_n_boundary
@@ -413,6 +420,7 @@ class TerrainMeshStage(PipelineStage):
             texture_tile_factor=tile_factor,
             region_map=region_map,
             water_depression_m=cfg.water_depression_m,
+            min_water_area_m2=cfg.min_water_area_m2,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,
@@ -464,6 +472,7 @@ class TerrainMeshStage(PipelineStage):
             noise_seed=cfg.seed,
             region_map=region_map,
             water_depression_m=cfg.water_depression_m,
+            min_water_area_m2=cfg.min_water_area_m2,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,

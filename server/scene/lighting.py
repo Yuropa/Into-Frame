@@ -46,6 +46,107 @@ _SUN_INTENSITY_SCALE = 30.0
 _LDR_FALLBACK_SUN_SCALE = 5.0
 
 
+def measure_panorama_sun(
+    panorama_rgb: np.ndarray,
+    sky_mask: "np.ndarray | None" = None,
+    *,
+    min_peak_contrast: float = 1.5,
+) -> "tuple[list, str] | None":
+    """Locate the sun in the panorama itself: (unit direction, hex colour) or None.
+
+    The environment map is an ESTIMATE of the lighting; the panorama is the
+    photograph (plus a generated sky continuous with it), and on a clear day the
+    solar disc is simply visible in it. Measured against the disc's true position
+    across four captures, LuxDiT's env-map direction was off by 81-127 degrees:
+
+        Rainier   env el -10.9 az  +99.1   real el +61.5 az -60.9   127 deg
+        Shark Fin env el +26.6 az -144.4   real el +30.8 az +53.4   120 deg
+        Paris     env el +33.0 az  +78.0   real el +19.4 az -13.8    81 deg
+        Iceland   env el +22.9 az  +99.9   real el  +3.9 az +17.3    82 deg
+
+    On Rainier -- a clear alpine noon -- that put the key light 11 degrees BELOW
+    the horizon, lighting the scene from underneath. It is not a frame-convention
+    bug: no axis flip, 180-degree rotation or axis swap brings all four into
+    agreement (best candidate still averages 66 degrees of error). LuxDiT is fed
+    only a 90-degree centre crop (PanoramaLightingConfiguration.crop_fov_deg), so
+    on two of these the sun is not even inside its input and it is inferring the
+    direction from shading cues.
+
+    Direction and colour therefore come from here; INTENSITY does not, and cannot
+    -- the panorama is 8-bit and its sun is clipped, which is the whole reason the
+    HDR merge exists. See SceneLighting.sun.
+
+    sky_mask          -- boolean, True where the panorama is sky. Strongly
+                         preferred: the brightest pixels of a Rainier panorama are
+                         sunlit snowfields and of a Paris one the glare off the
+                         Seine, and unmasked both outvote the disc. Without it the
+                         search is limited to above the horizon, which is weaker
+                         but still excludes the ground.
+    min_peak_contrast -- the peak region must be at least this many times the
+                         median sky luminance to count as a disc at all. An
+                         overcast sky has no key light, and its brightest 0.1% is
+                         just noise pointing in an arbitrary direction -- returning
+                         that would be worse than returning nothing. None means
+                         "no identifiable sun", and the caller keeps whatever the
+                         environment map said.
+    """
+    rgb = np.asarray(panorama_rgb, dtype=np.float32)
+    if rgb.ndim != 3 or rgb.shape[2] < 3:
+        return None
+    rgb = rgb[..., :3] / 255.0 if rgb.max() > 1.5 else rgb[..., :3]
+    height, width = rgb.shape[:2]
+    luminance = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+
+    if sky_mask is not None and np.asarray(sky_mask).shape == (height, width):
+        candidate = np.asarray(sky_mask, dtype=bool)
+    else:
+        candidate = np.zeros((height, width), dtype=bool)
+        candidate[: height // 2, :] = True
+    if not candidate.any():
+        return None
+
+    sky_values = luminance[candidate]
+    median = float(np.median(sky_values))
+    threshold = float(np.percentile(sky_values, _SUN_PERCENTILE))
+    peak = candidate & (luminance >= threshold)
+    if not peak.any():
+        return None
+
+    rows, cols = np.nonzero(peak)
+    weights = luminance[rows, cols].astype(np.float64)
+    weight_total = float(weights.sum())
+    if weight_total <= 0.0:
+        return None
+    if median > 1e-6 and (weights.mean() / median) < min_peak_contrast:
+        return None
+
+    # Same seam-safe averaging as SceneLighting.sun: mean the unit vectors, never
+    # the raw column indices, or a sun straddling the wrap lands on the far side.
+    longitude = ((cols + 0.5) / width - 0.5) * 2.0 * np.pi
+    latitude = (0.5 - (rows + 0.5) / height) * np.pi
+    direction = np.array([
+        float((np.cos(latitude) * np.sin(longitude) * weights).sum()),
+        float((np.sin(latitude) * weights).sum()),
+        float((np.cos(latitude) * np.cos(longitude) * weights).sum()),
+    ]) / weight_total
+    norm = float(np.linalg.norm(direction))
+    if norm <= 1e-6:
+        return None
+    direction = direction / norm
+
+    color = (rgb[rows, cols] * weights[:, None]).sum(axis=0) / weight_total
+    color_peak = float(color.max())
+    if color_peak > 0:
+        color = color / color_peak
+
+    return (
+        [round(float(v), 5) for v in direction],
+        "#{:02x}{:02x}{:02x}".format(
+            *(int(round(float(c) * 255.0)) for c in np.clip(color, 0.0, 1.0))
+        ),
+    )
+
+
 class SceneLighting:
     """
     Environment map pair estimated by LuxDiT.
@@ -56,9 +157,12 @@ class SceneLighting:
     HTTP round-trips, alongside the key light extracted from them (see sun()).
     """
 
-    def __init__(self, ldr: PILImage.Image, log: PILImage.Image, hdr=None):
+    def __init__(self, ldr: PILImage.Image, log: PILImage.Image, hdr=None, measured_sun=None):
         self.ldr = ldr
         self.log = log
+        # (direction, color) measured from the PANORAMA's own sky rather than from
+        # the estimated environment map, or None. See sun() and measure_panorama_sun.
+        self.measured_sun = measured_sun
         # (H, W, 3) float32 linear radiance from LuxDiT's own HDR merger, or None.
         # Not serialised to the client -- Unity gets the derived sun plus the LDR
         # map for its probe, which is all it needs, and a float EXR would dwarf
@@ -162,11 +266,24 @@ class SceneLighting:
         total = float(irradiance.sum())
         sun_share = float(irradiance[rows, cols].sum()) / total if total > 1e-9 else 0.0
 
+        # Prefer the sun measured from the panorama itself, when one was found.
+        # Direction and colour are observations there and estimates here (see
+        # measure_panorama_sun for the 81-127 degree discrepancy); intensity is the
+        # reverse -- the panorama's sun is clipped 8-bit, so only the environment
+        # map can speak to how much energy it carries. Take each from the source
+        # that actually knows.
+        measured = self.measured_sun
         return {
-            "direction": [round(float(v), 5) for v in direction],
-            "color": "#{:02x}{:02x}{:02x}".format(
+            "direction": (
+                list(measured[0]) if measured
+                else [round(float(v), 5) for v in direction]
+            ),
+            "color": measured[1] if measured else "#{:02x}{:02x}{:02x}".format(
                 *(int(round(float(c) * 255.0)) for c in np.clip(color, 0.0, 1.0))
             ),
+            # Where direction/colour came from, so a scene that silently fell back
+            # to the estimate is distinguishable from one that didn't.
+            "direction_source": "panorama" if measured else "envmap",
             "intensity": round(float(np.clip(
                 sun_share * _SUN_INTENSITY_SCALE
                 * (1.0 if is_hdr else _LDR_FALLBACK_SUN_SCALE),

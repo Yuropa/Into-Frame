@@ -63,6 +63,37 @@ _GRASS_SOURCE_TYPES: frozenset[RegionType] = frozenset({
 })
 
 
+def cell_greenness(
+    panorama_rgb: np.ndarray, row: np.ndarray, col: np.ndarray, sampled: np.ndarray,
+) -> np.ndarray:
+    """Per-cell excess green ((2G-R-B)/255) of the panorama pixel each cell observes.
+
+    The coarse region type is too blunt to decide where grass goes, in both
+    directions, and the fine ADE20K label it was collapsed from is not persisted
+    anywhere this stage can reach. Colour is available, is per-pixel, and settles
+    the same question more directly -- a surface that is going to carry grass is
+    green in the photograph.
+
+    It fixes the false positives the type map lets through: _LABEL_RULES folds
+    `grass`, `earth`, `field`, `sand`, `dirt`, `mud`, `ground`, `soil`, `floor`,
+    `snow` and `ice` into one RegionType.GROUND, so a snowfield and a meadow are
+    indistinguishable by type. Rainier's own meadow is ringed with melting
+    snowpack that types identically to the wildflowers beside it.
+
+    Cells outside `sampled` get -inf: they have no trustworthy UV, so there is no
+    pixel to read, and they must never pass a greenness test by accident.
+    """
+    out = np.full(row.shape, -np.inf, dtype=np.float32)
+    if panorama_rgb is None:
+        return np.zeros(row.shape, dtype=np.float32)
+    rgb = np.asarray(panorama_rgb, dtype=np.float32)[..., :3]
+    r = rgb[..., 0][row[sampled], col[sampled]]
+    g = rgb[..., 1][row[sampled], col[sampled]]
+    b = rgb[..., 2][row[sampled], col[sampled]]
+    out[sampled] = (2.0 * g - r - b) / 255.0
+    return out
+
+
 def grass_area_mask(
     pano_u: np.ndarray,
     pano_v: np.ndarray,
@@ -71,6 +102,8 @@ def grass_area_mask(
     *,
     max_radius_m: float,
     grid_size_meters: float,
+    panorama_rgb: "np.ndarray | None" = None,
+    min_cell_greenness: float = 0.02,
     nadir_fill_radius_m: float = 6.0,
     nadir_fill_min_fraction: float = 0.5,
     close_radius_cells: int = 9,
@@ -139,6 +172,24 @@ def grass_area_mask(
     cell_type[sampled] = region_type_map[row[sampled], col[sampled]].astype(np.int16)
 
     mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
+
+    # Per-cell colour veto, applied before any morphology so the closing below
+    # can't bridge across ground the veto just removed.
+    #
+    # The type gate above is coarse in a way that matters here: RegionType.GROUND
+    # is `grass`/`earth`/`field` collapsed together with `sand`, `snow` and `ice`
+    # (see _LABEL_RULES), so it cannot tell a meadow from the snowpack ringing it
+    # or from a beach. This asks the panorama what colour the cell actually is,
+    # which separates them directly. Deliberately a low bar rather than a test for
+    # "lush": dry and golden grass sit near zero on this scale, while sand runs
+    # about -0.12 and snow lower still, so the threshold sits just above neutral
+    # and only removes surfaces that are definitively not vegetation.
+    if panorama_rgb is not None and min_cell_greenness > -np.inf:
+        greenness = cell_greenness(panorama_rgb, row, col, sampled)
+        if stats is not None:
+            vetoed = mask & (greenness < min_cell_greenness)
+            stats["colour_vetoed_cells"] = int(vetoed.sum())
+        mask &= greenness >= min_cell_greenness
 
     # The per-cell UV is an equirectangular projection fanned out along rays, so
     # an unmeasured column between two measured ones shows up as a thin radial

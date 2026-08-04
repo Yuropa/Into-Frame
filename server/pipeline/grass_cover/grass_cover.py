@@ -96,6 +96,7 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         max_radius_m: float = 25.0,
         min_observed_grass_fraction: float = 0.15,
+        min_cell_greenness: float = 0.02,
         min_exemplar_greenness: float = 0.05,
         instance_spacing_m: float = 0.4,
         max_instances: int = 8000,
@@ -162,6 +163,16 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # "is a plant" -- dry or golden grass is legitimately low on this scale, so
         # the threshold sits far below every green case rather than between them.
         self.min_exemplar_greenness = float(min_exemplar_greenness)
+        # Per-CELL colour veto, the finer-grained companion to the whole-scene gate
+        # above. RegionType.GROUND collapses `grass`/`earth`/`field` together with
+        # `sand`, `snow` and `ice` (see panorama_region_result._LABEL_RULES) and the
+        # fine ADE20K label is not persisted anywhere this stage can read, so type
+        # alone cannot keep grass off the snowpack ringing an alpine meadow or off a
+        # beach inside an otherwise-grassy scene. This asks the panorama what colour
+        # each cell actually is. Set just above neutral rather than at anything lush:
+        # dry/golden grass sits near zero, sand runs about -0.12 and snow lower, so
+        # it removes only what is definitively not vegetation. -inf disables it.
+        self.min_cell_greenness = float(min_cell_greenness)
         # Nominal centre-to-centre spacing of the scatter lattice, before jitter.
         # 0.4 m over the ~886 m2 of grass the Rainier capture yields inside 25 m
         # is ~5500 instances, which is what max_instances is scaled against.
@@ -288,6 +299,8 @@ class GrassCoverStage(PipelineStage):
             pano_u, pano_v, type_map, sampled,
             max_radius_m=cfg.max_radius_m,
             grid_size_meters=grid_size_meters,
+            panorama_rgb=np.asarray(panorama.rgb()) if panorama is not None else None,
+            min_cell_greenness=cfg.min_cell_greenness,
             stats=area_stats,
         )
         area_m2 = area_square_meters(mask, grid_size_meters)

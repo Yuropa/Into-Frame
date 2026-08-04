@@ -867,7 +867,21 @@ setup_lux_dit() {
     run_in_env pip install -r "$LIB_DIR/LuxDiT/requirements.txt"
     run_in_env pip install --no-build-isolation git+https://github.com/NVlabs/nvdiffrast.git
 
-    if [ ! -d "$CHECKPOINT_DIR/LuxDiT" ]; then
+    # Gate on the LAST thing the snapshot provides, not on the parent directory.
+    #
+    # nvidia/LuxDiT ships three folders -- luxdit_video, luxdit_image and
+    # hdr_merge_mlp -- and this used to test `! -d "$CHECKPOINT_DIR/LuxDiT"`.
+    # That is true only on a completely fresh machine, so any checkout made
+    # before hdr_merge_mlp was needed (or one whose 23.5 GB download was
+    # interrupted part-way) keeps a parent directory that exists, skips the
+    # download forever, and silently runs without the HDR merger. That costs
+    # several stops of key light in every scene and is invisible from the
+    # pipeline side -- see LuxDiTServer.setup / scene.lighting.
+    #
+    # download_weights.py wraps snapshot_download, which is resumable and
+    # verifies by hash, so re-running it on a partial checkout fetches only
+    # what is missing rather than re-downloading the whole snapshot.
+    if [ ! -d "$CHECKPOINT_DIR/LuxDiT/hdr_merge_mlp" ] || [ ! -d "$CHECKPOINT_DIR/LuxDiT/luxdit_video" ]; then
         run_in_env python "$LIB_DIR/LuxDiT/download_weights.py" --repo_id nvidia/LuxDiT --local_dir "$CHECKPOINT_DIR/LuxDiT"
     fi
 
