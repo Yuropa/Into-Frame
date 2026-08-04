@@ -795,9 +795,19 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
                     chosen_idx = int(rng.choice(crop_pool))
-                    self.log_info(f"Creating billboard for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m) using crop_{chosen_idx}")
+                    # Prefer the delit crop PanoramaAssetGenerationStage wrote, so
+                    # this billboard carries albedo like the terrain texture beside
+                    # it rather than a photograph with the sun already in it (the
+                    # object-vs-ground colour mismatch -- see that stage's
+                    # use_intrinsic_delighting). The client resolves Object3D.texture
+                    # by name, so pointing at the other asset is the whole change.
+                    # Falls back per-crop, so one failed delight costs one billboard.
+                    texture_key = f"crop_delit_{chosen_idx}"
+                    if context.input_image(texture_key) is None:
+                        texture_key = f"crop_{chosen_idx}"
+                    self.log_info(f"Creating billboard for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m) using {texture_key}")
                     billboard = Object3D.billboard(
-                        f"crop_{chosen_idx}",
+                        texture_key,
                         width=width,
                         height=height,
                         x=position[0],

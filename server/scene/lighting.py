@@ -1,5 +1,6 @@
 import io
 import base64
+import json
 from pathlib import Path
 from typing import Self, Optional
 
@@ -319,18 +320,58 @@ class SceneLighting:
 
     @classmethod
     def decode(cls, data: dict) -> Self:
+        # Carry the measured sun back too, for the same reason save/load do -- a
+        # decoded SceneLighting that recomputed sun() from the env map alone would
+        # report the direction this class exists to override.
+        sun = data.get("sun") or {}
+        measured_sun = (
+            (sun["direction"], sun["color"])
+            if sun.get("direction_source") == "panorama" and "direction" in sun and "color" in sun
+            else None
+        )
+
         def _from_b64(b64: str) -> PILImage.Image:
             return PILImage.open(io.BytesIO(base64.b64decode(b64))).copy()
 
-        return cls(_from_b64(data["ldr"]), _from_b64(data["log"]))
+        return cls(
+            _from_b64(data["ldr"]), _from_b64(data["log"]), measured_sun=measured_sun,
+        )
+
+    # The panorama-measured sun has to survive the context cache. PanoramaLightingStage
+    # is cached like every other stage, so on any resumed run this pair -- not run() --
+    # is what produces the SceneLighting the scene is built from. Persisting only the
+    # two PNGs silently dropped `measured_sun` and fell the scene back to the
+    # environment map's own direction, which is the 81-127-degrees-wrong one this
+    # exists to replace (see measure_panorama_sun). The failure mode is the nasty
+    # kind: correct on the run that computed it, wrong on every run after.
+    _SUN_FILE = "measured_sun.json"
 
     def save(self, path: Path):
         path.mkdir(parents=True, exist_ok=True)
         self.ldr.save(path / "ldr.png")
         self.log.save(path / "log.png")
+        sun_path = path / self._SUN_FILE
+        if self.measured_sun is not None:
+            direction, color = self.measured_sun
+            sun_path.write_text(json.dumps({"direction": list(direction), "color": color}))
+        elif sun_path.exists():
+            # A rerun that found no disc must clear a stale one rather than
+            # inheriting the previous run's answer.
+            sun_path.unlink()
 
     @classmethod
     def load(cls, path: Path) -> Self:
         ldr = PILImage.open(path / "ldr.png").copy()
         log = PILImage.open(path / "log.png").copy()
-        return cls(ldr, log)
+        measured_sun = None
+        sun_path = path / cls._SUN_FILE
+        if sun_path.exists():
+            try:
+                data = json.loads(sun_path.read_text())
+                measured_sun = (data["direction"], data["color"])
+            except (ValueError, KeyError, OSError):
+                measured_sun = None
+        # hdr is deliberately not persisted (a float EXR would dwarf the cache, and
+        # the intensity it feeds is already baked into what the scene shipped), so a
+        # loaded SceneLighting reports is_hdr False and takes the LDR fallback path.
+        return cls(ldr, log, measured_sun=measured_sun)

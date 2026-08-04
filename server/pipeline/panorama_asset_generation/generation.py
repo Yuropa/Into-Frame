@@ -11,6 +11,17 @@ from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
+from PIL import Image as PILImage
+
+
+def _delit_key(idx: int) -> str:
+    """Asset name for a crop with its baked-in lighting removed.
+
+    SceneGenerationStage prefers this over crop_{idx} when it exists, and the
+    client resolves whichever name lands in Object3D.texture by string, so no
+    client change is needed for a billboard to pick up the delit image.
+    """
+    return f"crop_delit_{idx}"
 from util.device_utils import DeviceStrategy, preferred_device
 from util.crop_scoring import composite_score, occlusion_score, mask_fill_ratio
 
@@ -38,8 +49,37 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         occlusion_disqualify_fraction: float = 0.6,
         occlusion_depth_margin: float = 0.10,
         max_background_fraction: float = 0.5,
+        use_intrinsic_delighting: bool = True,
+        intrinsic_delight_strength: float = 0.6,
+        intrinsic_resolution: int = 768,
+        intrinsic_agg_num: int = 2,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Strip the baked-in sun out of the crops that become billboards and
+        # category meshes, the same way TerrainTextureGenerationStage already
+        # strips it out of its reference patches -- and, critically, by the same
+        # amount.
+        #
+        # This is the colour mismatch between objects and the ground they stand
+        # on. Both come from the same panorama pixels, but they arrive at the
+        # renderer through paths that disagree about what a texture IS: terrain
+        # reference patches are blended 60% toward IntrinsicDiffusion's predicted
+        # albedo, while object crops were passed through raw, at full baked
+        # lighting. The client then lights BOTH again with the estimated sun and
+        # ambient probe (SceneParamManager.ApplySun), so the same tree photographed
+        # once renders at one brightness and saturation baked into the terrain
+        # texture and a visibly different one as a billboard beside it -- reported
+        # on the Rainier capture as background trees not matching the terrain's.
+        #
+        # Delighting objects rather than re-lighting terrain is the direction that
+        # is also more correct: a renderer applying its own light wants albedo, not
+        # a photograph of a lit surface. Matching strengths matters more than the
+        # absolute value -- keep this equal to the terrain stage's own
+        # intrinsic_delight_strength, and change them together.
+        self.use_intrinsic_delighting = bool(use_intrinsic_delighting)
+        self.intrinsic_delight_strength = float(intrinsic_delight_strength)
+        self.intrinsic_resolution = int(intrinsic_resolution)
+        self.intrinsic_agg_num = int(intrinsic_agg_num)
         # A detection whose box is mostly BACKGROUND is not an object, whatever it
         # got typed as. Two independent readings of "background", both already
         # computed by earlier stages, and a box failing either is rejected:
@@ -157,6 +197,18 @@ class PanoramaAssetGenerationStage(PipelineStage):
         context.add_object("billboard_pools", billboard_pools)
         self._write_debug(skipped_debug, group_best, disqualified_debug, billboard_pools, synthetic_skipped)
 
+        # Everything that will actually be rendered: every curated billboard pool
+        # plus every mesh representative. Done after curation so the rejected
+        # crops -- environment, background, position_only -- cost nothing.
+        rendered = {i for pool in billboard_pools.values() for i in pool}
+        rendered.update(idx for idx, _depth, _score in group_best.values())
+        if self.config.use_intrinsic_delighting:
+            written = self._delight_crops(context, rendered)
+            self.log_info(
+                f"Delit {written}/{len(rendered)} rendered crop(s) at strength "
+                f"{self.config.intrinsic_delight_strength:.2f} to match the terrain texture"
+            )
+
         if not group_best:
             self.log_info("No objects within 3D generation distance")
             return context
@@ -177,7 +229,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     continue
 
                 self.log_info(f"  {mesh_key}: {depth:.1f} m, score {score:.2f} → 3D mesh (crop_{idx})")
-                crop = context.input_image(f"crop_{idx}")
+                # Prefer the delit crop: meshify BAKES this image into the GLB's
+                # texture, so a lit crop here bakes the sun into geometry that the
+                # client then lights again -- the same double-lighting the
+                # billboard path has, but permanent. Falls back to the raw crop
+                # when delighting is off or failed for this one image.
+                crop = context.image(_delit_key(idx)) or context.input_image(f"crop_{idx}")
 
                 fill_ratio = mask_fill_ratio(crop)
                 if fill_ratio is not None and fill_ratio <= 0.0:
@@ -211,6 +268,76 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         self.finish_progress(asset_task)
         return context
+
+    def _delight_crops(self, context: PipelineContext, indices: "set[int]") -> int:
+        """Write crop_delit_{i} for every crop that will be rendered.
+
+        Only the crops that actually reach the client are delit -- the mesh
+        representatives and the curated billboard pools -- rather than all of
+        OBJECT_COUNT. IntrinsicDiffusion is a diffusion model and this is a
+        per-image cost, so on a capture with hundreds of detections the
+        difference is the whole run.
+
+        Deliberately a NEW key rather than an overwrite of crop_{i}.
+        VideoObjectExtractionStage runs after this one and matches crop_{i}
+        against the generated video with SAM2; that video is rendered from the
+        original, fully-lit panorama, so handing the tracker a delit crop would
+        make it match its own subject worse. Rendering wants albedo, tracking
+        wants the photograph, and they can have one each.
+        """
+        if not indices or not self.config.use_intrinsic_delighting:
+            return 0
+        from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
+        from util.image_utils import Image as UtilImage
+
+        task = self.create_progress(len(indices), "Delighting object crops…")
+        intrinsics = ImageIntrinsics(self.preferred_device)
+        written = 0
+        try:
+            for idx in sorted(indices):
+                crop = context.input_image(f"crop_{idx}")
+                if crop is None:
+                    self.advance_progress(task)
+                    continue
+                pil = crop.rgba() if hasattr(crop, "rgba") else crop
+                try:
+                    result = intrinsics.intrinsic_images(
+                        UtilImage(pil.convert("RGB")),
+                        temp_path=self.temp,
+                        resolution=self.config.intrinsic_resolution,
+                        agg_num=self.config.intrinsic_agg_num,
+                    )
+                    albedo = result.albedo_image()
+                except Exception as exc:
+                    # One crop the model chokes on must not cost the whole scene
+                    # its delighting -- and a crop with no delit variant falls
+                    # back to crop_{i} downstream, which is exactly the old
+                    # behaviour for that one object.
+                    self.log_info(f"  crop_{idx}: delighting failed ({exc}), leaving it lit")
+                    self.advance_progress(task)
+                    continue
+
+                strength = self.config.intrinsic_delight_strength
+                if strength < 1.0:
+                    blended = (
+                        np.asarray(albedo.convert("RGB"), dtype=np.float32) * strength
+                        + np.asarray(pil.convert("RGB"), dtype=np.float32) * (1.0 - strength)
+                    )
+                    albedo = PILImage.fromarray(blended.clip(0, 255).astype(np.uint8), "RGB")
+                # The alpha channel is the segmentation cutout; without it a
+                # billboard renders as an opaque rectangle of sky around its
+                # subject.
+                if pil.mode == "RGBA":
+                    albedo = albedo.convert("RGBA")
+                    albedo.putalpha(pil.split()[-1])
+
+                context.add_image(_delit_key(idx), albedo)
+                written += 1
+                self.advance_progress(task)
+        finally:
+            intrinsics.close()
+        self.finish_progress(task)
+        return written
 
     @staticmethod
     def _box_patch(array, box, pano_w, pano_h):
@@ -534,10 +661,24 @@ class PanoramaAssetGenerationStage(PipelineStage):
         for obj_class, bucket in group_best:
             if context.mesh(f"category_mesh_{obj_class}_{bucket}") is None:
                 return False
+        # Deliberately NOT checking for crop_delit_{i}. run() tolerates
+        # IntrinsicDiffusion failing on an individual crop and leaves that one lit,
+        # so requiring the full set here would make a permanently-failing crop
+        # report this stage incomplete on every invocation -- and with it every
+        # stage downstream, forever. This mirrors run()'s own tolerance, which is
+        # the rule that keeps the dirty cascade from latching on.
+        #
+        # The cost is that turning use_intrinsic_delighting on for an
+        # already-cached scene doesn't retroactively delight it; billboards fall
+        # back to crop_{i} until the stage is rerun with --rerun.
         return True
 
     def model_names(self) -> list[str]:
-        return ModelGenerator.model_names(type=self.config.generator_type)
+        names = ModelGenerator.model_names(type=self.config.generator_type)
+        if self.config.use_intrinsic_delighting:
+            from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
+            names = names + ImageIntrinsics.model_names()
+        return names
 
     def contribute_report(self, context: PipelineContext):
         from pipeline.report.report_section import ReportSection

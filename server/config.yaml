@@ -1215,6 +1215,36 @@ stages:
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
+    use_intrinsic_delighting: true
+    # Strip the baked-in sun out of the crops that become billboards and category
+    # meshes, exactly as Terrain Texture Generation already does for its reference
+    # patches. THIS IS THE OBJECT-VS-GROUND COLOUR MISMATCH: both come from the same
+    # panorama pixels, but terrain patches were blended 60% toward IntrinsicDiffusion's
+    # predicted albedo while object crops went through raw at full baked lighting, and
+    # the client then lights BOTH again with the estimated sun and ambient probe. The
+    # same tree therefore renders at one colour baked into the terrain texture and a
+    # visibly different one as a billboard standing in front of it — reported on the
+    # Rainier capture as background trees not matching the terrain's.
+    #
+    # Delighting the objects (rather than re-lighting the terrain) is also the more
+    # correct direction: a renderer applying its own light wants albedo, not a
+    # photograph of an already-lit surface.
+    #
+    # Written to a NEW asset, crop_delit_{i}, never over crop_{i}: Video Object
+    # Extraction runs later and matches crop_{i} against the generated video with
+    # SAM2, and that video is rendered from the original fully-lit panorama, so the
+    # tracker wants the photograph while the renderer wants the albedo.
+    intrinsic_delight_strength: 0.6
+    # KEEP EQUAL TO Terrain Texture Generation's intrinsic_delight_strength and change
+    # them together — matching the two matters more than the absolute value, since the
+    # whole point is that objects and ground agree. 1.0 = pure albedo (IntrinsicDiffusion
+    # can look unnaturally flat there), 0.0 = untouched.
+    intrinsic_resolution: 768
+    intrinsic_agg_num: 2
+    # Cost knobs. Only the crops that are actually RENDERED are delit — the curated
+    # billboard pools plus the mesh representatives, not all of OBJECT_COUNT — so this
+    # is a few dozen diffusion passes rather than several hundred. Lower agg_num first
+    # if it dominates the run.
     max_background_fraction: 0.5
     # A detection whose box is mostly BACKGROUND is not an object, whatever it was
     # typed as. Two readings, both already computed upstream, and failing EITHER
