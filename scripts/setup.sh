@@ -484,9 +484,14 @@ verify_synthesize_cli() {
         exit 1
     fi
 
+    # Seeded above INT32_MAX on purpose. The pipeline's global seed is random over
+    # 0..2**32-1, and a build that reads the header into a plain `int` fails the read
+    # outright on such a value -- every tile dies with "failed to read header" and the
+    # scene paints nothing, on roughly half of all runs. A seed of 0 here would pass
+    # against exactly the build that has that bug.
     local stdin_data
     stdin_data="$(
-        echo "8 4 20 0"
+        echo "8 4 20 2911850091"
         echo 16
         for y in 0 1 2 3; do for x in 0 1 2 3; do echo "$x.0 $y.0"; done; done
         echo 3;  echo "1.0 1.0"; echo "3.0 1.0"; echo "2.0 3.0"

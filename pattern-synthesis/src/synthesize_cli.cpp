@@ -1,6 +1,8 @@
 #include "lloyd_relaxation.h"
 #include "synthesis_core.h"
 
+#include <algorithm>
+#include <climits>
 #include <iostream>
 #include <vector>
 
@@ -24,6 +26,8 @@
 //   <x0> <z0>          × n_output_boundary
 //
 // n_points <= 0 infers the target count from exemplar density (see synthesize_pattern).
+// The header is read as 64-bit; <seed> may be any integer and is folded into the
+// non-negative 32-bit range internally.
 //
 // Output (stdout): JSON
 //   {"output_points":[[x,z],...],"energy":<float>,"iterations":<int>,"n_points":<int>}
@@ -40,6 +44,12 @@ bool read_points(std::istream& in, int count, Eigen::MatrixXd& out) {
     return true;
 }
 
+// Header counts are read as 64-bit so an oversized value is a clamp rather than a
+// stream failure that would abort the tile before it read any points.
+int clamp_to_int(long long v) {
+    return static_cast<int>(std::min<long long>(std::max<long long>(v, INT_MIN), INT_MAX));
+}
+
 void print_empty_result() {
     std::cout << "{\"output_points\":[],\"energy\":0.0,\"iterations\":0,\"n_points\":0}\n";
 }
@@ -47,15 +57,36 @@ void print_empty_result() {
 }  // namespace
 
 int main() {
-    int bin_count = 0;
-    int n_points = 0;
-    int max_iters = 0;
-    int seed = 0;
+    // Read as 64-bit and narrow deliberately. `std::cin >> int` sets failbit on a
+    // value that doesn't fit, so an out-of-range seed used to kill the tile with
+    // "failed to read header" before a single point was read -- and the caller's seed
+    // comes from the pipeline's random.randint(0, 2**32 - 1) global seed, which
+    // exceeds INT32_MAX about half the time. Reading each field separately also names
+    // the offending one instead of blaming the whole header.
+    long long bin_count = 0;
+    long long n_points = 0;
+    long long max_iters = 0;
+    long long seed_in = 0;
 
-    if (!(std::cin >> bin_count >> n_points >> max_iters >> seed)) {
-        std::cerr << "synthesize_cli: failed to read header\n";
+    if (!(std::cin >> bin_count)) {
+        std::cerr << "synthesize_cli: failed to read header field 'bin_count'\n";
         return 1;
     }
+    if (!(std::cin >> n_points)) {
+        std::cerr << "synthesize_cli: failed to read header field 'n_points'\n";
+        return 1;
+    }
+    if (!(std::cin >> max_iters)) {
+        std::cerr << "synthesize_cli: failed to read header field 'max_iters'\n";
+        return 1;
+    }
+    if (!(std::cin >> seed_in)) {
+        std::cerr << "synthesize_cli: failed to read header field 'seed'\n";
+        return 1;
+    }
+    // The seed only has to be deterministic, not preserved, so fold it into the
+    // non-negative int range the synthesis API takes.
+    const int seed = static_cast<int>(seed_in & 0x7FFFFFFFLL);
 
     int n_domain = 0;
     if (!(std::cin >> n_domain)) {
@@ -122,7 +153,7 @@ int main() {
 
     const SynthesisResult result = synthesize_pattern(
         delaunay, exemplar_uv, input_boundary_uv, output_boundary_uv,
-        n_points, bin_count, max_iters, seed);
+        clamp_to_int(n_points), clamp_to_int(bin_count), clamp_to_int(max_iters), seed);
 
     if (result.output_uv.empty()) {
         // synthesize_pattern leaves final_energy as +inf on failure, which isn't valid

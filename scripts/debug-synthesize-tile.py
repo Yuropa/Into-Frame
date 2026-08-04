@@ -234,7 +234,10 @@ def build_jobs(ctx: Path, only_group: str | None):
 def to_stdin(job, n_points=None, max_iters=None) -> str:
     n = job["n_points"] if n_points is None else n_points
     iters = MAX_ITERS if max_iters is None else max_iters
-    lines = [f"{job['bin_count']} {n} {iters} {SEED}"]
+    # Folded into the signed 32-bit range exactly as the stage does -- synthesize_cli
+    # parses the header with `std::cin >> int`, so a raw 32-bit-unsigned seed used to
+    # fail the whole header read.
+    lines = [f"{job['bin_count']} {n} {iters} {SEED & 0x7FFFFFFF}"]
     for key in ("domain_points", "exemplar_points", "input_boundary", "output_boundary"):
         pts = job[key]
         lines.append(str(len(pts)))
@@ -281,6 +284,8 @@ def run_sweep(job, cli: Path, timeout: float):
 
 
 def main():
+    global MAX_CANDIDATES_PER_TILE, SEED
+
     ap = argparse.ArgumentParser()
     ap.add_argument("context_dir", type=Path)
     ap.add_argument("--group", help="only this '<region>/<type>' group, e.g. ground/flower")
@@ -298,13 +303,20 @@ def main():
                          "O(candidates^2) support table before any iteration runs, so this "
                          "sets a floor on tile cost that no point-count or iteration change "
                          "can get under.")
+    ap.add_argument("--seed", type=int, default=SEED,
+                    help="tile seed, as the stage would pass it (self.seed + tile index). "
+                         "Defaults to 0, which is NOT what a real run uses: the pipeline's "
+                         "global seed is random over 0..2**32-1 and is persisted in "
+                         "seed.json, so pass the run's own value from there to reproduce a "
+                         "seed-dependent failure.")
     ap.add_argument("--sweep", action="store_true",
                     help="run each selected tile across a grid of (n_points, max_iters) and "
                          "report wall time for each, so the cost curve is measured rather "
                          "than guessed. Uses --timeout per cell; keep it short (~30s).")
     args = ap.parse_args()
 
-    global MAX_CANDIDATES_PER_TILE
+    SEED = args.seed
+
     if args.candidates:
         MAX_CANDIDATES_PER_TILE = args.candidates
         print(f"max_candidates_per_tile overridden to {MAX_CANDIDATES_PER_TILE}")

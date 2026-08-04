@@ -140,7 +140,15 @@ def _run_synthesize_cli(
     failure, initial placement failure -- and names which one on STDERR. Judging the
     call by its exit code alone throws that diagnosis away and makes a total
     synthesis failure look exactly like an empty distribution."""
-    lines = [f"{bin_count} {n_points} {max_iters} {seed}"]
+    # synthesize_cli parses the header with `std::cin >> int`, so a value above
+    # INT32_MAX sets failbit and the tile dies with "failed to read header" before it
+    # reads a single point. The pipeline's global seed is random.randint(0, 2**32 - 1)
+    # (see SeedConfiguration), so roughly half of all runs draw a seed the CLI cannot
+    # parse -- and because that seed is persisted in seed.json and restored from cache,
+    # such a run then fails identically on every rerun. Fold it into the signed 32-bit
+    # range here as well as widening the C++ read, so an already-built binary keeps
+    # working without a rebuild.
+    lines = [f"{bin_count} {n_points} {max_iters} {seed & 0x7FFFFFFF}"]
 
     def emit(pts: np.ndarray):
         lines.append(str(len(pts)))
