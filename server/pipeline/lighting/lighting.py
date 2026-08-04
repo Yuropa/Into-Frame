@@ -94,9 +94,18 @@ class PanoramaLightingStage(PipelineStage):
         self.log_info(
             f"Lighting estimated: env map {lighting.width}×{lighting.height}"
             + (f", HDR radiance recovered (peak {float(result.hdr.max()):.1f})" if result.hdr is not None
-               else ", no HDR merge — sun intensity will be approximate")
+               else ", no HDR merge — sun intensity is an LDR-fallback estimate")
             + (f", sun {sun['intensity']:.2f}x @ {sun['color']}" if sun else ", no directional sun")
         )
+        # Says WHICH of the merge's failure modes happened, not just that it did.
+        # An LDR-only fallback costs several stops of key light (see
+        # scene.lighting._LDR_FALLBACK_SUN_SCALE), so it is worth a warning rather
+        # than leaving it to a stdout nothing captures.
+        if result.hdr_status:
+            if result.hdr is None:
+                self.log_warning(f"Lighting HDR: {result.hdr_status}")
+            else:
+                self.log_info(f"Lighting HDR: {result.hdr_status}")
         context.add_lighting(output_key, lighting)
 
         self.advance_progress(task)

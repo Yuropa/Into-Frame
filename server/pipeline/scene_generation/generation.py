@@ -5,7 +5,9 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES
+from pipeline.object_typing.categories import (
+    ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, normalize_category,
+)
 from pipeline.object_typing.categories import GRASS_TUFT_CATEGORY
 from pipeline.scene_generation.projection import (
     height_map_y_at,
@@ -114,7 +116,21 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
 
 # Objects whose estimated real-world largest dimension exceeds this threshold (meters)
 # are assumed to be large scene elements (mountains, hills, sky) and are skipped.
-_MAX_OBJECT_SIZE_M = 40.0
+#
+# This is a backstop, not the primary defence: an object this big is nearly always
+# a background crop whose depth the panorama map could not measure, and Panorama
+# Asset Generation's max_background_fraction gate rejects those on the evidence
+# rather than on the symptom. What survives to here is the residue -- a box with a
+# real depth sample that still unprojects absurdly large.
+#
+# Lowered 40 -> 25. At 40 the gate only ever caught the truly degenerate (a 349 m
+# crop of sky on a Shark Fin Cove capture) while passing a 38.1 m "lighthouse" of
+# blank sky, and on a Paris capture a 38.5 m and a 21.3 m "boat" on the Seine. 25 m
+# still clears everything those captures place legitimately -- the largest are a
+# 14.1 m building at 31.8 m and a 12.1 m riverboat -- and it is above the height of
+# any class in OBJECT_HEIGHT_PRIORS by a wide margin. Raise it for a capture whose
+# subject genuinely is a single large structure filling the frame.
+_MAX_OBJECT_SIZE_M = 25.0
 
 # A category mesh is scaled to match its instance's detected HEIGHT (see the mesh
 # branch in run()), which needs its own vertical extent as the divisor. Below this
@@ -440,7 +456,13 @@ class SceneGenerationStage(PipelineStage):
             for idx in placement_order:
                 metadata = context.input_object(f"metadata_{idx}") or {}
 
-                cls = metadata.get("class")
+                # Normalized for the same reason Panorama Asset Generation normalizes
+                # it (see normalize_category): post-typing detections carry free-text
+                # detector labels the environment test cannot recognize. It has to
+                # happen in BOTH stages or not at all -- this is also the name that
+                # builds mesh_key/pool_key below, and those have to match the keys
+                # asset generation published under.
+                cls = normalize_category(metadata.get("class"))
                 if cls in _ENV_CATEGORIES or cls == "indeterminate":
                     self.log_info(f"Skipping {cls} object {idx}")
                     self.advance_progress(generation_task)

@@ -47,7 +47,7 @@ class ImageClipClassifier:
         confidence_threshold: float = 0.9,
         object_margin_threshold: float = 0.9,
         min_confident_area_fraction: float = 0.001,
-        object_lead_confidence_threshold: float = 0.0,
+        object_lead_confidence_threshold: float = 0.5,
     ):
         self.device = device
         # Both thresholds are stated on _pairwise_certainty's scale: a
@@ -61,7 +61,7 @@ class ImageClipClassifier:
         # to", which is a question about scenery.
         self._confidence_threshold = confidence_threshold
         # The same gate for the other direction, when the OBJECT pool leads. Separate,
-        # and 0 by default, because the two directions are not the same question.
+        # and much lower, because the two directions are not the same question.
         #
         # object-vs-environment is a near-tie for most vegetation by construction: the
         # two pools are scored against prompts that describe the same pixels
@@ -75,9 +75,17 @@ class ImageClipClassifier:
         # ObjectCategoryClusteringStage's corroboration for want of a confident bucket
         # to match against, and the scene rendered zero trees.
         #
-        # At 0 an object lead of any size passes to the object-margin gate below, which
-        # is the question that DOES have an answer -- which object is it. Raise this
-        # toward confidence_threshold to restore the old symmetric strictness.
+        # This was 0 -- i.e. the gate was off, and an object lead of ANY size passed
+        # through to the object-margin gate below on the reasoning that "which object
+        # is it" is the question with an answer. That holds only while the lead is
+        # real. Measured on a Shark Fin Cove capture (a beach at sunset), the two
+        # crops that survived image typing were both blank sky, leading the
+        # environment pool by 0.0057 and 0.0083 raw cosine with every label in the
+        # scoring band 0.25-0.29 -- CLIP returning a near-uniform distribution, read
+        # by this gate as a decision. Both typed "lighthouse"; one rendered 38 m tall.
+        #
+        # The default is now a small positive lead rather than none. Raise toward
+        # confidence_threshold to restore the old symmetric strictness.
         self._object_lead_confidence_threshold = object_lead_confidence_threshold
         # Required gap between the winning object label's score and the
         # runner-up object label's score (same rescaled unit as `confidence`
@@ -227,13 +235,33 @@ class ImageClipClassifier:
             self._logit_scale,
         )
 
-        # Same measure, but within the object pool only: how one-sided is the
-        # winning object label against its runner-up. This is what `confidence`
-        # alone misses -- a crop can be unambiguously "an object, not scenery"
-        # while the specific object label chosen is nearly a coin flip.
+        # How one-sided is the winning object label against the best label that
+        # ISN'T it -- from either pool. This is what `confidence` alone misses:
+        # a crop can be unambiguously "an object, not scenery" while the specific
+        # object label chosen is nearly a coin flip.
+        #
+        # The rival is deliberately not the runner-up OBJECT alone, which is what
+        # this used to measure. Restricting it to the object pool means an
+        # environment label sitting BETWEEN the winner and the runner-up object is
+        # invisible to the gate, so the margin is earned against a label that was
+        # never the real competitor. Measured on a Shark Fin Cove capture (a beach,
+        # no structures of any kind), for a crop of blank sky:
+        #
+        #     lighthouse 0.2857   <- winner
+        #     cliff      0.2774   <- best environment, IGNORED by the old margin
+        #     landmark   0.2515   <- runner-up object, what the margin used
+        #
+        # margin against `landmark` is 0.94 and clears the 0.9 gate comfortably;
+        # against `cliff` it is 0.34 and does not. Both of that scene's two
+        # image-typed objects were this exact shape, and both rendered -- one as a
+        # 38 m "lighthouse" billboard of empty sky standing in the ocean.
+        rival_score = second_obj_score
+        rival_label = second_obj_label
+        if best_obj_label is not None and best_env_score > rival_score:
+            rival_score, rival_label = best_env_score, best_env_label
         object_margin = (
-            _pairwise_certainty(best_obj_score, second_obj_score, self._logit_scale)
-            if second_obj_label is not None else 1.0
+            _pairwise_certainty(best_obj_score, rival_score, self._logit_scale)
+            if rival_label is not None else 1.0
         )
 
         top_candidates = sorted(per_label, key=lambda x: x[1], reverse=True)[:top_n]
@@ -243,6 +271,10 @@ class ImageClipClassifier:
             "best_obj_score": round(best_obj_score, 4),
             "second_obj_label": second_obj_label,
             "second_obj_score": round(second_obj_score, 4) if second_obj_label is not None else None,
+            # Which label object_margin was actually measured against -- either the
+            # runner-up object or, when it outscores that, the best environment label.
+            "margin_rival_label": rival_label,
+            "margin_rival_score": round(rival_score, 4) if rival_label is not None else None,
             "object_margin": round(object_margin, 4),
             "best_env_label": best_env_label,
             "best_env_score": round(best_env_score, 4),

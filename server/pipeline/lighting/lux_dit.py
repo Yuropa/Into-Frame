@@ -14,6 +14,12 @@ class LightingResult:
         # is learned rather than analytic, so it cannot be inverted without the
         # merger. See LuxDiTServer._merge_hdr.
         self.hdr = result.get("hdr")
+        # Server-side account of why the merge did or didn't run (missing weights,
+        # a load failure, a rejected reconstruction, or success with its measured
+        # range). The server's own prints go to a stdout the pipeline log doesn't
+        # capture, so without this an LDR-only fallback -- which costs several
+        # stops of key light -- is indistinguishable from a working one.
+        self.hdr_status = result.get("hdr_status")
 
 
 class LuxDiT(RemoteClient):

@@ -92,23 +92,33 @@ stages:
                                        # object label (large crops only) before a specific
                                        # label is trusted; below this -> indeterminate
                                        # (or the scene-prior-corroborated runner-up)
-    object_lead_confidence_threshold: 0.0
+    object_lead_confidence_threshold: 0.5
                                        # the object-vs-environment gate, applied ONLY to
-                                       # crops where the OBJECT pool leads. The old single
-                                       # symmetric threshold rejected near-ties in both
-                                       # directions, and object-vs-environment is a near-tie
-                                       # for vegetation BY CONSTRUCTION -- the two pools are
-                                       # scored against prompts describing the same pixels
-                                       # ("colorful wildflowers in bloom" vs "a wildflower
-                                       # meadow"; "a cluster of trees" vs "a grassy lawn or
-                                       # meadow"). Measured on the Rainier capture: 68 of 68
-                                       # typed trees came back indeterminate from the crop,
-                                       # all 68 then failed Object Category Clustering's
-                                       # corroboration, and the scene rendered zero trees.
-                                       # 0 = any object lead falls through to the margin gate
-                                       # below, which asks the question that has an answer
-                                       # (WHICH object). Raise toward confidence_threshold to
-                                       # restore the old symmetric strictness.
+                                       # crops where the OBJECT pool leads. Deliberately far
+                                       # below confidence_threshold, because
+                                       # object-vs-environment is a near-tie for vegetation BY
+                                       # CONSTRUCTION -- the two pools are scored against
+                                       # prompts describing the same pixels ("colorful
+                                       # wildflowers in bloom" vs "a wildflower meadow"; "a
+                                       # cluster of trees" vs "a grassy lawn or meadow"). The
+                                       # old single symmetric threshold rejected those ties:
+                                       # measured on the Rainier capture, 68 of 68 typed trees
+                                       # came back indeterminate from the crop, all 68 then
+                                       # failed Object Category Clustering's corroboration,
+                                       # and the scene rendered zero trees.
+                                       #
+                                       # It is not 0, though, which is what it was and which
+                                       # disabled this gate outright -- ANY object lead, down
+                                       # to a rounding error, passed. Measured on a Shark Fin
+                                       # Cove capture (a beach), the only two crops that
+                                       # survived image-based typing at all were two patches
+                                       # of blank sky that beat the environment pool by 0.0057
+                                       # and 0.0083 raw cosine, both typed "lighthouse", one
+                                       # rendered 38 m tall standing in the sea. 0.5 is a
+                                       # ~0.011 raw-cosine lead: still well inside the
+                                       # vegetation tie band, and above the noise floor where
+                                       # CLIP is returning a near-uniform distribution over
+                                       # every prompt it has.
     min_confident_area_fraction: 0.001 # crop bbox area / panorama area below which the
                                        # margin gate above is skipped -- small crops just
                                        # take CLIP's best-effort guess.
@@ -1066,6 +1076,43 @@ stages:
     max_radius_m: 25.0        # grass is one Object3D per instance with no client-side
                                # instancing, so coverage is bounded; the terrain texture
                                # carries the ground beyond this.
+    # Two gates on whether this scene gets grass at all. Region typing alone answers
+    # only "is this cell's type grass-bearing", which comes back yes in scenes with no
+    # grass in them: measured across five captures, all five grew grass, including a
+    # photograph of the Seine taken from a bridge. 0 disables either gate.
+    min_observed_grass_fraction: 0.15
+                               # required share of the ground visible in the ORIGINAL
+                               # PHOTOGRAPH (front hemisphere, depth-sampled) that types as
+                               # grass. Only ~1/6 of the panorama is the capture; the rest
+                               # is generated, the generator invents plausible ground, and
+                               # region typing reads the invention as confidently as the
+                               # real pixels -- so a scene can be carpeted from evidence
+                               # nobody ever observed. Front typed-grass / front sampled:
+                               #   Mount Rainier (alpine meadow)  94%
+                               #   Irises (a field of irises)     40%
+                               #   Iceland (grassy hillside)       5%
+                               #   Shark Fin Cove (a beach)        2%
+                               #   Paris (a river)                 1%
+                               # Iceland is the one to watch: it genuinely has a grassy
+                               # hillside, but the segmenter types it `mountain` (which
+                               # grass_area._GRASS_SOURCE_TYPES excludes on purpose, to
+                               # keep grass off snowfields), so its real grass was never
+                               # eligible and its 1749 tufts were 88% behind the camera on
+                               # invented ground. Making that capture PASS is a region-
+                               # typing fix, not a threshold change.
+    min_exemplar_greenness: 0.05
+                               # required excess green ((2G-R-B)/255) of the exemplar
+                               # patches, over their opaque pixels. Those patches are cut
+                               # from the real panorama and are what the cards are TEXTURED
+                               # with, so if they aren't green nothing downstream will be:
+                               #   Paris +0.316  Irises +0.165  Rainier +0.148
+                               #   Iceland +0.127  Shark Fin Cove -0.123
+                               # Shark Fin Cove is the case: a "vegetation" region painted
+                               # onto a generated cliff face whose real pixels are orange
+                               # sand, which textured 1434 grass cards with beach. Set far
+                               # below every green case rather than between them -- this is
+                               # a veto on "definitely not a plant", and dry or golden grass
+                               # scores legitimately low.
     instance_spacing_m: 0.4   # nominal lattice pitch before jitter
     max_instances: 8000       # budget; exceeding it widens the spacing uniformly
                                # rather than truncating the scatter
@@ -1114,6 +1161,26 @@ stages:
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
+    max_background_fraction: 0.5
+    # A detection whose box is mostly BACKGROUND is not an object, whatever it was
+    # typed as. Two readings, both already computed upstream, and failing EITHER
+    # rejects the box: the fraction typed RegionType.SKY, and the fraction sitting at
+    # the panorama depth map's far clamp (max_depth_m, 100 m -- not a measurement but
+    # the value assigned to everything the map couldn't place, and ~43% of a typical
+    # panorama is at it).
+    #
+    # This is the gate for the "large floating object" failure, and it works because
+    # the two defects compound. Object size is angular_extent x depth, so a box the
+    # depth map couldn't measure isn't just mispositioned -- its metre size is
+    # angular_extent x 100, a fabricated number that grows with apparent distance.
+    # Across five captures every object over 10 m came from such a box: a 38 m
+    # "lighthouse" of blank sky standing in the sea (Shark Fin Cove), an 11.7 m moon
+    # over an alpine meadow (Mount Rainier), and on a Paris capture a 37 m tower plus
+    # 21 m, 16 m and 14 m "boats" -- all at 99.9 m median depth, 59-100% clamped.
+    #
+    # 0.5 because a real structure legitimately silhouettes against sky. Over those
+    # same captures the genuine buildings and boats measured 0.00-0.47 on both
+    # fractions and the rejects 0.54-1.00. 1.0 disables the gate.
     # Must stay in sync with Scene Generation's mesh_lod_distance_m below -- a group
     # meshed here but beyond that cutoff there generates an asset nothing renders,
     # and a group inside that cutoff without one here falls back to a billboard.

@@ -98,17 +98,30 @@ class LuxDiTServer(RemoteServer):
         #
         # Weights ship in the same nvidia/LuxDiT snapshot setup.sh already
         # downloads (the `hdr_merge_mlp` folder), so this costs no extra setup.
+        #
+        # hdr_status records WHY the merge did or didn't happen and travels back to
+        # the caller alongside the maps. This server runs in its own conda env as a
+        # subprocess, so the print()s here go to a stdout the pipeline log never
+        # captures, which made an LDR-only fallback silent from the pipeline's side:
+        # all five sample captures ran without HDR -- shipping a key light 2.4x-12x
+        # under Unity's nominal 1.0 -- and the only trace was "no HDR merge", with
+        # no way to tell missing weights from unloadable ones from a rejected result.
+        self.hdr_status = "not attempted"
         self.hdr_model = None
         merger_dir = checkpoint_dir / "hdr_merge_mlp"
         if merger_dir.is_dir():
             try:
                 from src.models.hdr_model import HDR_MLP
                 self.hdr_model = HDR_MLP.from_pretrained(str(merger_dir)).to(self.device).eval()
-                print(f"LuxDiT HDR merger loaded from {merger_dir}")
+                self.hdr_status = f"merger loaded from {merger_dir}"
             except Exception as e:
-                print(f"LuxDiT HDR merger failed to load ({e}) — falling back to LDR-only lighting")
+                self.hdr_status = f"merger at {merger_dir} failed to load: {e}"
         else:
-            print(f"No HDR merger at {merger_dir} — falling back to LDR-only lighting")
+            self.hdr_status = (
+                f"no merger at {merger_dir} — the nvidia/LuxDiT snapshot should "
+                f"contain an hdr_merge_mlp/ folder; re-run download_weights.py"
+            )
+        print(f"LuxDiT HDR: {self.hdr_status}")
 
     def _merge_hdr(self, ldr_img: PILImage.Image, log_img: PILImage.Image):
         """Reconstruct linear HDR radiance from the (env_ldr, env_log) pair.
@@ -132,7 +145,7 @@ class LuxDiTServer(RemoteServer):
             ldr = np.asarray(ldr_img.convert("RGB"), dtype=np.float32) / 255.0 * 2.0 - 1.0
             log = np.asarray(log_img.convert("RGB"), dtype=np.float32) / 255.0 * 2.0 - 1.0
             if ldr.shape != log.shape:
-                print(f"HDR merge skipped: shape mismatch {ldr.shape} vs {log.shape}")
+                self.hdr_status = f"merge skipped: shape mismatch {ldr.shape} vs {log.shape}"
                 return None
 
             shape = ldr.shape
@@ -142,15 +155,15 @@ class LuxDiTServer(RemoteServer):
                 hdr = self.hdr_model(x_ldr, x_log).float().cpu().numpy().reshape(shape)
 
             if not np.isfinite(hdr).all() or hdr.min() < 0.0 or hdr.max() <= 0.0:
-                print(f"HDR merge rejected: range [{hdr.min()}, {hdr.max()}] is not radiance")
+                self.hdr_status = f"merge rejected: range [{hdr.min()}, {hdr.max()}] is not radiance"
                 return None
-            print(
-                f"HDR merged: radiance range [{hdr.min():.4f}, {hdr.max():.2f}], "
+            self.hdr_status = (
+                f"merged: radiance range [{hdr.min():.4f}, {hdr.max():.2f}], "
                 f"peak/mean {hdr.max() / max(float(hdr.mean()), 1e-9):.1f}x"
             )
             return hdr.astype(np.float32)
         except Exception as e:
-            print(f"HDR merge failed ({e}) — falling back to LDR-only lighting")
+            self.hdr_status = f"merge failed: {e}"
             return None
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
@@ -229,7 +242,8 @@ class LuxDiTServer(RemoteServer):
         self.report_progress(1.0, "Done")
         # hdr is None when the merger is unavailable or produced something that
         # isn't radiance; SceneLighting falls back to the compressed maps then.
-        return {"ldr": frames_ldr[0], "log": frames_log[0], "hdr": hdr}
+        return {"ldr": frames_ldr[0], "log": frames_log[0], "hdr": hdr,
+                "hdr_status": self.hdr_status}
 
 
 if __name__ == "__main__":

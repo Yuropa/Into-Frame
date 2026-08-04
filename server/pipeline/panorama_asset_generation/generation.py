@@ -7,7 +7,10 @@ from typing import Any
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
 from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter
+from pipeline.object_typing.categories import (
+    ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
+)
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from util.device_utils import DeviceStrategy, preferred_device
 from util.crop_scoring import composite_score, occlusion_score, mask_fill_ratio
 
@@ -34,8 +37,36 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         occlusion_covered_fraction_threshold: float = 0.35,
         occlusion_disqualify_fraction: float = 0.6,
         occlusion_depth_margin: float = 0.10,
+        max_background_fraction: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # A detection whose box is mostly BACKGROUND is not an object, whatever it
+        # got typed as. Two independent readings of "background", both already
+        # computed by earlier stages, and a box failing either is rejected:
+        #
+        #   sky      -- fraction of the box PanoramaRegionStage types RegionType.SKY
+        #   unmeasured depth -- fraction of the box sitting at the panorama depth
+        #                       map's far clamp (max_depth_m, 100 m). Depth there is
+        #                       not a measurement; it is the value assigned to
+        #                       everything the map could not place, and 43% of a
+        #                       typical panorama is at it.
+        #
+        # This is the gate that matters for the "large floating object" failure,
+        # because the two defects compound. Size is angular_extent x depth (see
+        # scene_generation/projection.py), so a box the depth map could not measure
+        # is not merely mispositioned -- its metre size is angular_extent x 100,
+        # a fabricated number that grows with how far away the thing looked.
+        # Measured across five captures, every object over 10 m came from such a
+        # box: a 38 m "lighthouse" of blank sky standing in the sea (Shark Fin
+        # Cove), an 11.7 m moon hanging over a meadow (Mount Rainier), and in one
+        # Paris capture a 37 m tower, a 21 m boat, a 16 m boat and a 14 m boat, all
+        # at 99.9 m median depth with 59-100% of their pixels at the clamp.
+        #
+        # 0.5 rather than something stricter because a real structure legitimately
+        # silhouettes against sky: over those same captures the genuine buildings
+        # and boats measured 0.00-0.47 on both fractions and the rejects 0.54-1.00.
+        # 1.0 disables the gate.
+        self.max_background_fraction = float(max_background_fraction)
         self.billboard_distance_m = float(billboard_distance_m)
         # A group only earns a bespoke category mesh if its winning representative's
         # detection box covers at least this fraction of the panorama. Meshing is
@@ -111,8 +142,16 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
+        # The ORIGINAL panorama's region typing (not the _terrain one, which is
+        # derived from the object-removed panorama and so has nothing to say about
+        # where the objects were). Optional: absent, the background gate falls back
+        # to its depth half alone.
+        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        region_type_map = region_type_depth.depth if region_type_depth is not None else None
+
         group_best, billboard_pools, skipped_debug, disqualified_debug, synthetic_skipped = self._curate(
             object_count, context.input_object, context.input_image, panorama_depth, pano_w, pano_h,
+            region_type_map=region_type_map,
         )
 
         context.add_object("billboard_pools", billboard_pools)
@@ -173,8 +212,44 @@ class PanoramaAssetGenerationStage(PipelineStage):
         self.finish_progress(asset_task)
         return context
 
+    @staticmethod
+    def _box_patch(array, box, pano_w, pano_h):
+        """The `box` region of a full-sphere map, rescaled to that map's own resolution.
+
+        Boxes are in panorama pixel space, and neither map is guaranteed to share
+        it -- the depth map in particular is routinely a different resolution (see
+        _sample_object_depth, which does the same rescale for the same reason).
+        Indexing a half-size map with panorama coordinates reads the wrong region
+        entirely, and for a box near the bottom simply reads nothing.
+        """
+        if array is None or box is None or not pano_w or not pano_h:
+            return None
+        rows, cols = array.shape[:2]
+        sx, sy = cols / float(pano_w), rows / float(pano_h)
+        x1 = max(0, int(round(float(box[0]) * sx)))
+        y1 = max(0, int(round(float(box[1]) * sy)))
+        x2 = min(cols, max(x1 + 1, int(round((float(box[0]) + float(box[2])) * sx))))
+        y2 = min(rows, max(y1 + 1, int(round((float(box[1]) + float(box[3])) * sy))))
+        patch = array[y1:y2, x1:x2]
+        return patch if patch.size else None
+
+    def _background_fractions(
+        self, box, region_type_map, panorama_depth, far_depth, pano_w, pano_h,
+    ) -> tuple[float, float]:
+        """(sky fraction, unmeasured-depth fraction) of this box. See max_background_fraction."""
+        sky = clamped = 0.0
+        patch = self._box_patch(region_type_map, box, pano_w, pano_h)
+        if patch is not None:
+            sky = float(np.mean(patch == int(RegionType.SKY)))
+        if panorama_depth is not None and far_depth:
+            patch = self._box_patch(panorama_depth.depth, box, pano_w, pano_h)
+            if patch is not None:
+                clamped = float(np.mean(patch >= far_depth * 0.99))
+        return sky, clamped
+
     def _curate(
         self, object_count: int, get_metadata, get_image, panorama_depth, pano_w, pano_h,
+        region_type_map=None,
     ) -> tuple[dict[tuple[str, int], tuple[int, float, float]], dict[str, list[int]], list, list, int]:
         """Shared by run() and has_expected_output() (callers pass either the
         input_* accessors to see state as of the previous stage, or the plain
@@ -194,6 +269,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
         synthetic_skipped = 0
         depth_by_idx: dict[int, tuple[list, float]] = {}
         candidates_by_group: dict[tuple[str, int], list[dict]] = {}
+        far_depth = (
+            float(np.nanmax(panorama_depth.depth)) if panorama_depth is not None else None
+        )
 
         for idx in range(object_count):
             metadata = get_metadata(f"metadata_{idx}")
@@ -205,7 +283,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if box is not None and depth is not None:
                 depth_by_idx[idx] = (box, depth)
 
-            obj_class = metadata.get("class")
+            # Detections created after ObjectTypingStage (ObjectDetectionStage runs
+            # 17 stages later) carry free-text GroundingDINO labels rather than one
+            # of this module's category names, so the membership test below cannot
+            # see them for what they are -- "moon moonlight", "cloud", "sea water"
+            # and "stone" all read as placeable objects. See normalize_category.
+            obj_class = normalize_category(metadata.get("class"))
             if obj_class in _ENV_CATEGORIES or obj_class == "indeterminate":
                 skipped_debug.append({
                     "idx": idx,
@@ -213,6 +296,21 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     "reason": "environment" if obj_class in _ENV_CATEGORIES else "indeterminate",
                 })
                 continue
+
+            if not metadata.get("synthetic") and self.config.max_background_fraction < 1.0:
+                sky_fraction, clamped_fraction = self._background_fractions(
+                    box, region_type_map, panorama_depth, far_depth, pano_w, pano_h,
+                )
+                limit = self.config.max_background_fraction
+                if sky_fraction > limit or clamped_fraction > limit:
+                    skipped_debug.append({
+                        "idx": idx,
+                        "class": obj_class,
+                        "reason": "background",
+                        "sky_fraction": round(sky_fraction, 3),
+                        "unmeasured_depth_fraction": round(clamped_fraction, 3),
+                    })
+                    continue
             if not self.config.category_filter.allows(obj_class or ""):
                 skipped_debug.append({
                     "idx": idx,
@@ -428,8 +526,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_w = panorama.width if panorama is not None else None
         pano_h = panorama.height if panorama is not None else None
 
+        region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
         group_best, _, _, _, _ = self._curate(
             count, context.object, context.image, panorama_depth, pano_w, pano_h,
+            region_type_map=region_type_depth.depth if region_type_depth is not None else None,
         )
         for obj_class, bucket in group_best:
             if context.mesh(f"category_mesh_{obj_class}_{bucket}") is None:

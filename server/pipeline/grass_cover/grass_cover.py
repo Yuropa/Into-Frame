@@ -39,6 +39,52 @@ def _card_mesh_key(bucket: int) -> str:
     return f"category_mesh_{GRASS_TUFT_CATEGORY}_{bucket}_card"
 
 
+def _observed_grass_fraction(area_stats: dict) -> "float | None":
+    """Share of the ground the ORIGINAL PHOTOGRAPH shows that types as grass.
+
+    Front hemisphere only -- +Z is panorama theta 0, the direction the capture was
+    taken in and the only part of the equirect that is a photograph rather than a
+    generation. Denominator is the depth-sampled area rather than the whole disc,
+    so a scene whose near field simply wasn't measured isn't penalised for it;
+    this asks what the ground we could see is made of, not how much we could see.
+
+    None when the front hemisphere has no sampled ground at all (nothing to judge
+    on -- leave the decision to the other gates rather than inventing a verdict).
+    See GrassCoverConfiguration.min_observed_grass_fraction for the measurements.
+    """
+    front = (area_stats or {}).get("front")
+    if not front:
+        return None
+    sampled = float(front.get("sampled_m2") or 0.0)
+    if sampled <= 0.0:
+        return None
+    return float(front.get("grass_typed_m2") or 0.0) / sampled
+
+
+def _exemplar_greenness(patches: list) -> "float | None":
+    """Mean excess-green of the exemplar patches, over their opaque pixels only.
+
+    (2G - R - B) / 255, the standard vegetation index for ordinary RGB imagery: it
+    is positive for anything whose green channel dominates and strongly negative
+    for sand, bare rock and dry earth, without needing a model or a colour-space
+    conversion. Averaged per patch first so one large patch can't outvote the rest.
+
+    The alpha channel is the region cutout perspective_crop applied (see
+    _exemplar_patches), so transparent pixels are outside the vegetation region
+    entirely and would otherwise drag every patch toward the padding colour.
+    """
+    scores: list[float] = []
+    for patch in patches:
+        arr = np.asarray(patch.convert("RGBA"), dtype=np.float32)
+        rgb, alpha = arr[..., :3], arr[..., 3]
+        opaque = alpha > 8.0
+        if not opaque.any():
+            continue
+        r, g, b = rgb[..., 0][opaque], rgb[..., 1][opaque], rgb[..., 2][opaque]
+        scores.append(float(np.mean((2.0 * g - r - b) / 255.0)))
+    return float(np.mean(scores)) if scores else None
+
+
 class GrassCoverConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -49,6 +95,8 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         max_radius_m: float = 25.0,
+        min_observed_grass_fraction: float = 0.15,
+        min_exemplar_greenness: float = 0.05,
         instance_spacing_m: float = 0.4,
         max_instances: int = 8000,
         bucket_count: int = 3,
@@ -64,6 +112,56 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.max_radius_m = float(max_radius_m)
+        # Two gates on whether this scene should have grass AT ALL. Both exist
+        # because everything upstream of them answers a narrower question -- "is
+        # this cell's region type in _GRASS_SOURCE_TYPES" -- and that question has
+        # an affirmative answer in scenes with no grass anywhere in them. Measured
+        # across five captures, every one grew grass, including a photograph of the
+        # Seine from a bridge.
+        #
+        # WHERE the evidence came from. Only ~1/6 of the panorama is the original
+        # photograph; the rest is generated, and the generator invents plausible
+        # ground. Region typing then reads that invention as confidently as it reads
+        # the real pixels, so a scene can be carpeted from evidence that was never
+        # observed. This requires grass to be a real share of the ground actually
+        # visible in the photograph, measured over the front hemisphere alone (see
+        # grass_area._fill_hemisphere_stats, which already computed exactly this and
+        # had no consumer). Front typed-grass as a fraction of front depth-sampled
+        # ground, over those five captures:
+        #
+        #     Mount Rainier (alpine meadow)   94%
+        #     Irises (a field of irises)      40%
+        #     Iceland (grassy hillside)        5%
+        #     Shark Fin Cove (a beach)         2%
+        #     Paris (a river)                  1%
+        #
+        # 0.15 sits in the gap. Iceland is the interesting one: it DOES have a
+        # grassy hillside, filling half the frame -- but the segmenter types it
+        # `mountain`, which _GRASS_SOURCE_TYPES excludes on purpose (that exclusion
+        # is what keeps grass off snowfields), so its real grass was never eligible
+        # and the 1749 tufts it placed were 88% behind the camera on invented
+        # ground. Rejecting it is correct as things stand; making it PASS is a
+        # region-typing problem, not a threshold problem.
+        self.min_observed_grass_fraction = float(min_observed_grass_fraction)
+        # WHAT the evidence looks like. The exemplar patches are cut from the real
+        # panorama pixels inside the vegetation region, and they are what the cards
+        # get textured with -- so if they don't look like plants, nothing downstream
+        # will either. Excess green ((2G - R - B) / 255) over the opaque pixels of
+        # the candidate patches, which is a cheap deterministic test needing no
+        # model. Same five captures:
+        #
+        #     Paris          +0.316      Iceland         +0.127
+        #     Irises         +0.165      Shark Fin Cove  -0.123
+        #     Mount Rainier  +0.148
+        #
+        # Shark Fin Cove is the case this catches: a "vegetation" region the
+        # segmenter painted onto a generated cliff face, whose real pixels are
+        # orange sand, textured 1434 grass cards with beach.
+        #
+        # Deliberately a veto on "definitely not a plant" rather than a test for
+        # "is a plant" -- dry or golden grass is legitimately low on this scale, so
+        # the threshold sits far below every green case rather than between them.
+        self.min_exemplar_greenness = float(min_exemplar_greenness)
         # Nominal centre-to-centre spacing of the scatter lattice, before jitter.
         # 0.4 m over the ~886 m2 of grass the Rainier capture yields inside 25 m
         # is ~5500 instances, which is what max_instances is scaled against.
@@ -217,12 +315,40 @@ class GrassCoverStage(PipelineStage):
             context.add_object(_RAN_MARKER, True)
             return context
 
+        # Was any of this actually SEEN? See min_observed_grass_fraction. Checked
+        # before the exemplar/mesh work below, which is the expensive half.
+        observed = _observed_grass_fraction(area_stats)
+        if observed is not None and observed < cfg.min_observed_grass_fraction:
+            self.log_info(
+                f"Only {observed:.1%} of the ground visible in the original photograph "
+                f"types as grass (need {cfg.min_observed_grass_fraction:.0%}) — "
+                f"the {area_m2:.0f} m2 found is evidence from the generated panorama, "
+                f"not from the capture; skipping grass"
+            )
+            self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
+            context.add_object(_RAN_MARKER, True)
+            return context
+
         task = self.create_progress(4, "Building grass cover…")
 
         exemplars = self._exemplar_patches(panorama, type_map, cfg)
         self.advance_progress(task)
         if not exemplars:
             self.log_info("No usable grass exemplar patches in the panorama, skipping")
+            self.finish_progress(task)
+            self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
+            context.add_object(_RAN_MARKER, True)
+            return context
+
+        # Do those patches look like plants? See min_exemplar_greenness.
+        greenness = _exemplar_greenness(exemplars)
+        if greenness is not None and greenness < cfg.min_exemplar_greenness:
+            self.log_info(
+                f"Grass exemplars score {greenness:+.3f} excess-green "
+                f"(need {cfg.min_exemplar_greenness:+.3f}) — the region typed as "
+                f"vegetation isn't green, so its pixels would texture the cards with "
+                f"whatever it actually is; skipping grass"
+            )
             self.finish_progress(task)
             self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
             context.add_object(_RAN_MARKER, True)

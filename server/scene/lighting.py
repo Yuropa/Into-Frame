@@ -19,6 +19,32 @@ _SUN_PERCENTILE = 99.9
 # scaled up to put a normal sunny day near Unity's nominal intensity of 1.
 _SUN_INTENSITY_SCALE = 30.0
 
+# Extra gain applied to `intensity` ONLY when the HDR merge didn't run and the
+# estimate came from tonemapped LDR pixels instead (see _radiance).
+#
+# Tonemapping crushes precisely the range that separates a harsh sun from a bright
+# overcast sky, and it crushes it in one direction: the sun's peak is compressed
+# toward the sky's, so sun_share -- an energy ratio -- comes out systematically low
+# and the client's key light with it. SceneParamManager.ApplySun assigns this
+# straight to Unity's directional light, whose nominal daylight value is 1.0.
+# Measured across five captures, every one of which fell back to LDR:
+#
+#     Paris  0.08    Irises 0.10    Rainier 0.20    Shark Fin 0.32    Iceland 0.42
+#
+# i.e. between 2.4x and 12.2x under nominal, which is the flat, weak lighting this
+# corrects. 5.0 is the ratio the one available HDR-vs-LDR comparison showed (the
+# LDR map put the sun at ~6x the map mean where the merged HDR put it at ~30x), and
+# it lands the Rainier capture -- a clear-sky alpine noon with the solar disc
+# visible in frame -- at 1.01.
+#
+# It is a single constant standing in for a per-scene quantity, and the spread above
+# shows why that is a stopgap rather than a fix: the correct gain depends on how
+# diffuse the sky actually is, which is exactly what the merger measures and this
+# cannot. THE FIX IS TO MAKE THE MERGE RUN (LuxDiTServer.setup logs why it didn't);
+# when it does, is_hdr goes True, this is bypassed entirely, and nothing here
+# applies. Set to 1.0 to restore the previous under-lit behaviour.
+_LDR_FALLBACK_SUN_SCALE = 5.0
+
 
 class SceneLighting:
     """
@@ -141,7 +167,11 @@ class SceneLighting:
             "color": "#{:02x}{:02x}{:02x}".format(
                 *(int(round(float(c) * 255.0)) for c in np.clip(color, 0.0, 1.0))
             ),
-            "intensity": round(float(np.clip(sun_share * _SUN_INTENSITY_SCALE, 0.0, 3.0)), 3),
+            "intensity": round(float(np.clip(
+                sun_share * _SUN_INTENSITY_SCALE
+                * (1.0 if is_hdr else _LDR_FALLBACK_SUN_SCALE),
+                0.0, 3.0,
+            )), 3),
             # False means the merger didn't run, so `intensity` came from
             # tonemapped pixels and understates a harsh sun. Callers that care
             # (the client logs it) can tell the difference.

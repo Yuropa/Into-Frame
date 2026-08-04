@@ -1,3 +1,4 @@
+import re
 from typing import Final
 
 # Ground-cover grass, as a *scatterable object* rather than a surface type.
@@ -165,6 +166,73 @@ _ALL_KNOWN: Final[frozenset[str]] = frozenset(OBJECT_CATEGORIES) | frozenset({
     "sand", "snow", "ice", "mountain", "cliff", "trail", "road", "wall", "mud",
     "other_environment",
 })
+
+
+# Open-vocabulary detector labels that mean a known category under another name.
+# Checked before the token match in normalize_category, so a phrase that would
+# otherwise match nothing (or match the wrong half of itself) lands correctly.
+_CATEGORY_SYNONYMS: Final[dict[str, str]] = {
+    "stone": "rock",
+    "boulder": "rock",
+    "rock formation": "cliff",
+    "stone rock formation": "cliff",
+    "sea": "ocean",
+    "sea water": "water",
+    "cloud": "clouds",
+    "star": "stars",
+    "coast": "beach",
+    "shoreline": "beach",
+    "formation": "cliff",
+    "hill": "mountain",
+    "sun": "sunset",
+}
+
+
+def normalize_category(label: str | None) -> str | None:
+    """Map a free-text detector label onto a known category name, or return it unchanged.
+
+    ObjectTypingStage assigns every crop a label drawn from OBJECT_CATEGORIES /
+    ENVIRONMENT_CATEGORIES, so anything typed by CLIP is already a member of
+    _ALL_KNOWN. Detections created AFTER that stage are not: ObjectDetectionStage
+    runs 17 stages later and its GroundingDINO prompts come from
+    ObjectRecognitionStage's RAM tags, so its labels are free text -- and
+    frequently multi-word phrases that no exact-match test can ever recognize.
+
+    That matters because the environment filter downstream is an exact membership
+    test (`obj_class in ENVIRONMENT_CATEGORIES`). Every label it cannot recognize
+    is silently treated as a placeable object. Observed across five captures:
+
+        "moon moonlight"  -> not "moon"    -> placed a 11.7 m moon in a meadow
+        "cloud"           -> not "clouds"  -> placed a cloud
+        "sea water"       -> not "water"   -> placed a slab of ocean
+        "stone"           -> no match      -> placed an 8.4 m boulder cut from a cliff
+        "person man"      -> not "person"  -> lost its size prior as well
+
+    Matching is by whole word so a phrase resolves on any known token it contains,
+    with environment winning ties: "sea water" is scenery whichever half is read,
+    and a label that names scenery at all is not something to stand in the scene.
+    Unrecognized labels are returned unchanged rather than forced to a guess --
+    a genuinely novel object should still reach the placement gates, which judge
+    it on depth, sky fraction and size rather than on its name.
+    """
+    if not label:
+        return label
+    name = label.strip().lower()
+    if name in _ALL_KNOWN:
+        return name
+    if name in _CATEGORY_SYNONYMS:
+        return _CATEGORY_SYNONYMS[name]
+
+    tokens = [t for t in re.split(r"[^a-z0-9]+", name) if t]
+    for token in tokens:
+        if token in _CATEGORY_SYNONYMS:
+            return _CATEGORY_SYNONYMS[token]
+    # Environment first: a phrase naming both ("sea water", "rock face") is scenery.
+    for pool in (ENVIRONMENT_CATEGORIES, OBJECT_CATEGORIES):
+        for token in tokens:
+            if token in pool:
+                return token
+    return label
 
 
 def validate_categories(names: list[str]) -> None:
