@@ -25,3 +25,24 @@ class GroundingDino(RemoteClient):
             on_progress=on_progress,
         )
         return result["detections"]
+
+    def verify(
+        self,
+        crops: list[dict],
+        temp_path: Path,
+        threshold: float = 0.25,
+        min_box_fraction: float = 0.1,
+        on_progress=None,
+    ) -> list[dict]:
+        """Corroborate a proposed label per crop — see GroundingDinoServer._verify.
+
+        `crops` is [{"image": PIL.Image, "label": str}, ...]; the result is one
+        {label, score, box_fraction, verified} per input, in the same order.
+        """
+        result = self.send(
+            action="verify",
+            input={"crops": crops, "threshold": threshold, "min_box_fraction": min_box_fraction},
+            temp_path=temp_path,
+            on_progress=on_progress,
+        )
+        return result["verified"]

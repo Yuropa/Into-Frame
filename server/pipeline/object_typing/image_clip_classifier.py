@@ -47,7 +47,7 @@ class ImageClipClassifier:
         confidence_threshold: float = 0.9,
         object_margin_threshold: float = 0.9,
         min_confident_area_fraction: float = 0.001,
-        object_lead_confidence_threshold: float = 0.5,
+        object_lead_confidence_threshold: float = 0.0,
     ):
         self.device = device
         # Both thresholds are stated on _pairwise_certainty's scale: a
@@ -75,17 +75,24 @@ class ImageClipClassifier:
         # ObjectCategoryClusteringStage's corroboration for want of a confident bucket
         # to match against, and the scene rendered zero trees.
         #
-        # This was 0 -- i.e. the gate was off, and an object lead of ANY size passed
-        # through to the object-margin gate below on the reasoning that "which object
-        # is it" is the question with an answer. That holds only while the lead is
-        # real. Measured on a Shark Fin Cove capture (a beach at sunset), the two
-        # crops that survived image typing were both blank sky, leading the
-        # environment pool by 0.0057 and 0.0083 raw cosine with every label in the
-        # scoring band 0.25-0.29 -- CLIP returning a near-uniform distribution, read
-        # by this gate as a decision. Both typed "lighthouse"; one rendered 38 m tall.
+        # Back to 0 after a spell at 0.5. The 0.5 was an attempt to stop a Shark Fin
+        # Cove capture placing a 38 m "lighthouse" cut from blank sky, whose crop beat
+        # the environment pool by 0.0083 raw cosine with every label in the band
+        # 0.25-0.29 -- CLIP returning a near-uniform distribution, read as a decision.
+        # It did not work, and could not have: measured on the Rainier capture, ALL 20
+        # crops that cleared these gates sat inside a 0.019-0.034 top-5 spread, the 18
+        # junk ones and the 2 real ones alike. There is no threshold on a near-uniform
+        # distribution that keeps the signal and drops the noise, because at that point
+        # the two are the same numbers. What 0.5 did accomplish was rejecting the
+        # vegetation ties this gate exists to forgive: 65 of 65 trees came back
+        # indeterminate and the scene rendered none.
         #
-        # The default is now a small positive lead rather than none. Raise toward
-        # confidence_threshold to restore the old symmetric strictness.
+        # The judgement it was reaching for now happens where it can actually be made:
+        # ObjectTypingStage puts every proposed object label to Grounding DINO, which
+        # has to localize the phrase and can decline. "Is this really a lighthouse" is
+        # a question with an answer; "is a 0.008 cosine lead meaningful" is not.
+        #
+        # Raise toward confidence_threshold to restore the old symmetric strictness.
         self._object_lead_confidence_threshold = object_lead_confidence_threshold
         # Required gap between the winning object label's score and the
         # runner-up object label's score (same rescaled unit as `confidence`

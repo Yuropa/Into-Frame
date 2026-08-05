@@ -92,10 +92,9 @@ stages:
                                        # object label (large crops only) before a specific
                                        # label is trusted; below this -> indeterminate
                                        # (or the scene-prior-corroborated runner-up)
-    object_lead_confidence_threshold: 0.5
+    object_lead_confidence_threshold: 0.0
                                        # the object-vs-environment gate, applied ONLY to
-                                       # crops where the OBJECT pool leads. Deliberately far
-                                       # below confidence_threshold, because
+                                       # crops where the OBJECT pool leads, and OFF at 0.
                                        # object-vs-environment is a near-tie for vegetation BY
                                        # CONSTRUCTION -- the two pools are scored against
                                        # prompts describing the same pixels ("colorful
@@ -107,18 +106,17 @@ stages:
                                        # failed Object Category Clustering's corroboration,
                                        # and the scene rendered zero trees.
                                        #
-                                       # It is not 0, though, which is what it was and which
-                                       # disabled this gate outright -- ANY object lead, down
-                                       # to a rounding error, passed. Measured on a Shark Fin
-                                       # Cove capture (a beach), the only two crops that
-                                       # survived image-based typing at all were two patches
-                                       # of blank sky that beat the environment pool by 0.0057
-                                       # and 0.0083 raw cosine, both typed "lighthouse", one
-                                       # rendered 38 m tall standing in the sea. 0.5 is a
-                                       # ~0.011 raw-cosine lead: still well inside the
-                                       # vegetation tie band, and above the noise floor where
-                                       # CLIP is returning a near-uniform distribution over
-                                       # every prompt it has.
+                                       # Briefly 0.5, to stop a Shark Fin Cove sky crop
+                                       # becoming a 38 m "lighthouse". That did not work: on
+                                       # the Rainier capture all 20 crops clearing these gates
+                                       # sat inside a 0.019-0.034 top-5 spread -- 18 junk, 2
+                                       # real, one distribution. A threshold cannot separate
+                                       # numbers that are the same numbers. It did, however,
+                                       # reject 65 of 65 trees and empty the scene again.
+                                       #
+                                       # Deciding whether a label is real now happens where
+                                       # there is evidence for it: verify_labels below. Leave
+                                       # this at 0 unless that is disabled.
     min_confident_area_fraction: 0.001 # crop bbox area / panorama area below which the
                                        # margin gate above is skipped -- small crops just
                                        # take CLIP's best-effort guess.
@@ -133,6 +131,37 @@ stages:
                                        # including most of the trees this is meant to admit.
                                        # Crop area fractions on that capture: median 0.00049,
                                        # p90 0.00181, max 0.02217.
+    verify_labels: true                # after CLIP proposes a label, ask Grounding DINO to
+                                       # FIND that label in that crop, and set low_confidence
+                                       # from whether it could. This is the gate that decides
+                                       # what Object Category Clustering is allowed to trust,
+                                       # and it replaces CLIP grading its own homework.
+                                       #
+                                       # The gates above cannot do this job. CLIP scores a
+                                       # fixed label set and always returns a ranking, so on
+                                       # a capture it has no signal for the ranking is noise
+                                       # with a winner -- and that winner is what put 18
+                                       # crops of blurred meadow into the Rainier scene as
+                                       # the only category it had. An open-vocabulary
+                                       # detector has to localize the phrase it is given and
+                                       # can return nothing at all, which is the answer that
+                                       # was missing.
+                                       #
+                                       # Only OBJECT categories are verified; environment
+                                       # labels are never placed, so their flag changes
+                                       # nothing, and a detector is a poor judge of "sky".
+    verify_threshold: 0.25             # Grounding DINO box score required to corroborate.
+                                       # Below Object Detection's own 0.35 because this is a
+                                       # second opinion on a label another model already
+                                       # proposed, not a first-pass detection -- and it is
+                                       # paired with the coverage test below rather than
+                                       # standing alone.
+    verify_min_box_fraction: 0.1       # the box must also cover this fraction of the crop.
+                                       # The crop is already tight around one segmented
+                                       # instance, so a real match fills much of it; a small
+                                       # high-scoring box usually means the label was found
+                                       # in background caught inside the mask's bounding
+                                       # rectangle, not in the instance itself.
 
   - name: Panorama Inpainting
     stage: PanoramaInpaintingStage

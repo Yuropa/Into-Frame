@@ -31,6 +31,11 @@ _TRUNCATION_MARGIN_PX = 12
 # like SAM2's mask-based merge.
 _MERGE_BOX_IOU = 0.4
 
+# Floor for the "verify" action's own post-processing, well below _BOX_THRESHOLD --
+# that action decides on score and coverage jointly (see _verify) and so needs the
+# low-scoring boxes visible rather than cut off before it can weigh them.
+_VERIFY_FLOOR = 0.05
+
 
 class GroundingDinoServer(RemoteServer):
     def setup(self):
@@ -42,11 +47,72 @@ class GroundingDinoServer(RemoteServer):
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "detect":
             return self._detect(input["image"], input["tags"])
+        if action == "verify":
+            return self._verify(input["crops"], input["threshold"], input["min_box_fraction"])
         raise ValueError(f"Unknown action: {action}")
 
-    def _detect_one(self, image: PILImage.Image, prompt: str) -> list[dict]:
+    def _verify(
+        self, crops: list[dict], threshold: float, min_box_fraction: float
+    ) -> dict:
+        """Answer "does `label` actually appear in this crop" for each (image, label).
+
+        Independent corroboration for a label some other model proposed. Grounding
+        DINO is the right second opinion here specifically because it has to LOCALIZE
+        what it is asked about: a CLIP-style global embedding always returns a ranking
+        over whatever labels it was given, and on a capture with no signal that ranking
+        is near-uniform noise that still has a winner. This model can decline -- asked
+        for "lighthouse" on a crop of empty sky it returns no box at all.
+
+        Each crop is scored against ONLY its own candidate label, not the scene's whole
+        tag set. A single-phrase prompt is the actual question ("is this a tree"); a
+        multi-label prompt asks a different and easier one ("which of these is it
+        most"), which is the failure mode being corrected for.
+
+        A detection counts only if it covers at least `min_box_fraction` of the crop:
+        the crop is already tight around one segmented instance, so a real match fills
+        much of it, while a small high-scoring box usually means the label was found in
+        background that came along inside the mask's bounding rectangle.
+
+        Returns {"verified": [ {label, score, box_fraction, verified}, ... ]} in input
+        order -- the scores are kept for the debug record even when the answer is no.
+        """
+        out: list[dict] = []
+        for i, entry in enumerate(crops):
+            image, label = entry["image"], entry["label"]
+            rgb = image.convert("RGB")
+            crop_area = float(rgb.size[0] * rgb.size[1])
+            # Grounding DINO's prompt format: lowercase phrase, trailing period.
+            prompt = str(label).lower().strip().replace("_", " ") + "."
+            best_score, best_fraction = 0.0, 0.0
+            if crop_area > 0.0:
+                # Below this stage's own _BOX_THRESHOLD on purpose: the acceptance
+                # rule here is score AND coverage together, so it has to see the
+                # boxes a score-only cut would already have discarded.
+                for det in self._detect_one(rgb, prompt, threshold=_VERIFY_FLOOR):
+                    _, _, bw, bh = det["box"]
+                    fraction = float(bw * bh) / crop_area
+                    if det["score"] > best_score:
+                        best_score, best_fraction = det["score"], fraction
+            out.append({
+                "label": label,
+                "score": best_score,
+                "box_fraction": best_fraction,
+                "verified": best_score >= threshold and best_fraction >= min_box_fraction,
+            })
+            if (i + 1) % 16 == 0 or i + 1 == len(crops):
+                self.report_progress((i + 1) / max(len(crops), 1), f"Verifying… ({i + 1}/{len(crops)})")
+        return {"verified": out}
+
+    def _detect_one(
+        self, image: PILImage.Image, prompt: str, threshold: float | None = None
+    ) -> list[dict]:
         """Run Grounding DINO on a single (already tile-sized-or-smaller) image,
-        returning detections with box in that image's own local pixel space."""
+        returning detections with box in that image's own local pixel space.
+
+        `threshold` overrides the detection default for callers that apply their own
+        acceptance rule downstream and need the scores below it -- see _verify, which
+        decides on score AND coverage together and so must see boxes this stage's own
+        threshold would have dropped."""
         rgb = image.convert("RGB")
         inputs = self.processor(images=rgb, text=prompt, return_tensors="pt").to(self.device)
         with torch.no_grad():
@@ -54,7 +120,7 @@ class GroundingDinoServer(RemoteServer):
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             inputs.input_ids,
-            threshold=_BOX_THRESHOLD,
+            threshold=_BOX_THRESHOLD if threshold is None else threshold,
             target_sizes=[rgb.size[::-1]],  # (height, width)
         )[0]
 

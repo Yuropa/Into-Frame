@@ -136,8 +136,101 @@ _MAX_OBJECT_SIZE_M = 25.0
 # branch in run()), which needs its own vertical extent as the divisor. Below this
 # fraction of its largest extent the mesh is effectively a flat sheet, that divisor
 # is noise, and matching height would blow the other axes up by 1/extent_y -- so the
-# instance falls back to footprint scaling instead.
-_MIN_MESH_HEIGHT_FRACTION = 0.05
+# instance is billboarded instead.
+#
+# Raised 0.05 -> 0.25. At 0.05 the bar permitted a 20x amplification of the other two
+# axes and the pancake that motivated it cleared the bar: measured on the Rainier
+# capture, category_mesh_other_0 has extents [1.000, 0.0636, 0.468], i.e. 0.0636 of
+# its largest -- 27% ABOVE the old floor, so no warning fired and the height branch
+# was taken. Its two largest instances rendered at 15.9x and 47.2x, the second a
+# 47.2 m x 3.0 m x 22.1 m sheet whose near-flat geometry read as a slab hanging over
+# the meadow. The upright meshes this gate exists to pass are nowhere near it: the
+# same capture's category_mesh_flower_0 is [0.418, 1.000, 0.116], y/max = 1.000.
+_MIN_MESH_HEIGHT_FRACTION = 0.25
+
+# A reconstructed category mesh describes the same object its instance's 2D box
+# measured, so the two have to agree about that object's shape. This is the ratio
+# between the mesh's own width:height and the detection's, above which they don't:
+# the mesh is a bad reconstruction of something else, and the instance is billboarded
+# rather than scaled to fit.
+#
+# This is the check that actually catches unbounded mesh scaling, because it looks at
+# the mismatch rather than at either side alone -- and both `other` instances that
+# blew up on the Rainier capture fail it by two orders of magnitude:
+#
+#     idx 77   detection 0.70 x 3.00 m  -> 0.23:1      mesh 15.7:1   ratio 67x
+#     idx 7    detection 1.81 x 1.01 m  -> 1.79:1      mesh 15.7:1   ratio 8.8x
+#
+# while the legitimate meshes sit near 1: the same capture's flowers are a 0.42:1
+# mesh against a ~0.36:1 detection, a ratio of 1.2. 4.0 leaves a wide margin over
+# that and still rejects everything measured to have gone wrong. It would also have
+# caught the 38.1 m Shark Fin Cove "lighthouse", which was a sky crop meshed as a
+# broad flat shell against a tall narrow box.
+_MAX_MESH_ASPECT_RATIO = 4.0
+
+
+def mesh_instance_scale(
+    mesh_extents: "np.ndarray", width: float, height: float
+) -> tuple[float, str | None]:
+    """Uniform scale that renders `mesh_extents` at the instance's detected size.
+
+    Returns (scale, rejection_reason). A non-None reason means this mesh does not
+    describe this detection and the caller should billboard the instance instead --
+    the scale is still returned for the log line, not for use.
+
+    Scale is set by HEIGHT, for the reason object_scale.py's prior table documents:
+    an equirectangular box's horizontal extent depends on the object's yaw relative
+    to the camera (a tree seen through a gap vs. broadside differ by a lot) while its
+    vertical extent does not. Width is the unreliable axis, so it must not be what
+    sets scale.
+
+    The two rejections below both exist because that divisor is unbounded. Dividing
+    by a small extent_y is how a mesh of one object becomes a scene-spanning sheet
+    over another, and neither the detected size cull (_MAX_OBJECT_SIZE_M, which reads
+    the box, not the render) nor the classifier that assigned the class can see it
+    happen.
+    """
+    extent_y = float(mesh_extents[1])
+    extent_max = float(max(mesh_extents))
+    extent_horizontal = float(max(mesh_extents[0], mesh_extents[2]))
+    if extent_max <= 0.0 or extent_y <= 0.0:
+        return 0.0, "mesh has no extent"
+
+    if extent_y < _MIN_MESH_HEIGHT_FRACTION * extent_max:
+        return (
+            float(height) / extent_y,
+            f"flat in Y (extent_y {extent_y:.4f} is {extent_y / extent_max:.3f} of "
+            f"its largest {extent_max:.4f}, under {_MIN_MESH_HEIGHT_FRACTION})",
+        )
+
+    # Aspect agreement. Compared as a ratio-of-ratios so it is symmetric: a mesh far
+    # too squat for its box and one far too tall are the same kind of wrong.
+    if height > 1e-6 and width > 1e-6:
+        mesh_aspect = extent_horizontal / extent_y
+        box_aspect = float(width) / float(height)
+        disagreement = max(mesh_aspect / box_aspect, box_aspect / mesh_aspect)
+        if disagreement > _MAX_MESH_ASPECT_RATIO:
+            return (
+                float(height) / extent_y,
+                f"aspect {mesh_aspect:.2f}:1 disagrees with the detection's "
+                f"{box_aspect:.2f}:1 by {disagreement:.1f}x "
+                f"(over {_MAX_MESH_ASPECT_RATIO:.1f}x)",
+            )
+
+    scale = float(height) / extent_y
+
+    # Backstop on the RENDERED size. _MAX_OBJECT_SIZE_M above culls on the detected
+    # box, which is the wrong quantity for this failure and always passes it: the
+    # 47.2 m Rainier sheet was a 3.0 m detection, well inside a 25 m cull. What
+    # reaches the scene is scale * extents, so that is what has to be bounded.
+    rendered_max = scale * extent_max
+    if rendered_max > _MAX_OBJECT_SIZE_M:
+        return scale, (
+            f"would render {rendered_max:.1f} m across at {scale:.1f}x, "
+            f"over the {_MAX_OBJECT_SIZE_M:.0f} m limit"
+        )
+
+    return scale, None
 
 
 class SceneGenerationStage(PipelineStage):
@@ -262,6 +355,20 @@ class SceneGenerationStage(PipelineStage):
         # the client as objects floating above or buried under the ground.
         snap_counts = {"mesh": 0, "height_map": 0, "unsnapped": 0}
         unsnapped_examples: list[str] = []
+
+        # Category meshes refused for an instance by mesh_instance_scale, per mesh key.
+        # Summarised after the loop because the per-instance warning fires once per
+        # instance and a bad bucket mesh is shared by all of them -- the count is the
+        # signal that a whole reconstruction is wrong, not just one placement.
+        mesh_rejections: dict[str, int] = {}
+
+        # Per category mesh: its own normalised shape, and what every instance that
+        # used it actually renders at. A bucket mesh is shared, so one bad
+        # reconstruction is a defect repeated across the scene -- and the quantity
+        # that matters (scale * extents) appears nowhere else in a run's output. The
+        # 47 m Rainier sheet was a 3.0 m detection scaled 47.2x by a mesh 0.064 tall;
+        # every number in that sentence was invisible before this.
+        mesh_geometry: dict[str, dict] = {}
 
         def ground_y_at(world_x: float, world_z: float, yaw_degrees: float) -> float | None:
             local_x, local_z = terrain_local_xz(
@@ -708,6 +815,44 @@ class SceneGenerationStage(PipelineStage):
                     category_mesh, mesh_key, use_mesh = card_mesh, card_mesh_key, True
 
                 if use_mesh:
+                    # Does this mesh actually describe this instance's detection, and
+                    # what does it render at if so? Both questions are answered before
+                    # anything is placed, because a mesh that fails either one has to
+                    # fall through to the billboard branch below -- a billboard is
+                    # scaled directly to (width, height) and so cannot blow up the way
+                    # an unbounded 1/extent_y can.
+                    mesh_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                    mesh_scale, mesh_rejection = mesh_instance_scale(mesh_extents, width, height)
+
+                    record = mesh_geometry.get(mesh_key)
+                    if record is None:
+                        ex = [float(v) for v in mesh_extents]
+                        largest = max(ex) or 1.0
+                        record = mesh_geometry[mesh_key] = {
+                            "class": cls,
+                            "extents": [round(v, 4) for v in ex],
+                            "height_fraction": round(ex[1] / largest, 4),
+                            "aspect": round(max(ex[0], ex[2]) / ex[1], 3) if ex[1] > 0 else None,
+                            "instances": 0,
+                            "rejected": 0,
+                            "scales": [],
+                            "rendered_max_m": [],
+                        }
+                    record["instances"] += 1
+                    record["scales"].append(round(float(mesh_scale), 3))
+                    record["rendered_max_m"].append(round(float(mesh_scale) * max(record["extents"]), 3))
+
+                    if mesh_rejection is not None:
+                        self.log_warning(
+                            f"Category mesh {mesh_key} rejected for object {idx} ({cls}): "
+                            f"{mesh_rejection}; billboarding instead"
+                        )
+                        use_mesh = False
+                        mesh_rejections[mesh_key] = mesh_rejections.get(mesh_key, 0) + 1
+                        record["rejected"] += 1
+                        record.setdefault("reason", mesh_rejection)
+
+                if use_mesh:
                     # Use the shared bucket mesh with a random Y rotation.
                     # Mesh.fit_to_box recenters on the mesh's centroid, not its bounding-box
                     # center, so the mesh's lowest vertex is not reliably at -extent/2 --
@@ -716,43 +861,11 @@ class SceneGenerationStage(PipelineStage):
                     # the terrain. Sample the mesh's actual lowest vertex (bounds[0][1])
                     # and offset by exactly that, so the true bottom -- not an assumed one
                     # -- lands on terrain_y.
-                    # Scale this instance so the mesh's own HEIGHT matches the height
-                    # its 2D box subtends at its own depth -- per instance, not per
-                    # class and not per scene.
                     #
-                    # Height specifically, for the reason object_scale.py's prior table
-                    # documents: an equirectangular box's horizontal extent depends on
-                    # the object's yaw relative to the camera (a tree seen through a gap
-                    # vs. broadside differ by a lot) while its vertical extent does not.
-                    # Width is the unreliable axis, so it must not be what sets scale.
-                    #
-                    # The previous max(width, height) got this wrong twice over, because
-                    # it treated the scalar as if it were the mesh's height directly.
-                    # fit_to_box(1.0, 1.0) normalises the LARGER of X/Y to 1.0 and leaves
-                    # the other below it, so a uniform scale s renders a height of
-                    # s * extent_y, not s. On this capture 16 of 28 category meshes are
-                    # wider than tall (extent_y median 0.665, min 0.004), and 12 of 59
-                    # mesh-rendered objects came out more than 10% from their detected
-                    # height -- a tree box 2.70 x 1.92 m rendering 2.48 m tall (1.29x),
-                    # another 1.59x, and a flower at 0.08x. Dividing by the mesh's own
-                    # extent_y is exact in every case instead of right only when the mesh
-                    # is tall AND the detection is taller than wide.
-                    mesh_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
-                    mesh_extent_y = float(mesh_extents[1])
-                    # A mesh that is essentially flat in Y has no meaningful height to
-                    # match, and dividing by it explodes the other two axes (extent_y
-                    # 0.004 would scale a 0.07 m flower into a 17 m wide sheet). That is
-                    # a broken reconstruction, not a scale question -- fall back to the
-                    # old footprint-driven behaviour rather than trusting the ratio.
-                    if mesh_extent_y >= _MIN_MESH_HEIGHT_FRACTION * float(max(mesh_extents)):
-                        mesh_scale = float(height) / mesh_extent_y
-                    else:
-                        self.log_warning(
-                            f"Category mesh {mesh_key} is degenerate in Y "
-                            f"(extent {mesh_extent_y:.4f} of {float(max(mesh_extents)):.4f}); "
-                            f"scaling object {idx} by footprint instead of height"
-                        )
-                        mesh_scale = float(max(width, height))
+                    # mesh_scale was resolved above by mesh_instance_scale, which also
+                    # decides whether this mesh may be used for this instance at all;
+                    # reaching here means it passed. See that function for why height,
+                    # and not max(width, height), sets the scale.
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
                     self.log_info(f"Creating mesh for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m)")
@@ -860,6 +973,16 @@ class SceneGenerationStage(PipelineStage):
                 for example in rejected_examples:
                     self.log_info(f"    rejected object {example}")
 
+            if mesh_rejections:
+                self.log_warning(
+                    f"Category mesh rejection: {sum(mesh_rejections.values())} instance(s) "
+                    f"across {len(mesh_rejections)} mesh(es) billboarded instead of meshed"
+                )
+                for key, count in sorted(mesh_rejections.items(), key=lambda kv: -kv[1]):
+                    self.log_warning(f"    {key}: {count} instance(s)")
+
+            self._log_mesh_geometry(mesh_geometry)
+
         # Terrain/water/formation vertices were built directly in the panorama's
         # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --
         # not the camera's actual world orientation, which the extrinsics rotation
@@ -930,6 +1053,54 @@ class SceneGenerationStage(PipelineStage):
 
         context.add_scene(output_key, scene)
         return context
+
+    def _log_mesh_geometry(self, mesh_geometry: dict[str, dict]) -> None:
+        """Report every category mesh's own shape and what it rendered at.
+
+        The scale a shared bucket mesh gets is per-instance (height / extent_y), so
+        the same reconstruction can be fine for one detection and catastrophic for
+        the next -- and neither the mesh's shape nor the resulting world size was
+        recorded anywhere before this. Without them a scene-spanning slab and a
+        correctly-placed object produce identical logs.
+
+        height_fraction and aspect are the two inputs mesh_instance_scale actually
+        judges on, printed whether or not it rejected, so a mesh sitting just inside
+        the thresholds is visible before it becomes a bug report.
+        """
+        if not mesh_geometry:
+            return
+
+        self.log_info("Category mesh geometry (normalised extents → rendered size):")
+        for key, rec in sorted(mesh_geometry.items(), key=lambda kv: -max(kv[1]["rendered_max_m"] or [0])):
+            rendered = rec["rendered_max_m"]
+            scales = rec["scales"]
+            status = (
+                f"ALL {rec['rejected']} REJECTED" if rec["rejected"] == rec["instances"]
+                else f"{rec['rejected']}/{rec['instances']} rejected" if rec["rejected"]
+                else f"{rec['instances']} placed"
+            )
+            self.log_info(
+                f"    {key:<34} extents {rec['extents']} "
+                f"h_frac {rec['height_fraction']:.3f} aspect {rec['aspect']}  "
+                f"scale {min(scales):.1f}-{max(scales):.1f}x  "
+                f"rendered {min(rendered):.2f}-{max(rendered):.2f} m  [{status}]"
+            )
+            if rec.get("reason"):
+                self.log_info(f"        reason: {rec['reason']}")
+
+        if self.temp is not None or self.output is not None:
+            out = (self.temp or self.output) / "mesh_geometry_debug.json"
+            try:
+                out.write_text(json.dumps({
+                    "thresholds": {
+                        "min_mesh_height_fraction": _MIN_MESH_HEIGHT_FRACTION,
+                        "max_mesh_aspect_ratio": _MAX_MESH_ASPECT_RATIO,
+                        "max_object_size_m": _MAX_OBJECT_SIZE_M,
+                    },
+                    "meshes": mesh_geometry,
+                }, indent=2))
+            except OSError as e:
+                self.log_warning(f"Could not write mesh_geometry_debug.json: {e}")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, _, _, _, _, output_key = self._resolved_keys()

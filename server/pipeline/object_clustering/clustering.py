@@ -59,8 +59,8 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
 class ObjectCategoryClusteringStage(PipelineStage):
     """
     Sub-clusters each class's *confident* detections (ObjectTypingStage's
-    'low_confidence' flag false -- the real crop pixels alone cleared the CLIP
-    confidence bar) by visual similarity into 'bucket' groups -- e.g. splitting
+    'low_confidence' flag false -- Grounding DINO independently found that crop's
+    proposed label in that crop) by visual similarity into 'bucket' groups -- e.g. splitting
     one undifferentiated "flower" population into distinct color/species
     variants -- so downstream stages (Panorama Asset Generation, Scene
     Generation) can curate and place assets per visual variant instead of
@@ -77,8 +77,8 @@ class ObjectCategoryClusteringStage(PipelineStage):
     scene. Classes with fewer than 2 confident detections trivially get
     bucket 0.
 
-    Low-confidence crops (a caption or prior-class fallback guess ObjectTypingStage
-    couldn't verify against the actual pixels -- see its docstring) never get to
+    Low-confidence crops (a label ObjectTypingStage proposed but could not
+    corroborate -- see its docstring) never get to
     anchor a bucket or found their own category on that guess alone: instead, each
     one's DINOv2 embedding is compared against every confident bucket's centroid
     embedding, across every class, not just the one it was originally (unreliably)
@@ -136,6 +136,7 @@ class ObjectCategoryClusteringStage(PipelineStage):
         debug_by_class: dict[str, dict] = {}
         low_confidence_by_class: dict[str, list[int]] = {}
         centroids_by_class: dict[str, dict[int, np.ndarray]] = {}
+        trust_split: dict[str, tuple[int, int]] = {}
 
         for obj_class, grp in correlation.groups.items():
             # Environment/indeterminate groups (sky, grass, water, ...) are
@@ -161,6 +162,26 @@ class ObjectCategoryClusteringStage(PipelineStage):
             )
             if low_confidence_indices:
                 low_confidence_by_class[obj_class] = low_confidence_indices
+            trust_split[obj_class] = (len(confident_indices), len(low_confidence_indices))
+
+        # The composition of the confident set, per class, before anything is done
+        # with it. This is the state that decides the whole outcome: a class with no
+        # confident crop has no bucket, so every low-confidence crop it has must
+        # match some OTHER class's bucket or be dropped. That is how a capture with
+        # 65 typed trees rendered none, and until now the only trace of it was a
+        # zero in clustering_debug.json that had to be noticed and interpreted.
+        if trust_split:
+            self.log_info("  Confident / low-confidence split per class:")
+            for cls, (n_conf, n_low) in sorted(trust_split.items(), key=lambda kv: -sum(kv[1])):
+                marker = "  <-- NO ANCHOR" if n_conf == 0 and n_low else ""
+                self.log_info(f"    {cls:<16} confident {n_conf:<4} low-confidence {n_low:<4}{marker}")
+            anchorless = [c for c, (n_conf, n_low) in trust_split.items() if n_conf == 0 and n_low]
+            if anchorless:
+                self.log_warning(
+                    f"  {len(anchorless)} class(es) have low-confidence crops but NO confident "
+                    f"crop to anchor them: {', '.join(sorted(anchorless))}. Their crops can only "
+                    f"survive by matching another class's bucket."
+                )
 
         reassigned, rejected = self._reassign_low_confidence(
             context, correlation, low_confidence_by_class, centroids_by_class, task
@@ -224,6 +245,12 @@ class ObjectCategoryClusteringStage(PipelineStage):
         reassigned = 0
         rejected = 0
         threshold = self.config.position_only_similarity_threshold
+        # Best similarity reached per originating class, whether or not it cleared
+        # the bar. A class whose crops all peak just under threshold is a threshold
+        # problem; one that peaks near zero genuinely resembles nothing confident in
+        # the scene. The bare reject count cannot tell those apart, and it was the
+        # only thing reported when 270 crops were dropped in one line.
+        similarity_by_class: dict[str, list[float]] = {}
         for old_class, indices in low_confidence_by_class.items():
             for idx in indices:
                 metadata = context.input_object(f"metadata_{idx}") or {}
@@ -236,6 +263,10 @@ class ObjectCategoryClusteringStage(PipelineStage):
                         sim = float(np.dot(embedding, centroid))
                         if sim > best_sim:
                             best_sim, best_class = sim, cls
+
+                similarity_by_class.setdefault(old_class, []).append(
+                    best_sim if best_class is not None else 0.0
+                )
 
                 if best_class is not None and best_sim >= threshold:
                     self._move_index(correlation, old_class, best_class, idx)
@@ -255,6 +286,25 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 f"  low-confidence crops: {reassigned} visually corroborated (position-only), "
                 f"{rejected} unmatched -> dropped"
             )
+            if not all_centroids:
+                self.log_warning(
+                    "  No confident bucket existed anywhere in the scene, so every "
+                    "low-confidence crop was dropped without a comparison. Check "
+                    "Object Typing's 'Label verification' lines -- nothing was corroborated."
+                )
+            else:
+                self.log_info(
+                    f"  Best visual match per originating class "
+                    f"(threshold {threshold:.2f}, max / median):"
+                )
+                for cls, sims in sorted(similarity_by_class.items(), key=lambda kv: -len(kv[1])):
+                    ordered = sorted(sims)
+                    median = ordered[len(ordered) // 2]
+                    marker = "  <-- all dropped" if max(sims) < threshold else ""
+                    self.log_info(
+                        f"    {cls:<16} n={len(sims):<4} "
+                        f"{max(sims):.3f} / {median:.3f}{marker}"
+                    )
         return reassigned, rejected
 
     def _move_index(
