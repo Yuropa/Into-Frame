@@ -835,12 +835,33 @@ class SceneGenerationStage(PipelineStage):
                             "aspect": round(max(ex[0], ex[2]) / ex[1], 3) if ex[1] > 0 else None,
                             "instances": 0,
                             "rejected": 0,
-                            "scales": [],
-                            "rendered_max_m": [],
+                            # Running extremes, not per-instance lists. Ground cover
+                            # puts tens of thousands of instances through one card
+                            # mesh (16,031 grass tufts across 3 on the Rainier
+                            # capture), and keeping every value would write a debug
+                            # file of raw numbers that buries the handful that
+                            # matter. The extremes plus a few named examples are
+                            # what a blow-up actually shows up in.
+                            "scale_min": None, "scale_max": None,
+                            "rendered_min_m": None, "rendered_max_m": None,
+                            "examples": [],
                         }
                     record["instances"] += 1
-                    record["scales"].append(round(float(mesh_scale), 3))
-                    record["rendered_max_m"].append(round(float(mesh_scale) * max(record["extents"]), 3))
+                    scale_v = round(float(mesh_scale), 3)
+                    rendered_v = round(float(mesh_scale) * max(record["extents"]), 3)
+                    for lo, hi, value in (
+                        ("scale_min", "scale_max", scale_v),
+                        ("rendered_min_m", "rendered_max_m", rendered_v),
+                    ):
+                        if record[lo] is None or value < record[lo]:
+                            record[lo] = value
+                        if record[hi] is None or value > record[hi]:
+                            record[hi] = value
+                    # Keep the biggest few by rendered size -- those are the ones to
+                    # look at, and a reader wants an index to go and find them by.
+                    record["examples"].append({"idx": idx, "scale": scale_v, "rendered_m": rendered_v})
+                    record["examples"].sort(key=lambda e: -e["rendered_m"])
+                    del record["examples"][8:]
 
                     if mesh_rejection is not None:
                         self.log_warning(
@@ -1071,22 +1092,27 @@ class SceneGenerationStage(PipelineStage):
             return
 
         self.log_info("Category mesh geometry (normalised extents → rendered size):")
-        for key, rec in sorted(mesh_geometry.items(), key=lambda kv: -max(kv[1]["rendered_max_m"] or [0])):
-            rendered = rec["rendered_max_m"]
-            scales = rec["scales"]
+        for key, rec in sorted(mesh_geometry.items(), key=lambda kv: -(kv[1]["rendered_max_m"] or 0.0)):
             status = (
                 f"ALL {rec['rejected']} REJECTED" if rec["rejected"] == rec["instances"]
                 else f"{rec['rejected']}/{rec['instances']} rejected" if rec["rejected"]
                 else f"{rec['instances']} placed"
             )
+            aspect = "n/a" if rec["aspect"] is None else f"{rec['aspect']:.2f}"
             self.log_info(
                 f"    {key:<34} extents {rec['extents']} "
-                f"h_frac {rec['height_fraction']:.3f} aspect {rec['aspect']}  "
-                f"scale {min(scales):.1f}-{max(scales):.1f}x  "
-                f"rendered {min(rendered):.2f}-{max(rendered):.2f} m  [{status}]"
+                f"h_frac {rec['height_fraction']:.3f} aspect {aspect}  "
+                f"scale {rec['scale_min']:.1f}-{rec['scale_max']:.1f}x  "
+                f"rendered {rec['rendered_min_m']:.2f}-{rec['rendered_max_m']:.2f} m  [{status}]"
             )
             if rec.get("reason"):
                 self.log_info(f"        reason: {rec['reason']}")
+            if rec["examples"]:
+                biggest = ", ".join(
+                    f"obj {e['idx']} @ {e['scale']:.1f}x = {e['rendered_m']:.2f} m"
+                    for e in rec["examples"][:3]
+                )
+                self.log_info(f"        largest: {biggest}")
 
         if self.temp is not None or self.output is not None:
             out = (self.temp or self.output) / "mesh_geometry_debug.json"
