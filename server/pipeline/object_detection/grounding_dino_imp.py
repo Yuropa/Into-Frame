@@ -36,6 +36,54 @@ _MERGE_BOX_IOU = 0.4
 # low-scoring boxes visible rather than cut off before it can weigh them.
 _VERIFY_FLOOR = 0.05
 
+# Square canvas every crop is letterboxed onto before verification.
+#
+# Not cosmetic -- without it the model raises. Grounding DINO's two-stage decoder
+# selects a fixed `topk` (900) proposals from the flattened multi-scale feature
+# maps, and the processor sizes an image by shortest_edge=800 CAPPED at
+# longest_edge=1333. A crop with an extreme aspect ratio hits the cap first and
+# comes out tiny on its short axis: measured on the Rainier capture, crop_343 is
+# 1024x11 (93:1) and lands at roughly 1333x14, whose feature maps hold nowhere near
+# 900 positions, and torch.topk fails with "selected index k out of range". That
+# killed the whole stage mid-run. The detection path above never sees it because it
+# only ever feeds ~800px square tiles.
+#
+# Letterboxing onto a square fixes the shape problem at the source: aspect ratio is
+# preserved, the short axis is never squeezed by the long one, and every crop
+# presents the model the same geometry regardless of how the segmenter cut it.
+_VERIFY_CANVAS = 800
+# Crops smaller than this on either axis after all scaling are not a detection
+# question -- there is nothing in them to localize. Reported unverified rather than
+# guessed at.
+_VERIFY_MIN_SIDE_PX = 4
+
+
+def _letterbox_square(image: PILImage.Image, size: int) -> tuple[PILImage.Image, tuple[int, int, int, int]]:
+    """Scale `image` to fit a `size`x`size` canvas, preserving aspect, centred.
+
+    Returns (canvas, (x, y, w, h)) where the tuple is where the image landed, in
+    canvas pixels -- callers measuring how much of the CROP a detected box covers
+    need that rect, not the canvas.
+
+    Padding is the image's own mean colour rather than black. A black surround puts
+    a hard high-contrast rectangle round the subject, which an object detector will
+    happily find edges on; the mean blends it. Same reasoning as
+    flatten_alpha_with_mean_fill's, applied to the outside instead of the holes.
+    """
+    w, h = image.size
+    if w <= 0 or h <= 0:
+        return PILImage.new("RGB", (size, size)), (0, 0, 0, 0)
+
+    scale = min(size / w, size / h)
+    new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
+    resized = image.resize((new_w, new_h), PILImage.LANCZOS)
+
+    mean = tuple(int(c) for c in np.array(resized).reshape(-1, 3).mean(axis=0))
+    canvas = PILImage.new("RGB", (size, size), mean)
+    ox, oy = (size - new_w) // 2, (size - new_h) // 2
+    canvas.paste(resized, (ox, oy))
+    return canvas, (ox, oy, new_w, new_h)
+
 
 class GroundingDinoServer(RemoteServer):
     def setup(self):
@@ -80,25 +128,46 @@ class GroundingDinoServer(RemoteServer):
         for i, entry in enumerate(crops):
             image, label = entry["image"], entry["label"]
             rgb = image.convert("RGB")
-            crop_area = float(rgb.size[0] * rgb.size[1])
             # Grounding DINO's prompt format: lowercase phrase, trailing period.
             prompt = str(label).lower().strip().replace("_", " ") + "."
             best_score, best_fraction = 0.0, 0.0
-            if crop_area > 0.0:
+            note = None
+
+            canvas, crop_rect = _letterbox_square(rgb, _VERIFY_CANVAS)
+            cx0, cy0, cw, ch = crop_rect
+            if min(cw, ch) < _VERIFY_MIN_SIDE_PX:
+                note = f"crop too small to localize ({rgb.size[0]}x{rgb.size[1]})"
+            else:
+                crop_area = float(cw * ch)
                 # Below this stage's own _BOX_THRESHOLD on purpose: the acceptance
                 # rule here is score AND coverage together, so it has to see the
                 # boxes a score-only cut would already have discarded.
-                for det in self._detect_one(rgb, prompt, threshold=_VERIFY_FLOOR):
-                    _, _, bw, bh = det["box"]
-                    fraction = float(bw * bh) / crop_area
+                for det in self._detect_one(canvas, prompt, threshold=_VERIFY_FLOOR):
+                    bx, by, bw, bh = det["box"]
+                    # Clip to the pasted crop -- coverage has to be measured against
+                    # the crop, not the canvas, or the letterbox padding would count
+                    # as area the label failed to fill and every fraction would be
+                    # deflated by however square the crop happened to be.
+                    ix0, iy0 = max(bx, cx0), max(by, cy0)
+                    ix1, iy1 = min(bx + bw, cx0 + cw), min(by + bh, cy0 + ch)
+                    inter = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+                    fraction = inter / crop_area if crop_area > 0 else 0.0
                     if det["score"] > best_score:
                         best_score, best_fraction = det["score"], fraction
-            out.append({
+
+            result = {
                 "label": label,
                 "score": best_score,
                 "box_fraction": best_fraction,
-                "verified": best_score >= threshold and best_fraction >= min_box_fraction,
-            })
+                "verified": (
+                    note is None
+                    and best_score >= threshold
+                    and best_fraction >= min_box_fraction
+                ),
+            }
+            if note is not None:
+                result["note"] = note
+            out.append(result)
             if (i + 1) % 16 == 0 or i + 1 == len(crops):
                 self.report_progress((i + 1) / max(len(crops), 1), f"Verifying… ({i + 1}/{len(crops)})")
         return {"verified": out}

@@ -10,6 +10,22 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.image_utils import flatten_alpha_with_mean_fill
 
 
+# Labels that name no particular thing, so no detector can be asked to find one.
+# They are never corroborated and never trusted -- 'other' means "we did not
+# identify this", which is not a licence to place it, and the verification pass
+# must not read a detector's inability to localize "an unidentified object" as
+# evidence about the crop.
+#
+# This matters more than it looks. 'other' is scored by CLIP against the prompts
+# "a photo of an unidentified object" / "a miscellaneous item outdoors", which are
+# generic enough to win a near-uniform distribution outright: measured on the
+# Rainier capture, 158 of 359 crops came back 'other' from the image pass, at
+# confidences down to 0.03, including a crop BLIP had captioned "a close up of a
+# tall pine tree with a brown background". A catch-all that wins ties is a catch-all
+# that swallows the scene, and 18 such crops previously became its only category.
+_UNVERIFIABLE_CATEGORIES = frozenset({"other"})
+
+
 class ObjectTypingConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -242,9 +258,29 @@ class ObjectTypingStage(PipelineStage):
         if not self.config.verify_labels:
             return
 
+        # Unverifiable labels never reach the model; they are simply never trusted.
+        # Marked here rather than skipped silently so the count shows up in the log
+        # and the flag is written either way.
+        unverifiable = [e for e in debug_entries if e["class"] in _UNVERIFIABLE_CATEGORIES]
+        for entry in unverifiable:
+            entry["verification"] = {
+                "score": 0.0, "box_fraction": 0.0, "verified": False,
+                "note": "category names no specific thing; never corroborated",
+            }
+            metadata = context.object(f"metadata_{entry['idx']}") or {}
+            context.add_object(f"metadata_{entry['idx']}", {**metadata, "low_confidence": True})
+        if unverifiable:
+            self.log_info(
+                f"Label verification: {len(unverifiable)} crop(s) typed "
+                f"{'/'.join(sorted(_UNVERIFIABLE_CATEGORIES))} — not a localizable label, "
+                f"marked low-confidence without asking"
+            )
+
         candidates = [
             entry for entry in debug_entries
-            if entry["class"] in OBJECT_CATEGORIES and entry["class"] != "indeterminate"
+            if entry["class"] in OBJECT_CATEGORIES
+            and entry["class"] != "indeterminate"
+            and entry["class"] not in _UNVERIFIABLE_CATEGORIES
         ]
         if not candidates:
             self.log_info("Label verification: no object-class crops to verify")
@@ -262,15 +298,34 @@ class ObjectTypingStage(PipelineStage):
             return
 
         task = self.create_progress(1, "Verifying labels…")
-        if self._verifier is None:
-            self._verifier = GroundingDino(self.device)
-        verdicts = self._verifier.verify(
-            crops,
-            self.temp or self.output,
-            threshold=self.config.verify_threshold,
-            min_box_fraction=self.config.verify_min_box_fraction,
-            on_progress=self.make_progress_callback(task),
-        )
+        try:
+            if self._verifier is None:
+                self._verifier = GroundingDino(self.device)
+            verdicts = self._verifier.verify(
+                crops,
+                self.temp or self.output,
+                threshold=self.config.verify_threshold,
+                min_box_fraction=self.config.verify_min_box_fraction,
+                on_progress=self.make_progress_callback(task),
+            )
+        except Exception as e:
+            # This pass refines how much each label is TRUSTED; it does not produce
+            # the labels. Failing it should cost confidence, not the run. The first
+            # version of this code had no guard and took the whole pipeline down at
+            # stage 8 of 38 on a malformed crop, discarding half an hour of upstream
+            # work for a step whose absence the stage is designed to tolerate --
+            # low_confidence keeps the CLIP-only meaning set in the loop above.
+            self.log_warning(
+                f"Label verification failed ({type(e).__name__}: {e}); "
+                f"falling back to CLIP-only confidence for {len(kept)} crop(s). "
+                f"Every downstream trust decision is now made on the weaker signal."
+            )
+            self.finish_progress(task)
+            return
+        finally:
+            if self._verifier is not None:
+                self._verifier.close()
+                self._verifier = None
         self.finish_progress(task)
 
         verified_by_class: dict[str, list[int]] = {}

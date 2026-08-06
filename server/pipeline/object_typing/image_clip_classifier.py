@@ -8,6 +8,24 @@ import torch
 _OBJECT_LABELS = frozenset(OBJECT_CATEGORIES.keys())
 _ALL_CATEGORIES = {**OBJECT_CATEGORIES, **ENVIRONMENT_CATEGORIES}
 
+# Labels that are scored but can never be the answer. They stay in the pools --
+# removing them would push the generic probability mass they absorb onto whichever
+# specific label is nearest, inflating exactly the confidences the gates read -- but
+# winning with one is reported as 'indeterminate', which is what it means.
+#
+# 'other' is prompted as "a photo of an unidentified object" / "a miscellaneous item
+# outdoors". That is general enough to beat every specific label whenever CLIP has
+# no real signal, and there is no scene in which the useful conclusion is "an
+# unidentified object goes here". Measured on the Rainier capture with the object
+# lead gate off, it won the image pass for 158 of 359 crops at confidences down to
+# 0.03, one of them a crop BLIP had captioned "a close up of a tall pine tree with a
+# brown background" -- a tree, lost to a label that asserts nothing.
+#
+# Returning 'indeterminate' instead routes those crops to the caption fallback,
+# which for that crop says "tree" and can then be corroborated. A non-answer should
+# cost the crop its image-pass verdict, not its place in the scene.
+_NON_ANSWER_LABELS = frozenset({"other"})
+
 
 def _pairwise_certainty(winner_score: float, runner_up_score: float, logit_scale: float) -> float:
     """How decisively `winner_score` beats `runner_up_score`, in [0, 1].
@@ -36,6 +54,18 @@ def _pairwise_certainty(winner_score: float, runner_up_score: float, logit_scale
     turns it back into a probability the thresholds can be stated against.
     """
     return math.tanh(logit_scale * (winner_score - runner_up_score) / 2.0)
+
+
+def _answer(label: str | None) -> str:
+    """Winning label, or 'indeterminate' if it is one that asserts nothing.
+
+    See _NON_ANSWER_LABELS. Applied at every point that returns a winner so a
+    non-answer cannot slip through one branch -- including the scene-prior tie-break,
+    which picks the runner-up and could otherwise promote 'other' on a technicality.
+    """
+    if label is None or label in _NON_ANSWER_LABELS:
+        return "indeterminate"
+    return label
 
 
 class ImageClipClassifier:
@@ -318,9 +348,9 @@ class ImageClipClassifier:
                 and second_obj_label in scene_category_prior
                 and best_obj_label not in scene_category_prior
             ):
-                return second_obj_label, confidence, top_candidates, criteria
+                return _answer(second_obj_label), confidence, top_candidates, criteria
             return "indeterminate", confidence, top_candidates, criteria
 
         if best_obj_score >= best_env_score:
-            return best_obj_label, confidence, top_candidates, criteria
-        return best_env_label, confidence, top_candidates, criteria
+            return _answer(best_obj_label), confidence, top_candidates, criteria
+        return _answer(best_env_label), confidence, top_candidates, criteria
