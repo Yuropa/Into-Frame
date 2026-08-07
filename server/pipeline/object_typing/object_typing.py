@@ -357,7 +357,14 @@ class ObjectTypingStage(PipelineStage):
         for cls, (ok, total) in sorted(verified_by_class.items(), key=lambda kv: -kv[1][1]):
             self.log_info(f"    {cls}: {ok}/{total}")
 
-        self._log_verification_diagnostics(kept)
+        # Same guard as SceneGenerationStage's mesh report, for the same reason:
+        # this is reporting, and reporting must not be able to fail the stage.
+        try:
+            self._log_verification_diagnostics(kept)
+        except Exception as e:
+            self.log_warning(
+                f"Could not report verification diagnostics ({type(e).__name__}: {e})"
+            )
 
     def _log_verification_diagnostics(self, kept: list[dict]) -> None:
         """Everything needed to retune verify_threshold / verify_min_box_fraction.

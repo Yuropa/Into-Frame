@@ -170,18 +170,24 @@ class ObjectCategoryClusteringStage(PipelineStage):
         # match some OTHER class's bucket or be dropped. That is how a capture with
         # 65 typed trees rendered none, and until now the only trace of it was a
         # zero in clustering_debug.json that had to be noticed and interpreted.
-        if trust_split:
-            self.log_info("  Confident / low-confidence split per class:")
-            for cls, (n_conf, n_low) in sorted(trust_split.items(), key=lambda kv: -sum(kv[1])):
-                marker = "  <-- NO ANCHOR" if n_conf == 0 and n_low else ""
-                self.log_info(f"    {cls:<16} confident {n_conf:<4} low-confidence {n_low:<4}{marker}")
-            anchorless = [c for c, (n_conf, n_low) in trust_split.items() if n_conf == 0 and n_low]
-            if anchorless:
-                self.log_warning(
-                    f"  {len(anchorless)} class(es) have low-confidence crops but NO confident "
-                    f"crop to anchor them: {', '.join(sorted(anchorless))}. Their crops can only "
-                    f"survive by matching another class's bucket."
-                )
+        #
+        # Wrapped for the same reason SceneGenerationStage's mesh report is: this
+        # is reporting, and reporting must not be able to fail the stage.
+        try:
+            if trust_split:
+                self.log_info("  Confident / low-confidence split per class:")
+                for cls, (n_conf, n_low) in sorted(trust_split.items(), key=lambda kv: -sum(kv[1])):
+                    marker = "  <-- NO ANCHOR" if n_conf == 0 and n_low else ""
+                    self.log_info(f"    {cls:<16} confident {n_conf:<4} low-confidence {n_low:<4}{marker}")
+                anchorless = [c for c, (n_conf, n_low) in trust_split.items() if n_conf == 0 and n_low]
+                if anchorless:
+                    self.log_warning(
+                        f"  {len(anchorless)} class(es) have low-confidence crops but NO confident "
+                        f"crop to anchor them: {', '.join(sorted(anchorless))}. Their crops can only "
+                        f"survive by matching another class's bucket."
+                    )
+        except Exception as e:
+            self.log_warning(f"Could not report trust split ({type(e).__name__}: {e})")
 
         reassigned, rejected = self._reassign_low_confidence(
             context, correlation, low_confidence_by_class, centroids_by_class, task
@@ -281,6 +287,23 @@ class ObjectCategoryClusteringStage(PipelineStage):
                     rejected += 1
                 self.advance_progress(task)
 
+        # Reporting only from here down -- guarded so it cannot fail the stage.
+        try:
+            self._report_reassignment(
+                reassigned, rejected, all_centroids, similarity_by_class, threshold
+            )
+        except Exception as e:
+            self.log_warning(f"Could not report reassignment ({type(e).__name__}: {e})")
+        return reassigned, rejected
+
+    def _report_reassignment(
+        self,
+        reassigned: int,
+        rejected: int,
+        all_centroids: list,
+        similarity_by_class: dict[str, list[float]],
+        threshold: float,
+    ) -> None:
         if reassigned or rejected:
             self.log_info(
                 f"  low-confidence crops: {reassigned} visually corroborated (position-only), "
@@ -305,7 +328,6 @@ class ObjectCategoryClusteringStage(PipelineStage):
                         f"    {cls:<16} n={len(sims):<4} "
                         f"{max(sims):.3f} / {median:.3f}{marker}"
                     )
-        return reassigned, rejected
 
     def _move_index(
         self, correlation: ObjectCorrelationResult, old_class: str, new_class: str | None, idx: int,

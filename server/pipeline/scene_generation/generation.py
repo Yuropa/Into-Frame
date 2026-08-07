@@ -1,3 +1,4 @@
+import json
 from typing import Any
 from logging import Logger
 
@@ -1002,7 +1003,15 @@ class SceneGenerationStage(PipelineStage):
                 for key, count in sorted(mesh_rejections.items(), key=lambda kv: -kv[1]):
                     self.log_warning(f"    {key}: {count} instance(s)")
 
-            self._log_mesh_geometry(mesh_geometry)
+            # Reporting must never be able to fail the stage. This exact call took
+            # a completed 85-minute run down at the last stage with a NameError on
+            # a debug-file write -- every object placed, the scene assembled, and
+            # the run discarded by a log line. A diagnostic that can destroy the
+            # thing it is diagnosing is worse than no diagnostic.
+            try:
+                self._log_mesh_geometry(mesh_geometry)
+            except Exception as e:
+                self.log_warning(f"Could not report mesh geometry ({type(e).__name__}: {e})")
 
         # Terrain/water/formation vertices were built directly in the panorama's
         # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --
@@ -1125,7 +1134,7 @@ class SceneGenerationStage(PipelineStage):
                     },
                     "meshes": mesh_geometry,
                 }, indent=2))
-            except OSError as e:
+            except Exception as e:
                 self.log_warning(f"Could not write mesh_geometry_debug.json: {e}")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
