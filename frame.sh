@@ -112,6 +112,9 @@ remote options (SSH + port forwarding, then starts server on the remote):
   -i, --input PATH   Image to generate from, RELATIVE TO --dir unless absolute
                      (default: samples/Mount Rainier.jpg)          [server only]
   -d, --debug BOOL   Save intermediate files on remote   [server only]
+  --rerun STAGE[,...] Force stage(s) to re-run on the remote, with everything
+                     downstream. Repeatable. Required after a config.yaml edit --
+                     stage caching never looks at the config.     [server only]
   --config PATH      Remote pipeline config YAML         [server only]
   -o, --output DIR   Output directory to clear           [clear only]
 

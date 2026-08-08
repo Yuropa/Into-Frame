@@ -23,6 +23,7 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     colorize_region_type_map,
     paintable_region_types,
 )
+from pipeline.object_typing.categories import VEGETATION_CATEGORIES
 
 _HERE = Path(__file__).resolve().parent
 
@@ -39,6 +40,18 @@ _MIN_EXEMPLAR_DOMAIN = 16
 # can serve as a "did this stage actually run" marker for has_expected_output — an
 # ad hoc key it always (and only) writes on a completed run is the only reliable one.
 _RAN_MARKER = "distribution_synthesis_complete"
+
+
+def _is_water_region(region_type: str) -> bool:
+    """True when this distribution's region label is water.
+
+    The keys are labels, not RegionType members, and from_label raises on anything it
+    doesn't know -- a region type this build has never heard of is not water.
+    """
+    try:
+        return RegionType.from_label(region_type) == RegionType.WATER
+    except (KeyError, ValueError):
+        return False
 
 
 def _find_synthesize_cli(configured_path: str | None) -> Path | None:
@@ -212,6 +225,8 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         size_jitter: float = 0.15,
         input_boundary_pad_factor: float = 1.5,
         max_instances_per_group: int = 12000,
+        min_exemplars: int = 8,
+        paint_vegetation_in_water: bool = False,
         min_exemplar_spacing_m: float = 0.25,
         full_density_radius_m: float = 6.0,
         density_falloff_exponent: float = 2.0,
@@ -236,6 +251,29 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # instantiates one GameObject per placed object with no GPU instancing, so
         # this is a GameObject budget, not a triangle budget.
         self.max_instances_per_group = max_instances_per_group
+        # How many real detections a group needs before its pattern is trusted enough
+        # to populate a region with.
+        #
+        # Painted density is exemplar count / exemplar hull area, so it is a RATIO
+        # measured from however many points the group has -- and at two or three points
+        # that ratio is not a measurement of anything. Its hull is whatever triangle
+        # they happen to form, which for near-neighbours is a few square metres, and
+        # the resulting density is then painted across an entire region. Measured on
+        # the Rainier capture, where the stage went from 407 real detections to 5,541
+        # objects: flower [water] 3 exemplars -> 337 painted, bush [ground] 3 -> 211,
+        # plant [water] 3 -> 65. The groups with enough points to have a real spatial
+        # pattern behaved -- tree [ground] 56 -> 21.
+        #
+        # 8 is above every pathological group on that capture and below every healthy
+        # one (flower [ground] 45, tree [ground] 56, plant [ground] 39, table 8). The
+        # old floor of 2 was only ever "enough points to compute a PCF at all", which
+        # is a different question from "enough evidence to fill a meadow". 0 disables.
+        self.min_exemplars = min_exemplars
+        # Whether vegetation may be painted into RegionType.WATER. Off: the region map
+        # types a real lake, and the pattern learned from a shoreline clump then paints
+        # straight across it -- the Rainier capture put 337 flowers, 65 plants and 12
+        # trees on the water. Rock is left alone, since a rock in a stream is real.
+        self.paint_vegetation_in_water = paint_vegetation_in_water
         # Floor on the exemplar nearest-neighbour spacing that sets painted density.
         # Spacing is measured on world XZ unprojected from panorama bboxes, so a
         # clump of foreground subjects a metre from the camera (meadow flowers being
@@ -336,6 +374,10 @@ class DistributionSynthesisStage(PipelineStage):
                                        units of mean exemplar nearest-neighbour spacing
             max_instances_per_group   (int, default 12000) — ceiling on painted instances
                                        per (object_type, region_type); 0 disables
+            min_exemplars             (int, default 8) — real detections a group needs
+                                       before its density is trusted; 0 disables
+            paint_vegetation_in_water (bool, default False) — allow vegetation groups to
+                                       paint into RegionType.WATER
             min_exemplar_spacing_m    (float, default 0.25) — floor on the exemplar
                                        nearest-neighbour spacing that sets painted density
             full_density_radius_m     (float, default 6.0) — paint at the learned density
@@ -412,12 +454,33 @@ class DistributionSynthesisStage(PipelineStage):
             context.add_object(_RAN_MARKER, True)
             return context
 
-        groups = [
-            (region_type, obj_type, dist)
-            for region_type, by_type in distribution.distributions.items()
-            for obj_type, dist in by_type.items()
-            if dist.n_points >= 2 and len(dist.points) >= 2
-        ]
+        groups = []
+        for region_type, by_type in distribution.distributions.items():
+            for obj_type, dist in by_type.items():
+                if dist.n_points < 2 or len(dist.points) < 2:
+                    continue
+                # Both rejections are logged rather than filtered silently: "this group
+                # painted nothing" and "this group was never eligible" look identical in
+                # the output otherwise, and the first is a bug while the second is this
+                # working. See min_exemplars and paint_vegetation_in_water.
+                if len(dist.points) < cfg.min_exemplars:
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: {len(dist.points)} exemplar(s), "
+                        f"under min_exemplars={cfg.min_exemplars} — not enough evidence "
+                        f"to paint a population, skipping"
+                    )
+                    continue
+                if (
+                    not cfg.paint_vegetation_in_water
+                    and obj_type in VEGETATION_CATEGORIES
+                    and _is_water_region(region_type)
+                ):
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: vegetation is not painted into "
+                        f"water, skipping"
+                    )
+                    continue
+                groups.append((region_type, obj_type, dist))
         if not groups:
             self.log_info("No non-singleton distributions to paint")
             # Mark complete even though nothing was painted: has_expected_output()

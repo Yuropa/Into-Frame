@@ -53,8 +53,24 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         intrinsic_delight_strength: float = 0.6,
         intrinsic_resolution: int = 768,
         intrinsic_agg_num: int = 2,
+        max_mesh_faces: int = 8000,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Face budget per category mesh. SAM3D returns its reconstruction undecimated
+        # and nothing here used to touch it, which is affordable for a hero object and
+        # is not what these are: a category mesh is shared by every instance of its
+        # (class, bucket), and those run to four figures. Measured on the Rainier
+        # capture -- category_mesh_flower_0 at 348,650 faces x 1,187 placed instances
+        # is 414 M triangles on its own, and the scene's category meshes totalled
+        # 961 M across 21,185 objects.
+        #
+        # GrassCoverStage already reached this conclusion for its own assets and set
+        # max_near_mesh_faces to 4000, measuring p95 surface error at 0.19% of the
+        # bounding-box diagonal there (8000 -> 0.12%). 8000 here because these are
+        # subjects the viewer looks AT rather than ground cover underfoot, and because
+        # Mesh.decimate returns the original untouched when it is already inside
+        # budget -- so a small asset pays nothing. 0 disables.
+        self.max_mesh_faces = int(max_mesh_faces)
         # Strip the baked-in sun out of the crops that become billboards and
         # category meshes, the same way TerrainTextureGenerationStage already
         # strips it out of its reference patches -- and, critically, by the same
@@ -160,7 +176,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
     Config: billboard_distance_m (default 10.0 m), billboard_top_k (default 4),
             min_mesh_area_fraction (default 0.001 -- a group whose winning box
             covers less of the panorama than this stays billboard-only),
-            generator_type (default TRELLIS)
+            generator_type (default TRELLIS),
+            max_mesh_faces (default 8000 -- per-mesh face budget; 0 disables)
     """
 
     @classmethod
@@ -249,6 +266,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 try:
                     mesh = gen.meshify(crop, temp_path, seed=self.seed)
                     mesh = mesh.repair()
+                    raw_faces = mesh.face_count
+                    mesh = mesh.decimate(self.config.max_mesh_faces)
                     mesh.fit_to_box(1.0, 1.0)
                 except Exception as e:
                     # A single degenerate crop (e.g. a near-empty mask the
@@ -261,7 +280,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     self.advance_progress(asset_task)
                     continue
                 context.add_mesh(mesh_key, mesh)
-                self.log_info(f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f")
+                decimated = (
+                    f" (decimated from {raw_faces}f)" if mesh.face_count < raw_faces else ""
+                )
+                self.log_info(
+                    f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f{decimated}"
+                )
                 self.advance_progress(asset_task)
         finally:
             gen.close()

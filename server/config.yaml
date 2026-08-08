@@ -1075,11 +1075,32 @@ stages:
     # max_instances_per_group. If it's too heavy: lower full_density_radius_m, or
     # raise density_falloff_exponent to 1.5-2.0 to thin the mid-field harder. Check
     # temp/synthesis_{region}_{type}.png -- red = real exemplars, yellow = painted.
-    min_exemplar_spacing_m: 0.25
-    full_density_radius_m: 6.0
+    #
+    # Measured on the Rainier capture at 0.25/6.0: the stage took 407 real detections
+    # to 5,541 objects, and the scene read as far denser than the photograph it came
+    # from. The multiplication was concentrated where the evidence was thinnest --
+    # flower [ground] 45 exemplars -> 4,233 painted, flower [water] 3 -> 337, bush
+    # [ground] 3 -> 211 -- because painted density is exemplar count / exemplar HULL
+    # area, and the detections that survive are the near-field ones, clustered in a
+    # few square metres a metre from the camera. min_exemplars below is the direct
+    # answer to the 3-exemplar groups; these two are what pull the near-field carpet
+    # back toward what the photo shows.
+    min_exemplar_spacing_m: 0.4      # 0.25 m was 16/m² -- 0.4 m is 6.2/m²
+    full_density_radius_m: 3.0       # full learned density only within arm's reach
     density_falloff_exponent: 2.0
     max_paint_radius_m: 30.0         # 0 disables
     max_instances_per_group: 12000   # 0 disables the ceiling
+    # A group needs this many real detections before its density is trusted at all.
+    # Three points do not measure a spatial pattern -- their hull is whatever triangle
+    # they happen to form, and that ratio then fills a whole region. Above every
+    # pathological group on the Rainier capture and below every healthy one (flower
+    # 45, tree 56, plant 39). 0 disables.
+    min_exemplars: 8
+    # Vegetation is never painted into RegionType.WATER. The region map types the tarn
+    # in that capture correctly; the pattern learned from the shoreline flowers was
+    # then painted straight across it (337 flowers, 65 plants, 12 trees on the water).
+    # Rock is unaffected -- a rock in a stream is real.
+    paint_vegetation_in_water: false
     # Guard against a CLUMPED group (a few tight patches far apart) demanding a huge
     # exemplar candidate grid: the hull spans the empty gaps while spacing is measured
     # within the clumps, so e.g. three patches of 20 flowers 40 m apart asks for
@@ -1321,6 +1342,16 @@ stages:
     min_mesh_area_fraction: 0.0003
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
+    # Face budget per category mesh. SAM3D returns its reconstruction undecimated and
+    # nothing touched it, which is fine for a hero object and is not what these are --
+    # one mesh is shared by every instance of its (class, bucket), and those run to
+    # four figures. On the Rainier capture category_mesh_flower_0 was 348,650 faces
+    # across 1,187 instances (414 M triangles by itself); the scene's category meshes
+    # totalled 961 M. Decimating the four largest to 8000 takes those four from 688 M
+    # to 24 M at a p95 surface error of 0.06-0.28% of the bounding-box diagonal.
+    # Grass Cover's equivalent (max_near_mesh_faces) is 4000; 8000 here because these
+    # are subjects you look at rather than ground cover underfoot. 0 disables.
+    max_mesh_faces: 8000
 
   - name: Scene Generation
     stage: SceneGenerationStage

@@ -13,6 +13,7 @@ DEBUG=""
 CONFIG=""
 OUTPUT="output"
 SEEDS=()
+RERUNS=()
 # Forwarded to main.py as a global --log-mode. Every other frame.sh subcommand
 # already accepts -v/--plain/--log-mode; `remote` passes its argv straight here,
 # so without these cases `frame.sh remote -v` died on "Unknown argument: -v" --
@@ -47,6 +48,10 @@ server options:
   -d, --debug   Save intermediate files    (default: none)
   --config      Remote pipeline config     (default: config.yaml)
   --seed        Random seed (repeatable)   VALUE or STAGE:VALUE (default: none)
+  --rerun       Force stage(s) to re-run, with everything downstream of them.
+                Repeatable, comma-separated. Needed after editing config.yaml:
+                nothing hashes a stage's parameters, so a warm cache is reused
+                whatever the config now says. e.g. --rerun "Panorama Lighting"
 
 clear options:
   -o, --output  Output directory to clear  (default: ${OUTPUT})
@@ -86,6 +91,7 @@ while [[ $# -gt 0 ]]; do
     -d|--debug)    DEBUG="$2";        shift 2 ;;
     --config)      CONFIG="$2";       shift 2 ;;
     --seed)        SEEDS+=("$2");     shift 2 ;;
+    --rerun)       RERUNS+=("$2");    shift 2 ;;
     -o|--output)   OUTPUT="$2";       shift 2 ;;
     -i|--input)    INPUT="$2";        shift 2 ;;
     -v|--verbose)  LOG_MODE="verbose"; shift ;;
@@ -161,6 +167,11 @@ case "$ACTION" in
       && REMOTE_IN="${REMOTE_DIR}/${REMOTE_IN#./}"
 
     REMOTE_PY_ARGS="server --port ${PORT} --asset-port ${ASSET_PORT} --output $(quote_remote_path "$REMOTE_OUT")"
+    # Quoted: stage names have spaces in them ("Panorama Lighting"), and this whole
+    # string is re-split by the remote shell.
+    for r in "${RERUNS[@]}"; do
+      REMOTE_PY_ARGS="$REMOTE_PY_ARGS --rerun $(quote_remote_path "$r")"
+    done
     [[ -n "$REMOTE_IN" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --input $(quote_remote_path "$REMOTE_IN")"
     [[ -n "$DEBUG"  ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --debug $DEBUG"
     [[ -n "$CONFIG" ]] && REMOTE_PY_ARGS="$REMOTE_PY_ARGS --config $(quote_remote_path "$CONFIG")"

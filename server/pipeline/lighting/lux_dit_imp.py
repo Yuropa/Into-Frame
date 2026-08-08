@@ -123,16 +123,34 @@ class LuxDiTServer(RemoteServer):
             )
         print(f"LuxDiT HDR: {self.hdr_status}")
 
+    def _merger_samples_per_branch(self) -> int:
+        """How many values of one map the merger takes per sample.
+
+        HDR_MLP concatenates its two arguments (`torch.cat((x_ldr, x_hdr), dim=-1)`)
+        before its first Linear, so that layer's in_features counts BOTH branches and
+        half of it is the width each map must be reshaped to. Read from the loaded
+        weights rather than assumed: this file previously hard-coded a per-channel
+        scalar network (in_features 2 -> 1 value per branch) on the strength of a
+        docstring, and the released checkpoint's first Linear is (6, 64) -- it wants a
+        whole RGB triple from each map. Every lighting estimate since has died on
+        `mat1 and mat2 shapes cannot be multiplied (98304x2 and 6x64)` and silently
+        fallen back to an LDR-only sun ~half of Unity's nominal daylight.
+
+        Returns 0 when no Linear can be found, which the caller reports rather than
+        guessing at.
+        """
+        for module in self.hdr_model.modules():
+            if isinstance(module, torch.nn.Linear):
+                return max(module.in_features // 2, 0)
+        return 0
+
     def _merge_hdr(self, ldr_img: PILImage.Image, log_img: PILImage.Image):
         """Reconstruct linear HDR radiance from the (env_ldr, env_log) pair.
 
         Mirrors hdr_merger.py: both maps are normalised to [-1, 1] and fed to the
-        merger together. HDR_MLP is a *per-channel scalar* network -- its
-        `in_dim=2` counts the concatenation of one LDR sample with one log sample
-        (`torch.cat((x_ldr, x_hdr), dim=-1)`), and `out_dim=1` -- so the maps are
-        flattened to (N, 1) per channel rather than passed as (H, W, 3), which
-        would present 6 channels and only fit the HDR_CNN variant the released
-        weights are not.
+        merger together, flattened to (N, C) where C is whatever the loaded weights
+        ask for -- 3 for the released per-pixel-RGB checkpoint, 1 for a per-channel
+        scalar variant. See _merger_samples_per_branch.
 
         Returns float32 (H, W, 3) linear radiance, or None if anything about the
         result doesn't look like radiance -- a silently wrong reconstruction here
@@ -148,11 +166,30 @@ class LuxDiTServer(RemoteServer):
                 self.hdr_status = f"merge skipped: shape mismatch {ldr.shape} vs {log.shape}"
                 return None
 
+            channels = self._merger_samples_per_branch()
+            if channels <= 0 or ldr.size % channels != 0:
+                self.hdr_status = (
+                    f"merge skipped: merger takes {channels} value(s) per branch, "
+                    f"which does not divide a {ldr.shape} map"
+                )
+                return None
+
             shape = ldr.shape
             with torch.no_grad():
-                x_ldr = torch.from_numpy(ldr.reshape(-1, 1)).to(self.device)
-                x_log = torch.from_numpy(log.reshape(-1, 1)).to(self.device)
-                hdr = self.hdr_model(x_ldr, x_log).float().cpu().numpy().reshape(shape)
+                x_ldr = torch.from_numpy(ldr.reshape(-1, channels)).to(self.device)
+                x_log = torch.from_numpy(log.reshape(-1, channels)).to(self.device)
+                out = self.hdr_model(x_ldr, x_log).float().cpu().numpy()
+
+            # A merger whose output width doesn't match its input width would reshape
+            # into a differently-sized map and silently scramble the radiance across
+            # pixels rather than fail, so check before trusting it.
+            if out.size != ldr.size:
+                self.hdr_status = (
+                    f"merge rejected: merger returned {out.size} value(s) for a "
+                    f"{shape} map ({ldr.size} expected)"
+                )
+                return None
+            hdr = out.reshape(shape)
 
             if not np.isfinite(hdr).all() or hdr.min() < 0.0 or hdr.max() <= 0.0:
                 self.hdr_status = f"merge rejected: range [{hdr.min()}, {hdr.max()}] is not radiance"

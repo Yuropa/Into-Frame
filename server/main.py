@@ -139,6 +139,23 @@ def create_parser():
         default=None,
         help="Input image to generate from (default: samples/Mount Rainier.jpg)"
     )
+    # Same flag `run` already has, and for the same reason -- but this is the mode that
+    # needs it most. Stage caching is decided by has_expected_output() alone; nothing
+    # hashes a stage's configuration, so editing a parameter in config.yaml leaves the
+    # cached output looking perfectly valid and the stage is skipped. Without this the
+    # only way to apply a config change over a warm cache in server/remote mode was to
+    # clear the whole output directory and regenerate the panorama and terrain too.
+    server_parser.add_argument(
+        "--rerun",
+        type=str,
+        action="append",
+        metavar="STAGE[,STAGE...]",
+        help=(
+            "Purge cached output for the given stage(s) so they are treated as dirty "
+            "and re-run (along with all downstream stages). Accepts a comma-separated "
+            "list of stage names or output paths. May be repeated."
+        ),
+    )
 
     # run
     run_parser = subparsers.add_parser(

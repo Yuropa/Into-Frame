@@ -1,5 +1,6 @@
 from typing import Any
 from logging import Logger
+import math
 import torch
 import numpy as np
 from PIL import Image as PILImage
@@ -59,6 +60,35 @@ def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.nda
     if not top_labels:
         return opened
     return np.isin(labeled, list(top_labels))
+
+
+def _sun_from_direction(direction, panorama_h: int, panorama_w: int) -> tuple[int, int]:
+    """Panorama pixel for the sun direction the scene is actually lit by.
+
+    Exact inverse of SceneLighting.sun()'s own mapping (see scene/lighting.py): that
+    method builds a unit vector [cos(lat)sin(lon), sin(lat), cos(lat)cos(lon)] from
+    equirectangular pixel coordinates, and this undoes it. `direction` points FROM the
+    scene TOWARD the sun, in the panorama's frame -- the same frame this stage's rows
+    and columns are in, so no rotation is involved.
+
+    Preferred over _sun_from_lighting below because the two disagreed, badly. That one
+    takes the brightest pixel of the TONEMAPPED LDR environment map after a heavy
+    blur, which on the Rainier capture peaked in the horizon haze and returned
+    el=-5.6 deg -- "dusk", which then went into the FLUX sky prompt and the gradient
+    sky's centre -- while SceneLighting.sun() measured the top-percentile of LINEAR
+    radiance and shipped the client a sun at +61.5 deg. The sky the viewer sees and
+    the direction their light comes from were ~67 deg apart. Whatever the scene is lit
+    by is the one that has to win here.
+    """
+    x, y, z = (float(direction[0]), float(direction[1]), float(direction[2]))
+    latitude = math.asin(max(-1.0, min(1.0, y)))
+    longitude = math.atan2(x, z)
+    row = (0.5 - latitude / math.pi) * panorama_h - 0.5
+    col = (longitude / (2.0 * math.pi) + 0.5) * panorama_w - 0.5
+    return (
+        int(min(max(round(row), 0), panorama_h - 1)),
+        int(min(max(round(col), 0), panorama_w - 1)),
+    )
 
 
 def _sun_from_lighting(ldr: PILImage.Image, panorama_h: int, panorama_w: int) -> tuple[int, int]:
@@ -310,9 +340,18 @@ class SkyboxInpaintingStage(PipelineStage):
 
         # --- Sun position ---
         lighting = context.lighting(ContextKey.LIGHTING)
-        if lighting is not None:
+        measured_sun = lighting.sun() if lighting is not None else None
+        if measured_sun is not None and measured_sun.get("direction") is not None:
+            sun_row, sun_col = _sun_from_direction(measured_sun["direction"], h, w)
+            self.log_info(
+                "Sun position from the scene's own key light "
+                f"(direction_source: {measured_sun.get('direction_source', 'env map')})"
+            )
+        elif lighting is not None:
+            # sun() returns None only for a degenerate (uniform) environment map, where
+            # there is no key light to agree with in the first place.
             sun_row, sun_col = _sun_from_lighting(lighting.ldr, h, w)
-            self.log_info("Sun position from LuxDiT lighting")
+            self.log_info("Sun position from LuxDiT lighting (no key light measured)")
         else:
             sun_row, sun_col = _sun_from_sky_pixels(source_arr, sky_mask)
             self.log_info("Sun position from sky-pixel luminance (no lighting in context)")

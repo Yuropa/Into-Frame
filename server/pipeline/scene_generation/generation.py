@@ -149,6 +149,30 @@ _MAX_OBJECT_SIZE_M = 25.0
 # same capture's category_mesh_flower_0 is [0.418, 1.000, 0.116], y/max = 1.000.
 _MIN_MESH_HEIGHT_FRACTION = 0.25
 
+# The same question asked about the thinnest axis instead of the vertical one, which
+# is what catches a mesh that is a flat CARD rather than a flat pancake.
+#
+# _MIN_MESH_HEIGHT_FRACTION above only ever looks at extent_y, so it sees a horizontal
+# sheet and is blind to a vertical one -- an upright card has extent_y == its largest
+# extent and scores a perfect h_frac of 1.000. Measured on the Rainier capture,
+# category_mesh_tree_0 came back [0.965, 1.000, 0.0829]: a panel twelve times wider
+# than it is thick, h_frac 1.000, and 67 of its 108 instances were placed, rendering
+# up to 5.3 m tall x 5.1 m wide x 0.44 m thick. That is the "large rectangular slab"
+# in the scene, and it is a tree. category_mesh_forest_0 (0.0814) is the same shape.
+#
+# The cause is upstream and not fixable here: SAM3D reconstructs a shallow single-view
+# relief from a foliage crop, and Mesh.repair()'s Poisson pass seals that relief into a
+# thin closed shell. A billboard is the honest representation of a subject that was
+# never reconstructed in the round, and rejecting here is what falls back to one.
+#
+# 0.12 from the same capture's measured spread, replayed against its own
+# mesh_geometry_debug.json. Rejects statue 0.041, ship 0.056, forest 0.081, tree 0.083,
+# bench 0.086, fire_hydrant 0.091, bush 0.100, rock 0.104, plant_1 0.105 (119 instances
+# that were placed as sheets, 67 of them trees); keeps traffic_light 0.125, person_1
+# 0.136, building 0.146, and every flower (0.354-0.613). traffic_light is the closest
+# keeper, so do not raise this above ~0.12 without re-measuring against a real run.
+_MIN_MESH_THICKNESS_FRACTION = 0.12
+
 # A reconstructed category mesh describes the same object its instance's 2D box
 # measured, so the two have to agree about that object's shape. This is the ratio
 # between the mesh's own width:height and the detection's, above which they don't:
@@ -202,6 +226,17 @@ def mesh_instance_scale(
             float(height) / extent_y,
             f"flat in Y (extent_y {extent_y:.4f} is {extent_y / extent_max:.3f} of "
             f"its largest {extent_max:.4f}, under {_MIN_MESH_HEIGHT_FRACTION})",
+        )
+
+    # Flat in ANY axis -- an upright card clears the vertical test above with a perfect
+    # h_frac and is still a sheet. See _MIN_MESH_THICKNESS_FRACTION.
+    extent_min = float(min(mesh_extents))
+    if extent_min < _MIN_MESH_THICKNESS_FRACTION * extent_max:
+        return (
+            float(height) / extent_y,
+            f"a flat sheet (thinnest axis {extent_min:.4f} is "
+            f"{extent_min / extent_max:.3f} of its largest {extent_max:.4f}, under "
+            f"{_MIN_MESH_THICKNESS_FRACTION})",
         )
 
     # Aspect agreement. Compared as a ratio-of-ratios so it is symmetric: a mesh far
@@ -833,6 +868,7 @@ class SceneGenerationStage(PipelineStage):
                             "class": cls,
                             "extents": [round(v, 4) for v in ex],
                             "height_fraction": round(ex[1] / largest, 4),
+                            "thickness_fraction": round(min(ex) / largest, 4),
                             "aspect": round(max(ex[0], ex[2]) / ex[1], 3) if ex[1] > 0 else None,
                             "instances": 0,
                             "rejected": 0,
@@ -1110,7 +1146,8 @@ class SceneGenerationStage(PipelineStage):
             aspect = "n/a" if rec["aspect"] is None else f"{rec['aspect']:.2f}"
             self.log_info(
                 f"    {key:<34} extents {rec['extents']} "
-                f"h_frac {rec['height_fraction']:.3f} aspect {aspect}  "
+                f"h_frac {rec['height_fraction']:.3f} thin {rec['thickness_fraction']:.3f} "
+                f"aspect {aspect}  "
                 f"scale {rec['scale_min']:.1f}-{rec['scale_max']:.1f}x  "
                 f"rendered {rec['rendered_min_m']:.2f}-{rec['rendered_max_m']:.2f} m  [{status}]"
             )
@@ -1129,6 +1166,7 @@ class SceneGenerationStage(PipelineStage):
                 out.write_text(json.dumps({
                     "thresholds": {
                         "min_mesh_height_fraction": _MIN_MESH_HEIGHT_FRACTION,
+                        "min_mesh_thickness_fraction": _MIN_MESH_THICKNESS_FRACTION,
                         "max_mesh_aspect_ratio": _MAX_MESH_ASPECT_RATIO,
                         "max_object_size_m": _MAX_OBJECT_SIZE_M,
                     },
