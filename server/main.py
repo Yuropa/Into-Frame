@@ -294,6 +294,11 @@ def handle_server(args):
     simulation_config.log = configuration.log
     simulation_config.address = args.host
     simulation_config.port = args.port
+    # --asset-port was parsed but never applied here, so the asset server always
+    # bound 3000 no matter what frame.sh forwarded, while the client was told to
+    # use the port it asked for.
+    simulation_config.asset_port = args.asset_port
+    simulation_config.log_mode = configuration.log_mode
 
     pipeline = Pipeline(
         config=_create_pipeline_config(args=args)
@@ -386,6 +391,10 @@ def handle_local(args):
         sim_config.address = args.host
         sim_config.port = args.port
         sim_config.asset_port = args.asset_port
+        # `local` builds its own plain StreamHandler logger above rather than a
+        # PipelineConfiguration, so every log record already reaches the terminal;
+        # a live bar on top of that would fight with them.
+        sim_config.log_mode = "plain"
 
         server = SimulationServer(sim_config, pipeline=None, context=context, asset_dir=asset_dir)
         asyncio.run(server.run())

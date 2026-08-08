@@ -6,6 +6,7 @@ import threading
 import queue
 import os
 from aiohttp import web
+from aiohttp.abc import AbstractAccessLogger
 from copy import deepcopy
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -19,6 +20,7 @@ from typing import Any, Optional, TYPE_CHECKING
 # heavy stage graph.
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from server.messages import ServerMessages, ClientMessages
+from server.asset_progress import AssetTransferProgress
 from scene.scene import Scene
 from scene.object import Object3D
 from scene.splat_material import SplatMaterial
@@ -36,6 +38,9 @@ class SimulationServerConfiguration():
         self.port = 8080
         self.asset_port = 3000
         self.log = None
+        # Mirrors PipelineConfiguration.log_mode -- decides whether the asset
+        # download report draws a live progress bar or logs one line per file.
+        self.log_mode = "panel"
 
 class SimulationServer():
     _context: Optional[PipelineContext]
@@ -70,6 +75,9 @@ class SimulationServer():
 
         self._asset_server = web.Application()
         self._context = context
+        self._downloads = AssetTransferProgress(
+            self.log, getattr(config, "log_mode", "panel")
+        )
 
     def port(self):
         return self.config.port
@@ -100,17 +108,49 @@ class SimulationServer():
             match = self._find_asset(filename)
             if not match:
                 if self._context is not None:
+                    # Written out lazily on first request, so this can take a
+                    # noticeable moment (a GLB export) before any byte moves --
+                    # worth saying so rather than looking stalled.
+                    self._downloads.note(f"Exporting {filename}…")
                     match = self._context.save_object(filename, self.asset_dir)
 
             if not match:
                 # Coulnd't write the file out either
                 return web.Response(status=404)
 
+            self._downloads.asset_requested(filename, match.stat().st_size)
             return web.FileResponse(str(match))
 
         self._asset_server.router.add_get("/assets/{filename}", serve_asset)
 
-        runner = web.AppRunner(self._asset_server)
+        downloads = self._downloads
+
+        class _AssetAccessLogger(AbstractAccessLogger):
+            """aiohttp calls this once the response body has been written to the
+            transport, which is the only hook that reports a *finished* transfer --
+            a handler returning a FileResponse is long gone by the time the file
+            actually goes out.
+
+            The size comes from Content-Length, not response.body_length: a
+            FileResponse hands the file to the OS via loop.sendfile(), so those
+            bytes never pass through aiohttp's own writer and body_length ends up
+            counting the response headers alone (~250 B for every asset, whatever
+            its real size). Content-Length is what the response committed to
+            sending -- the whole file for a 200, the requested slice for the 206s a
+            video player issues."""
+
+            def log(self, request, response, time):
+                name = request.match_info.get("filename") or request.path.rsplit("/", 1)[-1]
+                sent = response.content_length
+                if sent is None:
+                    sent = response.body_length or 0
+                downloads.asset_delivered(name, sent, time, response.status)
+
+        runner = web.AppRunner(
+            self._asset_server,
+            access_log_class=_AssetAccessLogger,
+            access_log=self.log,
+        )
         await runner.setup()
         site = web.TCPSite(runner, self.host(), self.asset_port())
         await site.start()
@@ -160,6 +200,37 @@ class SimulationServer():
             snapshot["terrain_material"] = self._splat_material.encode()
         return snapshot
 
+    def _scene_asset_keys(self) -> list[str]:
+        """Every asset key the current scene points at, in the order a client meets
+        them. These are the files the client is about to pull over HTTP -- the
+        terrain material and lighting travel inside the snapshot itself, so they are
+        deliberately absent. An upper bound, not a promise: a client only fetches
+        what it renders (billboard videos in particular)."""
+        keys: list[str] = []
+        seen: set[str] = set()
+
+        def add(key: Optional[str]):
+            if key and key not in seen:
+                seen.add(key)
+                keys.append(key)
+
+        add(self.scene.skybox)
+        for obj in self.scene.objects:
+            add(obj.texture)
+            add(obj.mesh)
+            add(obj.physics_mesh)
+            add(obj.video_color)
+            add(obj.video_alpha)
+        return keys
+
+    async def _send_scene(self):
+        """Hand the snapshot to every client and start reporting the download it
+        kicks off. Always paired -- SCENE_INIT is what makes a client start pulling
+        assets, so a broadcast without this leaves the terminal blind for the whole
+        transfer."""
+        await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+        self._downloads.begin(self._scene_asset_keys())
+
     async def _handler(self, ws):
         client_id = str(uuid.uuid4())[:8]
         self.clients.add(ws)
@@ -183,7 +254,7 @@ class SimulationServer():
                     if self._scene_id is not None:
                         # Scene already generated — resend the cached snapshot instead of
                         # regenerating. The client compares scene_id and skips reload if unchanged.
-                        await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+                        await self._send_scene()
                     else:
                         await self._request_pipeline()
 
@@ -201,6 +272,10 @@ class SimulationServer():
             self.log.info(f"{client_id} disconnected")
 
     async def _request_pipeline(self):
+        # A pipeline run draws its own Live display from the executor thread, so
+        # the download bar has to be off the terminal before it starts.
+        self._downloads.stop()
+
         # Cancel the running pipeline if there is one
         if self._pipeline_task and not self._pipeline_task.done():
             self.log.info("Cancelling running pipeline")
@@ -237,7 +312,7 @@ class SimulationServer():
             self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
             self._scene_id = str(uuid.uuid4())
             self.log.info("Serving pre-loaded scene")
-            await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+            await self._send_scene()
             return
 
         self.log.info("Starting pipeline")
@@ -293,7 +368,7 @@ class SimulationServer():
         await drain_task
 
         self.log.info("Pipeline complete — sending scene")
-        await self.broadcast(ClientMessages.SCENE_INIT, self.get_snapshot())
+        await self._send_scene()
  
     async def _handle_object_event(self, payload: dict):
         # Do we need to handle anything directly from the unity scene here?
