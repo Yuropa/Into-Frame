@@ -1,3 +1,4 @@
+import math
 from logging import Logger
 from typing import Any
 
@@ -34,6 +35,7 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         default_sway_amplitude: float = 0.16,
         default_sway_frequency_hz: float = 0.6,
         sway_frequency_scale: float = 0.5,
+        sway_max_distance_m: float = 8.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Fallback sway for a stationary mesh whose own instance was never tracked
@@ -61,6 +63,9 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         # Rainier capture that put placed vegetation at a median 1.24 Hz, fast
         # enough to look like it's being shaken rather than blown. 0.5 halves it.
         self.sway_frequency_scale = float(sway_frequency_scale)
+        # Radius beyond which a stationary mesh is left un-swayed -- see the
+        # sway_limit block in run() for the per-frame cost this bounds. 0 disables.
+        self.sway_max_distance_m = float(sway_max_distance_m)
         # A single wind direction for the whole scene reads more physically
         # plausible than each tree leaning its own random way -- fixed at
         # construction (derived from `seed` below when left None) so re-running
@@ -108,6 +113,31 @@ class SceneAnimationStage(PipelineStage):
             wind_axis = float(np.random.default_rng(self.seed).uniform(0.0, 360.0))
 
         annotated = 0
+        # Sway is a per-frame cost on the CLIENT, paid per instance and paid whether or
+        # not anyone can see the motion. Every object carrying `sway` gets a WindSway
+        # MonoBehaviour whose LateUpdate samples the wind field at its own position and
+        # writes three bone rotations -- and the mesh it drives has to keep its skin, so
+        # it instantiates as a SkinnedMeshRenderer, which can be neither GPU-instanced
+        # nor static-batched. On the Rainier capture that was 17,129 of 17,475 objects.
+        #
+        # Amplitude is a fraction of the object's own footprint, so the ANGULAR motion
+        # of a 0.35 m grass tuft falls off with distance and is imperceptible well
+        # before the 25 m the ground cover reaches. Measured on that scene, swaying
+        # objects by distance from the camera: 8% within 5 m, 18% within 8 m, 51%
+        # within 15 m. Gating at 8 m therefore drops ~82% of the per-frame work and of
+        # the un-batchable skinned renderers, for motion nobody could resolve anyway.
+        #
+        # 0 disables the gate (every stationary instance sways, the old behaviour).
+        sway_limit = self.config.sway_max_distance_m
+        camera_xz = (0.0, 0.0)
+        if scene.extrinsics is not None:
+            camera_xz = (
+                float(scene.extrinsics.translation[0]),
+                float(scene.extrinsics.translation[2]),
+            )
+        swaying = 0
+        sway_skipped = 0
+
         task = self.create_progress(len(scene.objects), "Animating scene objects…")
         for obj in scene.objects:
             if obj.source_index is None:
@@ -137,6 +167,15 @@ class SceneAnimationStage(PipelineStage):
                         obj.video_alpha = f"object_video_alpha_{video_idx}"
                         annotated += 1
                 elif obj.type == ObjectType.MESH:
+                    if sway_limit > 0:
+                        distance = math.hypot(
+                            float(obj.position["x"]) - camera_xz[0],
+                            float(obj.position["z"]) - camera_xz[1],
+                        )
+                        if distance > sway_limit:
+                            sway_skipped += 1
+                            self.advance_progress(task)
+                            continue
                     sway = metadata.get("sway") or {}
                     phase_rng = np.random.default_rng((self.seed, idx))
                     amplitude = float(sway.get("amplitude", self.config.default_sway_amplitude))
@@ -155,6 +194,7 @@ class SceneAnimationStage(PipelineStage):
                         "axisDegrees": wind_axis,
                     }
                     annotated += 1
+                    swaying += 1
             else:
                 motion = metadata.get("motion")
                 world_width = metadata.get("world_width")
@@ -175,6 +215,13 @@ class SceneAnimationStage(PipelineStage):
         context.add_scene(ContextKey.SCENE, scene)
         context.add_object(ContextKey.SCENE_ANIMATION_COUNT, annotated)
         self.log_info(f"Annotated {annotated} scene object(s)")
+        if sway_skipped:
+            self.log_info(
+                f"Sway: {swaying} instance(s) within {sway_limit:.0f} m, "
+                f"{sway_skipped} beyond it left static "
+                f"({sway_skipped / max(swaying + sway_skipped, 1) * 100:.0f}% fewer "
+                f"per-frame sway updates on the client)"
+            )
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:

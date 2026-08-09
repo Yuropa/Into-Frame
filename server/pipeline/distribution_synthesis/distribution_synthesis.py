@@ -229,6 +229,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         paint_vegetation_in_water: bool = False,
         min_exemplar_spacing_m: float = 0.25,
         full_density_radius_m: float = 6.0,
+        density_radius_percentile: float = 75.0,
         density_falloff_exponent: float = 2.0,
         max_paint_radius_m: float = 30.0,
         max_exemplar_candidates: int = 4000,
@@ -294,6 +295,11 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # skybox panorama already carry the look, and individual billboards are
         # sub-pixel. Camera is the grid origin by construction (see _grid_to_world).
         self.full_density_radius_m = full_density_radius_m
+        # Percentile of a group's own exemplar distances used to extend
+        # full_density_radius_m for that group -- see the group_radius block in run().
+        # 100 would hand the radius to the single farthest (and least reliable)
+        # detection; 75 covers the bulk of where a class was actually seen.
+        self.density_radius_percentile = float(density_radius_percentile)
         self.density_falloff_exponent = density_falloff_exponent
         self.max_paint_radius_m = max_paint_radius_m
         # Ceiling on the exemplar candidate grid, enforced by RAISING the effective
@@ -586,6 +592,39 @@ class DistributionSynthesisStage(PipelineStage):
             # a property of the distribution alone, identical for every tile.
             exemplar_density = len(dist.points) / max(_polygon_area(input_boundary), 1e-6)
 
+            # This group's own full-density radius. The configured value is a FLOOR,
+            # raised to where this class was actually observed.
+            #
+            # The falloff is centred on the camera and one global radius applies it
+            # identically to classes that do not live at the same distance. Measured on
+            # the Rainier capture (camera is the grid origin, so these are exemplar
+            # distances): flower [ground] 45 exemplars, every one inside 1.2 m, p75
+            # 0.7 m; tree [ground] 56 exemplars from 0.3 to 31.5 m, p75 9.8 m; tree
+            # [vegetation] 16 exemplars from 7.1 to 34.2 m, p75 13.3 m. At a 3 m radius
+            # and a squared falloff a group is painted at 9% of its density by 10 m and
+            # 2% by 20 m -- which is precisely the band the trees occupy, and tree
+            # painting fell from 48 instances to 4 when that radius was tightened to
+            # rein in the near-field flower carpet.
+            #
+            # Taking the max, not the percentile alone, is deliberate: exemplar
+            # distance is bounded by DETECTABILITY, not by where a class exists. The
+            # meadow is flowers to the horizon and only the nearest metre resolves into
+            # detections, so shrinking their radius to 0.7 m would empty it. Trees are
+            # detected wherever they stand, so extending theirs is honest. This rule
+            # only ever extends.
+            group_radius = cfg.full_density_radius_m
+            if group_radius > 0 and len(exemplar_pts):
+                observed = float(np.percentile(
+                    np.linalg.norm(exemplar_pts, axis=1), cfg.density_radius_percentile
+                ))
+                if observed > group_radius:
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: exemplars reach {observed:.1f} m "
+                        f"(p{cfg.density_radius_percentile:.0f}), extending the full-density "
+                        f"radius {group_radius:.1f} m -> {observed:.1f} m"
+                    )
+                    group_radius = observed
+
             # Tile side length in grid cells: pick a tile candidate resolution (points
             # per side) and space those points at the exemplar's own nearest-neighbour
             # spacing, so tiles are fine enough for placement flexibility without
@@ -663,8 +702,8 @@ class DistributionSynthesisStage(PipelineStage):
                         # every per-point residual below stays <= 1 -- no clamping, and the
                         # expected surviving count is identical to the old behaviour.
                         tile_keep = 1.0
-                        if cfg.full_density_radius_m > 0 and tile_distance > cfg.full_density_radius_m:
-                            tile_keep = (cfg.full_density_radius_m / tile_distance) ** cfg.density_falloff_exponent
+                        if group_radius > 0 and tile_distance > group_radius:
+                            tile_keep = (group_radius / tile_distance) ** cfg.density_falloff_exponent
 
                         # Capped at the tile's own candidate count because that is the
                         # most synthesize_pattern can place anyway (it clamps n_points
@@ -686,6 +725,11 @@ class DistributionSynthesisStage(PipelineStage):
                             "bin_count": dist.bin_count,
                             "n_points": tile_points,
                             "tile_keep": tile_keep,
+                            # Per group, not per config -- see group_radius above. The
+                            # per-point rejection must divide by the same radius the
+                            # tile's request was discounted with, or the two disagree
+                            # and the falloff is applied twice.
+                            "full_density_radius_m": group_radius,
                             "seed": self.seed + seed_counter,
                         })
 
@@ -779,12 +823,13 @@ class DistributionSynthesisStage(PipelineStage):
                     # what keeps the two consistent: the product of the two stages is
                     # exactly the per-point falloff, as before, but the optimizer no
                     # longer places points that were always going to be discarded.
-                    if cfg.max_paint_radius_m > 0 or cfg.full_density_radius_m > 0:
+                    job_radius = job.get("full_density_radius_m", cfg.full_density_radius_m)
+                    if cfg.max_paint_radius_m > 0 or job_radius > 0:
                         distance = float(math.hypot(x, z))
                         if cfg.max_paint_radius_m > 0 and distance > cfg.max_paint_radius_m:
                             continue
-                        if cfg.full_density_radius_m > 0 and distance > cfg.full_density_radius_m:
-                            keep_prob = (cfg.full_density_radius_m / distance) ** cfg.density_falloff_exponent
+                        if job_radius > 0 and distance > job_radius:
+                            keep_prob = (job_radius / distance) ** cfg.density_falloff_exponent
                             # <= 1 by construction: tile_keep is the falloff at the
                             # closest point of this tile, so no point in it can have a
                             # larger one.

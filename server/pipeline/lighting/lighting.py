@@ -1,3 +1,4 @@
+import math
 from logging import Logger
 from typing import Any
 
@@ -54,6 +55,49 @@ class PanoramaLightingStage(PipelineStage):
             SemanticKey.INPUT: ContextKey.PANORAMA,
             SemanticKey.OUTPUT: ContextKey.LIGHTING,
         })
+
+    def _report_sun_provenance(self, context: PipelineContext, sun, panorama) -> None:
+        """Say whether the sun this scene is lit by was ever photographed.
+
+        The panorama is only part capture: PanoramaStage generates the rest, sky
+        included, and measure_panorama_sun reads the disc from wherever it ends up.
+        On the Rainier capture the camera's own FOV is 57.3 degrees -- azimuth
+        +/-28.7 -- while the disc it lights everything with sits at azimuth -60.9,
+        some 32 degrees outside anything the camera saw. The shading baked into the
+        real part of the panorama was produced by the actual sun; the light the client
+        applies comes from a disc the generator drew. When those disagree the scene
+        reads as inconsistently lit, and until now nothing said so.
+
+        Reported, not corrected. A Lambertian fit of the direction against the
+        captured region's own shading was tried and does not identify it on this data
+        (correlation 0.36 at best, and the objective is flat -- candidates 70 degrees
+        apart score within 0.04 of each other), which is itself consistent with what
+        the photograph shows: soft light and no hard cast shadows anywhere. Choosing a
+        direction on that basis would be replacing a plausible estimate with a
+        coin-flip. What is actionable is knowing which case you are in.
+        """
+        if not sun or not sun.get("direction"):
+            return
+        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        fov = float(getattr(intrinsics, "fov", 0.0) or 0.0) if intrinsics is not None else 0.0
+        if fov <= 0.0:
+            return
+
+        x, y, z = (float(v) for v in sun["direction"])
+        azimuth = math.degrees(math.atan2(x, z))
+        elevation = math.degrees(math.asin(max(-1.0, min(1.0, y))))
+        outside_by = abs(azimuth) - fov / 2.0
+        if outside_by > 0:
+            self.log_warning(
+                f"Sun at az {azimuth:.1f}° el {elevation:.1f}° is {outside_by:.1f}° outside "
+                f"the captured {fov:.1f}° FOV — the key light comes from generated sky, "
+                f"not from anything the camera saw"
+            )
+        else:
+            self.log_info(
+                f"Sun at az {azimuth:.1f}° el {elevation:.1f}° falls inside the captured "
+                f"{fov:.1f}° FOV — the disc was photographed"
+            )
 
     def run(self, context: PipelineContext) -> PipelineContext:
         input_key, output_key = self._resolved_keys()
@@ -126,6 +170,7 @@ class PanoramaLightingStage(PipelineStage):
             + (f", sun {sun['intensity']:.2f}x @ {sun['color']}"
                f" (direction from {sun['direction_source']})" if sun else ", no directional sun")
         )
+        self._report_sun_provenance(context, sun, panorama)
         # Says WHICH of the merge's failure modes happened, not just that it did.
         # An LDR-only fallback costs several stops of key light (see
         # scene.lighting._LDR_FALLBACK_SUN_SCALE), so it is worth a warning rather

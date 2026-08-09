@@ -9,7 +9,9 @@ from pipeline.model_generation.model_generation import ModelGenerator, ModelGene
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
+    VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY,
 )
+from pipeline.grass_cover.cards import crossed_card_mesh
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
 
@@ -54,8 +56,31 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         intrinsic_resolution: int = 768,
         intrinsic_agg_num: int = 2,
         max_mesh_faces: int = 8000,
+        card_categories: list[str] | None = None,
+        card_planes: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Classes that get a crossed-card LOD alongside (or instead of) their
+        # reconstruction, published under category_mesh_{class}_{bucket}_card.
+        #
+        # Vegetation, because that is where a camera-facing billboard fails and where
+        # single-view reconstruction cannot succeed. SAM3D reconstructs a shallow
+        # relief from one crop, which for a conifer is a card with the thickness of a
+        # card -- measured at 0.083 and 0.097 of its second-largest extent on two runs
+        # of the Rainier capture, rejected as a sheet by SceneGenerationStage, and
+        # every tree fell back to a quad that turns to face the viewer. In stereo, at
+        # the distance trees actually stand, that quad reads as flat and swings as the
+        # head moves. Three fixed planes carry the same photograph with parallax
+        # between them and cost 12 triangles.
+        #
+        # grass_tuft is excluded because GrassCoverStage builds its own cards from
+        # exemplar patches and applies a blade silhouette to them; these crops are
+        # already alpha cutouts of one instance and need no silhouette.
+        self.card_categories = frozenset(
+            card_categories if card_categories is not None
+            else (VEGETATION_CATEGORIES - {GRASS_TUFT_CATEGORY})
+        )
+        self.card_planes = int(card_planes)
         # Face budget per category mesh. SAM3D returns its reconstruction undecimated
         # and nothing here used to touch it, which is affordable for a hero object and
         # is not what these are: a category mesh is shared by every instance of its
@@ -226,6 +251,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 f"{self.config.intrinsic_delight_strength:.2f} to match the terrain texture"
             )
 
+        # Before the group_best early-out below: a card is built from a curated crop,
+        # not from a reconstruction, so it exists for every pooled group regardless of
+        # whether anything was close enough to mesh. A scene where nothing qualified
+        # for 3D still wants its vegetation on cards rather than on quads.
+        cards = self._build_card_meshes(context, billboard_pools)
+        if cards:
+            self.log_info(f"Built {cards} crossed-card LOD mesh(es)")
+
         if not group_best:
             self.log_info("No objects within 3D generation distance")
             return context
@@ -292,6 +325,50 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         self.finish_progress(asset_task)
         return context
+
+    def _build_card_meshes(self, context: PipelineContext, billboard_pools: dict) -> int:
+        """Publish a crossed-card LOD for every configured group with a curated pool.
+
+        Textured with the pool's top-ranked crop -- the same image the billboard branch
+        would have shown -- preferring its delit variant for the same reason the mesh
+        path does: the client lights the card again, so it wants albedo rather than a
+        photograph with the sun in it. The crop's own alpha is the silhouette
+        (crossed_card_mesh masks at 0.5), which is why no shaping pass is needed here.
+
+        Keyed category_mesh_{class}_{bucket}_card, which SceneGenerationStage already
+        resolves generically -- it takes the card beyond the mesh LOD distance, when a
+        bucket never got a reconstruction, and now when a reconstruction was rejected.
+        """
+        if not self.config.card_categories or self.config.card_planes < 1:
+            return 0
+
+        built = 0
+        for pool_key, pool in billboard_pools.items():
+            obj_class, _, bucket = pool_key.partition("::")
+            if obj_class not in self.config.card_categories or not pool:
+                continue
+
+            key = f"category_mesh_{obj_class}_{bucket}_card"
+            if context.mesh(key) is not None:
+                continue
+
+            crop = context.image(_delit_key(pool[0])) or context.input_image(f"crop_{pool[0]}")
+            if crop is None:
+                continue
+            texture = crop.rgba() if hasattr(crop, "rgba") else crop
+
+            try:
+                mesh = crossed_card_mesh(texture, plane_count=self.config.card_planes)
+            except Exception as e:
+                # One unusable crop costs one group its card, not the whole stage its
+                # cards -- that group simply falls back to a billboard as before.
+                self.log_info(f"  {key}: card build failed ({e}), skipping")
+                continue
+
+            context.add_mesh(key, mesh)
+            self.log_info(f"  {key}: {self.config.card_planes} planes from crop_{pool[0]}")
+            built += 1
+        return built
 
     def _delight_crops(self, context: PipelineContext, indices: "set[int]") -> int:
         """Write crop_delit_{i} for every crop that will be rendered.
@@ -695,6 +772,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # The cost is that turning use_intrinsic_delighting on for an
         # already-cached scene doesn't retroactively delight it; billboards fall
         # back to crop_{i} until the stage is rerun with --rerun.
+        #
+        # Card LODs are left out for the same reason and with the same cost.
+        # _build_card_meshes skips a group whose top crop is missing or whose card
+        # fails to build, so requiring the full set here could latch the cascade on a
+        # group that can never produce one -- and SceneGenerationStage already treats
+        # a missing card as "billboard instead", which is exactly the old behaviour.
+        # Enabling cards on a cached scene therefore needs --rerun too.
         return True
 
     def model_names(self) -> list[str]:

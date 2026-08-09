@@ -149,8 +149,9 @@ _MAX_OBJECT_SIZE_M = 25.0
 # same capture's category_mesh_flower_0 is [0.418, 1.000, 0.116], y/max = 1.000.
 _MIN_MESH_HEIGHT_FRACTION = 0.25
 
-# The same question asked about the thinnest axis instead of the vertical one, which
-# is what catches a mesh that is a flat CARD rather than a flat pancake.
+# "Is this a flat picture, or does it have volume in the round?", asked as the thinnest
+# extent over the SECOND largest -- which is what catches a mesh that is a flat CARD
+# rather than a flat pancake.
 #
 # _MIN_MESH_HEIGHT_FRACTION above only ever looks at extent_y, so it sees a horizontal
 # sheet and is blind to a vertical one -- an upright card has extent_y == its largest
@@ -165,13 +166,26 @@ _MIN_MESH_HEIGHT_FRACTION = 0.25
 # thin closed shell. A billboard is the honest representation of a subject that was
 # never reconstructed in the round, and rejecting here is what falls back to one.
 #
-# 0.12 from the same capture's measured spread, replayed against its own
-# mesh_geometry_debug.json. Rejects statue 0.041, ship 0.056, forest 0.081, tree 0.083,
-# bench 0.086, fire_hydrant 0.091, bush 0.100, rock 0.104, plant_1 0.105 (119 instances
-# that were placed as sheets, 67 of them trees); keeps traffic_light 0.125, person_1
-# 0.136, building 0.146, and every flower (0.354-0.613). traffic_light is the closest
-# keeper, so do not raise this above ~0.12 without re-measuring against a real run.
-_MIN_MESH_THICKNESS_FRACTION = 0.12
+# Measured against the LARGEST extent this reads as a sheet test but is really an
+# "is it tall and narrow" test, and those are different shapes: a sheet has one small
+# axis and two large (a tree card, [0.95, 1.00, 0.10]), while a mast, a trunk or a
+# person has TWO small axes ([0.15, 1.00, 0.14]). Only the second largest tells them
+# apart, and dividing by the largest cannot: on the 2026-08-08 run the sheets sat at
+# 0.044-0.111 of their largest and the keepers at 0.131-0.866, a gap of 1.18x, so the
+# threshold sat inside SAM3D's own run-to-run drift -- the same tree bucket measured
+# 0.083 one run and 0.097 the next.
+#
+# Over the second largest the two populations separate by 6x instead: sheets score
+# 0.082 (forest), 0.084 (statue), 0.101 (tree), 0.108 (rock), 0.159 (bush), 0.207
+# (bench), 0.225 (aircraft); keepers score 0.657 (table), 0.811 (traffic_light), 0.850
+# (boat), 0.866 (a grass card), 0.878-0.994 (every flower, person, building, tower,
+# plant). 0.4 sits in the middle of that gap with ~4x of margin on either side, which
+# is what makes it robust to a reconstruction that comes back slightly different.
+#
+# It also has to admit a deliberately narrow card: a 3-plane fan is [W, 1.0, 0.866W]
+# for any width W, which scores a constant 0.866 here and would have been rejected
+# outright by the old test for any conifer narrower than about 1:8.
+_MIN_MESH_THICKNESS_FRACTION = 0.4
 
 # A reconstructed category mesh describes the same object its instance's 2D box
 # measured, so the two have to agree about that object's shape. This is the ratio
@@ -230,13 +244,14 @@ def mesh_instance_scale(
 
     # Flat in ANY axis -- an upright card clears the vertical test above with a perfect
     # h_frac and is still a sheet. See _MIN_MESH_THICKNESS_FRACTION.
-    extent_min = float(min(mesh_extents))
-    if extent_min < _MIN_MESH_THICKNESS_FRACTION * extent_max:
+    extent_sorted = sorted(float(v) for v in mesh_extents)
+    extent_min, extent_mid = extent_sorted[0], extent_sorted[1]
+    if extent_mid > 0.0 and extent_min < _MIN_MESH_THICKNESS_FRACTION * extent_mid:
         return (
             float(height) / extent_y,
             f"a flat sheet (thinnest axis {extent_min:.4f} is "
-            f"{extent_min / extent_max:.3f} of its largest {extent_max:.4f}, under "
-            f"{_MIN_MESH_THICKNESS_FRACTION})",
+            f"{extent_min / extent_mid:.3f} of its second largest {extent_mid:.4f}, "
+            f"under {_MIN_MESH_THICKNESS_FRACTION})",
         )
 
     # Aspect agreement. Compared as a ratio-of-ratios so it is symmetric: a mesh far
@@ -267,6 +282,60 @@ def mesh_instance_scale(
         )
 
     return scale, None
+
+
+def _mesh_geometry_record(
+    mesh_geometry: dict, mesh_key: str, cls: str, extents, idx: int, scale: float
+) -> dict:
+    """Create-or-update this mesh's entry in the per-run geometry report.
+
+    Shared by the reconstruction path and the card path so a scene where every
+    instance ended up on a card still reports what was placed and at what size --
+    reading "no record" as "nothing rendered" is exactly the confusion
+    _log_mesh_geometry exists to prevent.
+    """
+    record = mesh_geometry.get(mesh_key)
+    if record is None:
+        ex = [float(v) for v in extents]
+        largest = max(ex) or 1.0
+        ordered = sorted(ex)
+        record = mesh_geometry[mesh_key] = {
+            "class": cls,
+            "extents": [round(v, 4) for v in ex],
+            "height_fraction": round(ex[1] / largest, 4),
+            # Over the SECOND largest, matching what _MIN_MESH_THICKNESS_FRACTION
+            # actually tests.
+            "thickness_fraction": round(ordered[0] / (ordered[1] or 1.0), 4),
+            "aspect": round(max(ex[0], ex[2]) / ex[1], 3) if ex[1] > 0 else None,
+            "instances": 0,
+            "rejected": 0,
+            # Running extremes, not per-instance lists. Ground cover puts tens of
+            # thousands of instances through one card mesh (16,031 grass tufts
+            # across 3 on the Rainier capture), and keeping every value would
+            # write a debug file of raw numbers that buries the handful that
+            # matter. The extremes plus a few named examples are what a blow-up
+            # actually shows up in.
+            "scale_min": None, "scale_max": None,
+            "rendered_min_m": None, "rendered_max_m": None,
+            "examples": [],
+        }
+    record["instances"] += 1
+    scale_v = round(float(scale), 3)
+    rendered_v = round(float(scale) * max(record["extents"]), 3)
+    for lo, hi, value in (
+        ("scale_min", "scale_max", scale_v),
+        ("rendered_min_m", "rendered_max_m", rendered_v),
+    ):
+        if record[lo] is None or value < record[lo]:
+            record[lo] = value
+        if record[hi] is None or value > record[hi]:
+            record[hi] = value
+    # Keep the biggest few by rendered size -- those are the ones to look at, and a
+    # reader wants an index to go and find them by.
+    record["examples"].append({"idx": idx, "scale": scale_v, "rendered_m": rendered_v})
+    record["examples"].sort(key=lambda e: -e["rendered_m"])
+    del record["examples"][8:]
+    return record
 
 
 class SceneGenerationStage(PipelineStage):
@@ -841,16 +910,24 @@ class SceneGenerationStage(PipelineStage):
                     cls, self.config.mesh_lod_distance_m
                 )
                 use_mesh = category_mesh is not None and camera_distance <= lod_distance
+                using_card = False
                 if not use_mesh and card_mesh is not None:
                     # Beyond the mesh LOD distance (or this bucket never got a
                     # reconstructed mesh at all) but a card LOD exists -- take it
                     # rather than the billboard. Everything below is shared: the
                     # card is an ordinary mesh, so it gets the same base snap,
-                    # random yaw and uniform scale, and CategoryMeshRiggingStage
-                    # will rig it for sway just like the near-LOD asset.
+                    # random yaw, and CategoryMeshRiggingStage will rig it for sway
+                    # just like the near-LOD asset.
                     category_mesh, mesh_key, use_mesh = card_mesh, card_mesh_key, True
+                    using_card = True
 
-                if use_mesh:
+                # A card is authored here, not reconstructed: crossed_card_mesh builds
+                # it to a known shape from a crop that is already the instance's own
+                # cutout, and it is scaled to the detection's own width and height
+                # below. The gates exist to catch a RECONSTRUCTION that turned out to
+                # describe something other than its detection, which is a question a
+                # card cannot fail -- so it is not asked.
+                if use_mesh and not using_card:
                     # Does this mesh actually describe this instance's detection, and
                     # what does it render at if so? Both questions are answered before
                     # anything is placed, because a mesh that fails either one has to
@@ -860,55 +937,35 @@ class SceneGenerationStage(PipelineStage):
                     mesh_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
                     mesh_scale, mesh_rejection = mesh_instance_scale(mesh_extents, width, height)
 
-                    record = mesh_geometry.get(mesh_key)
-                    if record is None:
-                        ex = [float(v) for v in mesh_extents]
-                        largest = max(ex) or 1.0
-                        record = mesh_geometry[mesh_key] = {
-                            "class": cls,
-                            "extents": [round(v, 4) for v in ex],
-                            "height_fraction": round(ex[1] / largest, 4),
-                            "thickness_fraction": round(min(ex) / largest, 4),
-                            "aspect": round(max(ex[0], ex[2]) / ex[1], 3) if ex[1] > 0 else None,
-                            "instances": 0,
-                            "rejected": 0,
-                            # Running extremes, not per-instance lists. Ground cover
-                            # puts tens of thousands of instances through one card
-                            # mesh (16,031 grass tufts across 3 on the Rainier
-                            # capture), and keeping every value would write a debug
-                            # file of raw numbers that buries the handful that
-                            # matter. The extremes plus a few named examples are
-                            # what a blow-up actually shows up in.
-                            "scale_min": None, "scale_max": None,
-                            "rendered_min_m": None, "rendered_max_m": None,
-                            "examples": [],
-                        }
-                    record["instances"] += 1
-                    scale_v = round(float(mesh_scale), 3)
-                    rendered_v = round(float(mesh_scale) * max(record["extents"]), 3)
-                    for lo, hi, value in (
-                        ("scale_min", "scale_max", scale_v),
-                        ("rendered_min_m", "rendered_max_m", rendered_v),
-                    ):
-                        if record[lo] is None or value < record[lo]:
-                            record[lo] = value
-                        if record[hi] is None or value > record[hi]:
-                            record[hi] = value
-                    # Keep the biggest few by rendered size -- those are the ones to
-                    # look at, and a reader wants an index to go and find them by.
-                    record["examples"].append({"idx": idx, "scale": scale_v, "rendered_m": rendered_v})
-                    record["examples"].sort(key=lambda e: -e["rendered_m"])
-                    del record["examples"][8:]
+                    record = _mesh_geometry_record(
+                        mesh_geometry, mesh_key, cls, mesh_extents, idx, mesh_scale
+                    )
 
                     if mesh_rejection is not None:
+                        # A rejected reconstruction prefers the card LOD over a
+                        # billboard when its group has one. Both are pictures of the
+                        # subject, but a card is fixed-orientation crossed planes with
+                        # parallax between them, while a billboard is one quad that
+                        # turns to face the viewer -- and for the subjects that fail
+                        # these gates (trees above all) that swing is the artefact
+                        # being traded for. This ordering only exists because the card
+                        # substitution above happens BEFORE the gates: without it,
+                        # publishing a tree card would change nothing, since the
+                        # reconstruction is found first and its rejection went straight
+                        # to the billboard branch.
+                        fallback = "carding" if card_mesh is not None else "billboarding"
                         self.log_warning(
                             f"Category mesh {mesh_key} rejected for object {idx} ({cls}): "
-                            f"{mesh_rejection}; billboarding instead"
+                            f"{mesh_rejection}; {fallback} instead"
                         )
-                        use_mesh = False
                         mesh_rejections[mesh_key] = mesh_rejections.get(mesh_key, 0) + 1
                         record["rejected"] += 1
                         record.setdefault("reason", mesh_rejection)
+                        if card_mesh is not None:
+                            category_mesh, mesh_key = card_mesh, card_mesh_key
+                            using_card = True
+                        else:
+                            use_mesh = False
 
                 if use_mesh:
                     # Use the shared bucket mesh with a random Y rotation.
@@ -924,12 +981,37 @@ class SceneGenerationStage(PipelineStage):
                     # decides whether this mesh may be used for this instance at all;
                     # reaching here means it passed. See that function for why height,
                     # and not max(width, height), sets the scale.
-                    mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * mesh_scale
+                    #
+                    # A card is the exception, and is scaled per axis to the detection's
+                    # own width and height. Uniform scaling exists because a
+                    # reconstruction's proportions are its own evidence and must not be
+                    # distorted; a card has no proportions of its own to preserve -- it
+                    # is a picture on planes, and a conifer boxed at 1:8 rendered
+                    # uniformly would stand as wide as it is tall. Horizontal scale is
+                    # shared between X and Z so the yaw fan stays isotropic, and the
+                    # card's base sits at y=0 by construction (see cards.py), so the
+                    # snap below resolves to 0 either way. Grass is unaffected: its
+                    # synthetic instances carry world_width == world_height.
+                    if using_card:
+                        card_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                        horizontal = float(card_extents[0]) or 1.0
+                        vertical = float(card_extents[1]) or 1.0
+                        scale_x = scale_z = float(width) / horizontal
+                        scale_y = float(height) / vertical
+                        _mesh_geometry_record(
+                            mesh_geometry, mesh_key, cls, card_extents, idx, scale_y
+                        )
+                    else:
+                        scale_x = scale_y = scale_z = mesh_scale
+                    mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * scale_y
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
-                    self.log_info(f"Creating mesh for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m)")
+                    self.log_info(
+                        f"Creating {'card' if using_card else 'mesh'} for {idx} "
+                        f"({cls}, bucket {bucket}, {camera_distance:.1f}m)"
+                    )
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
                     mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
-                    mesh_obj.set_scale(mesh_scale, mesh_scale, mesh_scale)
+                    mesh_obj.set_scale(scale_x, scale_y, scale_z)
                     mesh_obj.name = mesh_key
                     mesh_obj.source_index = idx
                     scene.add_object(mesh_obj)

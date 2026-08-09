@@ -1086,7 +1086,17 @@ stages:
     # answer to the 3-exemplar groups; these two are what pull the near-field carpet
     # back toward what the photo shows.
     min_exemplar_spacing_m: 0.4      # 0.25 m was 16/m² -- 0.4 m is 6.2/m²
-    full_density_radius_m: 3.0       # full learned density only within arm's reach
+    full_density_radius_m: 3.0       # a FLOOR, not the radius -- each group extends it to
+                                      # the p75 of its own exemplar distances (see
+                                      # density_radius_percentile), because classes do not
+                                      # live at the same distance from the camera. On the
+                                      # Rainier capture that leaves flowers at 3.0 m (their
+                                      # exemplars are all inside 1.2 m) and lifts tree
+                                      # [ground] to 9.8 m and tree [vegetation] to 13.3 m,
+                                      # which is ~6x and ~9x more painted trees. Without it
+                                      # a radius tuned for the near-field flower carpet
+                                      # switches off mid-field tree fill entirely.
+    density_radius_percentile: 75.0
     density_falloff_exponent: 2.0
     max_paint_radius_m: 30.0         # 0 disables
     max_instances_per_group: 12000   # 0 disables the ceiling
@@ -1352,6 +1362,16 @@ stages:
     # Grass Cover's equivalent (max_near_mesh_faces) is 4000; 8000 here because these
     # are subjects you look at rather than ground cover underfoot. 0 disables.
     max_mesh_faces: 8000
+    # Crossed-card LOD for vegetation, published as category_mesh_{class}_{bucket}_card
+    # and textured with the group's top curated crop. Scene Generation takes it beyond
+    # mesh_lod_distance_m, when a bucket never got a reconstruction, and when one was
+    # rejected as a sheet -- which is every tree, since SAM3D reconstructs a conifer as
+    # a card anyway. Three fixed planes at 12 triangles read as volume in stereo where
+    # a single camera-facing quad reads as flat and swings with the head.
+    #
+    # Defaults to vegetation minus grass_tuft (Grass Cover builds its own cards). Set
+    # card_categories: [] to turn cards off and go back to billboards.
+    card_planes: 3
 
   - name: Scene Generation
     stage: SceneGenerationStage
@@ -1548,6 +1568,14 @@ stages:
 
   - name: Scene Animation
     stage: SceneAnimationStage
+    # Radius beyond which a stationary mesh is left static. THIS IS A CLIENT FRAME-TIME
+    # KNOB, not a look knob: every swaying instance costs a WindSway.LateUpdate every
+    # frame AND has to keep its bone skin, so it renders as a SkinnedMeshRenderer that
+    # can be neither instanced nor batched. On the Rainier capture 17,129 of 17,475
+    # objects swayed; at 8 m that becomes 3,213 (81% fewer). Sway amplitude is a
+    # fraction of the object's own size, so a 0.35 m grass tuft's motion is
+    # sub-pixel long before the 25 m ground cover reaches. 0 disables the gate.
+    sway_max_distance_m: 8.0
     # Final pass: annotates Scene Generation's already-placed objects with animated-
     # billboard video, sway parameters, or rigid-body physics handoff, based on the
     # classification above. Purely additive -- placement itself is unchanged.
