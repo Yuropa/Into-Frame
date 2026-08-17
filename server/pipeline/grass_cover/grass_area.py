@@ -65,6 +65,7 @@ _GRASS_SOURCE_TYPES: frozenset[RegionType] = frozenset({
 
 def cell_greenness(
     panorama_rgb: np.ndarray, row: np.ndarray, col: np.ndarray, sampled: np.ndarray,
+    map_shape: "tuple[int, int] | None" = None,
 ) -> np.ndarray:
     """Per-cell excess green ((2G-R-B)/255) of the panorama pixel each cell observes.
 
@@ -82,14 +83,32 @@ def cell_greenness(
 
     Cells outside `sampled` get -inf: they have no trustworthy UV, so there is no
     pixel to read, and they must never pass a greenness test by accident.
+
+    row/col arrive in the REGION TYPE MAP's pixel space (that is what the caller
+    indexed to get each cell's type), and this reads the PANORAMA. The two are
+    normally the same size -- PanoramaRegionStage typed that same image -- but
+    SupersamplingStage rewrites PANORAMA in place at 2x, so a run whose typing
+    happened against the pre-supersampled panorama has them off by a factor of
+    two. GrassCoverStage._grass_card_boxes already resamples for exactly this
+    (see its type_map.shape check); this path had no equivalent and would either
+    raise IndexError or, in the halving direction, silently read the wrong pixel
+    and veto the meadow on the colour of somewhere else entirely. Rescaled rather
+    than asserted so the mismatch degrades to a slightly blurrier lookup, which
+    is what it actually is, instead of failing a stage over a factor of two.
     """
     out = np.full(row.shape, -np.inf, dtype=np.float32)
     if panorama_rgb is None:
         return np.zeros(row.shape, dtype=np.float32)
     rgb = np.asarray(panorama_rgb, dtype=np.float32)[..., :3]
-    r = rgb[..., 0][row[sampled], col[sampled]]
-    g = rgb[..., 1][row[sampled], col[sampled]]
-    b = rgb[..., 2][row[sampled], col[sampled]]
+    pano_h, pano_w = rgb.shape[:2]
+    r_idx, c_idx = row[sampled], col[sampled]
+    if map_shape is not None and tuple(map_shape) != (pano_h, pano_w):
+        map_h, map_w = map_shape
+        r_idx = np.clip(r_idx * (pano_h / map_h), 0, pano_h - 1).astype(np.intp)
+        c_idx = np.clip(c_idx * (pano_w / map_w), 0, pano_w - 1).astype(np.intp)
+    r = rgb[..., 0][r_idx, c_idx]
+    g = rgb[..., 1][r_idx, c_idx]
+    b = rgb[..., 2][r_idx, c_idx]
     out[sampled] = (2.0 * g - r - b) / 255.0
     return out
 
@@ -173,8 +192,7 @@ def grass_area_mask(
 
     mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
 
-    # Per-cell colour veto, applied before any morphology so the closing below
-    # can't bridge across ground the veto just removed.
+    # Per-cell colour veto.
     #
     # The type gate above is coarse in a way that matters here: RegionType.GROUND
     # is `grass`/`earth`/`field` collapsed together with `sand`, `snow` and `ice`
@@ -184,17 +202,26 @@ def grass_area_mask(
     # "lush": dry and golden grass sit near zero on this scale, while sand runs
     # about -0.12 and snow lower still, so the threshold sits just above neutral
     # and only removes surfaces that are definitively not vegetation.
+    #
+    # Applied TWICE, before and after the morphology below -- see the second call
+    # for why once is not enough.
+    vetoed_cells = np.zeros(pano_u.shape, dtype=bool)
     if panorama_rgb is not None and min_cell_greenness > -np.inf:
-        greenness = cell_greenness(panorama_rgb, row, col, sampled)
+        greenness = cell_greenness(
+            panorama_rgb, row, col, sampled, map_shape=(pano_h, pano_w)
+        )
+        # Only a SAMPLED cell has a real measurement behind it. An unsampled cell
+        # reads -inf from cell_greenness, which would make this a veto on "no data"
+        # -- the opposite of what the nadir fill below is for.
+        vetoed_cells = sampled & (greenness < min_cell_greenness)
         if stats is not None:
-            vetoed = mask & (greenness < min_cell_greenness)
-            stats["colour_vetoed_cells"] = int(vetoed.sum())
+            stats["colour_vetoed_cells"] = int((mask & vetoed_cells).sum())
             # Handed back so the caller can scatter BY this rather than uniformly
             # over whatever survives the threshold -- see GrassCoverStage._scatter.
             # A veto answers "is this cell vegetation at all"; how much vegetation
             # it shows is a different question, and the same measurement answers it.
             stats["greenness"] = greenness
-        mask &= greenness >= min_cell_greenness
+        mask &= ~vetoed_cells
 
     # The per-cell UV is an equirectangular projection fanned out along rays, so
     # an unmeasured column between two measured ones shows up as a thin radial
@@ -211,6 +238,34 @@ def grass_area_mask(
     )
 
     mask &= radius <= max_radius_m
+
+    # Re-apply the colour veto. Both steps above ADD cells, and neither can consult
+    # the veto while doing it:
+    #
+    #   binary_closing is a dilation followed by an erosion, so bridging a gap is
+    #   the whole point of it -- it cannot distinguish a gap that is an unmeasured
+    #   column (what it exists to stitch) from one that is a snow patch the veto
+    #   just cut out (what it must not). Running the veto first, as this used to,
+    #   does not help: it only decides what the closing starts from, not what it
+    #   fills. Measured on the Rainier capture, 34,079 cells came back this way --
+    #   7.8% of the final mask, every one of them a cell whose own panorama pixel
+    #   was measured and found not green.
+    #
+    #   _fill_nadir_disc fills unconditionally by design, but only where a cell is
+    #   unsampled, so it cannot resurrect a measured cell and is left alone here.
+    #
+    # 202 of 8,927 placed tufts stood on vetoed cells on that run, 105 of them on
+    # snow-bright pixels at a median 6.1 m -- directly in front of the viewer, which
+    # is why a 7.8% mask error was so visible. Restricted to `sampled` so this is a
+    # veto on measured evidence, never on its absence.
+    #
+    # Deliberately BEFORE the speckle drop below, not after: cutting these cells
+    # fragments components that were only whole because the closing had bridged
+    # them, and the speckle drop is what should decide whether the pieces are
+    # still worth scattering into. It costs 2,012 genuinely green cells on the
+    # Rainier capture (0.5% of the mask) that survived the veto but ended up in a
+    # sub-threshold fragment -- which is the speckle filter doing its job.
+    mask &= ~vetoed_cells
 
     # Drop speckle -- isolated cells from a stray misclassified panorama pixel,
     # which after the radial fan-out become a handful of lone tufts standing in

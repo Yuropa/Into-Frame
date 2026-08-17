@@ -403,7 +403,7 @@ class TerrainMeshStage(PipelineStage):
         component_id, formation_ids = self._select_formations(component_id, height_map, grid_size, cfg)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
-        mesh, water_mesh, pano_uv = TerrainMeshGenerator.generate(
+        mesh, water_mesh, pano_uv, uv_folds_fixed = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
             inner_min_dist=cfg.inner_min_dist,
@@ -428,6 +428,14 @@ class TerrainMeshStage(PipelineStage):
             pano_uv_u=pano_uv_u,
             pano_uv_v=pano_uv_v,
         )
+        if uv_folds_fixed:
+            total_faces = len(mesh.mesh.faces) if mesh is not None else 0
+            self.log_info(
+                f"Panorama UV: collapsed {uv_folds_fixed} triangle(s) bridging an "
+                f"occlusion boundary"
+                + (f" ({100.0 * uv_folds_fixed / total_faces:.1f}% of faces)" if total_faces else "")
+                + " — the panorama never photographed the ground under them"
+            )
         self.advance_progress(task)
 
         # Carried through to Mesh.save() as glTF TEXCOORD_1 -- Unity's terrain

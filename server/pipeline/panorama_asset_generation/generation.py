@@ -17,6 +17,15 @@ from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
 
 
+# How far a candidate's width:height may disagree with its bucket's median before it
+# is refused as that bucket's CARD TEXTURE -- see the card_sources block in _curate.
+# Deliberately the same 4x as scene_generation's _MAX_MESH_ASPECT_RATIO, which asks
+# the same question of a reconstruction against its detection: these are both "does
+# this thing describe the subject it claims to", and there is no reason for the two
+# to disagree about how much shape mismatch is too much.
+_MAX_CARD_ASPECT_RATIO = 4.0
+
+
 def _delit_key(idx: int) -> str:
     """Asset name for a crop with its baked-in lighting removed.
 
@@ -255,7 +264,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
         region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
         region_type_map = region_type_depth.depth if region_type_depth is not None else None
 
-        group_best, billboard_pools, skipped_debug, disqualified_debug, synthetic_skipped = self._curate(
+        (group_best, billboard_pools, card_sources, skipped_debug,
+         disqualified_debug, synthetic_skipped) = self._curate(
             object_count, context.input_object, context.input_image, panorama_depth, pano_w, pano_h,
             region_type_map=region_type_map,
         )
@@ -268,6 +278,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # crops -- environment, background, position_only -- cost nothing.
         rendered = {i for pool in billboard_pools.values() for i in pool}
         rendered.update(idx for idx, _depth, _score in group_best.values())
+        # Card textures are picked by resolution, not by pool rank, so the crop a
+        # card uses is routinely NOT in its group's top-K -- it has to be delit
+        # explicitly or the card ends up the one asset in the scene still carrying
+        # baked-in sunlight while everything around it is albedo.
+        rendered.update(
+            idx for key, idx in card_sources.items()
+            if key.partition("::")[0] in self.config.card_categories
+        )
         if self.config.use_intrinsic_delighting:
             written = self._delight_crops(context, rendered)
             self.log_info(
@@ -279,7 +297,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # not from a reconstruction, so it exists for every pooled group regardless of
         # whether anything was close enough to mesh. A scene where nothing qualified
         # for 3D still wants its vegetation on cards rather than on quads.
-        cards = self._build_card_meshes(context, billboard_pools)
+        cards = self._build_card_meshes(context, billboard_pools, card_sources)
         if cards:
             self.log_info(f"Built {cards} crossed-card LOD mesh(es)")
 
@@ -350,14 +368,17 @@ class PanoramaAssetGenerationStage(PipelineStage):
         self.finish_progress(asset_task)
         return context
 
-    def _build_card_meshes(self, context: PipelineContext, billboard_pools: dict) -> int:
+    def _build_card_meshes(
+        self, context: PipelineContext, billboard_pools: dict, card_sources: dict,
+    ) -> int:
         """Publish a crossed-card LOD for every configured group with a curated pool.
 
-        Textured with the pool's top-ranked crop -- the same image the billboard branch
-        would have shown -- preferring its delit variant for the same reason the mesh
-        path does: the client lights the card again, so it wants albedo rather than a
-        photograph with the sun in it. The crop's own alpha is the silhouette
-        (crossed_card_mesh masks at 0.5), which is why no shaping pass is needed here.
+        Textured with the group's HIGHEST-RESOLUTION eligible crop (card_sources, see
+        _curate) rather than its top-ranked one, preferring the delit variant for the
+        same reason the mesh path does: the client lights the card again, so it wants
+        albedo rather than a photograph with the sun in it. The crop's own alpha is the
+        silhouette (crossed_card_mesh masks at 0.5), which is why no shaping pass is
+        needed here.
 
         Keyed category_mesh_{class}_{bucket}_card, which SceneGenerationStage already
         resolves generically -- it takes the card beyond the mesh LOD distance, when a
@@ -376,7 +397,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if context.mesh(key) is not None:
                 continue
 
-            crop = context.image(_delit_key(pool[0])) or context.input_image(f"crop_{pool[0]}")
+            # Falls back to the pool's top crop only if this group produced no
+            # measurable box at all -- prior behaviour, and never worse than it.
+            source = card_sources.get(pool_key, pool[0])
+            crop = context.image(_delit_key(source)) or context.input_image(f"crop_{source}")
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
@@ -390,7 +414,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 continue
 
             context.add_mesh(key, mesh)
-            self.log_info(f"  {key}: {self.config.card_planes} planes from crop_{pool[0]}")
+            self.log_info(
+                f"  {key}: {self.config.card_planes} planes from crop_{source} "
+                f"({texture.width}x{texture.height} px)"
+            )
             built += 1
         return built
 
@@ -611,6 +638,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         group_best: dict[tuple[str, int], tuple[int, float, float]] = {}
         billboard_pools: dict[str, list[int]] = {}
+        card_sources: dict[str, int] = {}
         disqualified_debug = []
         for (obj_class, bucket), candidates in candidates_by_group.items():
             scored = []
@@ -637,6 +665,71 @@ class PanoramaAssetGenerationStage(PipelineStage):
             scored_by_rank = sorted(scored, key=lambda s: s["score"], reverse=True)
             pool_key = f"{obj_class}::{bucket}"
             billboard_pools[pool_key] = [s["idx"] for s in scored_by_rank[: self.config.billboard_top_k]]
+
+            # Card texture, chosen by RESOLUTION rather than by composite_score.
+            #
+            # A card is one image stretched over 3-5 m of geometry and viewed from
+            # a few metres away, so the only property that matters is how many
+            # pixels the crop actually has. composite_score ranks on confidence,
+            # fill ratio, depth proximity and occlusion and -- as the size gate
+            # below says of the same defect -- size is not one of its terms, so its
+            # winner is routinely a small nearby instance.
+            #
+            # Measured on the Rainier capture, where this produced the scene's most
+            # conspicuous artefact: every one of tree::0's 106 instances rendered as
+            # a card up to 5.3 m tall wearing crop_392, a 67x63 px `split_watershed`
+            # fragment of the treeline at the horizon captioned "a close up of a
+            # tree with a brown background" -- a featureless pale-green smudge with
+            # no tree in it. The same group holds crop_170 at 119x325 px: nine times
+            # the pixels, and conifer-shaped. plant::0 is 39x77 against 39x366
+            # available, flower::0 78x79 against 73x153.
+            #
+            # Ranked over the group's whole eligible candidate set, not over the
+            # top-K pool -- the pool is four entries deep and its best (51x165) is
+            # still a third of what the group has. Occlusion-disqualified crops are
+            # excluded where possible: a crop that is half some other object is a
+            # bad texture no matter how many pixels it has.
+            #
+            # Guarded on ASPECT, because "largest" on its own will happily pick a
+            # large MISdetection. A bucket is a visual-similarity cluster, so its
+            # members agree about the subject's shape, and a candidate that does not
+            # is the one that does not belong. Same test the placement-side mesh
+            # gates use (_MAX_MESH_ASPECT_RATIO, also 4x) and the same reasoning:
+            # compared as a ratio-of-ratios against the group's MEDIAN aspect, so it
+            # is symmetric and a single outlier cannot move the reference.
+            #
+            # Rainier again: flower::4's largest candidate is crop_69, 133x69 px --
+            # a landscape crop of a SNOW PATCH, captioned "there is a white vase
+            # with a bird on it", carrying a perfectly ordinary 0.94 detection score
+            # and 0.71 confidence, so nothing else in the pipeline separates it. Its
+            # bucket's other seven members are all portrait (median aspect 0.35);
+            # crop_69 is 1.93, a 5.5x disagreement. With the guard the bucket picks
+            # crop_268 (38x128, "a yellow flower that is on a stick"). Across every
+            # carded group on that capture this changes only flower::4.
+            # Degenerate boxes are dropped outright rather than clamped: a zero
+            # height makes an aspect of 1/epsilon, which is not merely a bad
+            # candidate -- as an entry in the list the median is taken over it drags
+            # the reference far enough to reject every real crop in the group.
+            def _measurable(s) -> bool:
+                b = s.get("box")
+                return bool(b) and b[2] > 0 and b[3] > 0
+
+            usable = [s for s in scored if not s["disqualified"] and _measurable(s)] \
+                or [s for s in scored if _measurable(s)]
+            if usable:
+                aspects = sorted(s["box"][2] / s["box"][3] for s in usable)
+                median_aspect = aspects[len(aspects) // 2]
+
+                def _agrees(s) -> bool:
+                    aspect = s["box"][2] / s["box"][3]
+                    return max(aspect / median_aspect, median_aspect / aspect) <= _MAX_CARD_ASPECT_RATIO
+
+                # If the guard rejects everything the group has no self-consistent
+                # shape to appeal to, so fall back to raw size rather than no card.
+                shaped = [s for s in usable if _agrees(s)] or usable
+                card_sources[pool_key] = max(
+                    shaped, key=lambda s: s["box"][2] * s["box"][3]
+                )["idx"]
 
             within_threshold = [s for s in scored if s["depth"] < threshold]
             if not within_threshold:
@@ -718,7 +811,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
                         "chosen_anyway": s["idx"] == winner["idx"],
                     })
 
-        return group_best, billboard_pools, skipped_debug, disqualified_debug, synthetic_skipped
+        return (group_best, billboard_pools, card_sources, skipped_debug,
+                disqualified_debug, synthetic_skipped)
 
     def _write_debug(
         self, skipped: list, group_best: dict, disqualified: list, billboard_pools: dict,
@@ -790,13 +884,20 @@ class PanoramaAssetGenerationStage(PipelineStage):
         pano_h = panorama.height if panorama is not None else None
 
         region_type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
-        group_best, _, _, _, _ = self._curate(
+        group_best, _pools, _cards, _skipped, _disq, _syn = self._curate(
             count, context.object, context.image, panorama_depth, pano_w, pano_h,
             region_type_map=region_type_depth.depth if region_type_depth is not None else None,
         )
         for obj_class, bucket in group_best:
             if context.mesh(f"category_mesh_{obj_class}_{bucket}") is None:
                 return False
+        # Deliberately NOT checking for the _card meshes, even though run() publishes
+        # them. _build_card_meshes skips a group whose crop is missing or whose card
+        # build raised, by design -- so requiring the full set here would leave any
+        # such group reporting this stage incomplete on every single invocation, and
+        # with it every stage downstream via the dirty cascade. A context carrying
+        # cards built under an older texture-selection rule is a --rerun, not a
+        # cache-validity question.
         # Deliberately NOT checking for crop_delit_{i}. run() tolerates
         # IntrinsicDiffusion failing on an individual crop and leaves that one lit,
         # so requiring the full set here would make a permanently-failing crop

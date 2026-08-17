@@ -45,6 +45,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         metric_height_jitter: float = 0.25,
         overlap_rejection: bool = True,
         overlap_min_separation: float = 0.35,
+        overlap_min_separation_overrides: dict[str, float] | None = None,
         overlap_exempt_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -114,6 +115,39 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # overlapping footprints (a chair tucked under a table, a boat against a
         # dock), and the target here is the pathological case, not contact.
         self.overlap_min_separation = float(overlap_min_separation)
+        # Per-class override of that separation, {class_name: fraction}. The global
+        # value is deliberately permissive because the scene is mostly discrete
+        # objects whose footprints legitimately touch. It is far too permissive for
+        # a class placed as a POPULATION, where the same "pathological case only"
+        # reasoning stops applying: those instances come from several producers at
+        # once (real detections, painted distribution points) and are dense enough
+        # that ordinary overlap IS the artefact.
+        #
+        # Measured on the Rainier capture. 44 real flower detections land within
+        # 1.5 m of the camera (median 0.57 m) because the panorama's near-nadir band
+        # over-splits one flower mass into dozens of boxes, and Distribution
+        # Synthesis then paints 275 more on top of them. Their median centre
+        # separation is 0.118 m against a median footprint width of 0.137 m -- so
+        # they overlap by default, while the global 0.35 only rejects centres inside
+        # 5.2 cm and passed 63 of the 115 instances within 3 m as interpenetrating.
+        #
+        # 0.8 rather than 1.0 (exactly tangent): real vegetation does grow into its
+        # neighbours and demanding tangency reads as a planted grid, plus it starts
+        # culling real detections rather than the painted surplus -- at 1.0, 20 of
+        # 44 real flowers are dropped by each other, against 14 at 0.8. Measured
+        # effect at 0.8: 63 -> 16 interpenetrating within 3 m, near-field flower
+        # density 21.6 -> 12.1 per m2, 82 vegetation instances rejected of which 56
+        # are synthetic.
+        #
+        # NOTE what this does NOT fix: the near field stays far denser than the rest
+        # of the disc (12.1 per m2 inside 1 m against 0.1 past 5 m). That gradient is
+        # not overlap -- it is 44 real detections genuinely occupying the first
+        # metre, and Distribution Synthesis painting at the density they imply out to
+        # its full_density_radius_m floor of 3 m. Removing it means either deleting
+        # real detections or emptying the meadow (see the group_radius block in
+        # distribution_synthesis.py for why that radius only ever extends), so it is
+        # deliberately left alone here.
+        self.overlap_min_separation_overrides = dict(overlap_min_separation_overrides or {})
         # Classes exempt from the test entirely, and from the occupancy set that
         # feeds it. Ground cover is the case this exists for: it is placed BY a
         # density, thousands of instances deliberately interpenetrating to read as
@@ -665,6 +699,7 @@ class SceneGenerationStage(PipelineStage):
             occ_y_high = np.zeros(object_count, dtype=np.float64)
             occ_n = 0
             rejected_overlap = 0
+            rejected_overlap_by_class: dict[str, int] = {}
             rejected_examples: list[str] = []
 
             def _placement_rank(i: int) -> tuple[int, float, int]:
@@ -832,6 +867,17 @@ class SceneGenerationStage(PipelineStage):
                 if self.config.overlap_rejection and cls not in self.config.overlap_exempt_classes:
                     radius = max(float(width) / 2.0, 1e-3)
                     y_low, y_high = place_y - height / 2.0, place_y + height / 2.0
+                    # Asymmetric by construction: the threshold is the ARRIVING
+                    # object's, tested against ground already claimed. That makes
+                    # the result depend on placement_order, which is exactly the
+                    # precedence wanted here -- _placement_rank puts real detections
+                    # ahead of synthetic ones and orders each by descending score, so
+                    # the painted surplus yields to real evidence and a weak
+                    # detection yields to a strong one, rather than whichever
+                    # happened to be enumerated first.
+                    min_separation = self.config.overlap_min_separation_overrides.get(
+                        cls, self.config.overlap_min_separation
+                    )
                     blocker = None
                     if occ_n:
                         reach = np.maximum(occ_r[:occ_n] + radius, 1e-9)
@@ -840,15 +886,16 @@ class SceneGenerationStage(PipelineStage):
                         ) / reach
                         # Only against objects this one actually shares height with.
                         overlaps_vertically = (y_high > occ_y_low[:occ_n]) & (y_low < occ_y_high[:occ_n])
-                        conflicting = overlaps_vertically & (separation < self.config.overlap_min_separation)
+                        conflicting = overlaps_vertically & (separation < min_separation)
                         if conflicting.any():
                             blocker = float(separation[conflicting].min())
                     if blocker is not None:
                         rejected_overlap += 1
+                        rejected_overlap_by_class[cls] = rejected_overlap_by_class.get(cls, 0) + 1
                         if len(rejected_examples) < 5:
                             rejected_examples.append(
                                 f"{idx} ({cls}) at x={position[0]:.1f} z={position[2]:.1f}, "
-                                f"separation {blocker:.2f} < {self.config.overlap_min_separation:.2f}"
+                                f"separation {blocker:.2f} < {min_separation:.2f}"
                             )
                         self.advance_progress(generation_task)
                         continue
@@ -1129,6 +1176,14 @@ class SceneGenerationStage(PipelineStage):
                     f"one already placed (min separation "
                     f"{self.config.overlap_min_separation:.2f}, {occ_n} kept)"
                 )
+                # Broken out by class because the threshold now varies by class, so
+                # one total cannot say whether a population is being thinned as
+                # intended or a discrete class is being culled by accident.
+                for key, count in sorted(rejected_overlap_by_class.items(), key=lambda kv: -kv[1]):
+                    used = self.config.overlap_min_separation_overrides.get(
+                        key, self.config.overlap_min_separation
+                    )
+                    self.log_info(f"    {key}: {count} instance(s) at separation {used:.2f}")
                 for example in rejected_examples:
                     self.log_info(f"    rejected object {example}")
 

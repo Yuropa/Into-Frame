@@ -133,7 +133,10 @@ class TerrainMeshGenerator:
                     Y_pos -- see the panorama-UV block below for why that
                     matters. No effect unless panorama is also supplied.
 
-        Returns (terrain_mesh, water_mesh, panorama_uv). water_mesh is None
+        Returns (terrain_mesh, water_mesh, panorama_uv, uv_folds_fixed).
+        uv_folds_fixed is how many triangles _fix_uv_discontinuities collapsed --
+        a direct measure of how much of this terrain the panorama never saw.
+        water_mesh is None
         when region_map is not supplied or the panorama has no detected water.
         panorama_uv is the final per-vertex panorama UV (None unless panorama
         is supplied) aligned 1:1 with terrain_mesh's own (possibly seam-
@@ -202,6 +205,11 @@ class TerrainMeshGenerator:
         # has no such guarantee. Unobserved (interpolated/synthetic) vertices
         # have no true UV to prefer, so they keep the position-derived one.
         pano_uv = None
+        # How many triangles _fix_uv_discontinuities had to collapse. Reported by
+        # TerrainMeshStage rather than logged here (this class has no logger), and
+        # worth watching: it is a direct measure of how much of the terrain the
+        # panorama could not actually see.
+        uv_folds_fixed = 0
         if panorama is not None:
             pano_uv = panorama.mesh_uvs(
                 np.stack([X_pos, Y_pos, Z_pos], axis=-1), sky_mask=sky_mask,
@@ -242,6 +250,13 @@ class TerrainMeshGenerator:
             vertices_seam = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
             vertices_seam, faces, pano_uv = TerrainMeshGenerator._fix_uv_seam(
                 vertices_seam, faces, pano_uv,
+            )
+            # After the seam fix, never before: that one unwraps longitude, and this
+            # one must read an already-unwrapped U to tell a wrap from a real step.
+            vertices_seam, faces, pano_uv, uv_folds_fixed = (
+                TerrainMeshGenerator._fix_uv_discontinuities(
+                    vertices_seam, faces, pano_uv, panorama.height,
+                )
             )
             X_pos, Y_pos, Z_pos = vertices_seam[:, 0], vertices_seam[:, 1], vertices_seam[:, 2]
             row_coords = ((Z_pos + z_far)  / (2.0 * z_far)   * (h_hm - 1)).clip(0, h_hm - 1)
@@ -405,7 +420,7 @@ class TerrainMeshGenerator:
                 water_tri_mesh.remove_unreferenced_vertices()
                 water_mesh = Mesh(water_tri_mesh)
 
-        return Mesh(tri_mesh), water_mesh, pano_uv
+        return Mesh(tri_mesh), water_mesh, pano_uv, uv_folds_fixed
 
     # ── Physics (collision) mesh ────────────────────────────────────────────────
 
@@ -765,6 +780,135 @@ class TerrainMeshGenerator:
             next_index += n
 
         return np.concatenate(vertex_chunks, axis=0), faces, np.concatenate(uv_chunks, axis=0)
+
+    @staticmethod
+    def _fix_uv_discontinuities(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        uv: np.ndarray,
+        panorama_height: int,
+        max_span_ratio: float = 4.0,
+        max_passes: int = 4,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """Collapse the UV of triangles that bridge an OCCLUSION boundary.
+
+        _fix_uv_seam above handles the other UV discontinuity this mesh has, the
+        longitude wrap, and handles it by correcting the UV -- a wrapped corner has
+        a right answer (shift by a whole turn) and shifting it recovers the texture
+        exactly. This one has no right answer.
+
+        A ground-level panorama sees a ridge and the terrain behind it at wildly
+        different elevation angles, but the height grid puts them in ADJACENT cells,
+        so the triangle spanning that step interpolates its UV straight across every
+        panorama row between the two -- smearing a hundred-plus pixel band of image
+        over two metres of ground. That is the "oil slick" ringing and the chevron
+        patterning on the far slopes: not stretch (too FEW texels), but its opposite,
+        a whole band of texture compressed onto one small triangle. There is no UV
+        that makes it correct, because the panorama simply never photographed the
+        ground that triangle covers -- it is behind the ridge.
+
+        So the goal is only to make it inoffensive. Each flagged triangle keeps the
+        UV of the two corners that agree with each other (its two corners on the same
+        side of the step) and its outlier corner is pulled to the nearer of those,
+        which renders it as a roughly correct flat patch instead of a rainbow.
+
+        DETECTED GEOMETRICALLY, not by a pixel threshold. How much panorama a
+        legitimate triangle spans depends entirely on how close it is -- a 2 m
+        triangle at the viewer's feet really does cover tens of degrees, while the
+        same triangle at 70 m covers under two -- so a fixed pixel budget would
+        clobber the near field and miss the far field, which is precisely where the
+        artefact lives. Compared instead against the span the triangle's own size and
+        distance predict (edge / distance, in radians, converted to rows). Measured
+        on the Rainier capture that ratio is 1.00 at p75, i.e. well-behaved triangles
+        match their prediction almost exactly, with a tail out to 21; 4.0 sits above
+        p90 (2.51) and flags 7.1% of faces covering 12% of the surface, median radius
+        76 m -- all far field, as expected.
+
+        Iterated to a fixed point. One pass moves the outlier corner onto one of the
+        agreeing pair, which resolves a triangle with a clean 2-vs-1 split but leaves
+        one whose three corners are all spread -- there the "agreeing pair" is itself
+        far apart, and collapsing onto it still spans. A second pass then treats the
+        (now 2-vs-1) result and finishes it. Measured on the Rainier capture: pass 1
+        fixes 5,516 faces and leaves 108, pass 2 fixes those 108 and leaves 0, pass 3
+        finds nothing. max_passes is a guard against a pathological mesh, not a
+        tuning knob.
+
+        Returns (vertices, faces, uv, faces_fixed) with faces_fixed summed over passes.
+        """
+        if len(faces) == 0 or panorama_height <= 0:
+            return vertices, faces, uv, 0
+
+        total_fixed = 0
+        for _ in range(max(1, max_passes)):
+            vertices, faces, uv, fixed = TerrainMeshGenerator._fix_uv_discontinuities_pass(
+                vertices, faces, uv, panorama_height, max_span_ratio,
+            )
+            total_fixed += fixed
+            if fixed == 0:
+                break
+        return vertices, faces, uv, total_fixed
+
+    @staticmethod
+    def _fix_uv_discontinuities_pass(
+        vertices: np.ndarray,
+        faces: np.ndarray,
+        uv: np.ndarray,
+        panorama_height: int,
+        max_span_ratio: float,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """One collapse pass. See _fix_uv_discontinuities, which iterates this."""
+        tri_uv = uv[faces]                       # (M, 3, 2)
+        tri_xyz = vertices[faces].astype(np.float64)
+
+        # V only. U is longitude and has already been unwrapped by _fix_uv_seam, but
+        # a residual whole-turn shift there would still read as a huge U delta here
+        # and this must not re-litigate that; elevation has no wrap and is where an
+        # occlusion step actually shows up.
+        def uv_gap(a: int, b: int) -> np.ndarray:
+            return np.abs(tri_uv[:, a, 1] - tri_uv[:, b, 1]) * panorama_height
+
+        def edge_len(a: int, b: int) -> np.ndarray:
+            return np.linalg.norm(tri_xyz[:, a] - tri_xyz[:, b], axis=1)
+
+        gaps = np.stack([uv_gap(0, 1), uv_gap(1, 2), uv_gap(0, 2)], axis=1)
+        edges = np.stack([edge_len(0, 1), edge_len(1, 2), edge_len(0, 2)], axis=1)
+        distance = np.maximum(np.linalg.norm(tri_xyz.mean(axis=1), axis=1), 0.5)
+        expected = (edges.max(axis=1) / distance) * (panorama_height / np.pi)
+        flagged = np.nonzero(gaps.max(axis=1) > max_span_ratio * np.maximum(expected, 1e-6))[0]
+        if len(flagged) == 0:
+            return vertices, faces, uv, 0
+
+        # The two corners joined by the SMALLEST V gap are the pair on one surface;
+        # the remaining corner is the one that stepped across.
+        pair_corners = ((0, 1), (1, 2), (0, 2))
+        closest = gaps[flagged].argmin(axis=1)
+
+        faces = faces.copy()
+        vertex_chunks = [vertices]
+        uv_chunks = [uv]
+        next_index = len(vertices)
+        for pair_idx, (ca, cb) in enumerate(pair_corners):
+            rows = flagged[closest == pair_idx]
+            if len(rows) == 0:
+                continue
+            outlier = 3 - ca - cb            # the corner in neither position
+            # Pull it to whichever of the agreeing pair it is already nearer, so the
+            # collapse moves the UV as little as it can.
+            to_a = np.abs(tri_uv[rows, outlier, 1] - tri_uv[rows, ca, 1])
+            to_b = np.abs(tri_uv[rows, outlier, 1] - tri_uv[rows, cb, 1])
+            target = np.where(to_a <= to_b, ca, cb)
+            dup_uv = tri_uv[rows, target, :].copy()
+            vertex_chunks.append(vertices[faces[rows, outlier]])
+            uv_chunks.append(dup_uv.astype(uv.dtype))
+            faces[rows, outlier] = np.arange(next_index, next_index + len(rows))
+            next_index += len(rows)
+
+        return (
+            np.concatenate(vertex_chunks, axis=0),
+            faces,
+            np.concatenate(uv_chunks, axis=0),
+            int(len(flagged)),
+        )
 
     @staticmethod
     def _uvs_pinhole(

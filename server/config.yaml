@@ -1590,6 +1590,30 @@ stages:
                                       # would put the whole population into an O(n^2) check
                                       # instead of the few dozen discrete objects that matter.
 
+    # Per-class override of overlap_min_separation. The global 0.35 is tuned for
+    # discrete objects, whose footprints legitimately touch (a chair under a table),
+    # and is far too permissive for a class placed as a POPULATION -- there, several
+    # producers scatter into the same ground and ordinary overlap IS the artefact.
+    #
+    # Measured on the Rainier capture: the near-nadir band of the panorama over-splits
+    # one flower mass into 44 detections inside 1.5 m of the camera, Distribution
+    # Synthesis paints 275 more on top, and their median centre separation (0.118 m)
+    # is below their median footprint width (0.137 m). The global 0.35 only rejects
+    # centres inside 5.2 cm, so 63 of the 115 flowers within 3 m were interpenetrating.
+    #
+    # At 0.8: 63 -> 16 interpenetrating, near-field density 21.6 -> 12.1 per m2, 82
+    # vegetation instances dropped of which 56 are synthetic (real detections are
+    # placed first and outrank painted points -- see _placement_rank). Not 1.0 (exactly
+    # tangent): real vegetation grows into its neighbours, tangency reads as a planted
+    # grid, and it starts culling real detections instead of the painted surplus -- 20
+    # of 44 real flowers dropped at 1.0 against 14 at 0.8.
+    overlap_min_separation_overrides:
+      flower: 0.8
+      plant: 0.8
+      bush: 0.8
+      tree: 0.8
+      forest: 0.8
+
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false
