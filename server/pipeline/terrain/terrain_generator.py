@@ -452,7 +452,10 @@ class TerrainMeshGenerator:
         0.10/2.0 m): a MeshCollider only needs to be close enough to walk/
         land on, not the visual mesh's full density.
         """
-        mesh, _, _ = TerrainMeshGenerator.generate(
+        # Four values, not three: generate() also reports how many triangles
+        # _fix_uv_discontinuities collapsed. Irrelevant here -- this branch passes
+        # no panorama, so there is no UV to fix and the count is always 0.
+        mesh, _water, _uv, _folds = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size_meters,
             inner_min_dist=inner_min_dist,
