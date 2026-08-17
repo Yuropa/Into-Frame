@@ -220,9 +220,10 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # client download 25 GB and the scene 1.8 billion triangles.
         #
         # A tuft is a handful of blades; its silhouette is what reads, and that survives
-        # aggressive decimation. 4000 keeps the blade shapes at arm's length (the near
-        # LOD only renders within Scene Generation's grass mesh_lod_distance override,
-        # ~3 m) while cutting the asset ~70x. 0 disables decimation entirely.
+        # aggressive decimation. 4000 keeps the blade shapes at arm's length (a 0.35 m
+        # tuft only clears Scene Generation's min_mesh_angular_px inside ~4.7 m, and
+        # that is with its 2 m viewer-movement margin) while cutting the asset ~70x.
+        # 0 disables decimation entirely.
         self.max_near_mesh_faces = int(max_near_mesh_faces)
         # Whether to run Mesh.repair() on the reconstructed tuft. Off, unlike every
         # other consumer of that call, and this is the single biggest thing standing

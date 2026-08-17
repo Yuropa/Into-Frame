@@ -1375,31 +1375,45 @@ stages:
     # 0.5 because a real structure legitimately silhouettes against sky. Over those
     # same captures the genuine buildings and boats measured 0.00-0.47 on both
     # fractions and the rejects 0.54-1.00. 1.0 disables the gate.
-    # Must stay in sync with Scene Generation's mesh_lod_distance_m below -- a group
-    # meshed here but beyond that cutoff there generates an asset nothing renders,
-    # and a group inside that cutoff without one here falls back to a billboard.
+    # Reconstruction-quality guard, not an LOD cutoff: past this the crop a mesh
+    # would be built FROM is too far away to carry usable detail, whatever size it
+    # renders at. The mesh-vs-billboard decision itself is min_mesh_angular_px
+    # below and Scene Generation's own, both of which are projected size.
+    # (This value also normalises composite_score's depth term.)
     billboard_distance_m: 60.0
     # A (class, bucket) group only earns a bespoke 3D mesh when at least one of its
-    # in-range instances covers this fraction of the panorama -- meshing is otherwise
+    # in-range instances subtends this much screen HEIGHT -- meshing is otherwise
     # gated on distance alone, which lets a close-but-tiny subject through.
     # Measured on an alpine-meadow capture: foreground flowers 0.6-1 m from the
-    # camera each occupy only ~0.01-0.07% of the frame (20-80 px) yet, split into a
-    # bucket per colour, spawned 7 separate flower meshes (several singleton buckets,
-    # one a conf-0.03 "sheep in grass" miscrop). Below this they stay billboard-only
+    # camera each occupy only 20-80 px of the frame yet, split into a bucket per
+    # colour, spawned 7 separate flower meshes (several singleton buckets, one a
+    # conf-0.03 "sheep in grass" miscrop). Below this they stay billboard-only
     # (pool still curated -- not dropped). 0 disables (distance-only).
     #
-    # Lowered 0.001 -> 0.0003 (~0.03%, ~50x50 px on a 4096x2048 panorama) to bias
-    # toward real geometry. 0.001 was tuned against that meadow, where the flower
-    # buckets it needed to reject are 15-25 px; on an urban capture it was also
-    # rejecting whole buildings. Measured on a Paris capture: 0.001 meshed 10 of 23
-    # groups (23/53 instances), 0.0003 meshes 13 (40/53), and the groups still
-    # rejected top out at 15x21 px -- too small to reconstruct anything from.
+    # Replaced min_mesh_area_fraction (0.0003 of panorama area). Area is the wrong
+    # axis: an equirect box's WIDTH depends on which way the subject happens to
+    # face and its height does not, so the area form rejected a tall narrow subject
+    # and admitted a broadside one of the same prominence. On the Paris capture the
+    # Eiffel Tower's largest instance is 126x529 px and a boat's is 297x189 -- the
+    # boat wins on area, the tower on height, and the tower is the one that matters.
+    #
+    # 90 px is ~2.6 deg, ~30 panorama rows on a 4096x2048 equirect. Derived from
+    # that same capture: the groups it must keep rejecting top out at 15x21 px
+    # (= 63 px here) and the ones it must admit start at 189 px of box height
+    # (= 565 px here), so 90 sits with margin on both sides. Rainier is not a
+    # constraint -- every surviving group there clears 236 px.
     #
     # NOTE this is evaluated per group against its largest qualifying instance, not
     # against the score-winning crop; see the size-gate block in generation.py for
     # why (the winner is ranked on confidence/depth/occlusion, never on size, so
     # gating on it threw away groups containing a genuinely prominent subject).
-    min_mesh_area_fraction: 0.0003
+    #
+    # MUST STAY WELL BELOW Scene Generation's min_mesh_angular_px, or a group is
+    # meshed here and nothing renders the asset. The two measure different things:
+    # this is the RAW detected angle, Scene Generation's is the PLACED size, which
+    # carries object_scale.py's per-run correction (4.45x on Rainier).
+    min_mesh_angular_px: 90.0
+    viewer_px_per_degree: 34.0   # must match Scene Generation's value below
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     generator_type: SAM3D
     # Face budget per category mesh. SAM3D returns its reconstruction undecimated and
@@ -1413,8 +1427,8 @@ stages:
     # are subjects you look at rather than ground cover underfoot. 0 disables.
     max_mesh_faces: 8000
     # Crossed-card LOD for vegetation, published as category_mesh_{class}_{bucket}_card
-    # and textured with the group's top curated crop. Scene Generation takes it beyond
-    # mesh_lod_distance_m, when a bucket never got a reconstruction, and when one was
+    # and textured with the group's top curated crop. Scene Generation takes it below
+    # min_mesh_angular_px, when a bucket never got a reconstruction, and when one was
     # rejected as a sheet -- which is every tree, since SAM3D reconstructs a conifer as
     # a card anyway. Three fixed planes at 12 triangles read as volume in stereo where
     # a single camera-facing quad reads as flat and swings with the head.
@@ -1429,20 +1443,54 @@ stages:
       panorama: panorama_sky
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
-    mesh_lod_distance_m: 60.0 # bake-time mesh-vs-billboard cutoff -- deliberately mirrors
-                               # Panorama Asset Generation's billboard_distance_m above (kept
-                               # in sync manually; each stage parses its own isolated config)
-                               #
-                               # Raised 30 -> 60 to bias toward real geometry. Panorama depth
-                               # is capped at max_depth_m (100 m) and compressed above 0.6 of
-                               # that, so a whole capture collapses into a fairly short range:
-                               # on a Paris capture every one of 53 detections sat between
-                               # 2.9 m and 63.6 m, which meant a 30 m cutoff billboarded
-                               # roughly half the scene purely on distance. Measured over that
-                               # capture's own groups, mesh-rendered instances go 23/53 -> 40/53
-                               # at 60 m with the size gate below. Ground cover is unaffected --
-                               # mesh_lod_distance_overrides pins grass_tuft at 3 m, which is
-                               # what keeps this from being ruinous (see that block).
+    # Bake-time mesh-vs-billboard cutoff, as the screen HEIGHT an instance renders at
+    # rather than its distance from the camera. At or above this it takes its bucket's
+    # reconstructed mesh; below it, the crossed-card LOD or a billboard.
+    #
+    # Replaced mesh_lod_distance_m (60 m) and mesh_lod_distance_overrides. Distance
+    # only stands in for what a viewer can resolve if every subject is the same size,
+    # which is where it broke: the single global value was tuned for subjects you look
+    # AT (a tree at 25 m earns its mesh) and was catastrophic for ground cover at your
+    # feet at the same distance, so it grew a per-class override table whose only entry
+    # existed to undo that mismatch for grass. Measured on the Rainier capture:
+    #
+    #   * 318 instances held a full 8000-triangle mesh below 250 px of screen height
+    #     -- 203 flowers, 43 trees, 39 plants -- ~2.5 M of the scene's 4.47 M triangles
+    #     spent under a thumbnail. At 250 px the scene is 228 meshed instances / 1.93 M.
+    #   * grass_tuft measures p50 50 px, p90 166 px (with the movement margin below)
+    #     and falls out on its own, with no class named anywhere. That is what retires
+    #     the override table. NOTE the exposure this trades for: 7% of tufts (622 on
+    #     that run) DO clear 250 px, against 174 under the old 3 m pin. That is only
+    #     acceptable because max_near_mesh_faces now decimates a tuft to 4000 faces
+    #     (622 x 4000 = 2.5 M triangles); the override existed to bound an
+    #     undecimated 275k-face asset, which is fixed at source. Grass Cover currently
+    #     publishes cards only, so today the exposure is zero -- watch this if a near
+    #     LOD comes back.
+    #   * only 4 of 9476 instances sat beyond the old 60 m cutoff at all (panorama depth
+    #     caps at 100 m and compresses above 0.6 of it, so p99 distance is 24.9 m), so
+    #     "big things far away keep their geometry" costs almost nothing here and is
+    #     the point on an urban capture.
+    #
+    # Height, not area or solid angle: an equirect box's width depends on the subject's
+    # yaw relative to the camera and its height does not -- the same reason
+    # mesh_instance_scale sets scale by height. See util/lod_metrics.py.
+    #
+    # This is measured on the PLACED size, i.e. after object_scale.py's correction, so
+    # it is not the same measurement as Panorama Asset Generation's like-named value
+    # (raw detected angle) and must stay well ABOVE it. See that block.
+    min_mesh_angular_px: 250.0
+    # Display angular resolution the threshold above is quoted against; 34 px/deg is
+    # Vision Pro class, so 250 px is ~7.4 deg. Exists so the threshold reads as the
+    # resolvability limit it is, and tracks the target display instead of silently
+    # meaning something else on new hardware. Must match Panorama Asset Generation's.
+    viewer_px_per_degree: 34.0
+    # How far the viewer may walk from the capture origin. Angular size is evaluated at
+    # the CLOSEST they can get (distance minus this), not at the bake position. The old
+    # distance cutoff did not need this -- distance changes by at most the distance
+    # walked -- but angular size goes as 1/d: a 3 m subject 3 m away nearly doubles its
+    # screen height after one and a half steps, and a threshold evaluated at the bake
+    # position would demote assets the viewer can then walk up to.
+    viewer_move_radius_m: 2.0
 
     # Object size is derived from panorama depth (world_size = angular_extent x depth,
     # see scene_generation/projection.py), so it inherits every compression that depth
@@ -1541,26 +1589,6 @@ stages:
                                       # continuous. Testing it would reject most of it, and
                                       # would put the whole population into an O(n^2) check
                                       # instead of the few dozen discrete objects that matter.
-
-    mesh_lod_distance_overrides:
-      # Ground cover needs its own, far shorter cutoff. The global value is tuned for
-      # subjects you look AT -- a tree at 25 m earns its mesh. Grass does not: Grass
-      # Cover scatters 6,661 tufts, every one of them inside its own max_radius_m of
-      # 25 m, so under the global 30 m cutoff all of them took the reconstructed near
-      # mesh and the 12-triangle crossed-card LOD never rendered once.
-      #
-      # That reconstructed tuft is ~275,000 triangles (SAM3D output, undecimated).
-      # Measured totals for the whole grass population at various cutoffs:
-      #     25 m -> 6659 tufts + 2 cards    = 1831 M triangles   (what shipped)
-      #     10 m -> 1536 tufts + 5125 cards =  422 M
-      #      5 m ->  468 tufts + 6193 cards =  129 M
-      #      3 m ->  174 tufts + 6487 cards =   48 M
-      # 3 m keeps real 3D geometry underfoot, where a flat card would read as a
-      # sticker, and hands everything past arm's reach to the cards.
-      #
-      # NOTE this only bounds the damage. 275k triangles for one grass tuft is the
-      # real defect -- decimating that asset would buy far more than any cutoff here.
-      grass_tuft: 3.0
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting

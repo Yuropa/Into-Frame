@@ -18,6 +18,7 @@ from pipeline.scene_generation.projection import (
     unproject_bbox_equirect,
 )
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
+from util.lod_metrics import angular_height_px
 from scene.scene import Scene
 from scene.object import Object3D
 import numpy as np
@@ -33,8 +34,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         eye_height_meters: float = 1.8,
-        mesh_lod_distance_m: float = 30.0,
-        mesh_lod_distance_overrides: dict[str, float] | None = None,
+        min_mesh_angular_px: float = 250.0,
+        viewer_px_per_degree: float = 34.0,
+        viewer_move_radius_m: float = 2.0,
         object_scale_correction: bool = True,
         object_scale_max_correction: float = 8.0,
         object_scale_min_anchors: int = 6,
@@ -49,26 +51,33 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
-        # Bake-time mesh-vs-billboard cutoff: an instance closer than this to
-        # the camera uses its bucket's 3D mesh, farther instances use a
-        # billboard. Deliberately mirrors Panorama Asset Generation's
-        # billboard_distance_m (meshes only exist for groups with an instance
-        # within that same distance) -- each stage parses its own isolated
-        # config, so keep the two in sync manually if either changes. A static
-        # bake-time cutoff (vs. runtime client-side LOD) is fine here since
-        # expected player movement is small (~2 m).
-        self.mesh_lod_distance_m = mesh_lod_distance_m
-        # Per-class override of that cutoff, {class_name: metres}. The single global
-        # value is tuned for subjects you look AT -- a tree at 25 m is worth its mesh.
-        # It is badly wrong for ground cover at your feet, where the same distance
-        # covers thousands of instances.
+        # Bake-time mesh-vs-billboard cutoff, as the screen height the instance
+        # subtends rather than its distance from the camera. An instance that
+        # renders at least this many display pixels tall uses its bucket's 3D
+        # mesh; anything smaller takes the card or billboard LOD. See
+        # util/lod_metrics.py for why projected size and not distance, and why
+        # height and not area.
         #
-        # Measured on the Rainier capture: GrassCoverStage places 6,661 tufts, all of
-        # them inside its own max_radius_m of 25 m, so with a global 30 m cutoff every
-        # single one took the reconstructed near mesh -- ~275,000 triangles each, 1.83
-        # BILLION in total -- and the 12-triangle crossed-card LOD that exists for
-        # exactly this purpose never rendered once.
-        self.mesh_lod_distance_overrides = dict(mesh_lod_distance_overrides or {})
+        # This replaced mesh_lod_distance_m and its per-class override table. The
+        # override table only ever had one entry -- grass_tuft, pinned at 3 m to
+        # undo a global cutoff tuned for subjects you look AT -- and that entry is
+        # exactly the mismatch a size metric removes: grass measures p50 44 px /
+        # p90 111 px on the Rainier capture and falls below any useful threshold
+        # on its own, with no class named anywhere.
+        self.min_mesh_angular_px = float(min_mesh_angular_px)
+        # Display angular resolution the threshold above is quoted against. 34
+        # px/deg is Vision Pro class. This exists so the threshold can be read as
+        # what it actually is (a resolvability limit) and so it tracks the target
+        # display instead of silently meaning something else on new hardware --
+        # the product min_mesh_angular_px / viewer_px_per_degree is the real
+        # quantity, ~7.4 deg at the defaults.
+        self.viewer_px_per_degree = float(viewer_px_per_degree)
+        # How far the viewer may walk from the capture origin. Angular size is
+        # evaluated at the CLOSEST they can get (distance minus this), not at the
+        # bake position -- see angular_height_px. The old distance cutoff did not
+        # need this because distance changes by at most the distance walked;
+        # angular size goes as 1/d and does not share that property.
+        self.viewer_move_radius_m = float(viewer_move_radius_m)
         # Learn a depth -> size-correction curve from objects with known real-world
         # heights and apply it to every placed object's extent. See
         # scene_generation/object_scale.py for why object size arrives compressed and
@@ -358,9 +367,9 @@ class SceneGenerationStage(PipelineStage):
                                                        "class": str, "bucket": int})
       category_mesh_{class}_{bucket}      → Mesh   (optional, from Panorama Asset
                                                        Generation; used when this
-                                                       instance is within
-                                                       mesh_lod_distance_m of the
-                                                       camera, billboard otherwise)
+                                                       instance renders at least
+                                                       min_mesh_angular_px tall,
+                                                       card/billboard otherwise)
       "billboard_pools" (generic object)  → {"{class}::{bucket}": [crop idx, ...]}
                                              (curated top-K pool per bucket, from
                                              Panorama Asset Generation)
@@ -895,24 +904,33 @@ class SceneGenerationStage(PipelineStage):
                 card_mesh_key = f"{mesh_key}_card"
                 card_mesh = context.input_mesh(card_mesh_key)
 
-                # Bake-time distance-based LOD: mesh if this instance is close
-                # enough to the camera AND its bucket actually has one (a
-                # bucket only gets a mesh if some instance of it qualified
-                # during Panorama Asset Generation -- this instance itself may
-                # still be farther than the mesh distance even when a
-                # sibling instance in the same bucket was close enough to
-                # trigger meshing). Static since expected player movement is
-                # small (~2 m) -- see mesh_lod_distance_m.
+                # Bake-time projected-size LOD: mesh if this instance renders big
+                # enough to resolve AND its bucket actually has one (a bucket only
+                # gets a mesh if some instance of it qualified during Panorama
+                # Asset Generation -- this instance itself may still be too small
+                # even when a sibling instance in the same bucket was prominent
+                # enough to trigger meshing).
+                #
+                # `height` here is the placed, scale-corrected extent, i.e. what
+                # the viewer actually sees, not the raw detected angle Panorama
+                # Asset Generation gates on. That is deliberate: a mesh is worth
+                # spending on what looks big, and object_scale.py's correction is
+                # part of how big it looks. It also means the two stages' pixel
+                # thresholds are not interchangeable -- see min_mesh_angular_px.
                 camera_distance = float(np.linalg.norm(
                     np.array((position[0], place_y, position[2]), dtype=float) - camera_position
                 ))
-                lod_distance = self.config.mesh_lod_distance_overrides.get(
-                    cls, self.config.mesh_lod_distance_m
+                rendered_px = angular_height_px(
+                    height, camera_distance, self.config.viewer_px_per_degree,
+                    viewer_move_radius_m=self.config.viewer_move_radius_m,
                 )
-                use_mesh = category_mesh is not None and camera_distance <= lod_distance
+                use_mesh = (
+                    category_mesh is not None
+                    and rendered_px >= self.config.min_mesh_angular_px
+                )
                 using_card = False
                 if not use_mesh and card_mesh is not None:
-                    # Beyond the mesh LOD distance (or this bucket never got a
+                    # Too small to resolve as geometry (or this bucket never got a
                     # reconstructed mesh at all) but a card LOD exists -- take it
                     # rather than the billboard. Everything below is shared: the
                     # card is an ordinary mesh, so it gets the same base snap,
@@ -1007,7 +1025,8 @@ class SceneGenerationStage(PipelineStage):
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
                     self.log_info(
                         f"Creating {'card' if using_card else 'mesh'} for {idx} "
-                        f"({cls}, bucket {bucket}, {camera_distance:.1f}m)"
+                        f"({cls}, bucket {bucket}, {camera_distance:.1f}m, "
+                        f"{rendered_px:.0f}px)"
                     )
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
                     mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
@@ -1251,6 +1270,9 @@ class SceneGenerationStage(PipelineStage):
                         "min_mesh_thickness_fraction": _MIN_MESH_THICKNESS_FRACTION,
                         "max_mesh_aspect_ratio": _MAX_MESH_ASPECT_RATIO,
                         "max_object_size_m": _MAX_OBJECT_SIZE_M,
+                        "min_mesh_angular_px": self.config.min_mesh_angular_px,
+                        "viewer_px_per_degree": self.config.viewer_px_per_degree,
+                        "viewer_move_radius_m": self.config.viewer_move_radius_m,
                     },
                     "meshes": mesh_geometry,
                 }, indent=2))

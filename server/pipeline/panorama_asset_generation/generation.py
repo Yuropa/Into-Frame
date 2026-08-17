@@ -12,6 +12,7 @@ from pipeline.object_typing.categories import (
     VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY,
 )
 from pipeline.grass_cover.cards import crossed_card_mesh
+from util.lod_metrics import angular_height_px_from_box
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
 
@@ -38,7 +39,8 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         billboard_distance_m: float = 10.0,
-        min_mesh_area_fraction: float = 0.001,
+        min_mesh_angular_px: float = 90.0,
+        viewer_px_per_degree: float = 34.0,
         generator_type: str = "TRELLIS",
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
@@ -149,18 +151,39 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # 1.0 disables the gate.
         self.max_background_fraction = float(max_background_fraction)
         self.billboard_distance_m = float(billboard_distance_m)
-        # A group only earns a bespoke category mesh if its winning representative's
-        # detection box covers at least this fraction of the panorama. Meshing is
+        # A group only earns a bespoke category mesh if some instance of it
+        # subtends at least this many display pixels of HEIGHT. Meshing is
         # otherwise gated on distance alone (billboard_distance_m), which lets a
         # tiny-but-close subject through -- e.g. foreground alpine-meadow flowers
-        # sit 0.6-1 m from the camera yet each occupy only ~0.01-0.07% of the frame
-        # (20-80 px), and, split into a bucket per colour, spawn a separate 3D mesh
-        # apiece (observed: 7 flower meshes, several from singleton buckets, one
-        # from a conf-0.03 "sheep in grass" miscrop). Bespoke meshes are meant for
-        # prominent foreground subjects; anything below this stays billboard-only
-        # (its pool is still curated, so it isn't dropped -- just not meshified).
-        # 0 disables the size gate (distance-only, prior behaviour).
-        self.min_mesh_area_fraction = float(min_mesh_area_fraction)
+        # sit 0.6-1 m from the camera yet each occupy only 20-80 px of the frame
+        # and, split into a bucket per colour, spawn a separate 3D mesh apiece
+        # (observed: 7 flower meshes, several from singleton buckets, one from a
+        # conf-0.03 "sheep in grass" miscrop). Bespoke meshes are meant for
+        # prominent subjects; anything below this stays billboard-only (its pool
+        # is still curated, so it isn't dropped -- just not meshified). 0 disables
+        # the size gate (distance-only, prior behaviour).
+        #
+        # Replaced min_mesh_area_fraction, which measured the same intent as box
+        # AREA over panorama area. Area is the wrong axis for the same reason
+        # SceneGenerationStage scales meshes by height: an equirect box's width
+        # depends on the subject's yaw relative to the camera and its height does
+        # not, so an area gate rejects a broadside subject and admits the same
+        # subject seen edge-on. Height is measured directly off the box with no
+        # depth sample involved -- an equirect row IS an angle. See
+        # util/lod_metrics.py.
+        #
+        # MUST STAY BELOW SceneGenerationStage's own min_mesh_angular_px, and by a
+        # wide margin, or a group gets meshed here and nothing renders the asset.
+        # The two are not the same measurement: this one is the RAW detected
+        # angle, while Scene Generation measures the placed size, which carries
+        # object_scale.py's correction on top (4.45x on the Rainier capture, and
+        # it is fitted per run, so the ratio is not a constant to tune against).
+        # 60 px here against 250 px there leaves room for a correction as low as
+        # ~0.25x before the ordering inverts.
+        self.min_mesh_angular_px = float(min_mesh_angular_px)
+        # Display angular resolution the threshold above is quoted against; must
+        # match Scene Generation's for the two to be comparable at all.
+        self.viewer_px_per_degree = float(viewer_px_per_degree)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
         self.billboard_top_k = billboard_top_k
@@ -199,8 +222,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
     Writes: category_mesh_{class}_{bucket} for each qualifying group,
             "billboard_pools" ({"{class}::{bucket}": [idx, ...]}) for every group
     Config: billboard_distance_m (default 10.0 m), billboard_top_k (default 4),
-            min_mesh_area_fraction (default 0.001 -- a group whose winning box
-            covers less of the panorama than this stays billboard-only),
+            min_mesh_angular_px (default 90 -- a group whose largest box subtends
+            less screen height than this stays billboard-only),
+            viewer_px_per_degree (default 34.0 -- display the above is quoted in),
             generator_type (default TRELLIS),
             max_mesh_faces (default 8000 -- per-mesh face budget; 0 disables)
     """
@@ -626,7 +650,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # curated above, so it isn't lost, just not meshified. Skipped when
             # panorama dims or a candidate's box are unavailable (can't measure),
             # preserving distance-only behaviour; disabled entirely at
-            # min_mesh_area_fraction == 0.
+            # min_mesh_angular_px == 0.
             #
             # Applied to the CANDIDATE SET, with the winner then chosen among whatever
             # survives -- deliberately not to the score-winner alone, which is what it
@@ -635,39 +659,48 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # routinely a small nearby instance, and testing the gate against it threw
             # away entire groups that contained a genuinely prominent subject.
             #
-            # Measured on a Paris capture (4096x2048 panorama, gate = 0.001 ~ 92x92 px),
-            # where this rejected 14 of 17 billboard-only groups:
+            # Measured on a Paris capture (4096x2048 panorama), where the previous
+            # area form of this gate rejected 14 of 17 billboard-only groups:
             #
             #     group      score-winner        largest instance in the same group
-            #     tower::1   0.00023 (44x44)     0.00795 (126x529)  <- the Eiffel Tower
-            #     boat::0    0.00021 (46x46)     0.00669 (297x189)
+            #     tower::1   44x44 px            126x529 px  <- the Eiffel Tower
+            #     boat::0    46x46 px            297x189 px
             #
-            # Both are ~7-8x ABOVE the gate and both were denied a mesh, so every one
-            # of the tower's 14 instances rendered as a billboard. The other 12
-            # rejected groups have largest == winner, i.e. they really are all-tiny,
-            # and they stay billboard-only under this too.
-            if self.config.min_mesh_area_fraction > 0 and pano_w and pano_h:
-                def _area_fraction(s) -> "float | None":
+            # Both are well ABOVE the gate on their largest instance and both were
+            # denied a mesh, so every one of the tower's 14 instances rendered as a
+            # billboard. The other 12 rejected groups have largest == winner, i.e.
+            # they really are all-tiny, and they stay billboard-only under this too.
+            #
+            # Note what changed with the switch from area to height: the boat is
+            # 297 WIDE by 189 tall, so it scored far higher on area than on height,
+            # while the tower is 126x529 and scores far higher on height. Height is
+            # the honest one -- 529 rows of panorama is 46 degrees of elevation no
+            # matter which way the tower faces, whereas the boat's 297 columns are
+            # 297 only because it happens to sit broadside.
+            if self.config.min_mesh_angular_px > 0 and pano_h:
+                def _angular_px(s) -> "float | None":
                     b = s.get("box")
-                    return None if b is None else (b[2] * b[3]) / float(pano_w * pano_h)
+                    return None if b is None else angular_height_px_from_box(
+                        b[3], pano_h, self.config.viewer_px_per_degree
+                    )
 
-                measured = [(s, _area_fraction(s)) for s in eligible]
+                measured = [(s, _angular_px(s)) for s in eligible]
                 # An unmeasurable box passes, same as before -- "can't measure" has
                 # never meant "reject".
                 prominent = [
-                    s for s, frac in measured
-                    if frac is None or frac >= self.config.min_mesh_area_fraction
+                    s for s, px in measured
+                    if px is None or px >= self.config.min_mesh_angular_px
                 ]
                 if not prominent:
-                    # Every frac is a real number here (a None would have passed), so
+                    # Every px is a real number here (a None would have passed), so
                     # report the closest this group came to clearing the gate.
-                    best, best_frac = max(measured, key=lambda pair: pair[1])
+                    best, best_px = max(measured, key=lambda pair: pair[1])
                     skipped_debug.append({
                         "idx": best["idx"],
                         "class": obj_class,
                         "reason": "too_small_for_mesh",
                         "bucket": bucket,
-                        "area_fraction": round(best_frac, 5),
+                        "angular_px": round(best_px, 1),
                     })
                     continue
                 eligible = prominent
@@ -696,6 +729,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
         payload = {
             "billboard_distance_m": self.config.billboard_distance_m,
             "billboard_top_k": self.config.billboard_top_k,
+            "min_mesh_angular_px": self.config.min_mesh_angular_px,
+            "viewer_px_per_degree": self.config.viewer_px_per_degree,
             "summary": {
                 "skipped_env_or_filtered": len(skipped),
                 "skipped_synthetic": synthetic_skipped,
