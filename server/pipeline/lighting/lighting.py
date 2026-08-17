@@ -170,6 +170,19 @@ class PanoramaLightingStage(PipelineStage):
             + (f", sun {sun['intensity']:.2f}x @ {sun['color']}"
                f" (direction from {sun['direction_source']})" if sun else ", no directional sun")
         )
+        if sun and sun.get("intensity_unclamped", 0) > 3.0:
+            # The clamp hiding a value means _SUN_INTENSITY_SCALE is mis-calibrated for
+            # this kind of scene, not that the scene is genuinely 3x nominal daylight.
+            self.log_warning(
+                f"Sun intensity clamped: {sun['intensity_unclamped']:.2f} -> 3.00 "
+                f"(irradiance share {sun['sun_share']:.4f}) — recalibrate "
+                f"_SUN_INTENSITY_SCALE against this"
+            )
+        elif sun:
+            self.log_info(
+                f"Sun irradiance share {sun['sun_share']:.4f} -> intensity "
+                f"{sun['intensity_unclamped']:.2f}"
+            )
         self._report_sun_provenance(context, sun, panorama)
         # Says WHICH of the merge's failure modes happened, not just that it did.
         # An LDR-only fallback costs several stops of key light (see

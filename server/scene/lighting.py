@@ -18,7 +18,22 @@ _SUN_PERCENTILE = 99.9
 # few percent of total irradiance even when it dominates the *look* of the
 # scene -- most of the energy is spread across the whole sky -- so the share is
 # scaled up to put a normal sunny day near Unity's nominal intensity of 1.
-_SUN_INTENSITY_SCALE = 30.0
+#
+# 30.0 was calibrated when every capture fell back to tonemapped LDR, which
+# systematically understates the share (that is what _LDR_FALLBACK_SUN_SCALE below
+# exists to paper over). Now that the merge runs, the share is measured on real
+# radiance and comes out 7-30x larger, so the same constant overdrives: on the five
+# sample captures of 2026-08-09 it shipped Paris at 2.10, Shark Fin at 1.58, and
+# Rainier, Iceland AND a third at the 3.0 clamp -- against a nominal 1.0, with the
+# clamp flattening whatever real difference there was between them.
+#
+# 15.0 from the two captures that did NOT clamp, and so are the only ones whose
+# share is recoverable: Paris measured 0.0701 (1.05 at this scale) and Shark Fin
+# 0.0528 (0.79). Both are clear-sky daylight and both now land near nominal. The
+# clamped three only give a lower bound (share >= 0.1), so this is an interim value
+# -- sun() now logs the raw share and the pre-clamp intensity so one more run
+# calibrates it exactly rather than by inference.
+_SUN_INTENSITY_SCALE = 15.0
 
 # Extra gain applied to `intensity` ONLY when the HDR merge didn't run and the
 # estimate came from tonemapped LDR pixels instead (see _radiance).
@@ -243,7 +258,34 @@ class SceneLighting:
             return None
         direction = direction / norm
 
-        color = (rgb[rows, cols] * weights[:, None]).sum(axis=0) / weight_total
+        # Colour comes from the TONEMAPPED map even when HDR radiance is available,
+        # while intensity below comes from the radiance. Same principle the docstring
+        # applies to direction: take each quantity from the source that knows it.
+        #
+        # HDR radiance does not know chroma at the top end. The merger maps each
+        # channel through its own nonlinearity, so a mild R>G>B lead in the LDR pixel
+        # becomes an enormous ratio once expanded -- and `color` is measured on exactly
+        # the brightest 0.1% of pixels, where that exaggeration is largest. Measured
+        # across the five sample captures once the merge started working:
+        #
+        #     capture     from HDR radiance     from the LDR map
+        #     Paris       #ff6f01 (pure orange) #fff8e3 (warm white)
+        #     Iceland     #ff7e11 (pure orange) #ffd881 (warm amber)
+        #     Irises      #9ebcff               #fbfbff
+        #
+        # Paris is a midday blue-sky capture and Iceland an overcast hillside; neither
+        # is lit by a 2000 K sun. SceneParamManager lerps the client's directional
+        # light to this colour, so those two scenes were being tinted orange outright.
+        # The captures where a solar disc was found in the panorama are unaffected --
+        # `measured` below wins over this for both colour and direction.
+        ldr_rgb = np.power(
+            np.asarray(self.ldr.convert("RGB"), dtype=np.float32) / 255.0, 2.2, dtype=np.float32
+        )
+        if ldr_rgb.shape[:2] == luminance.shape:
+            color_source = ldr_rgb
+        else:
+            color_source = rgb
+        color = (color_source[rows, cols] * weights[:, None]).sum(axis=0) / weight_total
         color_peak = float(color.max())
         if color_peak > 0:
             color = color / color_peak   # hue/tint only; brightness is `intensity`
@@ -274,6 +316,10 @@ class SceneLighting:
         # map can speak to how much energy it carries. Take each from the source
         # that actually knows.
         measured = self.measured_sun
+        unclamped_intensity = (
+            sun_share * _SUN_INTENSITY_SCALE
+            * (1.0 if is_hdr else _LDR_FALLBACK_SUN_SCALE)
+        )
         return {
             "direction": (
                 list(measured[0]) if measured
@@ -285,11 +331,14 @@ class SceneLighting:
             # Where direction/colour came from, so a scene that silently fell back
             # to the estimate is distinguishable from one that didn't.
             "direction_source": "panorama" if measured else "envmap",
-            "intensity": round(float(np.clip(
-                sun_share * _SUN_INTENSITY_SCALE
-                * (1.0 if is_hdr else _LDR_FALLBACK_SUN_SCALE),
-                0.0, 3.0,
-            )), 3),
+            "intensity": round(float(np.clip(unclamped_intensity, 0.0, 3.0)), 3),
+            # The two numbers _SUN_INTENSITY_SCALE has to be calibrated against, and
+            # neither was recoverable from a run before this: `intensity` above is
+            # clamped, so a scene at the ceiling reports 3.0 whether its true value is
+            # 3.1 or 30, and the whole point of the constant is to land a clear day
+            # near 1.0. Cheap to carry and it makes one run enough to set it.
+            "sun_share": round(float(sun_share), 5),
+            "intensity_unclamped": round(float(unclamped_intensity), 3),
             # False means the merger didn't run, so `intensity` came from
             # tonemapped pixels and understates a harsh sun. Callers that care
             # (the client logs it) can tell the difference.

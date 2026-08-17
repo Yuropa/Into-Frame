@@ -982,6 +982,16 @@ stages:
     # splitting one "flower" population into distinct color/species variants.
     # Tune against this stage's debug_panorama.png / clustering_debug.json.
     embedding_model_name: facebook/dinov2-base
+    # Built-region share below which BUILT_ENVIRONMENT_CATEGORIES (fixed structures and
+    # street furniture) are vetoed for this scene and demoted to indeterminate. CLIP
+    # scores every crop against the whole label set and a tall narrow dark silhouette
+    # matches the built-structure prompts well, so an alpine meadow acquired a 6.1 m
+    # "tower" 15 m from the viewer, three "statues", two "buildings", a "fire_hydrant"
+    # and two "tables" -- every one of them a conifer when you crop the panorama at its
+    # box. Requires BOTH this and the RAM++ scene tags to be silent before it fires.
+    # Measured built share: Rainier 0.01%, Iceland 0.12%, Shark Fin 1.13%, Irises
+    # 1.69%, Paris 7.47%. 0 disables the veto.
+    min_built_fraction: 0.005
     cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
     # The distance cut alone has no notion of how many buckets it produces. On a
     # full-panorama detection set it produced one bucket per instance -- measured on
@@ -1097,6 +1107,18 @@ stages:
                                       # a radius tuned for the near-field flower carpet
                                       # switches off mid-field tree fill entirely.
     density_radius_percentile: 75.0
+    # The NEAR edge of the band each group may be painted into, as a percentile of its
+    # own exemplar distances. The radius above is a density profile centred on the
+    # camera, so extending it for a mid-field class also lays that class at full
+    # density at the viewer's feet: on the Rainier capture 13 trees over 1 m tall stood
+    # within 5 m, 12 of them painted, the closest 2.7 m away, in a scene whose treeline
+    # starts around 20 m out. p10 is conservative on purpose — it only bites for a
+    # class genuinely absent from the near field (tree [vegetation] measures 7.6 m),
+    # and leaves ground cover alone (flower and plant measure 0.3-0.6 m, under the
+    # min_near_radius_m floor). Raise toward 35 to cross a bimodal exemplar set whose
+    # near cluster is mis-typed. 0 disables the near edge.
+    density_near_percentile: 10.0
+    min_near_radius_m: 1.5
     density_falloff_exponent: 2.0
     max_paint_radius_m: 30.0         # 0 disables
     max_instances_per_group: 12000   # 0 disables the ceiling

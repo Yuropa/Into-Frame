@@ -230,6 +230,8 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         min_exemplar_spacing_m: float = 0.25,
         full_density_radius_m: float = 6.0,
         density_radius_percentile: float = 75.0,
+        density_near_percentile: float = 10.0,
+        min_near_radius_m: float = 1.5,
         density_falloff_exponent: float = 2.0,
         max_paint_radius_m: float = 30.0,
         max_exemplar_candidates: int = 4000,
@@ -300,6 +302,15 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # 100 would hand the radius to the single farthest (and least reliable)
         # detection; 75 covers the bulk of where a class was actually seen.
         self.density_radius_percentile = float(density_radius_percentile)
+        # Percentile of a group's exemplar distances used as the NEAR edge of the
+        # band it may be painted into -- see the group_near_radius block in run().
+        # 0 disables the near edge entirely.
+        self.density_near_percentile = float(density_near_percentile)
+        # Below this the near edge is not worth enforcing: every class has SOME
+        # nearest exemplar, and a 0.4 m edge on ground cover would only carve a
+        # bare ring around the viewer's feet. Only a class genuinely absent from
+        # the near field (a treeline) clears it.
+        self.min_near_radius_m = float(min_near_radius_m)
         self.density_falloff_exponent = density_falloff_exponent
         self.max_paint_radius_m = max_paint_radius_m
         # Ceiling on the exemplar candidate grid, enforced by RAISING the effective
@@ -613,17 +624,49 @@ class DistributionSynthesisStage(PipelineStage):
             # detected wherever they stand, so extending theirs is honest. This rule
             # only ever extends.
             group_radius = cfg.full_density_radius_m
-            if group_radius > 0 and len(exemplar_pts):
-                observed = float(np.percentile(
-                    np.linalg.norm(exemplar_pts, axis=1), cfg.density_radius_percentile
-                ))
-                if observed > group_radius:
-                    self.log_info(
-                        f"  {obj_type} [{region_type}]: exemplars reach {observed:.1f} m "
-                        f"(p{cfg.density_radius_percentile:.0f}), extending the full-density "
-                        f"radius {group_radius:.1f} m -> {observed:.1f} m"
-                    )
-                    group_radius = observed
+            group_near_radius = 0.0
+            if len(exemplar_pts):
+                exemplar_distance = np.linalg.norm(exemplar_pts, axis=1)
+                if group_radius > 0:
+                    observed = float(np.percentile(
+                        exemplar_distance, cfg.density_radius_percentile
+                    ))
+                    if observed > group_radius:
+                        self.log_info(
+                            f"  {obj_type} [{region_type}]: exemplars reach {observed:.1f} m "
+                            f"(p{cfg.density_radius_percentile:.0f}), extending the full-density "
+                            f"radius {group_radius:.1f} m -> {observed:.1f} m"
+                        )
+                        group_radius = observed
+
+                # The NEAR edge of the band this class was observed in. The radius above
+                # is a density profile centred on the camera -- "full density inside R,
+                # thinning outside" -- and extending it to cover a mid-field class does
+                # not move that class outward, it lays it at full density everywhere
+                # inside R as well, including at the viewer's feet. Measured on the
+                # Rainier capture after the outer radius was extended: 13 trees over 1 m
+                # tall stood within 5 m of the camera, 12 of them painted, the closest a
+                # 5.1 m tree 2.7 m away -- in a photograph whose treeline starts around
+                # 20 m out and whose near field is meadow.
+                #
+                # A class that lives in a band needs both edges. p10 rather than the
+                # minimum because a single mis-typed foreground crop (a shrub typed as a
+                # tree) would otherwise pull the edge to zero and undo this. Classes
+                # genuinely at the viewer's feet are unaffected: flower and plant measure
+                # p10 = 0.3-0.6 m on that capture, so their near edge is nil, while
+                # tree [vegetation] measures 7.6 m and is a treeline.
+                if cfg.density_near_percentile > 0:
+                    group_near_radius = float(np.percentile(
+                        exemplar_distance, cfg.density_near_percentile
+                    ))
+                    if group_near_radius >= cfg.min_near_radius_m:
+                        self.log_info(
+                            f"  {obj_type} [{region_type}]: nothing observed closer than "
+                            f"{group_near_radius:.1f} m (p{cfg.density_near_percentile:.0f}) "
+                            f"— painting no closer than that"
+                        )
+                    else:
+                        group_near_radius = 0.0
 
             # Tile side length in grid cells: pick a tile candidate resolution (points
             # per side) and space those points at the exemplar's own nearest-neighbour
@@ -680,6 +723,15 @@ class DistributionSynthesisStage(PipelineStage):
                         tile_distance = float(np.hypot(*closest))
                         if cfg.max_paint_radius_m > 0 and tile_distance > cfg.max_paint_radius_m:
                             continue
+                        # Same for tiles wholly INSIDE the group's near edge -- every
+                        # point they'd produce is rejected below. Farthest corner of the
+                        # tile's bbox from the camera at the grid origin.
+                        if group_near_radius > 0.0:
+                            farthest = float(np.hypot(*np.maximum(
+                                np.abs(tile_world_min), np.abs(tile_world_max)
+                            )))
+                            if farthest < group_near_radius:
+                                continue
 
                         pad = max(cell_m, _MIN_PAD_M)
                         tile_domain = _local_grid(
@@ -730,11 +782,16 @@ class DistributionSynthesisStage(PipelineStage):
                             # tile's request was discounted with, or the two disagree
                             # and the falloff is applied twice.
                             "full_density_radius_m": group_radius,
+                            "near_radius_m": group_near_radius,
                             "seed": self.seed + seed_counter,
                         })
 
         # (x, z, width, height, bucket) per painted instance.
         group_placed: list[list[tuple[float, float, float, float, int]]] = [[] for _ in groups]
+        # Points the optimizer placed inside a group's near edge, discarded before
+        # they reach the scene. Reported so "this group painted fewer than the tile
+        # asked for" is attributable rather than mysterious.
+        near_rejected = 0
 
         # Set when every tile failed -- see the _RAN_MARKER decision at the end of run().
         total_failure = False
@@ -824,9 +881,16 @@ class DistributionSynthesisStage(PipelineStage):
                     # exactly the per-point falloff, as before, but the optimizer no
                     # longer places points that were always going to be discarded.
                     job_radius = job.get("full_density_radius_m", cfg.full_density_radius_m)
-                    if cfg.max_paint_radius_m > 0 or job_radius > 0:
+                    job_near = job.get("near_radius_m", 0.0)
+                    if cfg.max_paint_radius_m > 0 or job_radius > 0 or job_near > 0:
                         distance = float(math.hypot(x, z))
                         if cfg.max_paint_radius_m > 0 and distance > cfg.max_paint_radius_m:
+                            continue
+                        # Near edge of the observed band -- see group_near_radius. Not a
+                        # probability like the falloff below: inside it this class was
+                        # never seen at all, so there is nothing to thin toward.
+                        if job_near > 0 and distance < job_near:
+                            near_rejected += 1
                             continue
                         if job_radius > 0 and distance > job_radius:
                             keep_prob = (job_radius / distance) ** cfg.density_falloff_exponent
@@ -884,7 +948,11 @@ class DistributionSynthesisStage(PipelineStage):
                 })
                 next_idx += 1
 
-            self.log_info(f"  {obj_type} [{region_type}]: painted {len(placed)} instances")
+            self.log_info(
+                f"  {obj_type} [{region_type}]: painted {len(placed)} instances"
+                + (f" ({near_rejected} dropped inside the near edge)" if near_rejected else "")
+            )
+            near_rejected = 0
             if self.temp is not None:
                 self._write_debug_image(region_map, grid_size_meters, dist.points,
                                          [(p[0], p[1]) for p in placed],

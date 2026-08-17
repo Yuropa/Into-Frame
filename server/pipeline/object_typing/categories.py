@@ -101,6 +101,34 @@ OBJECT_CATEGORIES: Final[dict[str, list[str]]] = {
     "other":        ["a photo of an unidentified object", "a miscellaneous item outdoors"],
 }
 
+# Categories that only exist where something was BUILT IN PLACE: fixed structures and
+# the street furniture that comes with them. A scene showing no built environment at
+# all cannot contain any of these, whatever a crop happens to look like -- which is
+# the check ObjectCategoryClusteringStage applies (see _scene_admits_built).
+#
+# Measured on the Rainier capture, an alpine meadow whose region map types 0.01% of the
+# panorama as BUILT and whose RAM++ tags are "blanket | field | flower | moon |
+# moonlight | mountain | mountain landscape | mountain range | pasture | sky | snowy |
+# wild | wildflower": it still placed a 6.1 m "tower", three "statues", two
+# "buildings", a "fire_hydrant" and two "tables" within 25 m of the viewer. Cropping
+# the panorama at each of those boxes shows a conifer every time. CLIP scores every
+# crop against the whole label set and a tall narrow dark silhouette matches the
+# built-structure prompts well; nothing downstream ever asks whether the scene has
+# any built environment for them to belong to.
+#
+# Deliberately EXCLUDES vehicles (boat, car, aircraft, train...). They are manmade but
+# mobile, so a boat on a wilderness lake is a real thing and "no built region" is not
+# evidence against it. That leaves the Rainier "boat" -- also a conifer -- unvetoed;
+# it needs a different signal than this one.
+BUILT_ENVIRONMENT_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "building", "skyscraper", "tower", "bridge", "dock", "playground",
+    "monument", "statue", "landmark", "lighthouse", "fountain", "gazebo",
+    "wind_turbine",
+    "bench", "chair", "table", "streetlight", "trash_bin", "sign",
+    "fence", "barrier", "umbrella", "traffic_light", "fire_hydrant",
+    "bus_stop", "kiosk", "cart",
+})
+
 # Objects that are intrinsically one-of-a-kind in a scene. Multiple detections of
 # these types are treated as duplicates of the same object (ObjectCorrelationStage
 # merges them). Distinct from DISTRIBUTABLE_CATEGORIES below, which gates the

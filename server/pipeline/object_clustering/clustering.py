@@ -13,7 +13,10 @@ from scipy.spatial.distance import pdist
 
 from pipeline.object_clustering.dinov2_embedder import DinoV2Embedder
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
-from pipeline.object_typing.categories import ENVIRONMENT_CATEGORIES
+from pipeline.object_typing.categories import (
+    ENVIRONMENT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, normalize_category,
+)
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_context import ContextKey, PipelineContext
 from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration
 
@@ -31,6 +34,7 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         cluster_distance_threshold: float = 0.3,
         position_only_similarity_threshold: float = 0.75,
         max_buckets_per_class: int = 8,
+        min_built_fraction: float = 0.005,
         min_bucket_size: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -54,6 +58,13 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         # 0 disables either check.
         self.max_buckets_per_class = max_buckets_per_class
         self.min_bucket_size = min_bucket_size
+        # Share of the panorama that must type as RegionType.BUILT before this scene
+        # is allowed to contain built-in-place categories at all. Measured off the
+        # stored region maps of the five sample captures: Rainier 0.01%, Iceland 0.12%,
+        # Shark Fin 1.13%, Irises 1.69%, Paris 7.47% -- 0.5% sits ~4x clear of the
+        # nearest on either side. Only ever consulted alongside the scene tags; see
+        # _scene_admits_built. 0 disables the veto.
+        self.min_built_fraction = float(min_built_fraction)
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -111,6 +122,8 @@ class ObjectCategoryClusteringStage(PipelineStage):
               distance cut produced more buckets than this; 0 disables
             min_bucket_size (default 3) -- fold smaller buckets into the nearest
               surviving one; 0/1 disables
+            min_built_fraction (default 0.005) -- built-region share below which
+              BUILT_ENVIRONMENT_CATEGORIES are vetoed for this scene; 0 disables
     """
 
     @classmethod
@@ -120,6 +133,47 @@ class ObjectCategoryClusteringStage(PipelineStage):
     def __init__(self, config: ObjectCategoryClusteringConfiguration) -> None:
         super().__init__(config)
         self._embedder = None
+
+    def _scene_admits_built(self, context: PipelineContext) -> tuple[bool, str]:
+        """Whether this scene shows any built environment at all.
+
+        Two independent signals, both already computed upstream, and BOTH must be
+        silent before anything is vetoed -- a single one saying "no buildings" is not
+        worth overruling a classifier on:
+
+          1. The fraction of the panorama PanoramaRegionStage types RegionType.BUILT.
+             Measured off the stored region maps of the five sample captures: Rainier
+             0.01%, Iceland 0.12%, Shark Fin 1.13%, Irises 1.69%, Paris 7.47%. The
+             0.5% threshold sits ~4x clear of the nearest capture on either side.
+          2. RAM++'s scene tags. Rainier's are entirely natural ("mountain range |
+             pasture | wildflower | snowy | sky ..."), Paris's are not.
+
+        Returns (admits, why) -- `why` is logged, because "this scene has no built
+        environment" is a claim worth being able to check afterwards.
+        """
+        region_type = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        if region_type is None:
+            return True, "no region map — built categories left alone"
+        built_fraction = float(
+            (np.asarray(region_type.depth) == int(RegionType.BUILT)).mean()
+        )
+        if built_fraction >= self.config.min_built_fraction:
+            return True, f"{built_fraction * 100:.1f}% of the panorama is built"
+
+        tags = context.input_object(ContextKey.RECOGNIZE_TAGS) or ""
+        built_tags = sorted({
+            tag.strip() for tag in str(tags).split("|")
+            if normalize_category(tag.strip()) in BUILT_ENVIRONMENT_CATEGORIES
+        })
+        if built_tags:
+            return True, (
+                f"only {built_fraction * 100:.1f}% built region, but the scene tags "
+                f"name {', '.join(built_tags)}"
+            )
+        return False, (
+            f"{built_fraction * 100:.1f}% of the panorama is built and no scene tag "
+            f"names a structure"
+        )
 
     def run(self, context: PipelineContext) -> PipelineContext:
         correlation = context.input_object_correlation(ContextKey.OBJECT_CORRELATION)
@@ -138,7 +192,29 @@ class ObjectCategoryClusteringStage(PipelineStage):
         centroids_by_class: dict[str, dict[int, np.ndarray]] = {}
         trust_split: dict[str, tuple[int, int]] = {}
 
+        admits_built, built_reason = self._scene_admits_built(context)
+        if not admits_built:
+            self.log_info(f"  Scene has no built environment: {built_reason}")
+        vetoed_built: dict[str, int] = {}
+
         for obj_class, grp in correlation.groups.items():
+            # A built-in-place category in a scene with no built environment is a
+            # misread silhouette, not a structure -- see BUILT_ENVIRONMENT_CATEGORIES.
+            # Demoted to indeterminate rather than deleted, which is the same state
+            # this stage's own DINOv2 corroboration puts a crop it cannot vouch for:
+            # Panorama Asset Generation skips it, Scene Generation skips it, and it
+            # keeps its crop so nothing upstream has to be re-run to see it again.
+            if not admits_built and obj_class in BUILT_ENVIRONMENT_CATEGORIES:
+                for idx in grp.indices:
+                    metadata = context.input_object(f"metadata_{idx}") or {}
+                    metadata["class"] = "indeterminate"
+                    metadata["vetoed_class"] = obj_class
+                    metadata["veto_reason"] = "no built environment in this scene"
+                    context.add_object(f"metadata_{idx}", metadata)
+                    self.advance_progress(task)
+                vetoed_built[obj_class] = len(grp.indices)
+                continue
+
             # Environment/indeterminate groups (sky, grass, water, ...) are
             # never meshed or billboard-curated downstream (Panorama Asset
             # Generation filters them out the same way) -- clustering them
@@ -173,6 +249,13 @@ class ObjectCategoryClusteringStage(PipelineStage):
         #
         # Wrapped for the same reason SceneGenerationStage's mesh report is: this
         # is reporting, and reporting must not be able to fail the stage.
+        if vetoed_built:
+            self.log_warning(
+                f"  Vetoed {sum(vetoed_built.values())} crop(s) across "
+                f"{len(vetoed_built)} built-environment class(es) — "
+                + ", ".join(f"{c} x{n}" for c, n in sorted(vetoed_built.items(), key=lambda kv: -kv[1]))
+            )
+
         try:
             if trust_split:
                 self.log_info("  Confident / low-confidence split per class:")
