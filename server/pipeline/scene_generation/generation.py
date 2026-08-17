@@ -579,6 +579,11 @@ class SceneGenerationStage(PipelineStage):
             # distance, not just "every crop in the class" (which included
             # poorly-scored/occluded crops with no ranking).
             billboard_pools: dict[str, list[int]] = context.input_object("billboard_pools") or {}
+            # Indices Panorama Asset Generation rejected as background rather than
+            # objects. Absent on a context written before that key existed, in which
+            # case nothing is skipped and this behaves exactly as it used to.
+            background_rejected: set[int] = set(context.input_object("background_rejected") or [])
+            background_skipped = 0
 
             # Which visual variants each class actually has, taken from the pool
             # keys Panorama Asset Generation just wrote ("{class}::{bucket}").
@@ -730,6 +735,21 @@ class SceneGenerationStage(PipelineStage):
                     # trustworthy enough to render from its own crop -- only its
                     # position feeds ObjectDistributionStage's spatial pattern for
                     # `cls`. Never placed, meshed, or video-tracked.
+                    self.advance_progress(generation_task)
+                    continue
+
+                if idx in background_rejected:
+                    # Panorama Asset Generation measured this box to be mostly sky
+                    # and/or mostly unmeasured depth and declined to build anything
+                    # for it (max_background_fraction). That is a claim the detection
+                    # is not an object at all, not merely that it isn't worth an
+                    # asset, so placing it anyway put a fabricated metre size at a
+                    # fabricated distance -- the three worst objects in the scene on
+                    # the Rainier capture were all this. Its size comes from
+                    # angular_extent x depth and its depth is the far clamp, so both
+                    # numbers are invented and no amount of downstream gating can
+                    # recover a real one.
+                    background_skipped += 1
                     self.advance_progress(generation_task)
                     continue
 
@@ -1169,6 +1189,13 @@ class SceneGenerationStage(PipelineStage):
                     level(f"    no ground under object {example}")
             elif snapped:
                 self.log_info(f"Terrain snap: all {snapped} placed object(s) hit a ground mesh")
+
+            if background_skipped:
+                self.log_info(
+                    f"Background rejection: skipped {background_skipped} detection(s) "
+                    f"Panorama Asset Generation measured as sky/unmeasured-depth rather "
+                    f"than objects"
+                )
 
             if rejected_overlap:
                 self.log_info(

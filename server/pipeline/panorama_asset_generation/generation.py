@@ -26,6 +26,51 @@ from PIL import Image as PILImage
 _MAX_CARD_ASPECT_RATIO = 4.0
 
 
+def _largest_consistent(pool: list[dict], reference: list[dict]) -> "dict | None":
+    """Pick the highest-RESOLUTION candidate from `pool` whose shape fits its group.
+
+    Used for both things this stage builds out of one crop: the card texture and
+    the mesh representative. Both were previously taken from composite_score's
+    ranking, and composite_score has no size term at all -- it ranks on
+    confidence, fill ratio, depth proximity and occlusion -- so its winner is
+    routinely the smallest usable crop in the group. For an image that is about
+    to be stretched over metres of geometry, or fed to a single-view 3D
+    reconstructor, pixel count is the property that decides whether the result is
+    anything at all.
+
+    `reference` supplies the aspect median the shape guard compares against, and
+    is deliberately a different (wider) list than `pool`: the pool a mesh may be
+    drawn from is already filtered down by distance, occlusion and size and can
+    be a single entry, whose "median" says nothing. The group's whole candidate
+    set is the stable shape reference.
+
+    Returns None when nothing is measurable, so the caller can keep its old
+    behaviour rather than being handed a bad pick.
+    """
+    def measurable(s) -> bool:
+        b = s.get("box")
+        return bool(b) and b[2] > 0 and b[3] > 0
+
+    # Degenerate boxes are dropped, not clamped: a zero height gives an aspect of
+    # 1/epsilon, which as a member of the list the median is taken over drags the
+    # reference far enough to reject every real crop in the group.
+    candidates = [s for s in pool if measurable(s)]
+    if not candidates:
+        return None
+    shapes = sorted(s["box"][2] / s["box"][3] for s in reference if measurable(s)) \
+        or sorted(s["box"][2] / s["box"][3] for s in candidates)
+    median_aspect = shapes[len(shapes) // 2]
+
+    def agrees(s) -> bool:
+        aspect = s["box"][2] / s["box"][3]
+        return max(aspect / median_aspect, median_aspect / aspect) <= _MAX_CARD_ASPECT_RATIO
+
+    # If the guard rejects everything, the group has no self-consistent shape to
+    # appeal to -- fall back to raw size rather than to nothing.
+    shaped = [s for s in candidates if agrees(s)] or candidates
+    return max(shaped, key=lambda s: s["box"][2] * s["box"][3])
+
+
 def _delit_key(idx: int) -> str:
     """Asset name for a crop with its baked-in lighting removed.
 
@@ -271,6 +316,28 @@ class PanoramaAssetGenerationStage(PipelineStage):
         )
 
         context.add_object("billboard_pools", billboard_pools)
+        # Detections this stage judged to be BACKGROUND rather than objects, handed
+        # forward so SceneGenerationStage can decline to place them.
+        #
+        # max_background_fraction already identifies them correctly -- the whole
+        # "large floating object" failure it was built for -- but it only gated what
+        # this stage BUILDS. Scene Generation places every surviving metadata_{i}
+        # regardless of whether an asset was curated for it, so a detection rejected
+        # here still arrived in the scene, just without a curated pool behind it.
+        # Measured on the Rainier capture (2026-08-17 13:33 run), all three of them
+        # standing on the mountainside at 60-96 m: a 20.3 x 7.7 m "aircraft" with 74%
+        # of its box at the depth clamp, a 16.7 x 8.5 m "animal" at 67%, and a
+        # 4.8 x 9.2 m "person" whose box is 100% sky AND 100% unmeasured depth.
+        #
+        # Only the `background` reason travels. The others must not: `environment`
+        # and `indeterminate` are already skipped independently by Scene Generation,
+        # `category_filter` is a rendering preference rather than a claim the thing
+        # is not real, and `position_only`/`too_small_for_mesh` are explicitly still
+        # meant to be placed (as billboards) -- forwarding those would empty the scene.
+        context.add_object(
+            "background_rejected",
+            sorted({d["idx"] for d in skipped_debug if d.get("reason") == "background"}),
+        )
         self._write_debug(skipped_debug, group_best, disqualified_debug, billboard_pools, synthetic_skipped)
 
         # Everything that will actually be rendered: every curated billboard pool
@@ -706,30 +773,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # crop_69 is 1.93, a 5.5x disagreement. With the guard the bucket picks
             # crop_268 (38x128, "a yellow flower that is on a stick"). Across every
             # carded group on that capture this changes only flower::4.
-            # Degenerate boxes are dropped outright rather than clamped: a zero
-            # height makes an aspect of 1/epsilon, which is not merely a bad
-            # candidate -- as an entry in the list the median is taken over it drags
-            # the reference far enough to reject every real crop in the group.
-            def _measurable(s) -> bool:
-                b = s.get("box")
-                return bool(b) and b[2] > 0 and b[3] > 0
-
-            usable = [s for s in scored if not s["disqualified"] and _measurable(s)] \
-                or [s for s in scored if _measurable(s)]
-            if usable:
-                aspects = sorted(s["box"][2] / s["box"][3] for s in usable)
-                median_aspect = aspects[len(aspects) // 2]
-
-                def _agrees(s) -> bool:
-                    aspect = s["box"][2] / s["box"][3]
-                    return max(aspect / median_aspect, median_aspect / aspect) <= _MAX_CARD_ASPECT_RATIO
-
-                # If the guard rejects everything the group has no self-consistent
-                # shape to appeal to, so fall back to raw size rather than no card.
-                shaped = [s for s in usable if _agrees(s)] or usable
-                card_sources[pool_key] = max(
-                    shaped, key=lambda s: s["box"][2] * s["box"][3]
-                )["idx"]
+            undisqualified = [s for s in scored if not s["disqualified"]] or scored
+            card_source = _largest_consistent(undisqualified, scored)
+            if card_source is not None:
+                card_sources[pool_key] = card_source["idx"]
 
             within_threshold = [s for s in scored if s["depth"] < threshold]
             if not within_threshold:
@@ -798,7 +845,39 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     continue
                 eligible = prominent
 
-            winner = max(eligible, key=lambda s: s["score"])
+            # Mesh representative, by RESOLUTION among what survived the gates above
+            # -- not by composite_score, for the same reason the card texture is not.
+            #
+            # This is the single most consequential crop choice the stage makes:
+            # SAM3D reconstructs the whole bucket's geometry from it, every instance
+            # of the bucket renders that geometry, and a single-view reconstructor
+            # given too few pixels does not return a worse object, it returns a
+            # DIFFERENT one -- a flat pancake that scene_generation's shape gates
+            # then correctly refuse, so the whole bucket falls back to billboards.
+            #
+            # Measured on the Rainier capture (2026-08-17 13:33 run), where 205 of
+            # 471 placed instances were refused this way and every single refused
+            # bucket had been reconstructed from a crop far smaller than its own
+            # group held:
+            #
+            #     mesh          score-winner   largest available   gate verdict
+            #     person_0      27x65          50x197  (5.6x)      h_frac 0.059, aspect 16.9 -> all 15 refused
+            #     tree_0        67x63          119x325 (9.2x)      thickness 0.099 -> all 76 refused
+            #     flower_1      32x78          117x166 (7.8x)      thickness 0.311 -> all 59 refused
+            #     plant_2       52x40          69x180  (6.0x)      h_frac 0.012, aspect 80.6 -> all 26 refused
+            #     rock_0        23x73          44x187  (4.9x)      aspect 1.00 vs 0.23 -> 3 refused
+            #
+            # A 27x65 crop of a person is not enough evidence for a person, and the
+            # pancake SAM3D returned from it is the honest answer to the question it
+            # was asked. Asking a better question is this fix.
+            #
+            # Drawn from `eligible`, so it still respects every quality filter above
+            # (within billboard_distance_m, not occlusion-disqualified, over
+            # min_mesh_angular_px) -- resolution replaces score only as the final
+            # choice among crops already judged usable. The aspect guard's reference
+            # is the group's whole candidate set rather than `eligible`, which can be
+            # a single entry whose own median means nothing.
+            winner = _largest_consistent(eligible, scored) or max(eligible, key=lambda s: s["score"])
 
             group_best[(obj_class, bucket)] = (winner["idx"], winner["depth"], winner["score"])
             for s in within_threshold:
