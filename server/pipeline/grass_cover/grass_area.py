@@ -189,6 +189,11 @@ def grass_area_mask(
         if stats is not None:
             vetoed = mask & (greenness < min_cell_greenness)
             stats["colour_vetoed_cells"] = int(vetoed.sum())
+            # Handed back so the caller can scatter BY this rather than uniformly
+            # over whatever survives the threshold -- see GrassCoverStage._scatter.
+            # A veto answers "is this cell vegetation at all"; how much vegetation
+            # it shows is a different question, and the same measurement answers it.
+            stats["greenness"] = greenness
         mask &= greenness >= min_cell_greenness
 
     # The per-cell UV is an equirectangular projection fanned out along rays, so

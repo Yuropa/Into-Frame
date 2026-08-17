@@ -1095,6 +1095,19 @@ stages:
     # few square metres a metre from the camera. min_exemplars below is the direct
     # answer to the 3-exemplar groups; these two are what pull the near-field carpet
     # back toward what the photo shows.
+    # Appearance test for vegetation groups. The region map only answers "is this
+    # cell's TYPE paintable", and RegionType.GROUND folds grass, earth, field, sand,
+    # snow and ice together -- so a flower pattern learned from the meadow was painted
+    # onto snow margins and bare earth alike, with 89% of the result landing outside
+    # the 57 degrees the camera actually photographed. This asks the panorama what
+    # colour the ground is at each painted point, the same measurement Grass Cover
+    # already makes, and thins accordingly. Replayed over the Rainier capture's own
+    # painted points it drops 52% of them, all on ground the photograph shows as
+    # unvegetated. Keep these in step with Grass Cover's min_cell_greenness /
+    # full_density_greenness. Set full <= min to paint on region type alone.
+    min_vegetation_greenness: 0.02
+    full_vegetation_greenness: 0.15
+    vegetation_floor_fraction: 0.15
     min_exemplar_spacing_m: 0.4      # 0.25 m was 16/m² -- 0.4 m is 6.2/m²
     full_density_radius_m: 3.0       # a FLOOR, not the radius -- each group extends it to
                                       # the p75 of its own exemplar distances (see
@@ -1226,6 +1239,21 @@ stages:
                                # below every green case rather than between them -- this is
                                # a veto on "definitely not a plant", and dry or golden grass
                                # scores legitimately low.
+    # Density now FOLLOWS the observed greenness rather than being uniform everywhere
+    # min_cell_greenness passed. That threshold answers "is this cell vegetation at
+    # all"; it never answered "how much", so a melting snow margin, a dry patch and the
+    # thick of the meadow all received the same 15 tufts/m2 -- which is what makes
+    # ground cover read as a carpet laid over the terrain rather than as the meadow in
+    # the photograph. Keep-probability ramps linearly from density_floor_fraction at
+    # min_cell_greenness to 1.0 here.
+    #
+    # Measured over the Rainier capture's own gate-passing cells: 27% sit in 0.02-0.05
+    # (barely distinguishable from bare ground) and keep 16%; 6% clear 0.15 and keep
+    # all. Mean keep 0.46, so its 16,026 tufts become ~7,400 -- concentrated where the
+    # photograph actually shows meadow. Set full_density_greenness to 0 to restore
+    # uniform density.
+    full_density_greenness: 0.15
+    density_floor_fraction: 0.15
     instance_spacing_m: 0.25  # nominal lattice pitch before jitter.
                                # 0.4 m is one tuft every 40 cm (6.2/m2), which reads as
                                # scattered clumps on bare ground rather than as meadow --

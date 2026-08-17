@@ -97,6 +97,8 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         max_radius_m: float = 25.0,
         min_observed_grass_fraction: float = 0.15,
         min_cell_greenness: float = 0.02,
+        full_density_greenness: float = 0.15,
+        density_floor_fraction: float = 0.15,
         min_exemplar_greenness: float = 0.05,
         instance_spacing_m: float = 0.4,
         max_instances: int = 8000,
@@ -173,6 +175,18 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # dry/golden grass sits near zero, sand runs about -0.12 and snow lower, so
         # it removes only what is definitively not vegetation. -inf disables it.
         self.min_cell_greenness = float(min_cell_greenness)
+        # Greenness at which a cell earns the FULL instance_spacing_m density, with a
+        # linear ramp down to density_floor_fraction at min_cell_greenness above.
+        # 0.15 is where the Rainier meadow's own thick vegetation sits -- only 6% of
+        # its gate-passing cells reach it, and those are the parts of the photograph
+        # that genuinely read as dense grass. Set to 0 (or below min_cell_greenness)
+        # to restore uniform density everywhere the veto passes.
+        self.full_density_greenness = float(full_density_greenness)
+        # Density floor for a cell that only just clears the veto, as a fraction of
+        # full. Not zero: those cells are still vegetation by every test applied, and
+        # emptying them entirely would carve visible bald patches at the exact
+        # boundaries the colour measurement is least certain about.
+        self.density_floor_fraction = float(density_floor_fraction)
         # Nominal centre-to-centre spacing of the scatter lattice, before jitter.
         # 0.4 m over the ~886 m2 of grass the Rainier capture yields inside 25 m
         # is ~5500 instances, which is what max_instances is scaled against.
@@ -377,7 +391,10 @@ class GrassCoverStage(PipelineStage):
         self.advance_progress(task)
 
         tuft_height = self._tuft_height(cfg)
-        placed = self._scatter(context, mask, grid_size_meters, len(representatives), tuft_height, cfg)
+        placed = self._scatter(
+            context, mask, grid_size_meters, len(representatives), tuft_height, cfg,
+            greenness=area_stats.get("greenness"),
+        )
         self.advance_progress(task)
         self.finish_progress(task)
 
@@ -634,6 +651,7 @@ class GrassCoverStage(PipelineStage):
         bucket_count: int,
         tuft_height: float,
         cfg: GrassCoverConfiguration,
+        greenness: "np.ndarray | None" = None,
     ) -> int:
         """Place instances on a jittered lattice over the grass mask.
 
@@ -680,7 +698,35 @@ class GrassCoverStage(PipelineStage):
         xs, zs, rows, cols = xs[inside], zs[inside], rows[inside], cols[inside]
 
         keep = mask[rows, cols]
-        xs, zs = xs[keep], zs[keep]
+        xs, zs, rows, cols = xs[keep], zs[keep], rows[keep], cols[keep]
+
+        # Density follows how much vegetation the panorama actually shows at each
+        # cell, instead of being uniform everywhere the threshold passed.
+        #
+        # min_cell_greenness is a veto -- "is this cell vegetation at all" -- and the
+        # scatter then treated everything above it identically. Measured on the
+        # Rainier capture, of the cells that pass, 27% sit in 0.02-0.05 (barely
+        # distinguishable from bare ground) and only 6% clear 0.15; median 0.075. A
+        # melting snow margin, a dry patch and the thick of the meadow all received
+        # the same 15 tufts per square metre, which is what makes ground cover read as
+        # a carpet laid over the terrain rather than as the meadow in the photograph.
+        #
+        # The same measurement answers the density question, so this is a weight, not
+        # a second threshold: keep-probability ramps linearly from
+        # density_floor_fraction at the veto to 1.0 at full_density_greenness. Applied
+        # by rejection against the existing lattice, so the spacing/budget logic above
+        # is untouched and the result is still a jittered lattice, just thinned where
+        # the ground is not green. 0 for full_density_greenness restores the old
+        # uniform behaviour.
+        weighted = 0
+        if greenness is not None and cfg.full_density_greenness > cfg.min_cell_greenness:
+            g = np.asarray(greenness)[rows, cols]
+            span = cfg.full_density_greenness - cfg.min_cell_greenness
+            weight = (g - cfg.min_cell_greenness) / span
+            weight = np.clip(weight, cfg.density_floor_fraction, 1.0)
+            survives = rng.random(xs.size) < weight
+            weighted = int(xs.size - survives.sum())
+            xs, zs = xs[survives], zs[survives]
         if xs.size == 0:
             self.log_info("  no lattice points landed on grass, nothing placed")
             return 0
@@ -714,7 +760,8 @@ class GrassCoverStage(PipelineStage):
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
         self.log_info(
             f"  placed {xs.size} grass instance(s) at {spacing:.2f} m spacing "
-            f"({xs.size / area_m2:.1f}/m2), tuft height {tuft_height:.2f} m"
+            f"({xs.size / area_m2:.1f}/m2 average), tuft height {tuft_height:.2f} m"
+            + (f" — {weighted} thinned out where the ground is less green" if weighted else "")
         )
         return int(xs.size)
 

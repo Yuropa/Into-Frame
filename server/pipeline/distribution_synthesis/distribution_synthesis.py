@@ -24,6 +24,7 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     paintable_region_types,
 )
 from pipeline.object_typing.categories import VEGETATION_CATEGORIES
+from pipeline.grass_cover.grass_area import cell_greenness
 
 _HERE = Path(__file__).resolve().parent
 
@@ -226,6 +227,9 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         input_boundary_pad_factor: float = 1.5,
         max_instances_per_group: int = 12000,
         min_exemplars: int = 8,
+        min_vegetation_greenness: float = 0.02,
+        full_vegetation_greenness: float = 0.15,
+        vegetation_floor_fraction: float = 0.15,
         paint_vegetation_in_water: bool = False,
         min_exemplar_spacing_m: float = 0.25,
         full_density_radius_m: float = 6.0,
@@ -272,6 +276,14 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # old floor of 2 was only ever "enough points to compute a PCF at all", which
         # is a different question from "enough evidence to fill a meadow". 0 disables.
         self.min_exemplars = min_exemplars
+        # Appearance test for vegetation groups, sharing GrassCoverStage's thresholds
+        # (min_cell_greenness / full_density_greenness) so the two populations agree
+        # about where the ground is planted. Excess green below the first earns the
+        # floor weight, at or above the second full density. Set full <= min to paint
+        # on region type alone, as before.
+        self.min_vegetation_greenness = float(min_vegetation_greenness)
+        self.full_vegetation_greenness = float(full_vegetation_greenness)
+        self.vegetation_floor_fraction = float(vegetation_floor_fraction)
         # Whether vegetation may be painted into RegionType.WATER. Off: the region map
         # types a real lake, and the pattern learned from a shoreline clump then paints
         # straight across it -- the Rainier capture put 337 flowers, 65 plants and 12
@@ -419,6 +431,51 @@ class DistributionSynthesisStage(PipelineStage):
     def __init__(self, config: DistributionSynthesisConfiguration) -> None:
         super().__init__(config)
 
+    def _vegetation_weight(self, context: PipelineContext, resolution: int):
+        """Per-cell [0, 1] weight for how much vegetation the panorama shows there.
+
+        Reuses GrassCoverStage's own measurement (grass_area.cell_greenness) so the
+        two populations agree about where the ground is planted -- excess green,
+        (2G - R - B) / 255, of the panorama pixel each terrain cell observes, ramped
+        from min_vegetation_greenness (weight = floor) to full_vegetation_greenness
+        (weight = 1). Returns None when any input is missing or the grids disagree, in
+        which case the caller paints as before.
+        """
+        if self.config.full_vegetation_greenness <= self.config.min_vegetation_greenness:
+            return None
+        pano_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U)
+        pano_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V)
+        sampled = context.input_depth(ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK)
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        if pano_u is None or pano_v is None or sampled is None or panorama is None:
+            self.log_info("  no panorama UV for the appearance test — painting on region type alone")
+            return None
+
+        u, v = np.asarray(pano_u.depth), np.asarray(pano_v.depth)
+        valid = np.asarray(sampled.depth).astype(bool)
+        if u.shape != (resolution, resolution) or valid.shape != u.shape:
+            self.log_info(
+                f"  panorama UV {u.shape} does not match the region grid "
+                f"({resolution}, {resolution}) — painting on region type alone"
+            )
+            return None
+
+        rgb = np.asarray(panorama.rgb(), dtype=np.float32)
+        height, width = rgb.shape[:2]
+        row = np.zeros(u.shape, dtype=np.intp)
+        col = np.zeros(u.shape, dtype=np.intp)
+        row[valid] = np.clip((v[valid] * (height - 1)).astype(np.intp), 0, height - 1)
+        col[valid] = np.clip((u[valid] * (width - 1)).astype(np.intp), 0, width - 1)
+        greenness = cell_greenness(rgb, row, col, valid)
+
+        span = self.config.full_vegetation_greenness - self.config.min_vegetation_greenness
+        weight = (greenness - self.config.min_vegetation_greenness) / span
+        weight = np.clip(weight, self.config.vegetation_floor_fraction, 1.0)
+        # A cell with no trustworthy UV has no observation behind it either way;
+        # cell_greenness marks those -inf, and clipping would have floored them.
+        weight[~valid] = 1.0
+        return weight.astype(np.float32)
+
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: DistributionSynthesisConfiguration = self.config
 
@@ -454,6 +511,20 @@ class DistributionSynthesisStage(PipelineStage):
         )
 
         object_count = context.input_object(ContextKey.OBJECT_COUNT) or 0
+
+        # Per-cell vegetation weight, on the same grid as the region map, for the
+        # appearance test applied to vegetation groups below.
+        #
+        # The region map answers "is this cell's TYPE paintable", and nothing else in
+        # this stage asks what the panorama actually shows at a location before
+        # putting a plant on it -- so a flower pattern learned from the meadow was
+        # painted onto every ground cell inside its radius, snow margins and bare
+        # earth included, and 89% of the result landed outside the 57 degrees the
+        # camera photographed. RegionType.GROUND folds grass, earth, field, sand, snow
+        # and ice together (see panorama_region_result._LABEL_RULES), so type cannot
+        # separate a meadow from the snowpack ringing it; colour can, and
+        # GrassCoverStage already measures exactly this per cell for the same reason.
+        vegetation_weight = self._vegetation_weight(context, region_map.shape[0])
 
         cli_path = _find_synthesize_cli(cfg.synthesize_cli_path)
         if cli_path is None:
@@ -791,7 +862,13 @@ class DistributionSynthesisStage(PipelineStage):
         # Points the optimizer placed inside a group's near edge, discarded before
         # they reach the scene. Reported so "this group painted fewer than the tile
         # asked for" is attributable rather than mysterious.
-        near_rejected = 0
+        # Per group, not running totals: results are consumed in job order across
+        # every group at once, so a single counter would attribute all of it to
+        # whichever group happens to be reported first.
+        near_rejected: dict[int, int] = {}
+        # Vegetation points discarded because the panorama shows bare/unvegetated
+        # ground at that cell -- see _vegetation_weight.
+        appearance_rejected: dict[int, int] = {}
 
         # Set when every tile failed -- see the _RAN_MARKER decision at the end of run().
         total_failure = False
@@ -866,6 +943,10 @@ class DistributionSynthesisStage(PipelineStage):
                 if not synth or not synth.get("output_points"):
                     continue
                 dist = groups[job["group_idx"]][2]
+                # This job's OWN class. The loop that built the jobs has long since
+                # finished, so its obj_type is simply whatever the last group left
+                # bound -- every point would have been tested against that one.
+                job_obj_type = groups[job["group_idx"]][1]
                 placed = group_placed[job["group_idx"]]
                 for x, z in synth["output_points"]:
                     # Radial density falloff about the camera at the grid origin --
@@ -881,6 +962,21 @@ class DistributionSynthesisStage(PipelineStage):
                     # exactly the per-point falloff, as before, but the optimizer no
                     # longer places points that were always going to be discarded.
                     job_radius = job.get("full_density_radius_m", cfg.full_density_radius_m)
+                    # Appearance test, for vegetation only: keep this point with the
+                    # probability the panorama's own colour at this cell supports a
+                    # plant growing there. Rejection-sampled per point exactly like the
+                    # radial falloff below, so the painted set stays a thinned version
+                    # of the synthesized pattern rather than a differently-shaped one.
+                    # Non-vegetation distributables (rock) are left alone -- a rock in
+                    # scree is not green and has no business being tested for it.
+                    if vegetation_weight is not None and job_obj_type in VEGETATION_CATEGORIES:
+                        cell_col = int((x + grid_size_meters / 2.0) / cell_m)
+                        cell_row = int((z + grid_size_meters / 2.0) / cell_m)
+                        if 0 <= cell_row < grid_resolution and 0 <= cell_col < grid_resolution:
+                            if rng.random() >= float(vegetation_weight[cell_row, cell_col]):
+                                appearance_rejected[job["group_idx"]] = appearance_rejected.get(job["group_idx"], 0) + 1
+                                continue
+
                     job_near = job.get("near_radius_m", 0.0)
                     if cfg.max_paint_radius_m > 0 or job_radius > 0 or job_near > 0:
                         distance = float(math.hypot(x, z))
@@ -890,7 +986,7 @@ class DistributionSynthesisStage(PipelineStage):
                         # probability like the falloff below: inside it this class was
                         # never seen at all, so there is nothing to thin toward.
                         if job_near > 0 and distance < job_near:
-                            near_rejected += 1
+                            near_rejected[job["group_idx"]] = near_rejected.get(job["group_idx"], 0) + 1
                             continue
                         if job_radius > 0 and distance > job_radius:
                             keep_prob = (job_radius / distance) ** cfg.density_falloff_exponent
@@ -950,9 +1046,11 @@ class DistributionSynthesisStage(PipelineStage):
 
             self.log_info(
                 f"  {obj_type} [{region_type}]: painted {len(placed)} instances"
-                + (f" ({near_rejected} dropped inside the near edge)" if near_rejected else "")
+                + (f" ({near_rejected[group_idx]} dropped inside the near edge)"
+                   if near_rejected.get(group_idx) else "")
+                + (f" ({appearance_rejected[group_idx]} dropped on unvegetated ground)"
+                   if appearance_rejected.get(group_idx) else "")
             )
-            near_rejected = 0
             if self.temp is not None:
                 self._write_debug_image(region_map, grid_size_meters, dist.points,
                                          [(p[0], p[1]) for p in placed],
