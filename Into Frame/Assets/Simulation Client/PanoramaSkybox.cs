@@ -11,7 +11,18 @@ public class PanoramaSkybox : MonoBehaviour
 
     [Header("Sky Motion")]
     [Tooltip("Seconds for one full revolution of the sky. 0 disables the animation.")]
-    public float spinPeriodSeconds = 90f;
+    // Off by default. A 90 s revolution is far more motion than a still photograph
+    // implies: the panorama's clouds, its baked shadows and the terrain texture
+    // underneath it are all fixed to the sky it came from, so wheeling the sky past
+    // them reads as the world sliding rather than as weather. Rotating about the sun
+    // axis keeps the LIGHTING consistent (see SetSpinAxis) but cannot keep the
+    // imagery consistent, and on a scene with a strong horizon -- a cliff line, a
+    // city skyline -- the mismatch is obvious.
+    //
+    // Kept as a knob rather than deleted: the machinery is sound and a slow drift
+    // suits an overcast or featureless sky. Set a period in the Inspector to bring
+    // it back per-scene.
+    public float spinPeriodSeconds = 0f;
 
     private Material skyboxMaterial;
     private Texture2D currentTexture;

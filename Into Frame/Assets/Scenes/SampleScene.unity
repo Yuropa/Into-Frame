@@ -559,7 +559,7 @@ MonoBehaviour:
   imageName: 
   exposure: 1
   rotation: 0
-  spinPeriodSeconds: 800
+  spinPeriodSeconds: 0
   server: {fileID: 2130367361}
 --- !u!4 &341509120
 Transform:
