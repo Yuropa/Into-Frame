@@ -180,6 +180,13 @@ WATERBORNE_CATEGORIES: Final[frozenset[str]] = frozenset({
     "person", "animal", "bird", "buoy", "rock",
 })
 
+# BUILT_ENVIRONMENT_CATEGORIES above serves double duty here: besides gating a whole
+# scene that shows no built environment at all, its members are vetoed per-crop when
+# the box lands almost entirely inside RegionType.VEGETATION. A structure does not
+# grow in a tree canopy, and this is the one of the three region rules that fires on
+# a class the scene really does contain -- Paris has towers, so neither the scene-tag
+# test nor the caption test can touch its tree-shaped ones.
+
 # Classes that need level, buildable ground and so cannot be standing on a bare
 # rock face. Vetoed when the box lands almost entirely on RegionType.TERRAIN --
 # which in this taxonomy means mountain/cliff/rock, NOT ordinary ground (that is

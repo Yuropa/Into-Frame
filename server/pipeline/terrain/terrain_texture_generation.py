@@ -68,6 +68,15 @@ _LAYER_SMOOTHNESS: dict[RegionType, float] = {
     RegionType.ROAD:        0.18,
 }
 
+# How far Telea marches inward from a removed occluder's boundary when refilling its
+# footprint with real ground (see _ground_colour_panorama). This is a neighbourhood
+# radius in panorama pixels, not a hole size -- the algorithm fills a hole of any
+# size, this only sets how much boundary context each step averages over. Measured on
+# the Rainier capture: footprints there run to a 75 px inscribed radius (p95 41 px)
+# and 5 px resolves their grass structure without smearing it. The whole 4096x2048
+# pass costs ~0.3 s.
+_OCCLUDER_INPAINT_RADIUS_PX = 5
+
 _TILE_SUFFIX = (
     ", viewed from directly above at 30 centimetres, flat lay macro photography, "
     "filling the entire frame edge to edge, seamless tileable surface material, "
@@ -897,6 +906,11 @@ class TerrainTextureGenerationStage(PipelineStage):
 
         restore = np.isin(type_map, [int(RegionType.VEGETATION), int(RegionType.GROUND)])
         restore[: height // 2, :] = False
+        # Ground the occluder exclusion below is allowed to carve out of, kept so the
+        # holes it makes can be filled from real neighbours rather than left as
+        # fabricated gravel -- see the fill block further down.
+        restore_candidate = restore.copy()
+        occluder_hole = None
 
         occluder_image = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
         if occluder_image is not None:
@@ -905,10 +919,52 @@ class TerrainTextureGenerationStage(PipelineStage):
                 occluder = np.array(PIL.Image.fromarray(occluder).resize(
                     (width, height), PIL.Image.NEAREST,
                 ))
+            occluder_hole = restore_candidate & (occluder > 127)
             restore &= occluder <= 127
 
         if not restore.any():
             return panorama_terrain
+
+        source = np.asarray(original)
+
+        # ── Fill the occluder footprints from neighbouring real ground ────────
+        # An occluder's own pixels must not be restored -- that would paint canopy
+        # onto the ground the canopy was hiding, which is what the exclusion above
+        # is for. But LEAVING those pixels is not neutral either: what stays behind
+        # is ObjectClear's fabricated fill, and on a ground-level capture that fill
+        # is gravel invented in the middle of a wildflower meadow.
+        #
+        # Measured on the Rainier capture: of the below-horizon pixels whose final
+        # terrain texture still matches the inpainted panorama rather than the
+        # photograph, 86.8% are occluder-masked. They are the pale, object-shaped
+        # blobs scattered through the meadow -- every one of them the silhouette of
+        # a flower or plant that foreground removal took out, filled with gravel.
+        #
+        # Neither restoring nor keeping is right, because both answer the wrong
+        # question. The ground under a removed occluder is not that occluder, and it
+        # is not invented gravel -- it is whatever the ground immediately around it
+        # is. Telea inpainting answers that one: it marches inward from the hole
+        # boundary and propagates both colour and the direction of the structure it
+        # finds there, so grass entering a footprint carries on across it.
+        #
+        # Two cheaper fills were tried against this capture and both are worse.
+        # Nearest-neighbour from the boundary (a distance transform with
+        # return_indices) carries real texture but assigns each pixel one boundary
+        # sample, so every footprint fills with hard radial wedges. Normalised-
+        # convolution diffusion has no wedges but no structure either, leaving soft
+        # green smudges. Splitting them by frequency does not rescue it -- the wedge
+        # EDGES are high-frequency, so a low-pass swap leaves them intact.
+        if occluder_hole is not None and occluder_hole.any():
+            import cv2
+
+            filled = cv2.inpaint(
+                cv2.cvtColor(source, cv2.COLOR_RGB2BGR),
+                (occluder_hole * 255).astype(np.uint8),
+                _OCCLUDER_INPAINT_RADIUS_PX,
+                cv2.INPAINT_TELEA,
+            )
+            source = cv2.cvtColor(filled, cv2.COLOR_BGR2RGB)
+            restore = restore | occluder_hole
 
         # Feather the boundary -- a hard switch between a real photo and
         # ObjectClear's fill shows up as a visible outline once it is baked into
@@ -919,8 +975,13 @@ class TerrainTextureGenerationStage(PipelineStage):
         self.log_info(
             f"Ground colour: restored real photo over {restore.mean():.1%} of the panorama "
             f"({restore[height // 2:].mean():.1%} of the lower half)"
+            + (f", {occluder_hole.sum() / max(restore.sum(), 1):.1%} of it filled from "
+               f"neighbouring ground where an occluder was removed"
+               if occluder_hole is not None and occluder_hole.any() else "")
         )
-        return Panorama(Image(PIL.Image.composite(original, terrain, alpha)))
+        return Panorama(Image(PIL.Image.composite(
+            PIL.Image.fromarray(source, "RGB"), terrain, alpha,
+        )))
 
     @staticmethod
     def _panorama_tile(panorama, max_resolution: int) -> PIL.Image.Image:

@@ -249,6 +249,22 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 terrain = float((sub == int(RegionType.TERRAIN)).mean())
                 if terrain >= threshold:
                     return f"{terrain * 100:.0f}% of its box is bare rock"
+            if obj_class in BUILT_ENVIRONMENT_CATEGORIES:
+                # A structure does not grow inside a tree canopy. This is the third
+                # face of the same test and it catches a failure the other two miss
+                # entirely, because it fires on classes the SCENE genuinely contains.
+                #
+                # Paris types 38 crops `tower`, and `tower` is in its own RAM++ scene
+                # tags, so the caption veto skips them by construction. They are not
+                # one over-split Eiffel Tower -- the tower itself is a single clean
+                # 126x529 detection. They are ~14 real fragments of the cathedral
+                # (correctly sitting in BUILT, 0.48-1.00) plus a run of right-bank
+                # TREES typed as towers, sitting in 0.61-1.00 VEGETATION. Only the
+                # region map separates those two populations; class, confidence and
+                # caption all look alike.
+                vegetation = float((sub == int(RegionType.VEGETATION)).mean())
+                if vegetation >= threshold:
+                    return f"{vegetation * 100:.0f}% of its box is tree canopy"
             return None
 
         return veto
