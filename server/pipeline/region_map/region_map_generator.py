@@ -116,6 +116,8 @@ class RegionMapGenerator:
         type_idx_map: np.ndarray,
         sky_idx: int,
         water_idx: int = -1,
+        terrain_idx: int = -1,
+        min_terrain_silhouette_frac: float = 0.25,
         grid_size_meters: float = 100.0,
         grid_resolution: int = 4096,
         ridge_radius_frac: float = 0.85,
@@ -293,6 +295,51 @@ class RegionMapGenerator:
         boundary_row = silhouette.argmax(axis=0).astype(np.float64)  # (W,) float
 
         cols = np.arange(w)
+
+        # ── Is this horizon a LANDFORM at all? ────────────────────────────────
+        # Everything below treats the sky boundary as the crest of ground and
+        # anchors terrain elevation to it. That is right for a mountain, a cliff or
+        # a forested ridge -- and catastrophic for a flat city, where the same
+        # boundary is the roofline of a building forty metres away.
+        #
+        # The test is what the silhouette is MADE OF, not what the panorama
+        # contains. Measured on the sample captures, by fraction of silhouette
+        # columns whose own boundary pixel types TERRAIN:
+        #
+        #     Paris        0%   (71% BUILT, 29% VEGETATION) — a city skyline
+        #     Iceland     87%
+        #     Rainier     98%   (2% VEGETATION — a forested shoulder)
+        #     Shark Fin  100%
+        #
+        # Paris is not near the others; it is at zero, and no column of its horizon
+        # is a landform. Left ungated it reconstructed a flat river scene -- height
+        # map measured -6.0 to -0.2 m -- into 71 m of relief: a 5,966 m2 hill where
+        # the right-bank treeline stands and a 2,674 m2 one on the cathedral.
+        #
+        # Deliberately whole-scene rather than per-column. A per-column rule would
+        # also drop Iceland's 5% BUILT columns, which is tempting and probably
+        # right, but it would put the "built structures on hilltops" case this
+        # method's own comment calls out (a hut on a summit, a ridge with a mast)
+        # at risk for no measured benefit. 0.25 sits far from every capture on
+        # either side; set 0 to disable the gate.
+        #
+        # KNOWN LIMIT: a capture that is half city and half mountain scores ~50% and
+        # keeps anchoring, so its city half still becomes hills. Fixing that needs
+        # the per-column rule above, and a capture that actually exhibits it.
+        if terrain_idx >= 0 and min_terrain_silhouette_frac > 0 and has_silhouette.any():
+            boundary_types = type_idx_map[
+                boundary_row.astype(np.intp)[has_silhouette], cols[has_silhouette]
+            ]
+            terrain_frac = float((boundary_types == terrain_idx).mean())
+            if terrain_frac < min_terrain_silhouette_frac:
+                # No ridgeline, rather than a fabricated one. Every consumer of
+                # both return values already handles empty (each reads them with
+                # `or []`), and the resulting terrain is a level plane -- which is
+                # what a flat capture should have been all along.
+                return (
+                    np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+                    [],
+                )
 
         def _circular_fill(values: np.ndarray, valid: np.ndarray) -> np.ndarray:
             """Replace invalid entries of a column-indexed 1D signal with linear

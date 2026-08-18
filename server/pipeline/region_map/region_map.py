@@ -42,6 +42,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         interior_peak_min_depth_m: float = 50.0,
         ridge_prominence_min_m: float = 0.0,
         ridge_prominence_shoulder_m: float = 25.0,
+        min_terrain_silhouette_frac: float = 0.25,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -78,6 +79,11 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # and why prominence discards most of a real horizon.
         self.ridge_prominence_min_m = ridge_prominence_min_m
         self.ridge_prominence_shoulder_m = ridge_prominence_shoulder_m
+        # Fraction of the sky-boundary that must actually type TERRAIN before this
+        # capture is treated as having a mountain horizon at all. Below it, no ridge
+        # is extracted and the terrain stays the level plane a flat capture should
+        # have. See extract_mountain_ridgeline for the per-capture measurements.
+        self.min_terrain_silhouette_frac = float(min_terrain_silhouette_frac)
 
 
 class RegionMapStage(PipelineStage):
@@ -244,6 +250,8 @@ class RegionMapStage(PipelineStage):
             type_idx_map=type_idx_map,
             sky_idx=sky_idx,
             water_idx=water_idx,
+            terrain_idx=terrain_idx,
+            min_terrain_silhouette_frac=cfg.min_terrain_silhouette_frac,
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
             panorama_depth=panorama_depth,
@@ -270,6 +278,15 @@ class RegionMapStage(PipelineStage):
             + (f" (prominence ≥ {cfg.ridge_prominence_min_m:.0f} m)"
                if cfg.ridge_prominence_min_m > 0 else "")
         )
+        # Distinguish "extracted nothing because the horizon is not a landform" from
+        # "extraction failed" -- they look identical in the line above and want
+        # completely different responses.
+        if silhouette_px == 0 and not ridge_chains and cfg.min_terrain_silhouette_frac > 0:
+            self.log_warning(
+                f"  No ridgeline anchored: under {cfg.min_terrain_silhouette_frac * 100:.0f}% "
+                f"of this capture's sky boundary types terrain, so its horizon is a "
+                f"skyline (buildings/trees) rather than a landform. Terrain stays level."
+            )
         if self.temp is not None:
             rgb = np.zeros((*silhouette_grid.shape, 3), dtype=np.uint8)
             rgb[silhouette_grid > 0] = (255, 255, 255)

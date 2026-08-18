@@ -71,6 +71,7 @@ class TerrainMeshGenerator:
         region_map: Optional[Depth] = None,
         water_depression_m: float = 0.5,
         min_water_area_m2: float = 12.0,
+        water_level_percentile: float = 25.0,
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
@@ -96,6 +97,9 @@ class TerrainMeshGenerator:
                     the exact same triangulation so its shoreline matches the
                     terrain mesh's water hole precisely.
         water_depression_m: how far below the water surface the lakebed is carved.
+        water_level_percentile: which percentile of a water body's own reconstructed
+                    terrain height becomes its single flat surface level. See
+                    _level_water for why it is a low percentile and not the median.
         observed_mask: optional HEIGHT_MAP_OBSERVED_MASK (same grid as height_map,
                     True where a cell has a genuine direct point-cloud measurement,
                     already restored verbatim through Reconstruction and Noise
@@ -292,7 +296,13 @@ class TerrainMeshGenerator:
             )
             is_water = region_idx.astype(bool)
             if is_water.any():
-                water_Y = Y_pos.copy()
+                # rm is the region grid; hm is the height grid the water sits on.
+                # Both are the same (H, W) top-down convention, so a water cell in
+                # one indexes the same ground in the other.
+                water_Y = TerrainMeshGenerator._level_water(
+                    water_grid, hm, is_water, Y_pos, row_rm, col_rm,
+                    water_level_percentile,
+                )
 
         # ── Formation mask ────────────────────────────────────────────────────
         # Same idea as the water mask above: capture each formation vertex's real
@@ -405,10 +415,26 @@ class TerrainMeshGenerator:
             water_face_mask = is_water[faces].all(axis=1)
             if water_face_mask.any():
                 water_vertices = np.stack([X_pos, water_Y, Z_pos], axis=-1).astype(np.float32)
+                # Mirrored by Unity's IntoFrame/WaterSurface shader, which replaces
+                # this material outright and re-declares the same two numbers as its
+                # own defaults -- keep the two in step. It is also what renders
+                # unaided on clients with no water shader of their own (the visionOS
+                # app has none), so this is not merely a fallback.
+                #
+                # Alpha 0.90, raised from 0.75: the lakebed under this sheet is
+                # carved water_depression_m below it and painted with the panorama's
+                # own water pixels, so a quarter transmission showed a second,
+                # darker, wrong-scale copy of the water through the water. That is
+                # what read as tinted glass. Real water is near-opaque at the grazing
+                # angles that make up almost all of a standing viewer's sightlines.
+                # roughness 0.08 == the shader's smoothness 0.92, raised with it from
+                # 0.15/0.85. Water is close to optically smooth; the old value was
+                # broadening the specular into a sheen instead of a reflection, which
+                # on a client with no water shader is the only specular there is.
                 water_material = trimesh.visual.material.PBRMaterial(
-                    baseColorFactor=[0.10, 0.30, 0.45, 0.75],
+                    baseColorFactor=[0.10, 0.30, 0.45, 0.90],
                     metallicFactor=0.0,
-                    roughnessFactor=0.15,
+                    roughnessFactor=0.08,
                     alphaMode="BLEND",
                 )
                 water_tri_mesh = trimesh.Trimesh(
@@ -783,6 +809,82 @@ class TerrainMeshGenerator:
             next_index += n
 
         return np.concatenate(vertex_chunks, axis=0), faces, np.concatenate(uv_chunks, axis=0)
+
+    @staticmethod
+    def _level_water(
+        water_grid: np.ndarray,
+        height_grid: np.ndarray,
+        is_water: np.ndarray,
+        Y_pos: np.ndarray,
+        row_rm: np.ndarray,
+        col_rm: np.ndarray,
+        percentile: float,
+    ) -> np.ndarray:
+        """Flatten each connected water body to a single elevation.
+
+        Water used to take `Y_pos` unchanged -- whatever the reconstructed terrain
+        happened to be under each water-typed cell -- which is only correct if the
+        terrain under a lake is already flat. It is not. Measured on the Shark Fin
+        capture, one 11,872 m2 body of sea: its bulk sits near -1 m (p10 -1.56,
+        median -0.85) with a tail climbing to +67.75 m, and 21.7% of its vertices
+        stood more than a metre above the median. The ocean surface was draped up
+        the cliffs, which no amount of shader work can make read as water.
+
+        Levelled per CONNECTED BODY, not globally: two lakes at different altitudes
+        are both real, and a single global level would sink one and float the other.
+
+        The level is a LOW percentile rather than the median because the
+        contamination is one-sided. Nothing pushes a water cell's terrain height
+        down, but a cliff face misread as water -- spray, foam, wet rock -- pushes it
+        up hard, and the Shark Fin tail is exactly that. A level slightly under the
+        true surface merely lets the shoreline poke through, while one slightly over
+        it floats the whole sheet; the errors are not symmetric and neither is the
+        estimator. On that capture p25 gives -1.13 m against a median of -0.85 m, so
+        on clean data the choice barely matters and on dirty data it matters a lot.
+
+        Nothing ends up buried by this. The lakebed is carved from the surface, not
+        independently of it -- see the water_depression_m line further down generate()
+        -- so lowering a body's surface lowers its bed with it.
+
+        The level is measured over the height GRID, not over the mesh vertices, and
+        that distinction is load-bearing. Vertices are Poisson-disc sampled with a
+        deliberate near-camera density bias (inner_min_dist vs outer_min_dist), so on
+        Shark Fin 4,309 of 11,366 water vertices sit in the nearest 20 m and a
+        vertex-weighted p25 returns -4.54 m -- an estimate of the cove at the
+        viewer's feet, not of the sea. The same percentile over the grid, where every
+        cell is the same area, returns -1.13 m against a shoreline whose terrain sits
+        at -0.99 m: a 0.14 m step instead of a 3.5 m one.
+        """
+        from scipy.ndimage import label as _label
+
+        labels, count = _label(water_grid)
+        if count == 0:
+            return Y_pos.copy()
+
+        # Same nearest-neighbour sampling the mask itself used, so a vertex is
+        # assigned the body it was already judged to be inside.
+        vertex_component = map_coordinates(
+            labels.astype(np.int32), [row_rm, col_rm], order=0, mode="nearest"
+        )
+
+        water_Y = Y_pos.copy()
+        for component in range(1, count + 1):
+            member = is_water & (vertex_component == component)
+            if not member.any():
+                continue
+            if height_grid is not None and height_grid.shape == water_grid.shape:
+                heights = height_grid[labels == component]
+                heights = heights[np.isfinite(heights)]
+            else:
+                # Region and height grids are the same resolution on every capture
+                # measured, but they are produced by different stages and nothing
+                # enforces it. Fall back to the vertex-weighted estimate rather than
+                # index one grid with the other's mask -- less accurate, still level.
+                heights = Y_pos[member]
+            if heights.size == 0:
+                continue
+            water_Y[member] = float(np.percentile(heights, percentile))
+        return water_Y
 
     @staticmethod
     def _fix_uv_discontinuities(
