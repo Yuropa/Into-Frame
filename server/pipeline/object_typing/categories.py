@@ -129,6 +129,77 @@ BUILT_ENVIRONMENT_CATEGORIES: Final[frozenset[str]] = frozenset({
     "bus_stop", "kiosk", "cart",
 })
 
+# ── Where a class can physically be ──────────────────────────────────────────
+#
+# The two sets below are read by ObjectCategoryClusteringStage._region_veto, which
+# asks a question neither CLIP nor BLIP can answer: is the GROUND under this crop
+# the kind of surface this class can occupy? The region map answers it, and it is
+# the only opinion in the chain that comes from a different model looking at
+# different evidence -- ADE20K segmentation of the panorama, rather than a caption
+# of a cutout.
+#
+# That independence is the whole point. Measured across the five sample captures,
+# the failure this catches is BLIP captioning a texture crop fluently and wrongly,
+# and CLIP then mapping that caption to a confident class. On Shark Fin Cove -- a
+# scene of cliffs, sea stacks and surf -- 59% of crops were typed from a caption
+# rather than from the image, giving "there is a piece of chocolate cake on a
+# plate" -> table, "a giraffe that is flying in the sky" -> aircraft, and "a cat
+# that is sitting on a pillow" -> animal. Every one carried ordinary confidence
+# (median 0.95) and every one passed GroundingDINO verification, because a tight
+# cutout of a rock fills its own box and the verifier will localize almost any
+# label inside it. Nothing that reads the crop can tell these from real objects.
+#
+# Both sets are deliberately conservative: they name only what is IMPLAUSIBLE
+# beyond argument, and the veto additionally requires a crop to be almost entirely
+# inside the offending region (see region_veto_fraction). Replayed over all five
+# captures at 0.85 they reject 2 Paris, 4 Rainier, 12 Shark Fin and 5 Iceland
+# detections, and every single rejection is junk -- including four "aircraft"
+# embedded in Mount Rainier's snowfield, captioned "a blurry image of a bird",
+# "a shark shark that is flying" and "a picture of a dog".
+
+# Classes that may legitimately be surrounded by open water. Everything NOT in
+# here is vetoed when its box lands almost entirely on WATER.
+#
+# person and animal are included, and it is not an oversight: people wade, swim and
+# stand in surf, and birds sit on water. Their crops in a beach capture straddle the
+# waterline constantly, and the cost of being wrong about them (deleting the only
+# real detections in a coastal scene) is far worse than the cost of letting a
+# hallucinated one through to the shape gates downstream.
+#
+# `rock` is here for the same reason and was added on evidence: without it the veto
+# rejected crop_77 of the Shark Fin capture, a 58x112 px sea stack standing in the
+# surf, on the strength of its box being 100% water. It is a real rock, in a cove
+# named for its sea stacks. Boulders and stacks in water are a defining feature of
+# coastal captures, not an anomaly in them.
+#
+# `tree` is deliberately NOT here. A tree entirely surrounded by water is rare, and
+# the common case that produces one is a REFLECTION in still water -- which is
+# exactly what this veto should be catching.
+WATERBORNE_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "boat", "ship", "bridge", "dock", "waterfall", "fountain",
+    "person", "animal", "bird", "buoy", "rock",
+})
+
+# Classes that need level, buildable ground and so cannot be standing on a bare
+# rock face. Vetoed when the box lands almost entirely on RegionType.TERRAIN --
+# which in this taxonomy means mountain/cliff/rock, NOT ordinary ground (that is
+# RegionType.GROUND, and is not tested here).
+#
+# Street furniture plus vehicles. Deliberately EXCLUDES the natural classes that
+# genuinely live on rock: `rock` itself above all, but also tree, plant, bush,
+# flower (they root in crevices and on scree), and person/animal (climbers, goats).
+# Iceland is the capture that forces that restraint -- 48 of its 101 detections sit
+# almost entirely on TERRAIN because the whole island is rock, and a rule that
+# rejected trees and plants there would gut a legitimate scene. Restricted to these
+# classes it rejects 5, all of them phantom aircraft.
+LEVEL_GROUND_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "bench", "chair", "table", "streetlight", "trash_bin", "sign",
+    "fence", "barrier", "umbrella", "traffic_light", "fire_hydrant",
+    "bus_stop", "kiosk", "cart",
+    "car", "bus", "truck", "motorcycle", "bicycle", "train", "aircraft",
+    "boat", "ship",
+})
+
 # Objects that are intrinsically one-of-a-kind in a scene. Multiple detections of
 # these types are treated as duplicates of the same object (ObjectCorrelationStage
 # merges them). Distinct from DISTRIBUTABLE_CATEGORIES below, which gates the

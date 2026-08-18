@@ -992,6 +992,25 @@ stages:
     # Measured built share: Rainier 0.01%, Iceland 0.12%, Shark Fin 1.13%, Irises
     # 1.69%, Paris 7.47%. 0 disables the veto.
     min_built_fraction: 0.005
+    # Share of a single detection's own box that must land on a region its class
+    # cannot occupy before that detection is demoted to indeterminate. Per-CROP,
+    # where min_built_fraction above is per-SCENE -- which is the gap it fills: Shark
+    # Fin Cove types 1.13% of its panorama BUILT, clearing that gate, while being a
+    # scene of cliffs and surf with no tables and no fences anywhere in it.
+    #
+    # The region map is the only witness in the typing chain that is independent of
+    # the crop itself. On captures with weak image signal the class comes from a BLIP
+    # caption instead (59% of Shark Fin crops, 91% of Rainier's), and BLIP captions
+    # rock and kelp fluently and wrongly -- "a piece of chocolate cake on a plate"
+    # became a table, "a giraffe that is flying in the sky" an aircraft. Those carry
+    # ordinary confidence and pass GroundingDINO verification, so nothing that reads
+    # the crop separates them; where the crop SITS does.
+    #
+    # See WATERBORNE_CATEGORIES / LEVEL_GROUND_CATEGORIES for which classes are
+    # tested against which region, and why both sets are deliberately narrow. At 0.85
+    # over the five sample captures this rejects 2 Paris, 4 Rainier, 12 Shark Fin and
+    # 5 Iceland detections, all junk. 0 disables.
+    region_veto_fraction: 0.85
     cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
     # The distance cut alone has no notion of how many buckets it produces. On a
     # full-panorama detection set it produced one bucket per instance -- measured on

@@ -14,7 +14,8 @@ from scipy.spatial.distance import pdist
 from pipeline.object_clustering.dinov2_embedder import DinoV2Embedder
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
 from pipeline.object_typing.categories import (
-    ENVIRONMENT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, normalize_category,
+    ENVIRONMENT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, WATERBORNE_CATEGORIES,
+    LEVEL_GROUND_CATEGORIES, normalize_category,
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_context import ContextKey, PipelineContext
@@ -36,6 +37,7 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         max_buckets_per_class: int = 8,
         min_built_fraction: float = 0.005,
         min_bucket_size: int = 3,
+        region_veto_fraction: float = 0.85,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
@@ -65,6 +67,16 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         # nearest on either side. Only ever consulted alongside the scene tags; see
         # _scene_admits_built. 0 disables the veto.
         self.min_built_fraction = float(min_built_fraction)
+        # Share of a detection's own box that must land on the offending region
+        # before its class is vetoed as physically implausible there -- see
+        # _region_veto, WATERBORNE_CATEGORIES and LEVEL_GROUND_CATEGORIES.
+        #
+        # Deliberately near-total rather than a majority. A box that is 60% water is
+        # routinely a real thing at a waterline; a box that is 85%+ water with a
+        # picnic table in it is not a picnic table. Measured over the five sample
+        # captures, every rejection at 0.85 is junk and Mount Rainier loses only four
+        # phantom aircraft it should never have had. 0 disables the veto.
+        self.region_veto_fraction = float(region_veto_fraction)
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -175,6 +187,64 @@ class ObjectCategoryClusteringStage(PipelineStage):
             f"names a structure"
         )
 
+    def _region_veto(self, context: PipelineContext):
+        """Build a per-detection test for "can this class be standing here at all".
+
+        _scene_admits_built above asks the same kind of question of the WHOLE scene:
+        does this capture contain any built environment? That is the right shape for
+        a class that either belongs in the scene or does not, and the wrong shape for
+        a capture that genuinely has some of a class and also has a cliff face being
+        read as more of it. Shark Fin Cove types 1.13% of its panorama BUILT -- over
+        that gate's 0.5% threshold, so its tables and fences survive it -- while
+        being a scene with no tables and no fences at all.
+
+        This asks per crop instead, using the box each detection already carries:
+        what is actually underneath THIS one. See the block above
+        WATERBORNE_CATEGORIES for why the region map is the right witness and why
+        both category sets are as narrow as they are.
+
+        Returns a callable (idx, obj_class) -> reason string or None, or None when
+        there is no region map to consult (in which case nothing is vetoed, matching
+        _scene_admits_built's own behaviour on a missing map).
+        """
+        if self.config.region_veto_fraction <= 0:
+            return None
+        region_type = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        if region_type is None:
+            return None
+
+        region_map = np.asarray(region_type.depth)
+        map_h, map_w = region_map.shape[:2]
+        threshold = self.config.region_veto_fraction
+
+        def veto(idx: int, obj_class: str) -> "str | None":
+            metadata = context.input_object(f"metadata_{idx}") or {}
+            box = metadata.get("box")
+            if not box:
+                return None
+            x, y, w, h = (int(round(float(v))) for v in box[:4])
+            # The box is in panorama pixels and the region map is the panorama's own
+            # typing, so these are the same space -- but clamp anyway, since a box
+            # that runs off the edge would otherwise silently sample a smaller
+            # region than the detection actually covers.
+            sub = region_map[max(0, y):min(map_h, y + h), max(0, x):min(map_w, x + w)]
+            if sub.size == 0:
+                return None
+
+            if obj_class not in WATERBORNE_CATEGORIES:
+                water = float((sub == int(RegionType.WATER)).mean())
+                if water >= threshold:
+                    return f"{water * 100:.0f}% of its box is open water"
+            if obj_class in LEVEL_GROUND_CATEGORIES:
+                # TERRAIN is mountain/cliff/rock here, NOT ordinary ground -- see
+                # LEVEL_GROUND_CATEGORIES.
+                terrain = float((sub == int(RegionType.TERRAIN)).mean())
+                if terrain >= threshold:
+                    return f"{terrain * 100:.0f}% of its box is bare rock"
+            return None
+
+        return veto
+
     def run(self, context: PipelineContext) -> PipelineContext:
         correlation = context.input_object_correlation(ContextKey.OBJECT_CORRELATION)
         if correlation is None or not correlation.groups:
@@ -196,6 +266,9 @@ class ObjectCategoryClusteringStage(PipelineStage):
         if not admits_built:
             self.log_info(f"  Scene has no built environment: {built_reason}")
         vetoed_built: dict[str, int] = {}
+        region_veto = self._region_veto(context)
+        vetoed_region: dict[str, int] = {}
+        vetoed_region_examples: list[str] = []
 
         for obj_class, grp in correlation.groups.items():
             # A built-in-place category in a scene with no built environment is a
@@ -228,6 +301,29 @@ class ObjectCategoryClusteringStage(PipelineStage):
             confident_indices, low_confidence_indices = [], []
             for idx in grp.indices:
                 metadata = context.input_object(f"metadata_{idx}") or {}
+
+                # Per-instance region veto. Unlike the built-environment veto above
+                # this cannot be decided for the class as a whole -- the same class
+                # can be real in one part of a capture and a misread texture in
+                # another -- so it is applied here, per crop, and the survivors go on
+                # to cluster normally. Demoted to indeterminate exactly as the built
+                # veto demotes, so every downstream consumer already handles it.
+                reason = region_veto(idx, obj_class) if region_veto is not None else None
+                if reason is not None:
+                    metadata["class"] = "indeterminate"
+                    metadata["vetoed_class"] = obj_class
+                    metadata["veto_reason"] = reason
+                    context.add_object(f"metadata_{idx}", metadata)
+                    vetoed_region[obj_class] = vetoed_region.get(obj_class, 0) + 1
+                    if len(vetoed_region_examples) < 8:
+                        caption = str(metadata.get("caption") or "")[:48]
+                        vetoed_region_examples.append(
+                            f"crop_{idx} ({obj_class}): {reason}"
+                            + (f" — captioned '{caption}'" if caption else "")
+                        )
+                    self.advance_progress(task)
+                    continue
+
                 if metadata.get("low_confidence"):
                     low_confidence_indices.append(idx)
                 else:
@@ -255,6 +351,15 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 f"{len(vetoed_built)} built-environment class(es) — "
                 + ", ".join(f"{c} x{n}" for c, n in sorted(vetoed_built.items(), key=lambda kv: -kv[1]))
             )
+
+        if vetoed_region:
+            self.log_warning(
+                f"  Vetoed {sum(vetoed_region.values())} crop(s) standing somewhere "
+                f"their class cannot be — "
+                + ", ".join(f"{c} x{n}" for c, n in sorted(vetoed_region.items(), key=lambda kv: -kv[1]))
+            )
+            for example in vetoed_region_examples:
+                self.log_info(f"    {example}")
 
         try:
             if trust_split:
