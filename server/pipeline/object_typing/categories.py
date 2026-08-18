@@ -200,6 +200,42 @@ LEVEL_GROUND_CATEGORIES: Final[frozenset[str]] = frozenset({
     "boat", "ship",
 })
 
+# Words naming things that exist indoors, on a table, or in a zoo -- and so cannot
+# be standing in an outdoor landscape capture. Read by
+# ObjectCategoryClusteringStage._caption_veto.
+#
+# These are not classes; they are what BLIP writes when it is shown a texture it
+# cannot parse. Across the five sample captures the same handful recur: rock becomes
+# "a slice of pizza on a plate with a fork", kelp becomes "a chocolate covered ice
+# cream bar", a snowfield becomes "a white sheep standing on a white surface", and a
+# conifer becomes "a giraffe". They are fluent, specific and confidently wrong, and
+# on captures with weak image signal the class is derived from them -- 59% of Shark
+# Fin's crops and 91% of Rainier's were typed from a caption rather than an image.
+#
+# A caption containing one of these is NOT on its own evidence of anything, and
+# using it that way is the version of this idea that fails. BLIP routinely gets the
+# SUBJECT right and confabulates the SETTING: 19 of Rainier's real, placed flowers
+# are captioned "a close up of a flower in a vase", "a pink rose in a glass vase",
+# "purple flowers are in a vase on a brown background". Vetoing on the vocabulary
+# alone deletes all of them. See _caption_veto for the three further conditions that
+# make it safe.
+#
+# `vase`, `table` and `cat` are deliberately ABSENT despite being common in the junk
+# captions -- they are the words most often attached to a correctly-identified
+# subject ("a cat sitting on a tree branch" is a real tree), so their cost is far
+# higher than their yield.
+DOMESTIC_CAPTION_SUBJECTS: Final[frozenset[str]] = frozenset({
+    # Prepared food and tableware
+    "pizza", "cake", "chocolate", "bacon", "meat", "food", "plate", "fork", "spoon",
+    "bowl", "sandwich", "burger", "cookie", "bread", "dessert", "cream", "tea",
+    "coffee", "cup", "noodles",
+    # Indoor furnishing
+    "pillow", "couch", "sofa", "bed", "carpet", "rug", "curtain", "kitchen", "desk",
+    "laptop", "computer", "television",
+    # Animals that cannot be loose in any of these landscapes
+    "giraffe", "zebra", "elephant", "sheep", "bear", "horse", "cow",
+})
+
 # Objects that are intrinsically one-of-a-kind in a scene. Multiple detections of
 # these types are treated as duplicates of the same object (ObjectCorrelationStage
 # merges them). Distinct from DISTRIBUTABLE_CATEGORIES below, which gates the

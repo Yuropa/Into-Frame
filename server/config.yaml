@@ -1011,6 +1011,23 @@ stages:
     # over the five sample captures this rejects 2 Paris, 4 Rainier, 12 Shark Fin and
     # 5 Iceland detections, all junk. 0 disables.
     region_veto_fraction: 0.85
+    # Companion to the above, for junk that sits somewhere plausible. Drops a
+    # detection whose BLIP caption describes something this scene cannot contain --
+    # "a slice of pizza on a plate with a fork" typed as a table, on a beach.
+    #
+    # Requires FOUR conditions together, because every simpler version measurably
+    # deletes real objects: the class must have no support in the RAM++ scene tags
+    # (tags alone are too sparse -- Rainier's name no tree and it has 67), the
+    # caption must name something from DOMESTIC_CAPTION_SUBJECTS, the caption must
+    # NOT also name the class (without this, four real conifers captioned "a cat
+    # sitting on a tree branch" are lost), and the class must not be vegetation
+    # (Iceland's moss is captioned "broccoli" twelve times and `plant` is correct
+    # every time). See _caption_veto.
+    #
+    # Measured: removes 16 Shark Fin, 16 Iceland, 9 Rainier and 2 Paris detections,
+    # all junk. Rainier's nine include "a bird flying by a cake" typed aircraft and
+    # "a man sitting on a couch with a remote" typed bench. false disables.
+    caption_veto: true
     cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
     # The distance cut alone has no notion of how many buckets it produces. On a
     # full-panorama detection set it produced one bucket per instance -- measured on

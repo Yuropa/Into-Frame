@@ -1,5 +1,6 @@
 import colorsys
 import json
+import re
 from logging import Logger
 from typing import Any
 
@@ -15,7 +16,8 @@ from pipeline.object_clustering.dinov2_embedder import DinoV2Embedder
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, WATERBORNE_CATEGORIES,
-    LEVEL_GROUND_CATEGORIES, normalize_category,
+    LEVEL_GROUND_CATEGORIES, DOMESTIC_CAPTION_SUBJECTS, OBJECT_CATEGORIES,
+    VEGETATION_CATEGORIES, normalize_category,
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.pipeline_context import ContextKey, PipelineContext
@@ -38,6 +40,7 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         min_built_fraction: float = 0.005,
         min_bucket_size: int = 3,
         region_veto_fraction: float = 0.85,
+        caption_veto: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
@@ -77,6 +80,11 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         # captures, every rejection at 0.85 is junk and Mount Rainier loses only four
         # phantom aircraft it should never have had. 0 disables the veto.
         self.region_veto_fraction = float(region_veto_fraction)
+        # Drop a detection whose caption describes something that cannot be in this
+        # scene -- see _caption_veto for the four conditions it requires, and
+        # DOMESTIC_CAPTION_SUBJECTS for what BLIP writes when it cannot parse a
+        # texture. False disables it.
+        self.caption_veto = bool(caption_veto)
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -245,6 +253,91 @@ class ObjectCategoryClusteringStage(PipelineStage):
 
         return veto
 
+    def _caption_veto(self, context: PipelineContext):
+        """Build a per-detection test for "does this crop's caption describe something
+        that could not be in this scene at all".
+
+        The region veto above asks where a crop SITS. This asks what it was SAID to
+        be, and catches the junk that sits somewhere plausible -- a rock on a rock
+        face typed `person` because BLIP captioned it "a piece of pizza with bacon".
+
+        Four conditions, ALL required. Each one alone is measurably unsafe, and the
+        numbers below are the reason each is here rather than a simpler rule:
+
+          1. The class has no support in the RAM++ scene tags. Tags alone are far too
+             sparse to veto on -- Rainier's tags name no tree and it has 67 real ones,
+             Paris's name no tree and it has 16 -- so this only ever narrows what the
+             other conditions may look at.
+          2. The caption names something from DOMESTIC_CAPTION_SUBJECTS.
+          3. The caption does NOT name the class itself. This is the caption/class
+             agreement test used as a PROTECTION rather than as a veto, and the
+             direction matters: as a veto its synonym gaps delete real objects ("a
+             plane flying through the air" does not contain the word "aircraft"),
+             while as a protection a gap merely keeps a junk crop. Measured: without
+             it, four real Rainier conifers captioned "a cat sitting on a tree
+             branch" are deleted -- real tree, hallucinated cat.
+          4. The class is not vegetation. Green, bushy, edible-looking things are
+             exactly what a plant IS, so a food caption over vegetation is weak
+             evidence: Iceland's moss is captioned "a piece of broccoli on a plate"
+             twelve times and `plant` is the right answer every time.
+
+        Replayed over the five captures this removes 16 Shark Fin, 16 Iceland, 9
+        Rainier and 2 Paris detections, and every one is junk -- Rainier's nine
+        include "a bird flying by a cake" typed aircraft, "a giraffe standing in the
+        middle of a pasture" typed animal, and "a man sitting on a couch with a
+        remote" typed bench.
+
+        Returns a callable (idx, obj_class) -> reason or None, or None when disabled
+        or when there are no scene tags to establish what the capture is of.
+        """
+        if not self.config.caption_veto:
+            return None
+        tags = context.input_object(ContextKey.RECOGNIZE_TAGS) or ""
+        supported = {
+            normalize_category(tag.strip())
+            for tag in str(tags).split("|") if tag.strip()
+        }
+        supported.discard(None)
+        if not supported:
+            # No tags means no idea what this capture is of, and condition 1 cannot
+            # be evaluated. Veto nothing rather than veto blindly.
+            return None
+
+        stop = {"a", "an", "the", "of", "photo", "in", "on", "or", "and",
+                "with", "to", "at", "is", "there", "close", "up"}
+
+        def words(text: str) -> set:
+            return {w.rstrip("s") for w in re.findall(r"[a-z]+", (text or "").lower())}
+
+        def class_vocabulary(obj_class: str) -> set:
+            """Every word that would count as the caption naming this class."""
+            vocab = {obj_class, obj_class.rstrip("s")} | set(obj_class.split("_"))
+            for prompt in OBJECT_CATEGORIES.get(obj_class, []):
+                for word in re.findall(r"[a-z]+", prompt.lower()):
+                    if word not in stop and len(word) > 2:
+                        vocab.add(word)
+                        vocab.add(word.rstrip("s"))
+            return {w.rstrip("s") for w in vocab}
+
+        domestic = {w.rstrip("s") for w in DOMESTIC_CAPTION_SUBJECTS}
+
+        def veto(idx: int, obj_class: str) -> "str | None":
+            if obj_class in supported or obj_class in VEGETATION_CATEGORIES:
+                return None
+            metadata = context.input_object(f"metadata_{idx}") or {}
+            caption_words = words(metadata.get("caption"))
+            named = caption_words & domestic
+            if not named:
+                return None
+            if caption_words & class_vocabulary(obj_class):
+                return None
+            return (
+                f"captioned '{', '.join(sorted(named))}' — nothing in this scene's "
+                f"tags supports a {obj_class}"
+            )
+
+        return veto
+
     def run(self, context: PipelineContext) -> PipelineContext:
         correlation = context.input_object_correlation(ContextKey.OBJECT_CORRELATION)
         if correlation is None or not correlation.groups:
@@ -267,6 +360,7 @@ class ObjectCategoryClusteringStage(PipelineStage):
             self.log_info(f"  Scene has no built environment: {built_reason}")
         vetoed_built: dict[str, int] = {}
         region_veto = self._region_veto(context)
+        caption_veto = self._caption_veto(context)
         vetoed_region: dict[str, int] = {}
         vetoed_region_examples: list[str] = []
 
@@ -309,6 +403,8 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 # to cluster normally. Demoted to indeterminate exactly as the built
                 # veto demotes, so every downstream consumer already handles it.
                 reason = region_veto(idx, obj_class) if region_veto is not None else None
+                if reason is None and caption_veto is not None:
+                    reason = caption_veto(idx, obj_class)
                 if reason is not None:
                     metadata["class"] = "indeterminate"
                     metadata["vetoed_class"] = obj_class
