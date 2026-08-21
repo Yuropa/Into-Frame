@@ -1,0 +1,64 @@
+% =============================================================================
+\section{Conclusions and Future Work}
+\label{sec:conclusions}
+% =============================================================================
+
+\subsection{What we learned}
+
+The most transferable lesson is that at this scale, \textbf{most defects are
+assumption failures rather than model failures}. Every significant problem we
+diagnosed took the same shape: a step valid for the scene category it was designed
+against, applied silently to a category where its premise does not hold. Ridge
+anchoring assumes the horizon is ground. Foreground removal assumes what is close
+is an occluder. Water assumes the ground beneath it is flat. Distance-based LOD
+assumes objects are similarly sized. In each case the component worked exactly as
+specified and produced a bad scene.
+
+This suggests that scene-type awareness should be explicit rather than emergent.
+The fixes that worked best were those that made a premise testable from evidence
+already present --- measuring what the silhouette is made of, asking what region a
+crop sits in --- rather than those that tuned a threshold.
+
+A second lesson concerns \textbf{cross-checking between independent signals}. The
+strongest diagnostics came from disagreement between models that look at different
+evidence. A caption and a classifier that both read the same crop fail together; a
+region map segmenting the panorama fails independently, and that independence is
+what makes it useful.
+
+Third, \textbf{instrumentation is a scientific instrument, not a convenience}.
+Defects we had looked at directly for weeks became obvious the moment the right
+quantity was logged.
+
+\subsection{Future work}
+
+\paragraph{Explicit scene classification.} A first-class scene-type estimate
+(natural landform, urban, coastal, interior) consumed by every stage that
+currently embeds an implicit assumption would address the largest class of failure
+we observed.
+
+\paragraph{Confidence propagation.} Stages produce point estimates. Propagating
+uncertainty would let downstream stages weigh evidence rather than accept it, and
+would let the system report where it is guessing.
+
+\paragraph{Better single-view reconstruction for thin structures.} Vegetation is
+the dominant content of natural scenes and the weakest part of our object track;
+species-aware priors~\cite{lee2024tree} are the obvious direction.
+
+\paragraph{Joint refinement.} The pipeline is strictly feed-forward. A closing
+optimisation that adjusted depth, geometry and placement jointly against
+photometric consistency could correct compounded error that no single stage can
+see.
+
+\paragraph{Perceptual evaluation.} Our evaluation is diagnostic. A user study
+measuring presence, scale perception and navigation comfort in the headset would
+test what the system is actually for.
+
+\subsection{Closing}
+
+Into Frame demonstrates that a single photograph can be turned into an environment
+a person can walk through, with terrain, objects, ground cover, water and lighting
+reconstructed as distinct physical components. The decomposition is what makes the
+result explorable rather than merely viewable, and it is also what made the system
+debuggable. The remaining failures are, encouragingly, not mysterious: each is a
+stated assumption meeting a scene that violates it, which is a tractable problem in
+a way that ``the model produced a bad result'' is not.

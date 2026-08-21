@@ -1,0 +1,95 @@
+% =============================================================================
+\section{Overview}
+\label{sec:overview}
+% =============================================================================
+
+\begin{figure}[t]
+  \centering
+  \resizebox{\linewidth}{!}{\input{figures/pipeline-overview}}
+  \caption{The pipeline decomposes a single image into five tracks with different
+  physical roles. Solid arrows carry geometry, dashed arrows carry semantics.
+  The three panorama variants at the left are maintained deliberately: geometry is
+  derived from the object-removed panorama, semantics from the original.}
+  \label{fig:pipeline}
+\end{figure}
+
+\subsection{Design principle: role-specialised decomposition}
+
+The organising commitment of Into Frame is that a scene is not one thing. Ground,
+discrete objects, ground cover, water and sky differ in how they must be
+reconstructed, how they are represented, how they are textured, and how they
+behave at runtime. Forcing them through one representation means accepting the
+weakest common denominator.
+
+\Cref{fig:pipeline} shows the resulting structure. Concretely, the pipeline
+maintains five tracks:
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Terrain.] A single continuous height field, meshed with variable density,
+  carrying collision. Reconstructed from calibrated panoramic depth and completed
+  by a constrained solve.
+  \item[Objects.] Discrete entities detected, classified, clustered by visual
+  similarity, and reconstructed once per (class, appearance) group, then instanced
+  at every detection's position.
+  \item[Ground cover.] Populations too numerous to place individually as
+  reconstructions, scattered by density over a mask derived from semantics and
+  colour.
+  \item[Water.] Regions typed as water, extracted as a separate levelled surface
+  with an animated shader.
+  \item[Sky.] The panorama above the horizon, inpainted where objects were removed,
+  used as both skybox and image-based lighting source.
+\end{description}
+
+\subsection{Execution model}
+
+The pipeline comprises 40 active stages. Each declares typed inputs and outputs
+against a shared \emph{context}, and each may report whether its output already
+exists. When it does, the stage is skipped. A stage that runs marks everything
+downstream dirty, so a rerun is a linear cascade from the earliest changed stage.
+
+This is a development-time contribution as much as an engineering one. Full
+pipeline execution takes hours, so the ability to invalidate one stage and rerun
+only its consequences is what makes iteration possible at all. It also creates a
+specific hazard we encountered repeatedly: a stage's cache-validity predicate must
+mirror the conditions under which the stage itself would skip work. Where the two
+diverge, the stage reports incomplete forever and every downstream stage reruns on
+every invocation.
+
+A second consequence is that the configuration file is not part of the cache key.
+Changing a parameter therefore does not invalidate the stage it belongs to, and an
+explicit rerun directive is required. This is a deliberate trade --- hashing
+configuration would invalidate far more than necessary --- but it is a sharp edge.
+
+\subsection{Stage sequence}
+
+\Cref{tab:stages} groups the stages by track; \cref{sec:implementation} reports
+what each costs to run. The ordering is not arbitrary:
+several dependencies are counterintuitive and were established by failure. Object
+segmentation runs on the \emph{original} panorama, before foreground inpainting,
+because inpainting removes the objects that must be detected; but terrain geometry
+is derived from the \emph{inpainted} panorama, because occluders would otherwise
+punch holes in the ground. Maintaining both variants and routing each consumer to
+the correct one is a recurring structural theme.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Pipeline stages grouped by reconstruction track.}
+\label{tab:stages}
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+\textbf{Track} & \textbf{Stages} & \textbf{Purpose} \\
+\midrule
+Panorama    & 1--4   & Caption, perspective depth, $360^\circ$ outpainting, super-resolution \\
+Semantics   & 5--8   & Panoramic depth, object segmentation, classification, typing \\
+Cleanup     & 9--11  & Foreground removal, equirectangular LoRA correction \\
+Regions     & 12--15 & Semantic region typing (original and object-removed), lighting estimation, sky inpainting \\
+Geometry    & 16--19 & Panoramic depth, metric calibration, height field, region map \\
+Terrain     & 20--25 & Constrained reconstruction, erosion refinement, meshing, texturing \\
+Objects     & 26--30 & Recognition, detection, instance refinement, correlation, clustering \\
+Population  & 31--33 & Spatial statistics, population synthesis, ground cover \\
+Assembly    & 34--35 & Asset generation, scene assembly and placement \\
+Animation   & 38--42 & Video generation, motion extraction, rigging, animation \\
+\bottomrule
+\end{tabular}
+\end{table}

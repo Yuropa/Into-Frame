@@ -1,0 +1,454 @@
+@misc{lin2025depth3recoveringvisual,
+      title={Depth Anything 3: Recovering the Visual Space from Any Views}, 
+      author={Haotong Lin and Sili Chen and Junhao Liew and Donny Y. Chen and Zhenyu Li and Guang Shi and Jiashi Feng and Bingyi Kang},
+      year={2025},
+      eprint={2511.10647},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2511.10647}, 
+}
+
+@misc{conde2022swin2srswinv2transformercompressed,
+      title={Swin2SR: SwinV2 Transformer for Compressed Image Super-Resolution and Restoration}, 
+      author={Marcos V. Conde and Ui-Jin Choi and Maxime Burchi and Radu Timofte},
+      year={2022},
+      eprint={2209.11345},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2209.11345}, 
+}
+
+@misc{ravi2024sam2segmentimages,
+      title={SAM 2: Segment Anything in Images and Videos}, 
+      author={Nikhila Ravi and Valentin Gabeur and Yuan-Ting Hu and Ronghang Hu and Chaitanya Ryali and Tengyu Ma and Haitham Khedr and Roman Rädle and Chloe Rolland and Laura Gustafson and Eric Mintun and Junting Pan and Kalyan Vasudev Alwala and Nicolas Carion and Chao-Yuan Wu and Ross Girshick and Piotr Dollár and Christoph Feichtenhofer},
+      year={2024},
+      eprint={2408.00714},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2408.00714}, 
+}
+
+@misc{huang2025spar3dstablepointawarereconstruction,
+      title={SPAR3D: Stable Point-Aware Reconstruction of 3D Objects from Single Images}, 
+      author={Zixuan Huang and Mark Boss and Aaryaman Vasishta and James M. Rehg and Varun Jampani},
+      year={2025},
+      eprint={2501.04689},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2501.04689}, 
+}
+
+@misc{esser2024scalingrectifiedflowtransformers,
+      title={Scaling Rectified Flow Transformers for High-Resolution Image Synthesis}, 
+      author={Patrick Esser and Sumith Kulal and Andreas Blattmann and Rahim Entezari and Jonas Müller and Harry Saini and Yam Levi and Dominik Lorenz and Axel Sauer and Frederic Boesel and Dustin Podell and Tim Dockhorn and Zion English and Kyle Lacey and Alex Goodwin and Yannik Marek and Robin Rombach},
+      year={2024},
+      eprint={2403.03206},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2403.03206}, 
+}
+
+@misc{li2022blipbootstrappinglanguageimagepretraining,
+      title={BLIP: Bootstrapping Language-Image Pre-training for Unified Vision-Language Understanding and Generation}, 
+      author={Junnan Li and Dongxu Li and Caiming Xiong and Steven Hoi},
+      year={2022},
+      eprint={2201.12086},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2201.12086}, 
+}
+
+@article{
+    xiang2025trellis2,
+    title={Native and Compact Structured Latents for 3D Generation},
+    author={Xiang, Jianfeng and Chen, Xiaoxue and Xu, Sicheng and Wang, Ruicheng and Lv, Zelong and Deng, Yu and Zhu, Hongyuan and Dong, Yue and Zhao, Hao and Yuan, Nicholas Jing and Yang, Jiaolong},
+    journal={Tech report},
+    year={2025}
+}
+
+@article{zheng2024birefnet,
+  title={Bilateral Reference for High-Resolution Dichotomous Image Segmentation},
+  author={Zheng, Peng and Gao, Dehong and Fan, Deng-Ping and Liu, Li and Laaksonen, Jorma and Ouyang, Wanli and Sebe, Nicu},
+  journal={CAAI Artificial Intelligence Research},
+  volume = {3},
+  pages = {9150038},
+  year={2024}
+}
+
+@article{suvorov2021resolution,
+  title={Resolution-robust Large Mask Inpainting with Fourier Convolutions},
+  author={Suvorov, Roman and Logacheva, Elizaveta and Mashikhin, Anton and Remizova, Anastasia and Ashukha, Arsenii and Silvestrov, Aleksei and Kong, Naejin and Goka, Harshith and Park, Kiwoong and Lempitsky, Victor},
+  journal={arXiv preprint arXiv:2109.07161},
+  year={2021}
+}
+
+@article{yu2023inpaint,
+  title={Inpaint Anything: Segment Anything Meets Image Inpainting},
+  author={Yu, Tao and Feng, Runseng and Feng, Ruoyu and Liu, Jinming and Jin, Xin and Zeng, Wenjun and Chen, Zhibo},
+  journal={arXiv preprint arXiv:2304.06790},
+  year={2023}
+}
+
+@inproceedings{li2022mat,
+    title={MAT: Mask-Aware Transformer for Large Hole Image Inpainting},
+    author={Li, Wenbo and Lin, Zhe and Zhou, Kun and Qi, Lu and Wang, Yi and Jia, Jiaya},
+    booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
+    year={2022}
+}
+
+@article{sam3dteam2025sam3d3dfyimages,
+      title={SAM 3D: 3Dfy Anything in Images}, 
+      author={SAM 3D Team and Xingyu Chen and Fu-Jen Chu and Pierre Gleize and Kevin J Liang and Alexander Sax and Hao Tang and Weiyao Wang and Michelle Guo and Thibaut Hardin and Xiang Li and Aohan Lin and Jiawei Liu and Ziqi Ma and Anushka Sagar and Bowen Song and Xiaodong Wang and Jianing Yang and Bowen Zhang and Piotr Dollár and Georgia Gkioxari and Matt Feiszli and Jitendra Malik},
+      year={2025},
+      eprint={2511.16624},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2511.16624}, 
+}
+
+@inproceedings{
+  li2024svdquant,
+  title={SVDQuant: Absorbing Outliers by Low-Rank Components for 4-Bit Diffusion Models},
+  author={Li*, Muyang and Lin*, Yujun and Zhang*, Zhekai and Cai, Tianle and Li, Xiuyu and Guo, Junxian and Xie, Enze and Meng, Chenlin and Zhu, Jun-Yan and Han, Song},
+  booktitle={The Thirteenth International Conference on Learning Representations},
+  year={2025}
+}
+
+@article{wu360anything,
+  title={{360Anything}: Geometry-Free Lifting of Images and Videos to 360°},
+  author={Wu, Ziyi and Watson, Daniel and Tagliasacchi, Andrea and Fleet, David J. and Brubaker, Marcus A. and Saxena, Saurabh},
+  journal={arXiv},
+  year={2026}
+}
+
+@inproceedings{paliwal2024panodreamer,
+    author = {Paliwal, Avinash and Zhou, Xilong and Tsarov, Andrii and Kalantari, Nima},
+    title = {PanoDreamer: Optimization-Based Single Image to 360° 3D Scene With Diffusion},
+    year = {2025},
+    booktitle = {Proceedings of the SIGGRAPH Asia 2025 Conference Papers},
+    articleno = {112},
+    numpages = {10},
+    doi = {10.1145/3757377.3763883},
+    url = {https://doi.org/10.1145/3757377.3763883}
+}
+
+@InProceedings{Rombach_2022_CVPR,
+    author    = {Rombach, Robin and Blattmann, Andreas and Lorenz, Dominik and Esser, Patrick and Ommer, Bj\"orn},
+    title     = {High-Resolution Image Synthesis With Latent Diffusion Models},
+    booktitle = {Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    month     = {June},
+    year      = {2022},
+    pages     = {10684-10695}
+}
+
+@misc{kalischek2025cubediffrepurposingdiffusionbasedimage,
+      title={CubeDiff: Repurposing Diffusion-Based Image Models for Panorama Generation}, 
+      author={Nikolai Kalischek and Michael Oechsle and Fabian Manhardt and Philipp Henzler and Konrad Schindler and Federico Tombari},
+      year={2025},
+      eprint={2501.17162},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2501.17162}, 
+}
+
+@inproceedings{dreamcube,
+    title     = {{DreamCube: RGB-D Panorama Generation via Multi-plane Synchronization}},
+    author    = {Huang, Yukun and Zhou, Yanning and Wang, Jianan and Huang, Kaiyi and Liu, Xihui},
+    booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)},
+    month     = {October},
+    year      = {2025},
+    pages     = {24922-24932}
+}
+
+@article{dreamcube_arxiv,
+  title={{DreamCube: 3D Panorama Generation via Multi-plane Synchronization}},
+  author={Huang, Yukun and Zhou, Yanning and Wang, Jianan and Huang, Kaiyi and Liu, Xihui},
+  year={2025},
+  eprint={arXiv preprint arXiv:2506.17206},
+  archivePrefix={arXiv},
+  primaryClass={cs.CV},
+}
+
+@article{yang2024layerpano3d,
+  title={LayerPano3D: Layered 3D Panorama for Hyper-Immersive Scene Generation},
+  author={Yang, Shuai and Tan, Jing and Zhang, Mengchen and Wu, Tong and Li, Yixuan and Wetzstein, Gordon and Liu, Ziwei and Lin, Dahua},
+  journal={arXiv preprint arXiv:2408.13252},
+  year={2024}
+}
+
+@article{lin2025dap,
+  title={Depth Any Panoramas: A Foundation Model for Panoramic Depth Estimation},
+  author={Lin, Xin and Song, Meixi and Zhang, Dizhe and Lu, Wenxuan and Li, Haodong and Du, Bo and Yang, Ming-Hsuan and Nguyen, Truong and Qi, Lu},
+  journal={arXiv},
+  year={2025}
+}
+
+@inproceedings{10.1145/3769047.3769053,
+  author = {Barazandeh, Danial and Zachmann, Gabriel},
+  title = {Earthbender: An Interactive System for Stylistic Heightmap Generation using a Guided Diffusion Model},
+  year = {2025},
+  isbn = {9798400722363},
+  publisher = {Association for Computing Machinery},
+  address = {New York, NY, USA},
+  url = {https://doi.org/10.1145/3769047.3769053},
+  doi = {10.1145/3769047.3769053},
+  abstract = {Games, 3D simulations, and cinematic pipelines depend on realistic 3D terrain for immersion. However, creating detailed 3D terrain is labour-intensive: artists sculpt elevation, iterate on mountains, rivers, lakes, and must often repeat the entire workflow when the design changes. Recent generative approaches are attempting to address this challenge, but they primarily focus on a single landform (typically mountains) and overlook structural features, such as river networks, roads, or lakes.We propose a sketch‑conditioned diffusion framework that generates depth maps representing complete landscapes, including mountains, river networks, and lakes. Our method extends Stable Diffusion with a ControlNet branch that takes multiple channel inputs: Canny edges for overall structure, red for mountains, green for lakes, and blue as a carving tool for painting roads and rivers onto the heightmap.This approach addresses the technical challenges while prioritizing the artist’s creative control. Our interactive system, Earthbender, gives the artist fine-grained control over every detail in the heightmap, demonstrating a collaborative model where the generative AI acts as a powerful assistant to achieve an artistic vision, rather than replacing the artist’s creativity.Our experiments show that our ControlNet-based approach significantly outperforms traditional GANs in both data efficiency and output quality. Furthermore, we present an analysis demonstrating that the choice of loss function acts as a powerful artistic control, allowing the user to select between a sharp, detailed style and a softer, more organic output better suited for downstream game engine workflows.},
+  booktitle = {Proceedings of the 2025 18th ACM SIGGRAPH Conference on Motion, Interaction, and Games},
+  articleno = {6},
+  numpages = {11},
+  keywords = {Interactive Systems, Sketch-Based Modeling, Terrain Generation, ControlNet, Generative Models, Diffusion Models},
+  location = {
+  },
+  series = {MIG '25}
+}
+
+@article{huang2023open,
+  title={Open-Set Image Tagging with Multi-Grained Text Supervision},
+  author={Huang, Xinyu and Huang, Yi-Jie and Zhang, Youcai and Tian, Weiwei and Feng, Rui and Zhang, Yuejie and Xie, Yanchun and Li, Yaqian and Zhang, Lei},
+  journal={arXiv e-prints},
+  pages={arXiv--2310},
+  year={2023}
+}
+
+@article{zhang2023recognize,
+  title={Recognize Anything: A Strong Image Tagging Model},
+  author={Zhang, Youcai and Huang, Xinyu and Ma, Jinyu and Li, Zhaoyang and Luo, Zhaochuan and Xie, Yanchun and Qin, Yuzhuo and Luo, Tong and Li, Yaqian and Liu, Shilong and others},
+  journal={arXiv preprint arXiv:2306.03514},
+  year={2023}
+}
+
+@article{huang2023tag2text,
+  title={Tag2Text: Guiding Vision-Language Model via Image Tagging},
+  author={Huang, Xinyu and Zhang, Youcai and Ma, Jinyu and Tian, Weiwei and Feng, Rui and Zhang, Yuejie and Li, Yaqian and Guo, Yandong and Zhang, Lei},
+  journal={arXiv preprint arXiv:2303.05657},
+  year={2023}
+}
+
+@article{liang2025luxdit,
+  title={Luxdit: Lighting estimation with video diffusion transformer},
+  author={Liang, Ruofan and He, Kai and Gojcic, Zan and Gilitschenski, Igor and Fidler, Sanja and Vijaykumar, Nandita and Wang, Zian},
+  journal={arXiv preprint arXiv:2509.03680},
+  year={2025}
+}
+
+@inproceedings{Luo2024IntrinsicDiffusion,
+  author    = {Luo, Jundan and Ceylan, Duygu and Yoon, Jae Shin and Zhao, Nanxuan and Philip, Julien and Fr{\"u}hst{\"u}ck, Anna and Li, Wenbin and Richardt, Christian and Wang, Tuanfeng Y.},
+  title     = {{IntrinsicDiffusion}: Joint Intrinsic Layers from Latent Diffusion Models},
+  booktitle = {SIGGRAPH 2024 Conference Papers},
+  year      = {2024},
+  doi       = {10.1145/3641519.3657472},
+  url       = {https://intrinsicdiffusion.github.io},
+}
+
+@article{10.1145/2766975, author = {Emilien, Arnaud and Vimont, Ulysse and Cani, Marie-Paule and Poulin, Pierre and Benes, Bedrich}, title = {WorldBrush: interactive example-based synthesis of procedural virtual worlds}, year = {2015}, issue_date = {August 2015}, publisher = {Association for Computing Machinery}, address = {New York, NY, USA}, volume = {34}, number = {4}, issn = {0730-0301}, url = {https://doi.org/10.1145/2766975}, doi = {10.1145/2766975}, abstract = {We present a novel approach for the interactive synthesis and editing of virtual worlds. Our method is inspired by painting operations and uses methods for statistical example-based synthesis to automate content synthesis and deformation. Our real-time approach takes a form of local inverse procedural modeling based on intermediate statistical models: selected regions of procedurally and manually constructed example scenes are analyzed, and their parameters are stored as distributions in a palette, similar to colors on a painter's palette. These distributions can then be interactively applied with brushes and combined in various ways, like in painting systems. Selected regions can also be moved or stretched while maintaining the consistency of their content. Our method captures both distributions of elements and structured objects, and models their interactions. Results range from the interactive editing of 2D artwork maps to the design of 3D virtual worlds, where constraints set by the terrain's slope are also taken into account.}, journal = {ACM Trans. Graph.}, month = jul, articleno = {106}, numpages = {11}, keywords = {computer graphics, interactive modeling, inverse procedural modeling, painting systems, virtual worlds} }
+
+@inproceedings{10.1145/1572614.1572623, author = {Hurtut, T. and Landes, P.-E. and Thollot, J. and Gousseau, Y. and Drouillhet, R. and Coeurjolly, J.-F.}, title = {Appearance-guided synthesis of element arrangements by example}, year = {2009}, isbn = {9781605586045}, publisher = {Association for Computing Machinery}, address = {New York, NY, USA}, url = {https://doi.org/10.1145/1572614.1572623}, doi = {10.1145/1572614.1572623}, abstract = {We present a technique for the analysis and re-synthesis of 2D arrangements of stroke-based vector elements. The capture of an artist's style by the sole posterior analysis of his/her achieved drawing poses a formidable challenge. Such by-example techniques could become one of the most intuitive tools for users to alleviate creation process efforts. Here, we propose to tackle this issue from a statistical point of view and take specific care of accounting for information usually overlooked in previous research, namely the elements' very appearance. Composed of curve-like strokes, we describe elements by a concise set of perceptually relevant features. After detecting appearance dominant traits, we can generate new arrangements that respect the captured appearance-related spatial statistics using multitype point processes. Our method faithfully reproduces visually similar arrangements and relies on neither heuristics nor post-processes to ensure statistical correctness.}, booktitle = {Proceedings of the 7th International Symposium on Non-Photorealistic Animation and Rendering}, pages = {51–60}, numpages = {10}, keywords = {vector texture synthesis, by-example synthesis, NPR}, location = {New Orleans, Louisiana}, series = {NPAR '09} }
+
+@article{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8,
+ ISSN = {03036898, 14679469},
+ URL = {http://www.jstor.org/stable/4616323},
+ abstract = {An alternative algorithm to the usual birth-and-death procedure for simulating spatial point processes is introduced. The algorithm is used in a discussion of unconditional versus conditional likelihood inference for parametric models of spatial point processes.},
+ author = {Charles J. Geyer and Jesper Møller},
+ journal = {Scandinavian Journal of Statistics},
+ number = {4},
+ pages = {359--373},
+ publisher = {[Board of the Foundation of the Scandinavian Journal of Statistics, Wiley]},
+ title = {Simulation Procedures and Likelihood Inference for Spatial Point Processes},
+ urldate = {2026-06-02},
+ volume = {21},
+ year = {1994}
+}
+
+@article{jin2026sonoworld,
+    title={SonoWorld: From One Image to a 3D Audio-Visual Scene},
+    author={Jin, Derong and Chen, Xiyi and Lin, Ming C. and Gao, Ruohan},
+    booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)},
+    year={2026}
+}
+
+@misc{worldgen2025ziyangxie,
+  author = {Ziyang Xie},
+  title = {WorldGen: Generate Any 3D Scene in Seconds},
+  year = {2025},
+  publisher = {GitHub},
+  journal = {GitHub repository},
+  howpublished = {\url{https://github.com/ZiYang-xie/WorldGen}},
+}
+
+@article{schnepf2026sphericaldreamer,
+  title={{SphericalDreamer: Generating Navigable Immersive 3D Worlds with Panorama Fusion}},
+  author={Antoine Schnepf and Karim Kassab and Flavian Vasile and Andrew Comport},
+  booktitle={Forty-third International Conference on Machine Learning},
+  year={2026}
+}
+
+@article{jain:hal-05617061,
+  TITLE = {{Pixels2Peaks: Converting Terrain Images to Heightmaps}},
+  AUTHOR = {Jain, Aryamaan and Gain, James and Cordonnier, Guillaume},
+  URL = {https://inria.hal.science/hal-05617061},
+  JOURNAL = {{ACM Transactions on Graphics}},
+  PUBLISHER = {{Association for Computing Machinery}},
+  VOLUME = {45},
+  NUMBER = {4},
+  YEAR = {2026},
+  MONTH = Jul,
+  DOI = {10.1145/3811288},
+  PDF = {https://inria.hal.science/hal-05617061v1/file/pixels2peaks.pdf},
+  HAL_ID = {hal-05617061},
+  HAL_VERSION = {v1},
+}
+
+@article{DBLP:journals/corr/abs-2105-15203,
+  author    = {Enze Xie and
+               Wenhai Wang and
+               Zhiding Yu and
+               Anima Anandkumar and
+               Jose M. Alvarez and
+               Ping Luo},
+  title     = {SegFormer: Simple and Efficient Design for Semantic Segmentation with
+               Transformers},
+  journal   = {CoRR},
+  volume    = {abs/2105.15203},
+  year      = {2021},
+  url       = {https://arxiv.org/abs/2105.15203},
+  eprinttype = {arXiv},
+  eprint    = {2105.15203},
+  timestamp = {Wed, 02 Jun 2021 11:46:42 +0200},
+  biburl    = {https://dblp.org/rec/journals/corr/abs-2105-15203.bib},
+  bibsource = {dblp computer science bibliography, https://dblp.org}
+}
+
+@inproceedings{lee2024tree,
+  title={Tree-D Fusion: Simulation-Ready Tree Dataset from Single Images with Diffusion Priors},
+  author={Lee, Jae Joong and Li, Bosheng and Beery, Sara and Huang, Jonathan and Fei, Songlin and Yeh, Raymond A and Benes, Bedrich},
+  booktitle={European Conference on Computer Vision},
+  pages={439--460},
+  year={2024},
+  organization={Springer}
+}
+
+@article{genevaux:hal-01257198,
+  TITLE = {{Terrain Modelling from Feature Primitives}},
+  AUTHOR = {G{\'e}nevaux, Jean-David and Galin, Eric and Peytavie, Adrien and Gu{\'e}rin, Eric and Briquet, Cyril and Grosbellet, Fran{\c c}ois and Benes, Bedrich},
+  URL = {https://hal.science/hal-01257198},
+  JOURNAL = {{Computer Graphics Forum}},
+  PUBLISHER = {{Wiley}},
+  VOLUME = {34},
+  NUMBER = {6},
+  PAGES = {198-210},
+  YEAR = {2015},
+  MONTH = May,
+  DOI = {10.1111/cgf.12530},
+  KEYWORDS = {geometric modelling ; terrain modeling ; natural phenomena ; procedural modeling},
+  PDF = {https://hal.science/hal-01257198v2/file/2014-primitives-terrains-author.pdf},
+  HAL_ID = {hal-01257198},
+  HAL_VERSION = {v2},
+}
+
+@article{hobley2017creative,
+  title={
+    Creative computing with Landlab: an open-source toolkit for building,
+    coupling, and exploring two-dimensional numerical models of
+    Earth-surface dynamics
+  },
+  author={
+    Hobley, Daniel EJ and Adams, Jordan M and Nudurupati, Sai Siddhartha and
+    Hutton, Eric WH and Gasparini, Nicole M and Istanbulluoglu, Erkan and
+    Tucker, Gregory E
+  },
+  journal={Earth Surface Dynamics},
+  volume={5},
+  number={1},
+  pages={21--46},
+  year={2017},
+  publisher={Copernicus GmbH},
+  url={https://esurf.copernicus.org/articles/5/21/2017/},
+  doi={10.5194/esurf-5-21-2017}
+}
+
+@article{barnhart2020landlab,
+  title={Landlab v2. 0: a software package for Earth surface dynamics},
+  author={
+    Barnhart, Katherine R and Hutton, Eric WH and Tucker, Gregory E and
+    Gasparini, Nicole M and Istanbulluoglu, Erkan and Hobley, Daniel EJ and
+    Lyons, Nathan J and Mouchene, Margaux and Nudurupati, Sai Siddhartha and
+    Adams, Jordan M and others
+  },
+  journal={Earth Surface Dynamics},
+  volume={8},
+  number={2},
+  pages={379--397},
+  year={2020},
+  publisher={Copernicus GmbH},
+  url={https://esurf.copernicus.org/articles/8/379/2020/},
+  doi={10.5194/esurf-8-379-2020}
+}
+
+@InProceedings{zhao2026objectclear,
+    title   = {Precise Object and Effect Removal with Adaptive Target-Aware Attention},
+    author  = {Zhao, Jixin and Wang, Zhouxia and Yang, Peiqing and Zhou, Shangchen},
+    booktitle = {CVPR},
+    year    = {2026},
+    }
+
+@inproceedings{neyret:inria-00537511,
+  TITLE = {{Pattern-Based Texturing Revisited}},
+  AUTHOR = {Neyret, Fabrice and Cani, Marie-Paule},
+  URL = {https://inria.hal.science/inria-00537511},
+  BOOKTITLE = {{26th Annual Conference on Computer Graphics and interactive techniques (SIGGRAPH '99)}},
+  ADDRESS = {Los Angeles, United States},
+  PUBLISHER = {{ACM SIGGRAPH}},
+  PAGES = {235--242},
+  YEAR = {1999},
+  MONTH = Aug,
+  DOI = {10.1145/311535.311561},
+  KEYWORDS = {Texturing ; Aperiodic tilings ; Wang tiles ; Nonperiodic Tiling ; Texture Synthesis ; Patterns ; Texture Mapping},
+  PDF = {https://inria.hal.science/inria-00537511v1/file/patternTexture.pdf},
+  HAL_ID = {inria-00537511},
+  HAL_VERSION = {v1},
+}
+
+@software{Hutton_landlab_2020,
+  author={
+    Hutton, Eric and Barnhart, Katy and Hobley, Dan and Tucker, Greg
+    and Nudurupati, Sai and Adams, Jordan and Gasparini, Nicole
+    and Shobe, Charlie and Strauch, Ronda and Knuth, Jenny
+    and Mouchene, Margaux and Lyons, Nathan and Litwin, David
+    and Glade, Rachel and {Giuseppecipolla95} and Manaster, Amanda
+    and Abby, Langston and Thyng, Kristen and Rengers, Francis
+  },
+  doi={10.5281/zenodo.595872},
+  license={MIT},
+  month={4},
+  title={{landlab}},
+  url={https://github.com/landlab/landlab},
+  year={2020}
+}
+
+@inproceedings{radford2021learningtransferablevisual,
+  title     = {Learning Transferable Visual Models From Natural Language Supervision},
+  author    = {Radford, Alec and Kim, Jong Wook and Hallacy, Chris and Ramesh, Aditya
+               and Goh, Gabriel and Agarwal, Sandhini and Sastry, Girish and Askell, Amanda
+               and Mishkin, Pamela and Clark, Jack and Krueger, Gretchen and Sutskever, Ilya},
+  booktitle = {Proceedings of the 38th International Conference on Machine Learning},
+  series    = {Proceedings of Machine Learning Research},
+  volume    = {139},
+  pages     = {8748--8763},
+  year      = {2021},
+  publisher = {PMLR},
+  url       = {https://proceedings.mlr.press/v139/radford21a.html}
+}
+
+@inproceedings{liu2024groundingdino,
+  title     = {Grounding {DINO}: Marrying {DINO} with Grounded Pre-training for Open-Set Object Detection},
+  author    = {Liu, Shilong and Zeng, Zhaoyang and Ren, Tianhe and Li, Feng and Zhang, Hao
+               and Yang, Jie and Jiang, Qing and Li, Chunyuan and Yang, Jianwei and Su, Hang
+               and Zhu, Jun and Zhang, Lei},
+  booktitle = {Computer Vision -- ECCV 2024},
+  series    = {Lecture Notes in Computer Science},
+  volume    = {15105},
+  pages     = {38--55},
+  year      = {2024},
+  publisher = {Springer},
+  doi       = {10.1007/978-3-031-72970-6_3}
+}

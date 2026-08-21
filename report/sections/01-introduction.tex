@@ -1,0 +1,61 @@
+% =============================================================================
+\section{Introduction}
+% =============================================================================
+
+\subsection{Motivation}
+
+A photograph is a two-dimensional projection of a three-dimensional world, and
+recovering that world from a single view is underconstrained: infinitely many
+scenes project to the same image.
+Humans nonetheless read a photograph as a place. We infer that the ground
+continues past the frame, that the occluded side of a rock exists, that the
+flowers in the foreground are individual plants rather than a printed texture.
+Building an environment that supports those inferences, one a person can
+\emph{jump into}, is the problem this project begins to address.
+
+Photographs are among the most abundant records of place we have: personal
+archives, cultural heritage documentation, scientific field imagery, and now,
+with generative models, images of places that never existed at all. A system that
+converts such an image into an environment a person can walk into changes what
+those archives are able to express. It also lowers the cost of 3D content
+authoring by several orders of magnitude relative to manual modeling or
+multi-view capture, and because the process is automatic, it puts that authoring
+within reach of a non-expert.
+
+\subsection{The Challenge}
+
+The difficulty is not one hard sub-problem but the interaction of several, each
+of which degrades the others:
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Extreme ill-posedness.] A single view fixes neither absolute scale nor
+  the geometry of anything it does not see. Roughly $5/6$ of a full
+  $360^\circ$ panorama generated from a standard photograph is synthesized rather
+  than observed, and everything behind every foreground object is unknown. Much
+  of the world must be inferred.
+
+  \item[Compounding error.] A pipeline that estimates depth, then geometry, then
+  materials, then objects inherits every earlier error, and a discrepancy that is
+  barely visible at one stage can be structural by the next.
+
+  \item[Heterogeneous content.] The representation that suits a mountainside
+  (a height field) is wrong for a tree (a mesh instance), which is wrong for a
+  meadow (a scattered population), which is wrong for the sea (an animated
+  surface). These representations must nonetheless coexist in one scene: they
+  need to share a coordinate frame and a scale, agree on how they are lit, and
+  not seam visibly where they meet.
+
+  \item[Interactivity constraints.] The output must render stereoscopically at
+  headset frame rates. That budget constrains every rendering choice, and it
+  binds hardest on the animated, simulated elements that make the scene
+  interactive in the first place.
+
+\end{description}
+
+\subsection{Goals}
+
+Our goal is a system that takes one image and produces an environment which is
+\emph{interactive} (objects animate and interact with their surroundings),
+\emph{decomposed} (discrete objects exist as individual entities, not painted
+texture), \emph{plausible} beyond the observed region, and \emph{performant} at
+VR frame rates.

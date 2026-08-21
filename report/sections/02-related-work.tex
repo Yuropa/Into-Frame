@@ -1,0 +1,117 @@
+% =============================================================================
+\section{Related Work}
+\label{sec:related}
+% =============================================================================
+
+\subsection{Single-image panorama generation}
+
+Extending a narrow-field photograph to a full $360^\circ$ environment is the
+first step in most single-image scene systems. Diffusion models adapted to
+panoramic geometry are the dominant approach.
+CubeDiff~\cite{kalischek2025cubediffrepurposingdiffusionbasedimage} repurposes a
+perspective latent diffusion model for panorama generation by operating on
+cubemap faces with synchronized attention.
+DreamCube~\cite{dreamcube,dreamcube_arxiv} extends this to RGB-D panoramas
+through multi-plane synchronization, producing geometry alongside appearance.
+PanoDreamer~\cite{paliwal2024panodreamer} takes an optimization-based route to
+coherent single-image $360^\circ$ scenes, and
+LayerPano3D~\cite{yang2024layerpano3d} decomposes the panorama into depth layers
+to support larger viewpoint changes.
+Our system supports several such backends, defaulting to a
+FLUX-based~\cite{esser2024scalingrectifiedflowtransformers} outpainting path,
+with WorldGen~\cite{worldgen2025ziyangxie} and DreamCube as alternatives. The
+relevant distinction is that we treat the panorama as an intermediate
+representation rather than as the deliverable.
+
+\subsection{Single-image 3D scene generation}
+
+A growing body of work targets navigable 3D scenes from one image.
+SphericalDreamer~\cite{schnepf2026sphericaldreamer} generates navigable immersive
+worlds; SonoWorld~\cite{jin2026sonoworld} extends single-image scene generation to
+audio-visual output; 360Anything~\cite{wu360anything} lifts images and videos
+to $360^\circ$ geometry-free representations; and
+WorldGen~\cite{worldgen2025ziyangxie} produces complete 3D scenes rapidly.
+These systems generally optimize for visual fidelity from viewpoints near the
+original camera. Into Frame differs in prioritizing \emph{physical
+decomposition}. Our output is not a single geometry proxy but a set of typed
+entities with distinct behavior: a collidable terrain mesh, individually
+placed object meshes, an instanced ground-cover population, and an animated water
+surface. Each of these is required before a scene can be dynamic rather than
+merely viewable.
+
+\subsection{Depth estimation and panoramic depth}
+
+Monocular depth estimation underpins all geometry in the pipeline. We use
+Depth Anything 3~\cite{lin2025depth3recoveringvisual} for perspective depth and
+Depth Any Panoramas~\cite{lin2025dap} for equirectangular depth, the latter
+avoiding the distortion artifacts that arise when a perspective model is applied
+to equirectangular imagery. A recurring difficulty, which we address explicitly
+in \cref{sec:panorama}, is that monocular depth is relative and saturates: real
+distant terrain and sky receive indistinguishable predictions, so calibrated depth
+at a ridge crest is an extrapolation rather than a measurement.
+
+\subsection{Terrain modeling and heightmap synthesis}
+
+Recovering terrain from imagery connects to a long line of graphics work.
+Pixels2Peaks~\cite{jain:hal-05617061} converts terrain images to heightmaps
+directly. Terrain modeling from feature
+primitives~\cite{genevaux:hal-01257198} constructs terrain from sparse
+user-specified features, and Earthbender~\cite{10.1145/3769047.3769053} offers
+interactive stylistic heightmap generation. WorldBrush~\cite{10.1145/2766975}
+synthesizes procedural virtual worlds from examples, including the distribution of
+scene elements.
+For physical plausibility of unobserved relief we use
+Landlab~\cite{barnhart2020landlab,hobley2017creative,Hutton_landlab_2020}, an
+Earth-surface dynamics toolkit, to apply fluvial incision so that invented
+terrain obeys drainage structure rather than reading as smooth interpolation or
+undirected noise. The regions we never observed are therefore shaped by the same
+process that shapes real landscapes.
+
+\subsection{Texture synthesis}
+
+Projecting a panorama onto ground fails at grazing incidence: a single panorama
+row covers meters of ground at distance. Pattern-based
+texturing~\cite{neyret:inria-00537511} addresses exactly this class of problem by
+assembling surfaces from patterns rather than resampling a projection, and our
+terrain texturing follows that idea using patches extracted from the real
+photograph. Where synthetic material is unavoidable we use
+FLUX~\cite{esser2024scalingrectifiedflowtransformers} and latent diffusion
+models~\cite{Rombach_2022_CVPR}, with
+Swin2SR~\cite{conde2022swin2srswinv2transformercompressed} for super-resolution.
+
+\subsection{Segmentation, detection and recognition}
+
+Object decomposition uses SAM~2~\cite{ravi2024sam2segmentimages} for segmentation
+and video tracking, Grounding DINO~\cite{liu2024groundingdino} for
+open-vocabulary detection and label verification,
+CLIP~\cite{radford2021learningtransferablevisual} for embedding-based
+classification,
+BLIP~\cite{li2022blipbootstrappinglanguageimagepretraining} for captioning,
+Recognize Anything~\cite{zhang2023recognize,huang2023tag2text} and its open-set
+successor RAM++~\cite{huang2023open} for scene tagging,
+SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} for semantic region typing, and
+BiRefNet~\cite{zheng2024birefnet} for high-resolution matting. Each of these
+models solves a similar but subtly different problem. We combine them rather than
+choosing between them, using their agreement where they overlap to build a more
+reliable reading of the scene than any one model provides alone.
+
+\subsection{Object reconstruction and inpainting}
+
+Individual objects are reconstructed with
+SAM~3D~\cite{sam3dteam2025sam3d3dfyimages}, with
+SPAR3D~\cite{huang2025spar3dstablepointawarereconstruction} and
+TRELLIS~\cite{xiang2025trellis2} as alternatives.
+Removing foreground objects so the ground behind them can be reconstructed uses
+inpainting: LaMa~\cite{suvorov2021resolution},
+MAT~\cite{li2022mat}, Inpaint Anything~\cite{yu2023inpaint}, and
+ObjectClear~\cite{zhao2026objectclear}, the last targeting removal of both objects
+and their effects.
+
+\subsection{Lighting}
+
+Relighting reconstructed content so that it matches the original photograph
+requires recovering the scene illumination. We use
+LuxDiT~\cite{liang2025luxdit} for HDR lighting estimation
+and IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion} to separate albedo from
+shading, so that assets carry material color rather than baked-in sunlight and
+can be lit by our own lighting algorithm.

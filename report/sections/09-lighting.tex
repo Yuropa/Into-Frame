@@ -1,0 +1,72 @@
+% =============================================================================
+\section{Lighting and Animation}
+\label{sec:lighting}
+% =============================================================================
+
+The tracks described so far produce geometry and materials. Two things remain
+before the result reads as a place rather than a diorama: it has to be lit
+consistently, and it has to move.
+
+\subsection{Illumination and de-lighting}
+
+Scene illumination is estimated from the panorama with
+LuxDiT~\cite{liang2025luxdit}, which recovers an HDR environment and a dominant
+light direction. The client uses both: the environment as an image-based lighting
+source, and the direction as a directional light casting the scene's shadows.
+
+Estimating the light is only half the problem. Every asset in the scene is cut
+from a photograph, so it already carries the illumination of the moment it was
+taken --- shadows, directional shading, and the colour of the light. Rendering
+that under a second, freshly estimated light doubles the illumination and the
+result reads as flat and over-exposed. Object crops are therefore de-lit with
+IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, which separates albedo from
+shading, so what the client relights is material colour rather than a photograph.
+
+Two implementation details are worth recording because both are consequences of
+the pipeline's structure rather than of the models.
+
+First, de-lighting is applied only to the crops that will actually be rendered
+--- the mesh representatives and the curated billboard pools --- not to every
+detection. IntrinsicDiffusion is a diffusion model and the cost is per image; on
+a capture with several hundred detections the difference is a substantial
+fraction of the total run.
+
+Second, the de-lit image is written under a \emph{new} key rather than replacing
+the original crop. Video tracking (below) runs after this stage and matches crops
+against a video rendered from the original, fully-lit panorama, so handing the
+tracker an albedo image would make it match its own subject worse. Rendering
+wants albedo; tracking wants the photograph; both are kept.
+
+\subsection{Motion}
+
+Motion is recovered rather than authored. A short video is generated from the
+panorama, each detected object is tracked through it with
+SAM~2~\cite{ravi2024sam2segmentimages}, and the resulting trajectory is
+classified into a motion type. Category meshes for classes that should move are
+then rigged with a sway skeleton, and the client animates them.
+
+Only classes that can plausibly move are tracked, and the per-class tracking
+budget is capped. Without a cap the cost is unbounded in a way that is easy to
+miss: a single class routinely splits into dozens of appearance buckets, so a
+per-bucket limit barely constrains anything --- on one capture a ``tree'' class
+occupied 65 buckets, most holding one or two instances. Capping per class rather
+than per bucket is what makes the stage affordable. Synthesised population points
+are excluded entirely; they never appeared in the video, so there is nothing to
+track.
+
+\subsection{A shared wind field}
+
+Foliage sway, grass motion and the water surface are driven by one scene-global
+wind field rather than by independent per-object oscillators. The field is an
+ambient base strength plus discrete gust events, and each point's gust is delayed
+by how long the wind takes to physically reach it --- distance along the wind axis
+divided by gust speed.
+
+That delay is the entire mechanism, and it is what distinguishes a scene that
+moves from one that merely wobbles. Independent oscillators produce uniform
+agitation everywhere, which reads as noise. A delayed pulse produces a gust that
+visibly begins at one side of the scene and sweeps across it, with grass, foliage
+and water all responding in step because all three sample the same field. The
+water shader evaluates the same gust formula in HLSL that the foliage sway
+evaluates in C\#, so the swell rises with the same gust front that bends the
+grass.

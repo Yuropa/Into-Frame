@@ -1,0 +1,103 @@
+% =============================================================================
+\section{Terrain Geometry}
+\label{sec:terrain}
+% =============================================================================
+
+\subsection{Projection with UV retention}
+\label{sec:uv-retention}
+
+The height field is a $4096^2$ top-down grid spanning \SI{200}{\meter}. Each
+panorama pixel below the horizon is unprojected to a 3D point using calibrated
+depth and accumulated into the grid cell containing its $(x,z)$.
+
+The contribution here is what is retained alongside the height. For every cell
+that receives a genuine measurement we store the panorama $(u,v)$ it was observed
+through, together with a mask distinguishing directly measured cells from those
+later filled by interpolation. This costs two float channels and removes an entire
+class of error.
+
+The alternative --- re-deriving $(u,v)$ from the final geometry --- is what a
+naive implementation does, and it fails in a specific way. The elevation angle of
+a ground point is $\varphi = \arcsin(y/d)$, so near the nadir a small error in $y$
+produces a large error in $\varphi$ and therefore in panorama row. Since $y$ has
+by then passed through reconstruction, erosion and meshing, it is not the value
+that was measured. Retaining the observed UV means downstream texturing samples
+the correspondence that was actually observed.
+
+\subsection{Constrained harmonic completion}
+
+The projected height field is sparse and uneven: dense near the camera, sparse at
+range, and empty wherever an object occluded the ground. Completion is posed as a
+constrained boundary-value problem. Cells with direct, high-certainty measurements
+become Dirichlet boundary conditions; distant ridge anchors extracted from the sky
+silhouette are added as further fixed values; the remainder is solved as a
+discrete harmonic problem
+\begin{equation}
+  \nabla^2 h = 0 \quad \text{on } \Omega_{\text{unknown}},
+  \qquad h = h_{\text{obs}} \quad \text{on } \partial\Omega_{\text{obs}},
+\end{equation}
+using a sparse linear solve. Measured terrain is therefore never modified, and
+unobserved terrain is the smoothest surface consistent with it.
+
+\subsection{Ridge anchoring and its assumption}
+
+Terrain beyond depth range has no usable measurement, so its elevation comes from
+the sky boundary: for each panorama column, the first non-sky pixel below sky
+gives an elevation angle, placed at a fixed radius on the grid. This is a
+deliberate scale compromise --- a mountain kilometres away cannot be walkable
+terrain in a \SI{200}{\meter} grid, so it is brought close and shrunk, preserving
+silhouette shape rather than true distance.
+
+The assumption embedded here is that the sky boundary is the crest of
+\emph{ground}. \Cref{sec:results} shows what happens when it is not.
+
+\subsection{De-spoking}
+
+The equirectangular-to-grid projection maps each panorama column onto a radial
+line on the grid. Any per-column bias in the depth prediction therefore becomes a
+radial streak, and because those streaks lie in the \emph{observed} data --- around
+$89\%$ of solve nodes are fixed --- the harmonic solve cannot remove them.
+
+We remove them with a targeted filter that subtracts only the tangential
+high-frequency component, computed as a polar round-trip difference
+\begin{equation}
+  h' = h - \big(P(h) - G_\sigma^{\theta}(P(h))\big),
+\end{equation}
+where $P$ is the polar resample and $G_\sigma^{\theta}$ an angular Gaussian blur.
+Taking the difference cancels the resampling error, which would otherwise bake in
+concentric rings: resampling error is around \SI{1.2}{\meter} against a spoke
+signal of roughly \SI{0.2}{\meter}. Validated end-to-end, the radial elevation
+profile is unchanged (\SI{18.1}{\meter}/\SI{30.7}{\meter}/\SI{21.8}{\meter} at
+$r=45/60/\SI{80}{\meter}$ against \SI{18.1}{\meter}/\SI{30.7}{\meter}/%
+\SI{21.9}{\meter} before), the cliff mask is bit-identical, and the mean absolute
+change is \SI{0.19}{\meter} concentrated in the spoke regions.
+
+\subsection{Erosion refinement}
+
+Harmonic completion is smooth by construction, which is correct as an estimator
+and wrong as terrain. Real landforms carry drainage structure. We therefore run
+fluvial incision over the completed field using
+Landlab~\cite{barnhart2020landlab,hobley2017creative}, restricted to unobserved
+cells so measured ground is preserved. Erosion strength is modulated by a
+jaggedness map derived from the ridge silhouette, so the invented relief matches
+the character of the visible terrain.
+
+\subsection{Meshing}
+
+The height field is triangulated by Poisson-disc sampling with a near-camera
+density bias, then Delaunay triangulation, giving natural level-of-detail without
+axis-aligned artefacts. Water regions are extracted as a separate surface, and the
+terrain beneath is depressed so an animated water plane never clips through its
+bed. Disconnected landmasses above a plausibility threshold are extracted as
+separate formation meshes. A coarser collision mesh is generated by the same
+procedure with sparser parameters.
+
+Each vertex carries a second UV channel holding the retained panorama coordinate
+from \cref{sec:uv-retention}. Because that channel is per-vertex and interpolated
+across triangles, triangles spanning an occlusion boundary --- where grid-adjacent
+vertices observed very different panorama rows --- smear a wide band of image
+across a small piece of ground. We detect these geometrically, comparing each
+triangle's UV span against the span its own size and distance predict, and collapse
+the offending corner. Detection must be geometric rather than a fixed pixel budget,
+because a near triangle legitimately spans tens of degrees while the same triangle
+at range spans under two.

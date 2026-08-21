@@ -1,0 +1,52 @@
+% =============================================================================
+\section{The Panoramic Substrate}
+\label{sec:panorama}
+% =============================================================================
+
+Every track in \cref{fig:pipeline} consumes the same three artefacts: a
+$360^\circ$ panorama, a metric depth map registered to it, and a per-pixel
+semantic typing of it. This section covers how those are produced and the two
+properties of them that constrain everything downstream --- the depth map's
+metric compression, and the fact that the panorama must be maintained in more
+than one version.
+
+\subsection{Panorama generation and metric calibration}
+
+The input image is captioned, its perspective depth estimated, and the image
+outpainted to a full equirectangular panorama, then super-resolved. Panoramic
+depth is estimated on the result~\cite{lin2025dap}.
+
+That depth is relative, so it is calibrated against the one metric anchor
+available: an assumed camera height above the ground directly below. Two
+properties of the calibration matter downstream. First, depth beyond the
+hero-photo overlap is a capped extrapolation. Second, a far-range compression
+folds everything beyond a fraction of the maximum range into the maximum, because
+the underlying prediction saturates there. The result is \emph{angularly faithful
+but metrically compressed}: the panorama lines up, but distances --- and anything
+derived by multiplying by distance --- are systematically shrunk.
+
+We flag this explicitly because it is the origin of a defect that appears far
+downstream. Object size is computed as angular extent times depth, so objects
+inherit the compression and render too small. Correcting the depth map would
+change the terrain, which is derived from the same map and is otherwise correct,
+so instead the correction is applied at placement time to object extents only,
+using per-class real-world height priors pooled into a monotonic depth-to-factor
+curve. Positions, terrain and both depth maps are untouched.
+
+\subsection{Semantic region map}
+
+In parallel, a semantic region map is produced by projecting per-pixel region
+types (sky, water, terrain, ground, vegetation, built, road, trail) from the
+panorama onto the same grid. This map drives water extraction, texture material
+selection, ground-cover masking and, as \cref{sec:results} discusses, several
+plausibility checks on object detections.
+
+Two typings are maintained, one from the original panorama and one from the
+object-removed panorama. This is not redundancy. Foreground inpainting removes
+everything closer than a threshold, which in a ground-level capture is the ground
+itself across the whole lower hemisphere. On one alpine capture the removal mask
+covered \SI{48.5}{\percent} of the panorama and \SI{100}{\percent} of every row
+below roughly $60\%$ height, and the meadow it erased returned as bare gravel.
+Sampled over directly measured cells, the vegetation evidence fell from
+\SI{1000}{\meter\squared} to \SI{47}{\meter\squared}. Geometry must come from the
+inpainted panorama; semantics must come from the original.

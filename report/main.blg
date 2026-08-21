@@ -1,0 +1,51 @@
+This is BibTeX, Version 0.99e (TeX Live 2026)
+Capacity: max_strings=200000, hash_size=200000, hash_prime=170003
+The top-level auxiliary file: main.aux
+The style file: plain.bst
+Database file #1: references.bib
+Warning--entry type for "Hutton_landlab_2020" isn't style-file defined
+--line 423 of file references.bib
+Warning--empty journal in dreamcube_arxiv
+Warning--empty journal in sam3dteam2025sam3d3dfyimages
+You've used 43 entries,
+            2118 wiz_defined-function locations,
+            723 strings with 15960 characters,
+and the built_in function-call counts, 22480 in all, are:
+= -- 2001
+> -- 1748
+< -- 20
++ -- 691
+- -- 648
+* -- 1850
+:= -- 3722
+add.period$ -- 138
+call.type$ -- 43
+change.case$ -- 452
+chr.to.int$ -- 0
+cite$ -- 45
+duplicate$ -- 710
+empty$ -- 1327
+format.name$ -- 648
+if$ -- 4579
+int.to.chr$ -- 0
+int.to.str$ -- 43
+missing$ -- 40
+newline$ -- 216
+num.names$ -- 86
+pop$ -- 531
+preamble$ -- 1
+purify$ -- 409
+quote$ -- 0
+skip$ -- 543
+stack$ -- 0
+substring$ -- 900
+swap$ -- 246
+text.length$ -- 20
+text.prefix$ -- 0
+top$ -- 0
+type$ -- 172
+warning$ -- 2
+while$ -- 135
+width$ -- 45
+write$ -- 469
+(There were 3 warnings)
