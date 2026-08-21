@@ -1,131 +1,408 @@
 % =============================================================================
 %  Pipeline overview figure -- TikZ source.
 %
-%  Included from sections/03-method-overview.tex via \input. Requires, in the
-%  preamble of main.tex:
+%  Included from sections/03-overview.tex via \input. Requires, in the preamble
+%  of main.tex:
 %
 %      \usepackage{tikz}
 %      \usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
 %
-%  Coordinates are in the units set by x=/y= below; the whole figure is about
-%  19.5 x 9.0 units, so at 0.78cm/unit it lands close to \textwidth on A4 with
-%  2.4cm margins. Change ONE number (the x=/y= scale) to resize everything.
+%  GOTCHA 1 -- no blank lines inside the \begin{tikzpicture}[...] option list.
+%  A blank line is a \par, and TeX will not tolerate one while it is still
+%  scanning the optional argument. It fails with "Paragraph ended before
+%  \tikz@picture was complete" and then every \node / \draw below reports as an
+%  undefined control sequence, which hides the real cause. Use a lone % to
+%  separate style blocks instead.
 %
-%  Layout was prototyped and visually checked before being written out here;
-%  every coordinate below is the one that was verified.
+%  GOTCHA 2 -- node sizes are absolute (cm) but positions are in grid units of
+%  0.78cm, so the two must be kept in step by hand:
+%
+%      stage box    2.05cm wide  = 2.628 units  (half-width 1.314)
+%      column pitch 3.00 units                  -> 0.372 units of clear space
+%      lane height  2.00 units, pitch 2.15      -> 0.15 units between lanes
+%
+%  Change the box width and the column pitch must change with it, or boxes
+%  silently overlap their neighbours and the lane labels.
+%
+%  GOTCHA 3 -- (A |- B) takes x from A and y from B. Only B's y is read, so
+%  writing (porig.north |- 6.20,13.80) silently ignores the 6.20.
+%
+%  Each lane reserves a 0.6-unit header strip at its top for its label; boxes
+%  hang 1.25 units below the lane top to clear it. Rotated labels do not work:
+%  "Ground cover" set sideways is taller than a lane.
+%
+%  Routing is orthogonal throughout. Each panorama variant emits ONE line from
+%  its own east edge into its own distribution spine, and the spine is where it
+%  fans out to that variant's lanes -- so the diagram still shows which variant
+%  feeds which lane, which the caption and section 3.3 both rely on. Keep every
+%  spine x above 4.55 or it cuts back through the panorama boxes.
 % =============================================================================
 \begin{tikzpicture}[
-  x=0.78cm, y=0.78cm,
+  x=0.78cm,
+  y=0.78cm,
   font=\sffamily,
-  % ---- boxes -------------------------------------------------------------
+  %
   stage/.style={
-    draw=black!38, line width=0.5pt, fill=white, rounded corners=2.2pt,
-    align=center, inner sep=2.6pt, font=\sffamily\scriptsize,
-    minimum width=2.10cm, minimum height=0.84cm},
-  pano/.style={stage, fill=black!4, minimum width=2.02cm, minimum height=0.74cm},
+    draw=black!35,
+    line width=0.5pt,
+    fill=white,
+    rounded corners=2.2pt,
+    align=center,
+    inner sep=2.6pt,
+    font=\sffamily\scriptsize,
+    minimum width=2.05cm,
+    minimum height=0.80cm
+  },
+  %
+  pano/.style={
+    stage,
+    fill=black!4,
+    minimum width=2.02cm,
+    minimum height=0.74cm
+  },
+  %
   anchorbox/.style={
-    draw=black!72, line width=0.9pt, fill=black!7, rounded corners=2.6pt,
-    align=center, inner sep=3pt, font=\sffamily\scriptsize\bfseries},
-  outbox/.style={anchorbox, line width=1.2pt, fill=black!12},
-  % ---- containers --------------------------------------------------------
-  panogroup/.style={
-    draw=black!38, line width=0.7pt, fill=black!2, rounded corners=3pt},
+    draw=black!70,
+    line width=0.9pt,
+    fill=black!7,
+    rounded corners=2.6pt,
+    align=center,
+    inner sep=3pt,
+    font=\sffamily\scriptsize\bfseries
+  },
+  %
+  outbox/.style={
+    anchorbox,
+    line width=1.2pt,
+    fill=black!12
+  },
+  %
   lanelabel/.style={
-    anchor=west, font=\sffamily\scriptsize\bfseries, text=black!62},
-  grouplabel/.style={font=\sffamily\scriptsize\itshape, text=black!62},
-  % ---- edges -------------------------------------------------------------
-  flow/.style={draw=black!58, line width=0.5pt, -{Latex[length=3.4pt,width=2.6pt]}},
-  sem/.style={flow, dashed, dash pattern=on 2.4pt off 1.8pt},
+    anchor=west,
+    font=\sffamily\scriptsize\bfseries,
+    text=black!62
+  },
+  %
+  grouplabel/.style={
+    font=\sffamily\scriptsize\itshape,
+    text=black!62
+  },
+  %
+  flow/.style={
+    draw=black!58,
+    line width=0.5pt,
+    -{Latex[length=3.4pt,width=2.6pt]}
+  },
+  %
+  flowline/.style={
+    draw=black!58,
+    line width=0.5pt
+  },
+  %
+  sem/.style={
+    flow,
+    dashed,
+    dash pattern=on 2.4pt off 1.8pt,
+    draw=black!45
+  }
 ]
 
-% ---- lane backgrounds (drawn first, so boxes sit on top) -------------------
-% one \filldraw per lane: fill, border, y-span
-\filldraw[fill=blue!8,   draw=blue!22,   line width=0.6pt, rounded corners=2.6pt] (5.55, 5.67) rectangle (13.05, 6.93);
-\filldraw[fill=orange!10, draw=orange!30, line width=0.6pt, rounded corners=2.6pt] (5.55, 4.42) rectangle (13.05, 5.68);
-\filldraw[fill=green!9,   draw=green!25,  line width=0.6pt, rounded corners=2.6pt] (5.55, 3.17) rectangle (13.05, 4.43);
-\filldraw[fill=violet!8,  draw=violet!22, line width=0.6pt, rounded corners=2.6pt] (5.55, 1.92) rectangle (13.05, 3.18);
-\filldraw[fill=yellow!14, draw=yellow!40, line width=0.6pt, rounded corners=2.6pt] (5.55, 0.67) rectangle (13.05, 1.93);
-\filldraw[fill=black!5,   draw=black!18,  line width=0.6pt, rounded corners=2.6pt] (5.55,-0.68) rectangle (13.05, 0.58);
+% ---------------------------------------------------------------------------
+% Layout constants
+% ---------------------------------------------------------------------------
 
-\node[lanelabel] at (5.71,6.74) {Terrain};
-\node[lanelabel] at (5.71,5.49) {Objects};
-\node[lanelabel] at (5.71,4.24) {Ground cover};
-\node[lanelabel] at (5.71,2.99) {Water};
-\node[lanelabel] at (5.71,1.74) {Sky};
-\node[lanelabel] at (5.71,0.39) {Motion};
+\def\xone{7.45}
+\def\xtwo{10.45}
+\def\xthree{13.45}
 
-% ---- input ----------------------------------------------------------------
-\node[anchorbox, minimum width=1.80cm, minimum height=1.05cm] (photo) at (0.80,3.10)
+\def\xleft{5.90}
+\def\xright{14.95}
+
+% One distribution spine per panorama variant, in the gutter between the group
+% box (right edge 4.55) and the lanes (left edge 5.90). Each variant emits a
+% single line from its own east edge; the spine is where it fans out. Keep all
+% three above 4.55 or they cut back through the panorama boxes.
+%
+% Ordering is psky / pterr / porig, left to right. Three right-angle crossings
+% are unavoidable at any ordering, because the object-removed panorama feeds
+% both the topmost lane and a middle one while the original feeds top to bottom;
+% this ordering is one of the arrangements that achieves the minimum of three.
+\def\spinesky{4.75}
+\def\spineterr{5.05}
+\def\spineorig{5.35}
+
+% Collector trunk, between the lane right edge (14.95) and asm.west (15.61).
+\def\xbus{15.20}
+
+\def\yterrain{11.75}
+\def\yobjects{9.60}
+\def\yground{7.45}
+\def\ywater{5.30}
+\def\ysky{3.15}
+\def\ymotion{1.00}
+
+% ---------------------------------------------------------------------------
+% Lane backgrounds
+% ---------------------------------------------------------------------------
+
+\filldraw[
+  fill=blue!4,
+  draw=blue!20,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,11.00) rectangle (\xright,13.00);
+
+\filldraw[
+  fill=orange!5,
+  draw=orange!25,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,8.85) rectangle (\xright,10.85);
+
+\filldraw[
+  fill=green!4,
+  draw=green!20,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,6.70) rectangle (\xright,8.70);
+
+\filldraw[
+  fill=violet!4,
+  draw=violet!20,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,4.55) rectangle (\xright,6.55);
+
+\filldraw[
+  fill=yellow!6,
+  draw=yellow!30,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,2.40) rectangle (\xright,4.40);
+
+\filldraw[
+  fill=black!3,
+  draw=black!16,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,0.25) rectangle (\xright,2.25);
+
+% ---------------------------------------------------------------------------
+% Lane labels
+% ---------------------------------------------------------------------------
+
+\node[lanelabel] at (6.08,12.70) {Terrain};
+\node[lanelabel] at (6.08,10.55) {Objects};
+\node[lanelabel] at (6.08, 8.40) {Ground cover};
+\node[lanelabel] at (6.08, 6.25) {Water};
+\node[lanelabel] at (6.08, 4.10) {Sky};
+\node[lanelabel] at (6.08, 1.95) {Motion};
+
+% ---------------------------------------------------------------------------
+% Input
+% ---------------------------------------------------------------------------
+
+\node[
+  anchorbox,
+  minimum width=1.70cm,
+  minimum height=1.00cm
+] (photo) at (0.30,6.625)
   {Single\\photograph};
 
-% ---- three panorama variants ----------------------------------------------
-\draw[panogroup] (2.08,1.72) rectangle (4.32,4.52);
-\node[grouplabel] at (3.20,4.78) {Three panorama variants};
-\node[pano] (porig) at (3.20,3.98) {Original\\panorama};
-\node[pano] (pterr) at (3.20,3.06) {Object-removed\\panorama};
-\node[pano] (psky)  at (3.20,2.14) {Sky-inpainted\\panorama};
+% ---------------------------------------------------------------------------
+% Panorama variants
+% ---------------------------------------------------------------------------
 
-\draw[flow] (1.70,3.10) -- (2.02,3.10);
+\draw[
+  draw=black!35,
+  line width=0.7pt,
+  fill=black!2,
+  rounded corners=3pt
+] (1.75,4.85) rectangle (4.55,8.40);
 
-% ---- lane contents ---------------------------------------------------------
-% three-step lanes: x = 6.60, 9.30, 12.00 ; two-step lanes: x = 6.60, 12.00
-\node[stage] (t1) at (6.60,6.25) {Height field};
-\node[stage] (t2) at (9.30,6.25) {Constrained\\reconstruction};
-\node[stage] (t3) at (12.00,6.25) {Mesh + texture};
-\draw[flow] (t1) -- (t2);   \draw[flow] (t2) -- (t3);
+\node[grouplabel] at (3.15,4.55)
+  {Panorama Variants};
 
-\node[stage] (o1) at (6.60,5.00) {Detection\\+ typing};
-\node[stage] (o2) at (9.30,5.00) {Appearance\\clustering};
-\node[stage] (o3) at (12.00,5.00) {3D assets};
-\draw[flow] (o1) -- (o2);   \draw[flow] (o2) -- (o3);
+\node[pano] (porig) at (3.15,7.775)
+  {Original\\Panorama};
 
-\node[stage] (g1) at (6.60,3.75) {Spatial\\statistics};
-\node[stage] (g2) at (12.00,3.75) {Population\\synthesis};
-\draw[flow] (g1) -- (g2);
+\node[pano] (pterr) at (3.15,6.625)
+  {Cleaned\\Panorama};
 
-\node[stage] (w1) at (6.60,2.50) {Region\\extraction};
-\node[stage] (w2) at (12.00,2.50) {Levelled\\surface};
+\node[pano] (psky) at (3.15,5.475)
+  {Sky-Inpainted\\Panorama};
+
+\draw[flow]
+  (photo.east) -- (1.75,6.625);
+
+% ---------------------------------------------------------------------------
+% Processing stages
+% ---------------------------------------------------------------------------
+
+% Terrain
+\node[stage] (t1) at (\xone,\yterrain) {Height field};
+\node[stage] (t2) at (\xtwo,\yterrain)
+  {Constrained\\reconstruction};
+\node[stage] (t3) at (\xthree,\yterrain)
+  {Mesh + texture};
+
+\draw[flow] (t1) -- (t2);
+\draw[flow] (t2) -- (t3);
+
+% Water
+\node[stage] (w1) at (\xone,\ywater)
+  {Region\\extraction};
+\node[stage] (w2) at (\xthree,\ywater)
+  {Levelled\\surface};
+
 \draw[flow] (w1) -- (w2);
 
-\node[stage] (s1) at (6.60,1.25) {Lighting\\estimation};
-\node[stage] (s2) at (12.00,1.25) {Skybox};
+% Objects
+\node[stage] (o1) at (\xone,\yobjects)
+  {Detection\\+ typing};
+\node[stage] (o2) at (\xtwo,\yobjects)
+  {Appearance\\clustering};
+\node[stage] (o3) at (\xthree,\yobjects)
+  {3D assets};
+
+\draw[flow] (o1) -- (o2);
+\draw[flow] (o2) -- (o3);
+
+% Ground cover
+\node[stage] (g1) at (\xone,\yground)
+  {Spatial\\statistics};
+\node[stage] (g2) at (\xthree,\yground)
+  {Population\\synthesis};
+
+\draw[flow] (g1) -- (g2);
+
+% Sky
+\node[stage] (s1) at (\xone,\ysky)
+  {Lighting\\estimation};
+\node[stage] (s2) at (\xthree,\ysky)
+  {Skybox};
+
 \draw[flow] (s1) -- (s2);
 
-\node[stage] (m1) at (6.60,-0.10) {Video\\generation};
-\node[stage] (m2) at (9.30,-0.10) {Motion\\extraction};
-\node[stage] (m3) at (12.00,-0.10) {Rigging};
-\draw[flow] (m1) -- (m2);   \draw[flow] (m2) -- (m3);
+% Motion
+\node[stage] (m1) at (\xone,\ymotion)
+  {Video\\generation};
+\node[stage] (m2) at (\xtwo,\ymotion)
+  {Motion\\extraction};
+\node[stage] (m3) at (\xthree,\ymotion)
+  {Rigging};
 
-% ---- panorama -> lanes (geometry) -----------------------------------------
-% which variant feeds which lane is the load-bearing detail; see the report text
-\draw[flow] (pterr.east) to[out=20,in=180]  (5.50,6.30);   % object-removed -> terrain
-\draw[flow] (porig.east) to[out=-10,in=180] (5.50,5.05);   % original       -> objects
-\draw[flow] (porig.east) to[out=-30,in=180] (5.50,3.80);   % original       -> ground cover
-\draw[flow] (pterr.east) to[out=-25,in=180] (5.50,2.55);   % object-removed -> water
-\draw[flow] (psky.east)  to[out=-20,in=180] (5.50,1.30);   % sky-inpainted  -> sky
-\draw[flow] (porig.east) to[out=-55,in=180] (5.50,-0.05);  % original       -> motion
+\draw[flow] (m1) -- (m2);
+\draw[flow] (m2) -- (m3);
 
-% ---- semantics (dashed) ----------------------------------------------------
-\draw[sem] (porig.east) to[out=45,in=150] (t2.north west);   % region typing -> ridge anchoring
-\draw[sem] (o2.south)   to[out=-90,in=70] (g1.north east);   % exemplars     -> population stats
+% ---------------------------------------------------------------------------
+% Panorama -> lane connections
+%
+% Use explicit orthogonal routing.  This keeps the six incoming arrows
+% visually separated rather than sending six curves across one another.
+% ---------------------------------------------------------------------------
 
-% ---- convergence -----------------------------------------------------------
-\node[anchorbox, minimum width=1.90cm, minimum height=1.10cm] (asm) at (14.55,3.10)
+% Sky-inpainted -> Sky  (single destination, so one continuous path)
+\draw[flow]
+  (psky.east)
+  -- (\spinesky,5.475)
+  -- (\spinesky,\ysky)
+  -- (\xleft,\ysky);
+
+% Object-removed -> Terrain, Water
+\draw[flowline] (pterr.east)          -- (\spineterr,6.625);
+\draw[flowline] (\spineterr,\ywater)  -- (\spineterr,\yterrain);
+\draw[flow]     (\spineterr,\yterrain) -- (\xleft,\yterrain);
+\draw[flow]     (\spineterr,\ywater)   -- (\xleft,\ywater);
+
+% Original -> Objects, Ground cover, Motion
+\draw[flowline] (porig.east)           -- (\spineorig,7.775);
+\draw[flowline] (\spineorig,\ymotion)  -- (\spineorig,\yobjects);
+\draw[flow]     (\spineorig,\yobjects) -- (\xleft,\yobjects);
+\draw[flow]     (\spineorig,\yground)  -- (\xleft,\yground);
+\draw[flow]     (\spineorig,\ymotion)  -- (\xleft,\ymotion);
+
+% ---------------------------------------------------------------------------
+% Semantic connections
+% ---------------------------------------------------------------------------
+
+% Original panorama -> constrained reconstruction
+\draw[sem]
+  (porig.north)
+  -- (porig.north |- 0,13.80)
+  -- (\xtwo,13.80)
+  -- (t2.north);
+
+% Appearance clustering -> population synthesis
+\draw[sem]
+  (o2.south)
+  -- (o2.south |- g1.north)
+  -- (g1.north);
+
+% ---------------------------------------------------------------------------
+% Scene assembly
+% ---------------------------------------------------------------------------
+
+\node[
+  anchorbox,
+  minimum width=1.85cm,
+  minimum height=1.05cm
+] (asm) at (16.80,8.00)
   {Scene\\assembly};
-\foreach \yy in {6.25, 5.00, 3.75, 2.50, 1.25, -0.10}
-  { \draw[flow] (13.10,\yy) to[out=0,in=180] (asm.west); }
 
-\node[outbox, minimum width=2.40cm, minimum height=1.15cm] (out) at (17.60,3.10)
+% Lanes feed a collector trunk; a single arrow enters the assembly node, so
+% six arrowheads do not stack on asm.west.
+\draw[flowline] (t3.east) -- (\xbus,\yterrain);
+\draw[flowline] (o3.east) -- (\xbus,\yobjects);
+\draw[flowline] (g2.east) -- (\xbus,\yground);
+\draw[flowline] (w2.east) -- (\xbus,\ywater);
+\draw[flowline] (s2.east) -- (\xbus,\ysky);
+\draw[flowline] (m3.east) -- (\xbus,\ymotion);
+
+\draw[flowline] (\xbus,\ymotion) -- (\xbus,\yterrain);
+\draw[flow]     (\xbus,8.00) -- (asm.west);
+
+% ---------------------------------------------------------------------------
+% Output
+% ---------------------------------------------------------------------------
+
+\node[
+  outbox,
+  minimum width=2.35cm,
+  minimum height=1.15cm
+] (out) at (16.80,4.50)
   {Explorable 3D\\environment};
+
 \draw[flow] (asm) -- (out);
 
-% ---- legend ----------------------------------------------------------------
-\draw[draw=black!58, line width=0.5pt] (0.35,-1.35) -- (1.05,-1.35);
-\node[anchor=west, font=\sffamily\scriptsize, text=black!62] at (1.15,-1.35)
+% ---------------------------------------------------------------------------
+% Legend
+% ---------------------------------------------------------------------------
+
+\draw[
+  draw=black!58,
+  line width=0.5pt
+] (0.30,-0.55) -- (1.10,-0.55);
+
+\node[
+  anchor=west,
+  font=\sffamily\scriptsize,
+  text=black!62
+] at (1.22,-0.55)
   {geometry / assets};
-\draw[draw=black!58, line width=0.5pt, dashed, dash pattern=on 2.4pt off 1.8pt]
-  (3.55,-1.35) -- (4.25,-1.35);
-\node[anchor=west, font=\sffamily\scriptsize, text=black!62] at (4.35,-1.35)
+
+\draw[
+  draw=black!58,
+  line width=0.5pt,
+  dashed,
+  dash pattern=on 2.4pt off 1.8pt
+] (4.80,-0.55) -- (5.60,-0.55);
+
+\node[
+  anchor=west,
+  font=\sffamily\scriptsize,
+  text=black!62
+] at (5.72,-0.55)
   {semantics};
 
 \end{tikzpicture}

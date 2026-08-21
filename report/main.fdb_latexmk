@@ -1,14 +1,14 @@
 # Fdb version 4
-["bibtex main"] 1787318508.91667 "main.aux" "main.bbl" "main" 1787318678.00985 0
+["bibtex main"] 1787321331.16766 "main.aux" "main.bbl" "main" 1787321429.70696 0
   "./references.bib" 1787318676.34207 25095 b49094e4b10f42a74be120ac9ce2cb77 ""
   "/usr/local/texlive/2026/texmf-dist/bibtex/bst/base/plain.bst" 1292289607 20613 bd3fbfa9f64872b81ac57a0dd2ed855f ""
-  "main.aux" 1787318677.75547 22235 054a35309a067b5455acc4a5a4bbe399 "pdflatex"
+  "main.aux" 1787321429.46378 22236 30c34f6108cdc880dee44dbe80605673 "pdflatex"
   (generated)
   "main.bbl"
   "main.blg"
   (rewritten before read)
-["pdflatex"] 1787318676.55822 "/Users/Josh/Documents/Research/Into Frame/report/main.tex" "main.pdf" "main" 1787318678.00999 0
-  "/Users/Josh/Documents/Research/Into Frame/report/main.tex" 1787222421.45042 2922 06b9daac939367ad8cc3497fd4c534cb ""
+["pdflatex"] 1787321428.37779 "/Users/Josh/Documents/Research/Into Frame/report/main.tex" "main.pdf" "main" 1787321429.7071 0
+  "/Users/Josh/Documents/Research/Into Frame/report/main.tex" 1787321207.87056 2922 06b9daac939367ad8cc3497fd4c534cb ""
   "/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-ec.enc" 1254269338 2375 baa924870cfb487815765f9094cf3728 ""
   "/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathex.enc" 1202520719 3486 c7eadf5dcc57b3b2d11736679f6636ba ""
   "/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathit.enc" 1202520719 2405 5dcf2c1b967ee25cc46c58cd52244aed ""
@@ -222,17 +222,17 @@
   "/usr/local/texlive/2026/texmf-var/web2c/pdftex/pdflatex.fmt" 1774209607 3636776 dc5fa9b6b1453b9d196cd42edf876004 ""
   "/usr/local/texlive/2026/texmf.cnf" 1774209515 577 648cd9f92f9c0eac486f4c71c85cfbbe ""
   "figures/paris-terrain.pdf" 1787080529.42288 195426 456f62d5d100baa0eb73953ed244d969 ""
-  "figures/pipeline-overview.tex" 1787135941.96743 6764 215d3165ba3c6ffde49bbdb0834afaf1 ""
+  "figures/pipeline-overview.tex" 1787321428.16663 11288 108e295cc026c9eb60605606a61026e6 ""
   "figures/silhouette-composition.pdf" 1787080549.12745 16000 2f72f1643910a61a3e34985b58115627 ""
   "figures/texel-density.pdf" 1787080585.42341 15346 8e69be67a5d0a2d29d919acad000d4e1 ""
-  "main.aux" 1787318677.75547 22235 054a35309a067b5455acc4a5a4bbe399 "pdflatex"
-  "main.bbl" 1787318515.01932 13982 d3ac866a1bd037a5e7a7d505c62b80f4 "bibtex main"
-  "main.out" 1787318677.75653 9730 902951f60c35a99a6aace39ec549403d "pdflatex"
-  "main.tex" 1787222421.45042 2922 06b9daac939367ad8cc3497fd4c534cb ""
+  "main.aux" 1787321429.46378 22236 30c34f6108cdc880dee44dbe80605673 "pdflatex"
+  "main.bbl" 1787321331.24812 13800 43759e12e8601a76aaffce90c4c6c036 "bibtex main"
+  "main.out" 1787321429.46485 9730 902951f60c35a99a6aace39ec549403d "pdflatex"
+  "main.tex" 1787321207.87056 2922 06b9daac939367ad8cc3497fd4c534cb ""
   "sections/00-abstract.tex" 1787314475.5032 1871 187119184ed208454b95b4ecf08a7c7e ""
   "sections/01-introduction.tex" 1787314487.18254 3155 145b20453f81d1d2fc0109cda11facd2 ""
   "sections/02-related-work.tex" 1787316941.33716 6534 1802a1c7542ebf1b03abd7e52ba7d40e ""
-  "sections/03-overview.tex" 1787318237.31865 4970 141d49429cdc08d6a09d87045d5faf9a ""
+  "sections/03-overview.tex" 1787319293.36087 5195 a097c987bf54ab8821b599e6516e9bfa ""
   "sections/04-panorama.tex" 1787217743.61002 3106 9049d37a84e136e457b0a565c84e13b3 ""
   "sections/05-terrain.tex" 1787217743.6101 5703 188cb420767b53ff398e10a75c1c417d ""
   "sections/06-texturing.tex" 1787217743.61029 2532 ac499b3da3d11d8e8e18ac4f47fcdf9b ""

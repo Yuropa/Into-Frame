@@ -5,7 +5,10 @@
 
 \begin{figure}[t]
   \centering
-  \resizebox{\linewidth}{!}{\input{figures/pipeline-overview}}
+  % Wider than the text block: the diagram bleeds 0.9cm into each margin (which
+  % are 2.4cm) so the stage labels stay legible. Change the 18cm to \linewidth
+  % to keep it strictly inside the text block.
+  \makebox[\linewidth][c]{\resizebox{18cm}{!}{\input{figures/pipeline-overview}}}
   \caption{The pipeline decomposes a single image into five tracks with different
   physical roles. Solid arrows carry geometry, dashed arrows carry semantics.
   The three panorama variants at the left are maintained deliberately: geometry is
