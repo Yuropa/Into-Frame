@@ -9,6 +9,36 @@ semantic typing. The depth map and semantic typing are both derived from
 the generated panorama, which extends the provided input image into a complete
 $360^\circ$ view of the scene.
 
+We use one capture, a photograph of Mount Rainier, as a running example through
+the rest of the report. \Cref{fig:rainier-input} shows the input and the panorama
+generated from it. The photograph covers roughly a sixth of the sphere; everything
+else in the panorama is synthesized, and every figure that follows is derived from
+this one image.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{rainier/input.jpg}
+    \caption{Input photograph.}
+    \label{fig:rainier-photo}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.48\linewidth}
+    \centering
+    \includegraphics[width=\linewidth]{rainier/depth-perspective.png}
+    \caption{Perspective depth, the metric anchor.}
+    \label{fig:rainier-depth-persp}
+  \end{subfigure}
+
+  \vspace{0.6em}
+  \includegraphics[width=\linewidth]{rainier/panorama.jpg}
+  \caption{The Mount Rainier example. The input photograph (a) and its perspective
+  depth estimate (b) are outpainted into a full equirectangular panorama (below).
+  The photograph occupies the region around the mountain; the remaining
+  $\sim$\SI{83}{\percent} of the sphere is generated.}
+  \label{fig:rainier-input}
+\end{figure}
+
 \subsection{Panorama Generation and Metric Calibration}
 
 The input image is first processed by generating a synthetic caption and a
@@ -124,6 +154,18 @@ contaminate, and applying the same deterministic function to both depth maps pla
 the same real-world point at the same distance in each, with no scale factor to
 thread between them.
 
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{rainier/depth-calibrated.png}
+  \caption{Calibrated panoramic depth for the Rainier capture, near field bright.
+  Two properties discussed above are visible directly. The near-field meadow is
+  resolved in detail, while everything from the mid-ground treeline outward
+  collapses into a narrow band of values: the raw prediction has saturated, and the
+  far-range compression maps that whole range onto the approach to
+  $D_{\max}$. The sky is masked out rather than assigned a depth.}
+  \label{fig:rainier-depth}
+\end{figure}
+
 \paragraph{Consequences.}
 The result is metrically compressed. Distances to close objects are accurate, while
 distant objects are systematically shrunk. Since we assume the user explores the
@@ -148,6 +190,26 @@ and raised bumps whenever an object stands in front of the ground, since the sur
 behind it was never observed; removing the objects first gives the depth model an
 unobstructed view of the terrain.
 
+\Cref{fig:rainier-cleaned} shows the effect on the running example. The near-field
+wildflower meadow, which dominates the lower half of the original panorama, is
+replaced by the bare ground and residual snow that the terrain track needs. Note
+that this is a destructive edit made deliberately: the flowers are not discarded but
+reconstructed separately as a ground-cover population (\cref{sec:distribution}), and
+the region typing that decides where they belong is read from the \emph{original}
+panorama, not this one.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{rainier/panorama.jpg}\\[0.4em]
+  \includegraphics[width=\linewidth]{rainier/panorama-cleaned.jpg}
+  \caption{Foreground removal. The original panorama (top) and the cleaned panorama
+  (bottom) used for terrain reconstruction. The near-field meadow and the individual
+  trees have been removed together with their shadows, exposing the ground surface
+  behind them. Depth taken from the top image would place the flower canopy, not the
+  ground, at the bottom of the height field.}
+  \label{fig:rainier-cleaned}
+\end{figure}
+
 \subsection{Semantic Region Map}
 
 A semantic region map is produced by determining per-pixel region types (sky, water,
@@ -156,3 +218,15 @@ drives much of the downstream scene understanding. We use
 SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} to determine these semantic
 regions, which are then used for terrain construction and for object understanding
 and placement.
+
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{rainier/regions.jpg}
+  \caption{Resolved semantic region typing for the Rainier capture, overlaid on the
+  panorama. Vegetation, bare terrain, snow and standing water separate cleanly in
+  the near field. The typing is run twice, once on the original panorama and once on
+  the cleaned one, because the two answer different questions: where ground cover
+  should be scattered is a property of the scene as photographed, while what the
+  terrain surface is made of is a property of the scene with the objects taken away.}
+  \label{fig:rainier-regions}
+\end{figure}

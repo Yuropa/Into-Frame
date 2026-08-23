@@ -10,7 +10,7 @@ SAM~2~\cite{ravi2024sam2segmentimages}, tiled and merged to handle equirectangul
 distortion. Each crop is classified by CLIP against a fixed category set, with a
 BLIP caption~\cite{li2022blipbootstrappinglanguageimagepretraining} as fallback
 where the image pass is indeterminate. Labels are then verified by asking
-Grounding DINO~\cite{huang2023open} to localise the proposed label in the crop:
+Grounding DINO~\cite{liu2024groundingdino} to localize the proposed label in the crop:
 CLIP proposes, an independent model disposes.
 
 The reason for verification is that CLIP scores a fixed label set and always
@@ -19,13 +19,25 @@ near-uniform noise with a winner. On one alpine capture, of 359 crops the 20 tha
 survived CLIP's own gates all scored within a $0.019$--$0.034$ top-5 spread: junk
 crops and real flowers were numerically indistinguishable.
 
+\begin{figure}[htbp]
+  \centering
+  \includegraphics[width=\linewidth]{rainier/detections.jpg}
+  \caption{Object detections on the Rainier panorama after correlation, drawn in
+  panorama pixel space. Segmentation runs on the original panorama rather than the
+  hero photograph, so detections cover the full $360^\circ$; the density in the
+  near-field meadow is what motivates the population synthesis of
+  \cref{sec:distribution} rather than per-instance reconstruction. This capture
+  yielded 359 crops, of which 20 survived the classifier's own gates.}
+  \label{fig:rainier-detections}
+\end{figure}
+
 \subsection{Correlation and clustering}
 
 Surviving detections are grouped by class, then sub-clustered by visual similarity
 using DINOv2 embeddings and agglomerative clustering, splitting a class into
-appearance variants (flower colours, tree species). Bucket counts are bounded, and
-undersized buckets folded into their nearest neighbour, because an unbounded
-distance cut produces one bucket per instance --- measured at 302 groups on one
+appearance variants (flower colors, tree species). Bucket counts are bounded, and
+undersized buckets folded into their nearest neighbor, because an unbounded
+distance cut produces one bucket per instance, measured at 302 groups on one
 capture, each demanding its own reconstruction.
 
 \subsection{Asset generation and level of detail}
@@ -35,10 +47,10 @@ SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} and instanced at every member's
 position. Two selection decisions matter. The crop fed to reconstruction is chosen
 by \emph{resolution} among those passing quality gates, not by classifier score,
 because a single-view reconstructor given too few pixels does not return a worse
-object but a different one --- a flat sheet. And the mesh-versus-billboard decision
+object but a different one: a flat sheet. And the mesh-versus-billboard decision
 is made on \emph{projected angular size} rather than distance, since distance only
 proxies resolvability when every object is the same size.
 
 Reconstructions are validated against their detections before placement: a mesh
 too flat in any axis, or whose aspect ratio disagrees with its detection's, is
-rejected in favour of a crossed-card or billboard representation.
+rejected in favor of a crossed-card or billboard representation.

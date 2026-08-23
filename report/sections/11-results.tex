@@ -10,11 +10,11 @@ We evaluate on five captures chosen to stress different assumptions:
 \textbf{Paris} (flat urban river scene, architecture),
 \textbf{Shark Fin Cove} (coastal cliffs, open water, sea stacks),
 \textbf{Iceland} (barren volcanic terrain, human figures), and
-\textbf{Irises} (a Van Gogh painting --- non-photographic input).
+\textbf{Irises} (a Van Gogh painting, non-photographic input).
 
 Ground truth 3D does not exist for any of them, so evaluation is necessarily
 diagnostic: we instrument the pipeline, measure intermediate quantities against
-what the scene demonstrably contains, and localise defects to specific stages.
+what the scene demonstrably contains, and localize defects to specific stages.
 
 \begin{figure}[t]
   \centering
@@ -37,7 +37,7 @@ capture point.
 
 \subsection{Quantitative summary}
 
-\Cref{tab:results} summarises scene composition. The mesh/card/billboard split is
+\Cref{tab:results} summarizes scene composition. The mesh/card/billboard split is
 the clearest single indicator of how well object reconstruction served each
 capture.
 
@@ -73,32 +73,32 @@ extends beyond depth range.
 \paragraph{UV retention and fold repair.}
 Retaining observed UVs measurably improved texture correspondence. The geometric
 fold detector identified $5\,624$ triangles ($7.0\%$) on Mount Rainier bridging
-occlusion boundaries; collapsing them removed the concentric artefacts on the
+occlusion boundaries; collapsing them removed the concentric artifacts on the
 mountain face while leaving well-behaved triangles untouched. Detection converges
 in two passes.
 
 \paragraph{Projected-size level of detail.}
 Replacing distance-based LOD with angular size halved the scene's triangle count
 ($\SI{4.47}{M} \rightarrow \SI{2.48}{M}$) while retaining every prominent object,
-and removed the need for a per-class override table --- ground cover falls below
+and removed the need for a per-class override table: ground cover falls below
 any sensible threshold on its own.
 
 \paragraph{Ground-cover masking.}
-Colour-vetoed grass masking correctly excludes snowfields that type identically to
+Color-vetoed grass masking correctly excludes snowfields that type identically to
 meadow. After ordering the veto to run after morphological closing, zero grass
 instances remain on cells the veto rejected.
 
 \subsection{Failure modes and their causes}
 
 The more instructive result is where the system fails, because in every case we
-were able to localise the failure to an \emph{assumption} rather than a model.
+were able to localize the failure to an \emph{assumption} rather than a model.
 \Cref{sec:remediation} reports what each corrective measure then achieved.
 
 \begin{figure}[t]
   \centering
   \figbox{paris-terrain.pdf}{Paris height field before and after reconstruction.}{0.92}
   \caption{The Paris failure. \textbf{Left:} the measured height field, spanning
-  \SI{-6.0}{\meter} to \SI{-0.2}{\meter} --- correctly flat, and near-featureless
+  \SI{-6.0}{\meter} to \SI{-0.2}{\meter}: correctly flat, and near-featureless
   under a shared shading scale. \textbf{Right:} after ridge-anchored reconstruction,
   spanning \SI{-13.1}{\meter} to \SI{+70.9}{\meter}. Hill \textsf{A}
   (\SI{5966}{\meter\squared}) is the right-bank treeline; hill \textsf{B}
@@ -110,7 +110,7 @@ were able to localise the failure to an \emph{assumption} rather than a model.
 \paragraph{Skyline read as landform.}
 Ridge anchoring assumes the sky boundary is the crest of ground. In Paris it is a
 roofline \SI{40}{\meter} away. The measured height field spans
-\SI{-6.0}{\meter} to \SI{-0.2}{\meter} --- flat, correctly --- and reconstruction
+\SI{-6.0}{\meter} to \SI{-0.2}{\meter} (flat, correctly), and reconstruction
 produced \SI{-13.1}{\meter} to \SI{+70.9}{\meter}: a \SI{5966}{\meter\squared}
 hill on the right-bank treeline and a \SI{2674}{\meter\squared} hill on the
 cathedral (\cref{fig:paris-terrain}). The discriminator is what the silhouette is \emph{made of}: the fraction
@@ -132,25 +132,25 @@ Shark Fin Cove produced 50 detections at median confidence $0.95$, of which
 essentially none is an object. The stored captions are diagnostic: a rock typed
 \emph{person} is captioned ``a piece of pizza with bacon on it''; another typed
 \emph{aircraft} is ``a giraffe that is flying in the sky''. On captures with weak
-image signal the class is derived from the caption --- $59\%$ of Shark Fin crops and
-$91\%$ of Rainier's --- and the captioner describes unparseable texture fluently
+image signal the class is derived from the caption ($59\%$ of Shark Fin crops and
+$91\%$ of Rainier's), and the captioner describes unparseable texture fluently
 and wrongly. These pass label verification, because a tight cutout fills its own
-box and an open-vocabulary detector will localise almost any label inside it.
+box and an open-vocabulary detector will localize almost any label inside it.
 
 The consequence for reconstruction is direct: SAM~3D given a flat rock fragment
-returns a flat sheet (normalised extents $[1.00, 0.049, 0.425]$), the shape gates
+returns a flat sheet (normalized extents $[1.00, 0.049, 0.425]$), the shape gates
 correctly reject it, and every instance falls back to a billboard. Shark Fin's zero
 meshes are the gates working, on garbage input.
 
 The signal that separates them is the region map, because it is the only opinion in
-the chain that does not look at the crop. A per-crop plausibility veto --- a class
-that cannot occupy the region its box sits in --- removes $43\%$ of Shark Fin's
+the chain that does not look at the crop. A per-crop plausibility veto, a class
+that cannot occupy the region its box sits in, removes $43\%$ of Shark Fin's
 detections with no false positives across the other captures.
 
 \paragraph{Thin vegetation reconstruction.}
 Conifers fail single-view reconstruction. Given a good $120\times326$ crop, SAM~3D
-returns a mesh with aspect $3.50{:}1$ against detections at $0.12{:}1$ --- a
-$28\times$ disagreement --- so 70 of 75 instances fall back to crossed cards. A thin
+returns a mesh with aspect $3.50{:}1$ against detections at $0.12{:}1$, a
+$28\times$ disagreement, so 70 of 75 instances fall back to crossed cards. A thin
 conifer offers almost no volume cue from one view. Species-aware
 approaches~\cite{lee2024tree} are the natural remedy.
 
@@ -158,7 +158,7 @@ approaches~\cite{lee2024tree} are the natural remedy.
 Water inherited the terrain height under each of its cells, which is correct only
 if the ground under a lake is flat. On Shark Fin one \SI{11872}{\meter\squared}
 body of sea spanned \SI{73.5}{\meter} in elevation, with $21.7\%$ of its vertices
-more than a metre above the median --- the ocean draped up the cliffs.
+more than a meter above the median: the ocean draped up the cliffs.
 
 \begin{figure}[t]
   \centering
@@ -249,12 +249,12 @@ wrong.
 \paragraph{Caption plausibility requires conjunction.}
 Rejecting a detection because its caption mentions something implausible is
 appealing and unsafe. On Mount Rainier, 21 flower detections carry captions such as
-``a close up of a flower in a vase'' --- and \num{19} of those \num{21} are real,
+``a close up of a flower in a vase'', and \num{19} of those \num{21} are real,
 placed flowers. The captioner identifies the \emph{subject} correctly and
 confabulates the \emph{setting}. Conversely, rejecting on scene-tag support alone
 is also unsafe: Rainier's tags name no tree, and it has \num{67} real ones. Only
-the conjunction of four conditions --- no scene-tag support, implausible caption
-vocabulary, caption not naming the class, and class not vegetation --- produced
+the conjunction of four conditions (no scene-tag support, implausible caption
+vocabulary, caption not naming the class, and class not vegetation) produced
 zero false positives. Notably, the caption--class agreement test is unusable as a
 veto (its synonym gaps delete real objects) but safe as an \emph{exemption}, because
 a gap then merely retains a spurious detection rather than removing a real one.
@@ -274,9 +274,9 @@ correct; the sample weighting was not.
 \paragraph{Strengths.}
 The decomposition is the system's main asset. Because terrain, objects and ground
 cover are separate, each can be fixed without disturbing the others, and defects
-localise cleanly. Preserving measured data as hard constraints means the pipeline
-never silently overwrites evidence with inference. The instrumentation --- every
-stage writing structured debug output --- is what made the failure analysis above
+localize cleanly. Preserving measured data as hard constraints means the pipeline
+never silently overwrites evidence with inference. The instrumentation, every
+stage writing structured debug output, is what made the failure analysis above
 possible at all; several defects were invisible until the relevant quantity was
 recorded.
 

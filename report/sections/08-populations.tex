@@ -5,20 +5,43 @@
 
 A detector finds tens of flowers in a meadow that contains thousands. Placing only
 what was detected leaves a scene correct everywhere it was measured and empty
-everywhere it was not, which reads worse than either extreme --- the eye sees the
+everywhere it was not, which reads worse than either extreme: the eye sees the
 sampling pattern rather than the meadow.
 
 Two mechanisms fill that gap, and they are deliberately separate because they
 answer different questions. Population synthesis asks \emph{where else would
 instances of this class be, given where these ones are}. Ground cover asks
 \emph{what is the ground made of}, a question with no discrete instances to
-generalise from at all.
+generalize from at all.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/synthesis-tree.png}
+    \caption{Synthesized tree population.}
+    \label{fig:pop-synth}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/grass-area.png}
+    \caption{Ground-cover mask.}
+    \label{fig:pop-grass}
+  \end{subfigure}
+  \caption{The two mechanisms on the Rainier capture, both top-down over the
+  \SI{200}{\meter} grid. Population synthesis (a) extends the observed tree
+  detections outward across the region where that class is admissible, matching
+  their measured spatial statistics rather than repeating a fixed density. Ground
+  cover (b) is a mask, not a set of instances: it marks where the scattered tuft
+  geometry is admissible. The mask is small relative to the grid because it is
+  derived from the region typing of the \emph{original} panorama, which only sees
+  meadow in the near field the photograph actually observed.}
+  \label{fig:rainier-populations}
+\end{figure}
 
 \subsection{Synthesis from observed statistics}
 
 For each (class, region-type) pair with enough real detections to constitute
 evidence, we measure the spatial statistics of those detections as a
-pair-correlation histogram, and synthesise additional instances matching them over
+pair-correlation histogram, and synthesize additional instances matching them over
 the rest of the matching region. This is a point-process
 formulation~\cite{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8}, closely related to
 appearance-guided element arrangement~\cite{10.1145/1572614.1572623} and in the
@@ -27,7 +50,7 @@ spirit of example-based world synthesis~\cite{10.1145/2766975}.
 Three properties of the implementation matter more than the choice of estimator.
 
 \paragraph{Density is measured in world units, not image units.}
-Instances per square metre is computed from the exemplar count over the exemplar
+Instances per square meter is computed from the exemplar count over the exemplar
 hull's area, a property of the distribution alone. An earlier version inferred the
 count per output tile from the ratio of candidate positions falling inside the
 input versus output boundary, which is only a proxy for areal density if both
@@ -41,9 +64,9 @@ budget in the far field, where it buys nothing, and a fixed radius is wrong in t
 other direction for a class that lives in a band. The full-density radius is
 therefore extended to where the class was actually observed, and a near edge is
 imposed where nothing was observed closer. The asymmetry is deliberate: exemplar
-distance is bounded by \emph{detectability}, not by where a class exists --- a
-meadow is flowers to the horizon and only the nearest metre resolves into
-detections --- so the rule only ever extends the outer radius, while the near edge
+distance is bounded by \emph{detectability}, not by where a class exists (a
+meadow is flowers to the horizon and only the nearest meter resolves into
+detections), so the rule only ever extends the outer radius, while the near edge
 is taken from a low percentile so a single mis-typed foreground crop cannot
 collapse it.
 
@@ -54,7 +77,7 @@ the two populations can collide, which \cref{sec:results} returns to.
 
 \subsection{Ground cover}
 
-Grass is not synthesised from detections, because a detector does not usefully
+Grass is not synthesized from detections, because a detector does not usefully
 enumerate blades of grass. It is scattered by density over a mask, and the
 interesting part is how that mask is derived.
 
@@ -64,11 +87,11 @@ meadow erased along with the objects standing in it. But region type alone is to
 blunt in a way that matters here. The semantic label set folds \texttt{grass},
 \texttt{earth} and \texttt{field} together with \texttt{sand}, \texttt{snow} and
 \texttt{ice} into one ground class, so a snowfield and a meadow are
-indistinguishable by type --- and an alpine meadow is typically ringed by melting
+indistinguishable by type, and an alpine meadow is typically ringed by melting
 snowpack that types identically to the wildflowers beside it.
 
-Colour settles it. Each candidate cell is tested against the excess-green of the
-panorama pixel it was observed through --- available directly, because that pixel
+Color settles it. Each candidate cell is tested against the excess-green of the
+panorama pixel it was observed through, available directly, because that pixel
 is the one retained in \cref{sec:uv-retention}. The threshold is deliberately a low
 bar rather than a test for lushness: dry grass sits near zero on this scale while
 sand runs about $-0.12$ and snow lower still, so it removes only surfaces that are
@@ -78,5 +101,5 @@ is instead of being uniform over whatever survives the threshold.
 
 Tufts are placed as fixed-orientation crossed cards rather than camera-facing
 billboards. A billboard is a single quad that turns to face the viewer, which
-works for an upright subject at eye level and collapses to a line --- then swings
-through the ground plane --- for ground cover underfoot.
+works for an upright subject at eye level and collapses to a line, then swings
+through the ground plane, for ground cover underfoot.

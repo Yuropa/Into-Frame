@@ -11,7 +11,7 @@ over a WebSocket control channel and an HTTP asset channel, so a client streams
 assets as they become available rather than waiting for the full run.
 
 Two clients exist. A Unity client (C\#, URP) targets desktop VR and carries the
-runtime shading work --- a terrain splat shader blending the layered material of
+runtime shading work: a terrain splat shader blending the layered material of
 \cref{sec:texture}, an animated water surface, and wind-driven foliage sway
 sharing one global wind field so that grass, foliage and water gust together. A
 native macOS client (Swift, Metal~4) renders the same scene and streams it to an
@@ -22,7 +22,7 @@ added to one do not automatically exist in the other. The water shader described
 in \cref{sec:texture}, for instance, exists only in the Unity client, so on the
 Metal client water falls back to the material parameters baked into the asset.
 Keeping the baked material in step with the shader defaults is therefore not
-cosmetic --- it is what one of the two clients actually renders.
+cosmetic: it is what one of the two clients actually renders.
 
 \subsection{Models}
 
@@ -51,7 +51,7 @@ Segmentation        & SAM~2~\cite{ravi2024sam2segmentimages} & Objects; also vid
 Matting             & BiRefNet~\cite{zheng2024birefnet} & High-resolution cutouts \\
 Region typing       & SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} & ADE20K classes folded into 9 region types \\
 Classification      & CLIP & Fixed category set \\
-Verification        & Grounding DINO~\cite{huang2023open} & Independent label corroboration \\
+Verification        & Grounding DINO~\cite{liu2024groundingdino} & Independent label corroboration \\
 Similarity          & DINOv2 & Appearance clustering into buckets \\
 Object 3D           & SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} & Alternatives: SPAR3D~\cite{huang2025spar3dstablepointawarereconstruction}, TRELLIS~\cite{xiang2025trellis2} \\
 Inpainting          & ObjectClear~\cite{zhao2026objectclear} & Alternatives: LaMa~\cite{suvorov2021resolution}, MAT~\cite{li2022mat} \\
@@ -68,10 +68,10 @@ A full run on the Mount Rainier capture takes \SI{93}{\minute} on a single GPU
 across 38 active stages. The distribution is heavily skewed:
 object segmentation (\SI{29.5}{\percent}) and per-group 3D reconstruction
 (\SI{25.2}{\percent}) together account for over half, with video generation and
-tracking (\SI{16.5}{\percent}) next. The entire terrain track --- height field,
-reconstruction, erosion, meshing and texturing --- is under
+tracking (\SI{16.5}{\percent}) next. The entire terrain track (height field,
+reconstruction, erosion, meshing and texturing) is under
 \SI{10}{\percent}, which is worth noting given it is where most of this report's
-technical contribution lies. Optimising the pipeline means optimising the learned
+technical contribution lies. Optimizing the pipeline means optimizing the learned
 components, not the geometry.
 
 The resulting scene contains a \num{79982}-triangle terrain mesh, a separate
@@ -79,4 +79,4 @@ The resulting scene contains a \num{79982}-triangle terrain mesh, a separate
 \SI{4.0}{\mega\byte}, and \num{9475} placed entities of which the overwhelming
 majority are instanced ground cover. Because assets are shared per (class,
 appearance) group and instanced, entity count and asset payload are effectively
-decoupled --- the property that makes a meadow of nine thousand plants affordable.
+decoupled: the property that makes a meadow of nine thousand plants affordable.
