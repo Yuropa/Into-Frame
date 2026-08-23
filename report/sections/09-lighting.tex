@@ -3,10 +3,6 @@
 \label{sec:lighting}
 % =============================================================================
 
-The tracks described so far produce geometry and materials. Two things remain
-before the result reads as a place rather than a diorama: it has to be lit
-consistently, and it has to move.
-
 \subsection{Illumination and De-lighting}
 
 Scene illumination is estimated from the panorama with
@@ -32,59 +28,106 @@ source, and the direction as a directional light casting the scene's shadows.
   \label{fig:rainier-lighting}
 \end{figure}
 
-Estimating the light is only half the problem. Every asset in the scene is cut
-from a photograph, so it already carries the illumination of the moment it was
-taken: shadows, directional shading, and the color of the light. Rendering
-that under a second, freshly estimated light doubles the illumination and the
-result reads as flat and over-exposed. Object crops are therefore de-lit with
-IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, which separates albedo from
-shading, so what the client relights is material color rather than a photograph.
+Every asset in the scene is cut from a photograph, so it already carries the
+illumination of the moment it was taken: shadows, directional shading, and the
+color of the light. Rendering that under a second, freshly estimated light doubles
+the illumination and the result reads as flat and over-exposed. Object crops are
+therefore de-lit with IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, which
+separates albedo from shading, so what the client relights is material color rather
+than a photograph.
 
-Two implementation details are worth recording because both are consequences of
-the pipeline's structure rather than of the models.
-
-First, de-lighting is applied only to the crops that will actually be rendered, the mesh representatives and the curated billboard
-pools, not to every
-detection. IntrinsicDiffusion is a diffusion model and the cost is per image; on
-a capture with several hundred detections the difference is a substantial
-fraction of the total run.
-
-Second, the de-lit image is written under a \emph{new} key rather than replacing
-the original crop. Video tracking (below) runs after this stage and matches crops
-against a video rendered from the original, fully-lit panorama, so handing the
-tracker an albedo image would make it match its own subject worse. Rendering
-wants albedo; tracking wants the photograph; both are kept.
+De-lighting is what makes the objects portable. Population synthesis places
+instances anywhere the class is admissible, not only where they were photographed,
+so an instance rarely sits in the orientation its shading was baked under. An
+asset carrying its original shading would announce this immediately, lit from one
+direction while the terrain beneath it is lit from another.
 
 \subsection{Motion}
 
-Motion is recovered rather than authored. A short video is generated from the
-panorama, each detected object is tracked through it with
-SAM~2~\cite{ravi2024sam2segmentimages}, and the resulting trajectory is
-classified into a motion type. Category meshes for classes that should move are
-then rigged with a sway skeleton, and the client animates them.
+A short video is generated from the panorama with
+LTX-2~\cite{lightricks2026ltx2}, and each detected object is tracked through it
+with SAM~2~\cite{ravi2024sam2segmentimages}. The camera is held locked off during
+generation, which is what makes the resulting tracks usable: any drift in an
+object's image-space centroid is the object moving, not the camera.
 
-Only classes that can plausibly move are tracked, and the per-class tracking
-budget is capped. Without a cap the cost is unbounded in a way that is easy to
-miss: a single class routinely splits into dozens of appearance buckets, so a
-per-bucket limit barely constrains anything: on one capture a ``tree'' class
-occupied 65 buckets, most holding one or two instances. Capping per class rather
-than per bucket is what makes the stage affordable. Synthesized population points
-are excluded entirely; they never appeared in the video, so there is nothing to
-track.
+\begin{figure}[htbp]
+  \centering
+  % Source: Video Object Extraction/build/object_video_306/object.mp4, cropped to
+  % the union of the object's own mask across the clip. Frames 26/54/82/120 were
+  % selected by maximising summed pairwise silhouette dissimilarity (1 - IoU)
+  % subject to a minimum spacing of ~1.2s, so the four span the clip while showing
+  % the widest range of motion in it; an evenly spaced set scores 1.28 against
+  % 2.13 here. Panel times are relative to the first frame shown, not clip start.
+  % Note for future edits: object 306 comes from an earlier pipeline run than the
+  % rest of the Rainier figures (2026-07-28 vs 2026-08-18). It was chosen because
+  % it shows the sway most clearly; the mechanism it illustrates is unchanged.
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-26.jpg}
+    \caption{\SI{0}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-54.jpg}
+    \caption{\SI{1.2}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-82.jpg}
+    \caption{\SI{2.3}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-120.jpg}
+    \caption{\SI{3.9}{\second}}
+  \end{subfigure}
+  \caption{A single tracked object through the generated video: one paintbrush
+  flower in the Rainier meadow, cropped to the union of its own mask over the whole
+  clip. SAM~2 supplies the per-frame mask, so everything outside the object is
+  removed and what remains is the silhouette the classifier actually measures. The
+  head tilts and recovers between frames while staying in place, which is the
+  signal that decides its type: the centroid oscillates about a stationary mean
+  rather than translating away from it. This flower is therefore typed as anchored
+  and given a sway amplitude and frequency, not a trajectory.}
+  \label{fig:rainier-motion}
+\end{figure}
+
+The classification itself is a single measurement. An object whose centroid drifts
+less than \SI{60}{\percent} of its own bounding-box diagonal over the whole clip is
+treated as \emph{stationary}: it is oscillating in place, anchored to the scene, as
+a flower or a tree is. Anything that drifts further is a \emph{moving} body.
+
+Stationary objects contribute an amplitude and a frequency, read from their own
+horizontal centroid signal, and are rigged rather than animated directly. Each
+shared bucket mesh gets a three-bone vertical skeleton baked into it, with joints
+at the base of the mesh and at one third and two thirds of its height. The last
+joint sits at two thirds rather than at the top for a specific reason: a joint
+bends what is above it, so a joint at the very top has no geometry to move and
+degenerates into a dead bone, hinging the whole upper half about a single point
+instead of curving along its length. With joints at thirds, the bottom third stays
+rigid on the ground and each joint above inherits the bend below it plus its own.
+Timing is attached per instance while the skeleton stays part of the shared mesh,
+so a meadow of thousands of plants remains a single instanced draw with the sway
+evaluated per instance.
+
+Moving objects are handled as rigid bodies. Their image-space track is unprojected
+into world space, holding depth fixed at the reference frame's estimate since no
+per-frame depth exists, and fitted with a smoothed curve to recover a linear
+velocity and acceleration. Those become the initial conditions handed to the
+client's physics engine, which then resolves the object against the terrain and
+against other objects. Angular velocity is deliberately out of scope: it is not
+reliably recoverable from a monocular silhouette, and a wrong spin is more
+noticeable than none.
 
 \subsection{A Shared Wind Field}
+\label{sec:wind}
 
 Foliage sway, grass motion and the water surface are driven by one scene-global
 wind field rather than by independent per-object oscillators. The field is an
-ambient base strength plus discrete gust events, and each point's gust is delayed
-by how long the wind takes to physically reach it: distance along the wind axis
-divided by gust speed.
+ambient base strength plus discrete gust events, and it is what gives the scene its
+sense of connectedness: a gust crosses the meadow and everything in its path
+responds in turn, rather than each plant oscillating on its own clock. Independent
+oscillators are cheaper and read as obviously synthetic, because nothing in a real
+landscape moves without its neighbors moving too.
 
-That delay is the entire mechanism, and it is what distinguishes a scene that
-moves from one that merely wobbles. Independent oscillators produce uniform
-agitation everywhere, which reads as noise. A delayed pulse produces a gust that
-visibly begins at one side of the scene and sweeps across it, with grass, foliage
-and water all responding in step because all three sample the same field. The
-water shader evaluates the same gust formula in HLSL that the foliage sway
-evaluates in C\#, so the swell rises with the same gust front that bends the
-grass.
+The field is currently authored rather than derived. The per-object amplitudes and
+frequencies recovered above set how strongly each instance responds to it, but the
+gust schedule itself does not yet come from the generated video. Deriving it from
+the observed correlated motion, so that the reconstructed wind matches the wind in
+the photograph, is left as future work.
