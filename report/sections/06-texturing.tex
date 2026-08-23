@@ -3,6 +3,8 @@
 \label{sec:texture}
 % =============================================================================
 
+\subsection{Why Projection Alone Fails}
+
 The obvious way to texture the ground is to project the panorama onto it. This
 fails in two distinct ways.
 
@@ -23,12 +25,35 @@ pinwheel.
 Texturing is therefore a weighted blend of layers. A panorama layer supplies real
 photographic color where projection is trustworthy, gated by a visibility weight
 that falls off near the nadir and the horizon and is withheld where a texel's own
-panorama pixel is vegetation or built structure rather than ground. Synthetic
-material layers, generated per region type, supply the rest.
+panorama pixel is vegetation or built structure rather than ground. Material
+layers, one per region type present in the scene, supply the rest.
 
-TODO: Little blurb on how we generate the synthetic texture. 
+Those layers are filled by preference rather than by a single method. Real
+material is preferred wherever the scene provides it (\cref{sec:pattern}); a
+generated tile is the fallback for a region type with no usable real reference,
+which in practice means a type that appears only in the far field or only behind
+an occluder.
+
+Generation is a two-pass process built on FLUX~\cite{esser2024scalingrectifiedflowtransformers}
+and grounded in the photograph rather than in the region label alone. A handful of
+real crops of the region type are cut from the panorama and tiled edge to edge
+across the tile's interior, so the first pass has only to outpaint a thin border
+ring rather than extrapolate an entire tile from one small inset. The first crop is
+also captioned with Florence-2~\cite{xiao2024florence2}, which replaces the generic
+per-region phrase in the prompt with a concrete description of the material actually present, so a region typed merely as
+\emph{ground} is generated as, say, cracked sun-bleached mud with small pebbles.
+The second pass then repaints the whole tile, including the original crop regions,
+to drive it toward genuine tileability and a uniform finish.
+
+The prompt fixes the framing as an overhead flat lay under diffuse light, with no
+horizon, no sky and no directional shadows. This matters for the same reason
+de-lighting matters in \cref{sec:lighting}: the tile is used as an albedo that the
+client will light, so any shading baked into it would be applied twice. Where a
+tile is generated it repeats across the terrain at a fixed frequency, unlike the
+real-material layer below, which is a single world-space bake.
 
 \subsection{Real-Material Pattern Texturing}
+\label{sec:pattern}
 
 Where the panorama layer is withheld, we prefer real material over generated
 material. Following pattern-based texturing~\cite{neyret:inria-00537511}, small
@@ -40,3 +65,27 @@ Reference patches are drawn from the object-removed panorama with real ground
 color restored from the original wherever foreground removal ate the ground
 rather than an occluder. Where an occluder genuinely was removed, its footprint is
 refilled by inpainting from the surrounding real ground.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/tile-terrain.jpg}
+    \caption{Terrain layer, near the camera.}
+    \label{fig:tex-terrain}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/formation-texture.jpg}
+    \caption{A distant formation's baked texture.}
+    \label{fig:tex-formation}
+  \end{subfigure}
+  \caption{Both failure modes of \cref{sec:texture} in the baked output for the
+  Rainier capture, viewed in texture space. The radial structure in (a) is the
+  signature of the equirectangular-to-ground mapping: each panorama column becomes
+  one ray on the ground, so any upright content along that column is drawn out along
+  it. In (b), a formation far from the camera, grazing incidence dominates and the
+  texture degenerates into streaks, because a single panorama row there covers
+  meters of ground. These are the artifacts the layered material and the
+  pattern-texturing path are meant to suppress; \cref{sec:results} quantifies how
+  much of the terrain is still affected.}
+  \label{fig:rainier-texture}
+\end{figure}

@@ -47,34 +47,6 @@ formulation~\cite{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8}, closely related to
 appearance-guided element arrangement~\cite{10.1145/1572614.1572623} and in the
 spirit of example-based world synthesis~\cite{10.1145/2766975}.
 
-Three properties of the implementation matter more than the choice of estimator.
-
-\paragraph{Density is measured in world units, not image units.}
-Instances per square meter is computed from the exemplar count over the exemplar
-hull's area, a property of the distribution alone. An earlier version inferred the
-count per output tile from the ratio of candidate positions falling inside the
-input versus output boundary, which is only a proxy for areal density if both
-candidate grids are built at the same points-per-area rate. It is also unstable:
-three adjacent tiles of the same group reported support values of 349, 4220 and
-4220, and requested 290, 4 and 7 points respectively.
-
-\paragraph{Density falls off radially, and the band is measured.}
-Painting a learned density uniformly across a region spends the entire instance
-budget in the far field, where it buys nothing, and a fixed radius is wrong in the
-other direction for a class that lives in a band. The full-density radius is
-therefore extended to where the class was actually observed, and a near edge is
-imposed where nothing was observed closer. The asymmetry is deliberate: exemplar
-distance is bounded by \emph{detectability}, not by where a class exists (a
-meadow is flowers to the horizon and only the nearest meter resolves into
-detections), so the rule only ever extends the outer radius, while the near edge
-is taken from a low percentile so a single mis-typed foreground crop cannot
-collapse it.
-
-\paragraph{Synthesis is additive.}
-Painted points are appended past the existing instance count and never displace a
-real detection. This keeps the measured content authoritative, but it does mean
-the two populations can collide, which \cref{sec:results} returns to.
-
 \subsection{Ground Cover}
 
 Grass is not synthesized from detections, because a detector does not usefully
