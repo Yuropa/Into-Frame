@@ -5,41 +5,48 @@
 
 \subsection{Evaluation Setup}
 
-We evaluate on five captures chosen to stress different assumptions:
+We evaluate on three captures chosen to stress different assumptions:
 \textbf{Mount Rainier} (alpine meadow, dense vegetation, snow),
-\textbf{Paris} (flat urban river scene, architecture),
-\textbf{Shark Fin Cove} (coastal cliffs, open water, sea stacks),
-\textbf{Iceland} (barren volcanic terrain, human figures), and
-\textbf{Irises} (a Van Gogh painting, non-photographic input).
+\textbf{Paris} (flat urban river scene, architecture), and
+\textbf{Shark Fin Cove} (coastal cliffs, open water, sea stacks).
 
 Ground truth 3D does not exist for any of them, so evaluation is necessarily
 diagnostic: we instrument the pipeline, measure intermediate quantities against
 what the scene demonstrably contains, and localize defects to specific stages.
 
-\begin{figure}[t]
+\begin{figure}[htbp]
   \centering
-  \begin{subfigure}{0.48\textwidth}
+  \begin{subfigure}{0.5\linewidth}
     \centering
-    \figbox{rainier-scene.jpg}{Mount Rainier: reconstructed scene.}{1.0}
+    \figbox{rainier-scene.png}{Mount Rainier: reconstructed scene.}{1.0}
     \caption{Mount Rainier}
-  \end{subfigure}\hfill
-  \begin{subfigure}{0.48\textwidth}
+  \end{subfigure}
+
+  \vspace{0.9em}
+  \begin{subfigure}{0.5\linewidth}
     \centering
-    \figbox{sharkfin-scene.jpg}{Shark Fin Cove: reconstructed scene.}{1.0}
+    \figbox{paris-scene.png}{Paris: reconstructed scene.}{1.0}
+    \caption{Paris}
+  \end{subfigure}
+
+  \vspace{0.9em}
+  \begin{subfigure}{0.5\linewidth}
+    \centering
+    \figbox{sharkfin-scene.png}{Shark Fin Cove: reconstructed scene.}{1.0}
     \caption{Shark Fin Cove}
   \end{subfigure}
   \caption{Reconstructed environments viewed from near the capture point.}
   \label{fig:scenes}
 \end{figure}
 
-\Cref{fig:scenes} shows two reconstructed environments viewed from near the
+\Cref{fig:scenes} shows three reconstructed environments viewed from near the
 capture point.
 
 \subsection{Quantitative Summary}
 
-\Cref{tab:results} summarizes scene composition. The mesh/card/billboard split is
-the clearest single indicator of how well object reconstruction served each
-capture.
+\Cref{tab:results} summarizes scene composition. The mesh/card/billboard split
+indicates how far object reconstruction got on each capture, with the caveat that
+the card column is dominated by ground cover rather than by object fallbacks.
 
 \begin{table}[t]
 \centering
@@ -55,44 +62,34 @@ introduced by terrain reconstruction beyond what the height field measured.}
 Mount Rainier   & 128 & 9\,303 & 33 & \SI{35}{\meter} & Conifer reconstruction \\
 Paris           & 27  & 4      & 56 & \SI{78}{\meter} & Skyline read as landform \\
 Shark Fin Cove  & 0   & 1      & 42 & \SI{81}{\meter} & Detections are rock fragments \\
-Iceland         & 0   & 45     & 39 & \SI{52}{\meter} & As Shark Fin \\
-Irises          & 0   & 10\,738 & 0 & --- & Painting; ground cover only \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-\subsection{What Works}
+\subsection{What the Measurements Support}
+
+Two behaviors are worth stating separately from the corrective measures, which
+\cref{tab:fixes} quantifies in full.
 
 \paragraph{Terrain geometry on landform scenes.}
-Where the horizon genuinely is terrain, reconstruction behaves as intended.
-Measured cells are preserved exactly by construction, the harmonic solve produces
-a continuous surface, and erosion supplies drainage-consistent relief. On Mount
-Rainier the \SI{35}{\meter} of added relief corresponds to real mountain that
-extends beyond depth range.
-
-\paragraph{UV retention and fold repair.}
-Retaining observed UVs measurably improved texture correspondence. The geometric
-fold detector identified $5\,624$ triangles ($7.0\%$) on Mount Rainier bridging
-occlusion boundaries; collapsing them removed the concentric artifacts on the
-mountain face while leaving well-behaved triangles untouched. Detection converges
-in two passes.
-
-\paragraph{Projected-size level of detail.}
-Replacing distance-based LOD with angular size halved the scene's triangle count
-($\SI{4.47}{M} \rightarrow \SI{2.48}{M}$) while retaining every prominent object,
-and removed the need for a per-class override table: ground cover falls below
-any sensible threshold on its own.
+Where the horizon genuinely is terrain, reconstruction behaves as intended:
+measured cells are preserved exactly by construction, the harmonic solve produces a
+continuous surface, and erosion supplies drainage-consistent relief. Mount
+Rainier's \SI{35}{\meter} of added relief lies beyond depth range, where the
+silhouette is the only evidence available and $98\%$ of it types as terrain.
 
 \paragraph{Ground-cover masking.}
-Color-vetoed grass masking correctly excludes snowfields that type identically to
-meadow. After ordering the veto to run after morphological closing, zero grass
-instances remain on cells the veto rejected.
+Color vetoing excludes snowfields, which type identically to meadow under the
+semantic label set. With the veto ordered after morphological closing, zero grass
+instances remain on cells it rejected.
 
 \subsection{Failure Modes and Their Causes}
 
 The more instructive result is where the system fails, because in every case we
-were able to localize the failure to an \emph{assumption} rather than a model.
-\Cref{sec:remediation} reports what each corrective measure then achieved.
+localized the failure to an \emph{assumption} rather than a model. A defect can
+also surface far from its cause: object size compression originates in depth
+calibration (\cref{sec:panorama}) and manifests at placement, eight stages later.
+\Cref{sec:remediation} reports what each corrective measure achieved.
 
 \begin{figure}[t]
   \centering
@@ -128,8 +125,9 @@ column of its horizon is a landform (\cref{fig:silhouette}).
 \end{figure}
 
 \paragraph{Confident misclassification on texture.}
-Shark Fin Cove produced 50 detections at median confidence $0.95$, of which
-essentially none is an object. The stored captions are diagnostic: a rock typed
+Shark Fin Cove produced 49 detections at median confidence $0.95$; the two
+plausibility vetoes of \cref{tab:fixes} later remove 28 of them, and every instance
+that survived failed the reconstruction shape gates. The captions are diagnostic: a rock typed
 \emph{person} is captioned ``a piece of pizza with bacon on it''; another typed
 \emph{aircraft} is ``a giraffe that is flying in the sky''. On captures with weak
 image signal the class is derived from the caption ($59\%$ of Shark Fin crops and
@@ -140,7 +138,7 @@ box and an open-vocabulary detector will localize almost any label inside it.
 The consequence for reconstruction is direct: SAM~3D given a flat rock fragment
 returns a flat sheet (normalized extents $[1.00, 0.049, 0.425]$), the shape gates
 correctly reject it, and every instance falls back to a billboard. Shark Fin's zero
-meshes are the gates working, on garbage input.
+meshes are the gates behaving as intended on inputs that are not objects.
 
 The signal that separates them is the region map, because it is the only opinion in
 the chain that does not look at the crop. A per-crop plausibility veto, a class
@@ -167,7 +165,7 @@ more than a meter above the median: the ocean draped up the cliffs.
   indistinguishable within \SI{25}{\meter}; beyond it Shark Fin degrades far
   faster, because a clifftop camera places most of its surface near the horizon
   where equirectangular compression is worst. Above roughly
-  \SI{0.5}{\meter} per texel the ground reads as smeared.}
+  \SI{0.5}{\meter} per texel we take the ground to read as smeared.}
   \label{fig:texel}
 \end{figure}
 
@@ -268,24 +266,3 @@ rather than the sea: \SI{-4.54}{\meter} against a shoreline at
 \SI{-0.99}{\meter}. Estimating over the uniform grid instead gives
 \SI{-1.13}{\meter} and a \SI{0.14}{\meter} shoreline step. The estimator was
 correct; the sample weighting was not.
-
-\subsection{Strengths and Weaknesses}
-
-\paragraph{Strengths.}
-The decomposition is the system's main asset. Because terrain, objects and ground
-cover are separate, each can be fixed without disturbing the others, and defects
-localize cleanly. Preserving measured data as hard constraints means the pipeline
-never silently overwrites evidence with inference. The instrumentation, every
-stage writing structured debug output, is what made the failure analysis above
-possible at all; several defects were invisible until the relevant quantity was
-recorded.
-
-\paragraph{Weaknesses.}
-Error compounds along a 40-stage chain, and a defect can surface many stages from
-its cause: object size compression originates in depth calibration and manifests in
-placement. Scene-type assumptions are embedded implicitly, and the system has no
-notion of what \emph{kind} of scene it is processing; the Paris terrain failure is
-exactly this. Reconstruction quality is bounded by single-view 3D, which is
-unreliable for thin structures. And the system has no way to know it is wrong: it
-produces the same confident output on a coastal cliff face typed as furniture as on
-a correctly reconstructed meadow.

@@ -3,38 +3,48 @@
 \label{sec:conclusions}
 % =============================================================================
 
-\subsection{What We Learned}
+\subsection{The Case for a Hybrid Pipeline}
 
-The most transferable lesson is that at this scale, \textbf{most defects are
-assumption failures rather than model failures}. Every significant problem we
-diagnosed took the same shape: a step valid for the scene category it was designed
-against, applied silently to a category where its premise does not hold. Ridge
-anchoring assumes the horizon is ground. Foreground removal assumes what is close
-is an occluder. Water assumes the ground beneath it is flat. Distance-based LOD
-assumes objects are similarly sized. In each case the component worked exactly as
-specified and produced a bad scene.
+The result we most want to draw out is the shape of the system rather than any
+single stage. Into Frame mixes learned models and classical graphics roughly
+two-to-one by stage count, and neither part would produce this output alone.
 
-This suggests that scene-type awareness should be explicit rather than emergent.
-The fixes that worked best were those that made a premise testable from evidence
-already present (measuring what the silhouette is made of, asking what region a
-crop sits in) rather than those that tuned a threshold.
+Generative models make the problem tractable at all. Five sixths of the sphere and
+the ground behind every object are never observed, and no classical reasoning
+recovers content absent from the input. Outpainting, foreground removal,
+single-view reconstruction and video generation supply it.
 
-A second lesson concerns \textbf{cross-checking between independent signals}. The
-strongest diagnostics came from disagreement between models that look at different
-evidence. A caption and a classifier that both read the same crop fail together; a
-region map segmenting the panorama fails independently, and that independence is
-what makes it useful.
+What they do not supply is structure. A generative system asked for a scene returns
+something viewable: a panorama, a mesh, a radiance field. It does not return a
+collidable surface, a population whose density can be sampled, a water plane
+animated separately from its bed, or a mesh with a skeleton in it. Every property
+that makes the output walkable rather than watchable comes from the classical side:
+a harmonic solve that provably never modifies measured ground, fluvial incision,
+point-process synthesis fitted to observed statistics, pattern texturing, and a
+three-bone rig driven by a shared wind field. Of the 38 active stages, 12 use no
+learned model at all, and those are disproportionately the ones producing physical
+behavior.
 
-Third, \textbf{instrumentation is a scientific instrument, not a convenience}.
-Defects we had looked at directly for weeks became obvious the moment the right
-quantity was logged.
+The division of labor is the point. Learned components answer \emph{what is there},
+including where nothing was observed; classical components decide \emph{how it
+behaves}, under constraints a generative model cannot honor: measured terrain must
+survive completion unchanged, water must sit below its bed, a meadow of thousands
+of plants must remain one instanced draw. Treating those as requirements rather
+than as things to be learned is what turns a picture of a place into a place.
+
+It also explains our failures. As \cref{sec:results} sets out, the surviving defects
+are mostly not model failures but assumption failures, where a step correct for one
+scene category is applied silently to another. That is the more tractable problem:
+an assumption can be identified, measured, and gated.
 
 \subsection{Future Work}
 
 \paragraph{Explicit scene classification.} A first-class scene-type estimate
 (natural landform, urban, coastal, interior) consumed by every stage that
 currently embeds an implicit assumption would address the largest class of failure
-we observed.
+we observed. The system is biased toward outdoor natural scenes, and several
+assumptions do not hold outside them: that the sky boundary is the crest of ground,
+that a large uniform region is terrain, that vegetation is the dominant content.
 
 \paragraph{Confidence propagation.} Stages produce point estimates. Propagating
 uncertainty would let downstream stages weigh evidence rather than accept it, and
@@ -49,16 +59,27 @@ optimization that adjusted depth, geometry and placement jointly against
 photometric consistency could correct compounded error that no single stage can
 see.
 
-\paragraph{Perceptual evaluation.} Our evaluation is diagnostic. A user study
-measuring presence, scale perception and navigation comfort in the headset would
-test what the system is actually for.
+\paragraph{Perceptual evaluation.} Our evaluation is diagnostic: it measures where
+the system is wrong, not how the result feels to be inside. A user study of
+presence, scale perception and navigation comfort would test what the system is
+actually for, and is the clearest gap in our rigor.
 
-\subsection{Closing}
+\paragraph{Audio and interaction.} The scene is something to move through rather
+than to act on. Spatialized audio generated jointly with the
+scene~\cite{jin2026sonoworld}, and ways for the user to disturb the environment
+rather than only observe it, would extend interactivity in the direction this
+framing implies.
 
-Into Frame demonstrates that a single photograph can be turned into an environment
-a person can walk through, with terrain, objects, ground cover, water and lighting
-reconstructed as distinct physical components. The decomposition is what makes the
-result explorable rather than merely viewable, and it is also what made the system
-debuggable. The remaining failures are, encouragingly, not mysterious: each is a
-stated assumption meeting a scene that violates it, which is a tractable problem in
-a way that ``the model produced a bad result'' is not.
+\subsection{Closing Remarks}
+
+Into Frame demonstrates that a single photograph can become an interactive
+environment, with terrain, objects, ground cover, water and lighting reconstructed
+as distinct physical components rather than as one representation serving every
+purpose. That decomposition buys the depth of the result: each component is
+reconstructed by a method suited to its role and then behaves according to it.
+
+The remaining failures are mostly not failures of any model, but assumptions that
+held for outdoor natural landscapes and did not extrapolate beyond them. That is an
+encouraging place to stop: the boundaries are legible and measurable, and addressing
+them means making implicit commitments explicit rather than waiting for better
+models.

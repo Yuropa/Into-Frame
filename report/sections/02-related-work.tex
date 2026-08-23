@@ -32,12 +32,11 @@ audio-visual output; 360Anything~\cite{wu360anything} lifts images and videos
 to $360^\circ$ geometry-free representations; and
 WorldGen~\cite{worldgen2025ziyangxie} produces complete 3D scenes rapidly.
 These systems generally optimize for visual fidelity from viewpoints near the
-original camera. Into Frame differs in prioritizing \emph{physical
-decomposition}. Our output is not a single geometry proxy but a set of typed
-entities with distinct behavior: a collidable terrain mesh, individually
-placed object meshes, an instanced ground-cover population, and an animated water
-surface. Each of these is required before a scene can be dynamic rather than
-merely viewable.
+original camera. Into Frame instead prioritizes \emph{physical decomposition}: the
+output is not one geometry proxy but a set of typed entities with distinct
+behavior, a collidable terrain mesh, individually placed object meshes, an
+instanced ground-cover population and an animated water surface. Each is required
+before a scene can be dynamic rather than merely viewable.
 
 \subsection{Depth Estimation and Panoramic Depth}
 
@@ -54,18 +53,16 @@ at a ridge crest is an extrapolation rather than a measurement.
 
 Recovering terrain from imagery connects to a long line of graphics work.
 Pixels2Peaks~\cite{jain:hal-05617061} converts terrain images to heightmaps
-directly. Terrain modeling from feature
-primitives~\cite{genevaux:hal-01257198} constructs terrain from sparse
-user-specified features, and Earthbender~\cite{10.1145/3769047.3769053} offers
-interactive stylistic heightmap generation. WorldBrush~\cite{10.1145/2766975}
-synthesizes procedural virtual worlds from examples, including the distribution of
-scene elements.
-For physical plausibility of unobserved relief we use
+directly; terrain modeling from feature primitives~\cite{genevaux:hal-01257198}
+builds terrain from sparse user-specified features;
+Earthbender~\cite{10.1145/3769047.3769053} offers interactive stylistic heightmap
+generation; and WorldBrush~\cite{10.1145/2766975} synthesizes procedural worlds
+from examples, including the distribution of scene elements. For physical
+plausibility of unobserved relief we use
 Landlab~\cite{barnhart2020landlab,hobley2017creative,Hutton_landlab_2020}, an
-Earth-surface dynamics toolkit, to apply fluvial incision so that invented
-terrain obeys drainage structure rather than reading as smooth interpolation or
-undirected noise. The regions we never observed are therefore shaped by the same
-process that shapes real landscapes.
+Earth-surface dynamics toolkit, applying fluvial incision so that invented terrain
+obeys drainage structure rather than reading as smooth interpolation or undirected
+noise.
 
 \subsection{Texture Synthesis}
 
@@ -91,10 +88,10 @@ Florence-2~\cite{xiao2024florence2} for captioning,
 Recognize Anything~\cite{zhang2023recognize,huang2023tag2text} and its open-set
 successor RAM++~\cite{huang2023open} for scene tagging,
 SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} for semantic region typing, and
-BiRefNet~\cite{zheng2024birefnet} for high-resolution matting. Each of these
-models solves a similar but subtly different problem. We combine them rather than
-choosing between them, using their agreement where they overlap to build a more
-reliable reading of the scene than any one model provides alone.
+BiRefNet~\cite{zheng2024birefnet} for high-resolution matting. Each solves a
+similar but subtly different problem; we combine them rather than choosing between
+them, using their agreement where they overlap to build a more reliable reading of
+the scene than any one provides alone.
 
 \subsection{Object Reconstruction and Inpainting}
 

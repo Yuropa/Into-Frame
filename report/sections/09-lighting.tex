@@ -28,19 +28,16 @@ source, and the direction as a directional light casting the scene's shadows.
   \label{fig:rainier-lighting}
 \end{figure}
 
-Every asset in the scene is cut from a photograph, so it already carries the
-illumination of the moment it was taken: shadows, directional shading, and the
-color of the light. Rendering that under a second, freshly estimated light doubles
-the illumination and the result reads as flat and over-exposed. Object crops are
-therefore de-lit with IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, which
-separates albedo from shading, so what the client relights is material color rather
-than a photograph.
-
-De-lighting is what makes the objects portable. Population synthesis places
-instances anywhere the class is admissible, not only where they were photographed,
-so an instance rarely sits in the orientation its shading was baked under. An
-asset carrying its original shading would announce this immediately, lit from one
-direction while the terrain beneath it is lit from another.
+Every asset is cut from a photograph, so it already carries the illumination of the
+moment it was taken: shadows, directional shading, and the color of the light.
+Rendering that under a second, freshly estimated light doubles the illumination and
+reads as flat and over-exposed. Object crops are therefore de-lit with
+IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, so what the client relights is
+material color rather than a photograph. This is also what makes assets portable:
+population synthesis places instances anywhere the class is admissible, so an
+instance rarely sits in the orientation its shading was baked under, and one
+carrying its original shading would be lit from a different direction than the
+terrain beneath it.
 
 \subsection{Motion}
 
@@ -93,41 +90,35 @@ less than \SI{60}{\percent} of its own bounding-box diagonal over the whole clip
 treated as \emph{stationary}: it is oscillating in place, anchored to the scene, as
 a flower or a tree is. Anything that drifts further is a \emph{moving} body.
 
-Stationary objects contribute an amplitude and a frequency, read from their own
-horizontal centroid signal, and are rigged rather than animated directly. Each
-shared bucket mesh gets a three-bone vertical skeleton baked into it, with joints
-at the base of the mesh and at one third and two thirds of its height. The last
-joint sits at two thirds rather than at the top for a specific reason: a joint
-bends what is above it, so a joint at the very top has no geometry to move and
-degenerates into a dead bone, hinging the whole upper half about a single point
-instead of curving along its length. With joints at thirds, the bottom third stays
-rigid on the ground and each joint above inherits the bend below it plus its own.
-Timing is attached per instance while the skeleton stays part of the shared mesh,
-so a meadow of thousands of plants remains a single instanced draw with the sway
-evaluated per instance.
+Stationary objects contribute an amplitude and a frequency read from their own
+centroid signal, and are rigged rather than animated directly. Each shared bucket
+mesh gets a three-bone vertical skeleton with joints at its base and at one and two
+thirds of its height. The top joint sits at two thirds deliberately: a joint bends
+what is above it, so one at the very top has no geometry to move and degenerates
+into a dead bone, hinging the upper half about a point instead of curving. With
+joints at thirds the bottom stays rigid on the ground and each joint inherits the
+bend below it plus its own. Timing is per instance while the skeleton stays part of
+the shared mesh, so a meadow of thousands of plants remains one instanced draw.
 
-Moving objects are handled as rigid bodies. Their image-space track is unprojected
-into world space, holding depth fixed at the reference frame's estimate since no
-per-frame depth exists, and fitted with a smoothed curve to recover a linear
-velocity and acceleration. Those become the initial conditions handed to the
-client's physics engine, which then resolves the object against the terrain and
-against other objects. Angular velocity is deliberately out of scope: it is not
-reliably recoverable from a monocular silhouette, and a wrong spin is more
-noticeable than none.
+Moving objects are rigid bodies. Their track is unprojected into world space,
+holding depth fixed at the reference frame's estimate since no per-frame depth
+exists, and fitted with a smoothed curve to recover linear velocity and
+acceleration. Those are the initial conditions handed to the physics engine, which
+resolves the object against terrain and other objects. Angular velocity is out of
+scope: it is not reliably recoverable from a monocular silhouette, and a wrong spin
+is more noticeable than none.
 
 \subsection{A Shared Wind Field}
 \label{sec:wind}
 
 Foliage sway, grass motion and the water surface are driven by one scene-global
-wind field rather than by independent per-object oscillators. The field is an
-ambient base strength plus discrete gust events, and it is what gives the scene its
-sense of connectedness: a gust crosses the meadow and everything in its path
-responds in turn, rather than each plant oscillating on its own clock. Independent
+wind field, an ambient base strength plus discrete gust events, rather than by
+independent per-object oscillators. That is what gives the scene its connectedness:
+a gust crosses the meadow and everything in its path responds in turn. Independent
 oscillators are cheaper and read as obviously synthetic, because nothing in a real
 landscape moves without its neighbors moving too.
 
-The field is currently authored rather than derived. The per-object amplitudes and
-frequencies recovered above set how strongly each instance responds to it, but the
-gust schedule itself does not yet come from the generated video. Deriving it from
-the observed correlated motion, so that the reconstructed wind matches the wind in
-the photograph, is left as future work.
+The field is authored rather than derived. The per-object amplitudes above set how
+strongly each instance responds, but the gust schedule does not yet come from the
+generated video. Deriving it from the observed correlated motion is left as future
+work.

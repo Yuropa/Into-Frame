@@ -76,15 +76,12 @@ numbers follow configuration order throughout. The gap at 36--37 in
 \cref{tab:stages} is two stages that are defined but disabled by default, and so
 belong to no track.
 
-The panorama stages build a $360^\circ$ representation of the scene. Semantics then
-runs against that representation to identify the objects within it. Cleanup
-produces a second panorama with those objects removed, better suited to terrain
-generation, and the geometry stages recover depth and a metric spatial
-understanding of the scene from it. Terrain is meshed and eroded using established
-techniques. Objects are detected and their spatial distributions learned, after
-which the scene is assembled from those statistics. Finally, a video generation
-model guides animation for each object and determines whether it should be treated
-as a rigid body.
+The panorama stages build a $360^\circ$ representation; semantics identifies the
+objects in it; cleanup produces a second panorama with those objects removed, from
+which the geometry stages recover depth and metric scale. Terrain is meshed and
+eroded, objects are detected and their spatial distributions learned, and the scene
+is assembled from those statistics. Finally a video generation model guides
+per-object animation and decides which objects are rigid bodies.
 
 \begin{table}[htbp]
 \centering
@@ -156,13 +153,10 @@ disabled in the default configuration.}
 
 \subsection{System Architecture}
 
-The system is split into a Python generation server and a rendering client. The
-server executes the pipeline described above and exposes the result as a
-\texttt{.frame} archive over a WebSocket control channel and an HTTP asset
-channel, so a client streams assets as they become available rather than waiting
-for the whole scene.
-
-A Unity client (C\#, URP) targets desktop VR and carries the runtime shading work:
-a terrain splat shader blending the layered material of \cref{sec:texture}, an
-animated water surface, and wind-driven foliage sway sharing one global wind field
-so that grass, foliage and water gust together.
+The system splits into a Python generation server and a rendering client. The
+server runs the pipeline and exposes the result as a \texttt{.frame} archive over a
+WebSocket control channel and an HTTP asset channel, so the client streams assets
+as they become available rather than waiting for the whole scene. A Unity client
+(C\#, URP) targets desktop VR and carries the runtime shading: a terrain splat
+shader blending the layered material of \cref{sec:texture}, an animated water
+surface, and wind-driven foliage sway on one global wind field.

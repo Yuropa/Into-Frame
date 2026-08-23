@@ -48,10 +48,27 @@ One mesh is reconstructed per (class, bucket) group with
 SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} and instanced at every member's
 position. Two selection decisions matter.
 
-The crop fed to reconstruction is chosen by \emph{resolution} among those passing quality gates, not by classifier score,
-because a single-view reconstructor given too few pixels does not return a worse
-object but a different one: a flat sheet. And the mesh-versus-billboard decision
-is made on \emph{projected angular size} rather than distance, since distance only
-proxies resolvability when every object is the same size. The scene therefore
-carries a mix of meshes and billboards, which is what keeps total geometry
-affordable without deciding resolvability by a proxy.
+The crop fed to reconstruction is chosen by \emph{resolution} among those passing
+quality gates, not by classifier score, because a single-view reconstructor given too few pixels does not return a worse
+object but a different one: a flat sheet. And the representation decision is made
+on \emph{projected angular size} rather than distance, since distance only proxies
+resolvability when every object is the same size.
+
+That second decision picks one of three representations, in order of preference.
+An instance is placed as a reconstructed \emph{mesh} when its group has one and it
+renders large enough to resolve as geometry. Failing that it takes a \emph{crossed
+card}: three fixed planes carrying the group's own photograph, twelve triangles
+that hold their silhouette from any angle. A \emph{billboard}, a single quad that
+rotates to face the viewer, is the last resort. Keeping the cheap tiers is what
+makes the geometry budget hold without deciding resolvability by a proxy.
+
+Cards are published only for vegetation, because vegetation is where both other
+options fail. Single-view reconstruction of a conifer returns a sheet, under a
+tenth as thick as it is wide on the Rainier capture, which the shape gates
+correctly reject; and in stereo at the distance trees actually stand, a
+camera-facing quad reads as flat and swings as the head moves. A rejected
+reconstruction therefore falls back to a card rather than a billboard whenever its
+class has one, which is why the same rejection yields cards for Rainier's trees and
+billboards for Shark Fin's rock fragments (\cref{tab:results}). Because a card is
+an ordinary textured mesh, it also inherits the sway rig of \cref{sec:lighting}
+instead of standing still beside animated neighbors.

@@ -9,11 +9,9 @@ semantic typing. The depth map and semantic typing are both derived from
 the generated panorama, which extends the provided input image into a complete
 $360^\circ$ view of the scene.
 
-We use one capture, a photograph of Mount Rainier, as a running example through
-the rest of the report. \Cref{fig:rainier-input} shows the input and the panorama
-generated from it. The photograph covers roughly a sixth of the sphere; everything
-else in the panorama is synthesized, and every figure that follows is derived from
-this one image.
+We use one capture, a photograph of Mount Rainier, as a running example throughout.
+\Cref{fig:rainier-input} shows the input and the panorama generated from it: the
+photograph covers roughly a sixth of the sphere, and everything else is synthesized.
 
 \begin{figure}[htbp]
   \centering
@@ -46,17 +44,12 @@ perspective depth estimate, then outpainting the image to a full equirectangular
 panorama, which is super-sampled to its working resolution. Panoramic depth is
 estimated on the result~\cite{lin2025dap}.
 
-The depth model in \emph{Depth Any Panoramas} is specifically built to generate
-accurate depth for equirectangular panoramic images. However, the depth values it
-provides are relative: it does not produce real, metric depth. We therefore
-calibrate the panoramic depth output against a second estimate that does carry
-metric meaning.
-
-To achieve this we run Depth Anything~3~\cite{lin2025depth3recoveringvisual}
-against the original input image, which gives a metric baseline over the region
-the photograph actually observed. The two maps are related by fitting a monotonic
-response curve rather than a single scale factor, because the relationship between
-the two models' outputs is not linear.
+\emph{Depth Any Panoramas} is built for equirectangular imagery, but its output is
+relative rather than metric. We calibrate it against
+Depth Anything~3~\cite{lin2025depth3recoveringvisual} run on the original input,
+which gives a metric baseline over the region the photograph actually observed.
+The two are related by a monotonic response curve rather than a single scale
+factor, because the relationship is not linear.
 
 \paragraph{Fitting the response curve.}
 Let $r \in [0,1]$ be the panoramic model's raw prediction and $d$ the metric depth
@@ -72,21 +65,15 @@ partitioned into $N = 14$ quantile bins of $r$, and each bin contributes one kno
   m_b = \operatorname{median}\{d_i : i \in \mathcal{B}_b\},
 \end{equation}
 
-where $\mathcal{B}_b$ is the set of samples in bin $b$. Taking medians rather than
-means keeps a handful of mismatched samples, typically foreground objects that
-survive into the overlap, from dragging a knot. Depth must not decrease as the raw
-prediction increases, so the knots are made monotonic by a running maximum,
-$\tilde{m}_b = \max_{k \le b} m_k$, which prevents a noisy bin from punching a dip
-into the curve. Calibration is attempted only when at least $300$ valid overlap
-samples survive; below that the photograph barely overlaps the panorama, typically
-an extreme field of view or a mostly-sky shot, and the panorama depth is left
-uncalibrated rather than fitted unreliably.
-
-Metric depth is then recovered by interpolating $(c_b, \tilde{m}_b)$. The
-correspondence is treated as a property of the depth model rather than of the
-particular image, so the same fitted curve is applied to every panoramic depth map
-in the scene, which is what keeps the two depth maps that must agree on a common
-scale.
+where $\mathcal{B}_b$ is the set of samples in bin $b$. Medians rather than means
+keep mismatched samples, typically foreground objects surviving into the overlap,
+from dragging a knot, and a running maximum $\tilde{m}_b = \max_{k \le b} m_k$
+enforces that depth cannot decrease as the raw prediction increases. Calibration is
+attempted only above $300$ valid samples; below that the overlap is too small to fit
+reliably and the depth is left uncalibrated. Metric depth is then recovered by
+interpolating $(c_b, \tilde{m}_b)$. The curve is treated as a property of the model
+rather than of the image, so the same fit applies to every panoramic depth map in
+the scene, which is what keeps them on a common scale.
 
 \paragraph{Extrapolating beyond the fitted range.}
 The overlap region only ever covers the photograph's own near field, a few to a few
@@ -103,37 +90,32 @@ approaches its ceiling asymptotically as true depth grows,
 \end{equation}
 
 with the slope $s$ estimated from the last $k = 3$ knots, and symmetrically at the
-near end. This is capped at $d \le \lambda\,\tilde{m}_N$ with $\lambda = 20$. The
-cap matters because the raw output saturates well before true distance does: a
-mountainside a few hundred meters out and a hard-clamped sky pixel both read at
-essentially the same near-unit ceiling. A slope estimated from a few tail bins and
-then exponentiated over that gap is extremely sensitive to noise, and in practice
-produced fabricated depths of tens of kilometers for every pixel sharing a
-saturated raw value. A single outlier of that size dominates anything downstream
-that treats panorama depth as a trustworthy scale, which silently discards real
-terrain as out of bounds rather than merely far. The cap cannot recover a distance
-the model genuinely cannot resolve, since there is no signal left to extrapolate
-from once the prediction saturates, but it keeps far content bounded and ordered.
+near end, capped at $d \le \lambda\,\tilde{m}_N$ with $\lambda = 20$. The cap
+matters because the raw output saturates well before true distance does: a
+mountainside a few hundred meters out and a hard-clamped sky pixel read at
+essentially the same ceiling. A slope estimated from a few tail bins and then
+exponentiated over that gap is extremely noise-sensitive, and produced fabricated
+depths of tens of kilometers for every pixel sharing a saturated value. One
+outlier of that size dominates anything treating panorama depth as a trustworthy
+scale, silently discarding real terrain as out of bounds rather than merely far.
+The cap recovers no distance the model cannot resolve, but it keeps far content
+bounded and ordered.
 
 \paragraph{Fitting the scene into the terrain budget.}
-The calibrated map must finally fit inside the terrain grid's own footprint,
-$D_{\max} = \SI{100}{\meter}$, which is half the \SI{200}{\meter} grid extent;
-nothing farther can land inside that grid in any case. The obvious approach, a
-uniform rescale by $D_{\max}$ over the farthest non-sky pixel, preserves relative
-distances exactly and is the wrong invariant to protect. The scale would then be
-set by the single most distant thing in the scene, which for a landscape photograph
-is effectively unbounded, and it silently invalidates the pipeline's second and
-more load-bearing metric anchor: the assumed camera height, which the height map
-relies on to place ground at $-h$ directly below the camera. On one capture of
-Mount Rainier, fitting a summit kilometers away into \SI{100}{\meter} divided the
-whole map by roughly $6.5\times$; ground \SI{1.37}{\meter} below the camera came
-back as \SI{0.21}{\meter} of depth, and the reconstructed surface ended up around
-\SI{0.9}{\meter} \emph{above} eye level with the camera buried inside its own
-terrain. A flat clamp is wrong for the opposite reason, collapsing a
-\SI{120}{\meter} ridge and a \SI{900}{\meter} peak onto one wall.
+The calibrated map must finally fit inside the terrain grid's footprint,
+$D_{\max} = \SI{100}{\meter}$, half the \SI{200}{\meter} grid extent. A uniform
+rescale preserves relative distances exactly and is the wrong invariant to protect:
+the scale would be set by the most distant thing in the scene, effectively unbounded
+for a landscape, and it invalidates the pipeline's second and more load-bearing
+anchor, the assumed camera height that places ground at $-h$ below the camera. On
+Rainier, fitting a summit kilometers away into \SI{100}{\meter} divided the map by
+$6.5\times$: ground \SI{1.37}{\meter} below the camera returned \SI{0.21}{\meter} of
+depth, putting the reconstructed surface \SI{0.9}{\meter} \emph{above} eye level
+with the camera buried in its own terrain. A flat clamp fails oppositely, collapsing
+a \SI{120}{\meter} ridge and a \SI{900}{\meter} peak onto one wall.
 
-We instead compress only the far end, leaving the near field metrically intact.
-With a knee at $k = 0.6\,D_{\max}$ and tail $t = D_{\max} - k$,
+We compress only the far end, leaving the near field metrically intact. With a knee
+at $k = 0.6\,D_{\max}$ and tail $t = D_{\max} - k$,
 
 \begin{equation}
   d' =
@@ -143,16 +125,13 @@ With a knee at $k = 0.6\,D_{\max}$ and tail $t = D_{\max} - k$,
   \end{cases}
 \end{equation}
 
-This is continuous and $C^1$ at the knee, since both branches have unit slope
-there, strictly monotonic everywhere, and asymptotic to $D_{\max}$, so no pixel can
-exceed the budget without a hard clamp. Distant content keeps its ordering and
-stays distinguishable; it simply stops being proportional, which it never
-meaningfully was once a mountain kilometers away had to fit inside a
-\SI{200}{\meter} grid. Because the curve is fixed by $(D_{\max}, k)$ alone rather
-than by the data's own maximum, there is no pool of samples for saturated sky to
-contaminate, and applying the same deterministic function to both depth maps places
-the same real-world point at the same distance in each, with no scale factor to
-thread between them.
+This is $C^1$ at the knee, strictly monotonic, and asymptotic to $D_{\max}$, so no
+pixel exceeds the budget without a hard clamp. Distant content keeps its ordering;
+it simply stops being proportional, which it never meaningfully was once a mountain
+kilometers away had to fit a \SI{200}{\meter} grid. Because the curve is fixed by
+$(D_{\max}, k)$ rather than by the data's maximum, saturated sky cannot contaminate
+it, and applying the same function to both depth maps places the same point at the
+same distance in each.
 
 \begin{figure}[htbp]
   \centering
@@ -167,36 +146,28 @@ thread between them.
 \end{figure}
 
 \paragraph{Consequences.}
-The result is metrically compressed. Distances to close objects are accurate, while
-distant objects are systematically shrunk. Since we assume the user explores the
-scene only on the scale of a few meters, the visual effect of this is minimal: the
-scene relies on forced perspective, and a large mountain far away reads much like a
-smaller one closer in. The compression is not free, however, and \cref{sec:results}
-returns to a defect it causes, where object size is computed as angular extent times
-depth and therefore inherits the same shrinkage.
+The result is metrically compressed: near distances are accurate, far ones
+systematically shrunk. Since the user explores only a few meters of the scene the
+visual effect is minimal, relying on forced perspective, but it is not free.
+\Cref{sec:results} returns to a defect it causes, where object size is computed as
+angular extent times depth and inherits the same shrinkage.
 
 \subsection{Object-Removed Panorama}
 
-To assist with terrain generation we produce a second panorama with foreground
-objects removed, using ObjectClear~\cite{zhao2026objectclear}. That model is
-trained to remove objects together with their effects, such as reflections and cast
-shadows, rather than only the objects themselves. We select the objects to remove by
-thresholding on depth, taking those closest to the camera, and run the model across
-the foreground region of the panorama.
+To assist terrain generation we produce a second panorama with foreground objects
+removed, using ObjectClear~\cite{zhao2026objectclear}, which removes objects
+together with their effects such as reflections and cast shadows. Objects are
+selected by depth threshold, taking those closest to the camera.
 
-The result is a clean panorama better suited to terrain reconstruction. Taking depth
-from the panorama with objects still in it instead produces spurious depth values
-and raised bumps whenever an object stands in front of the ground, since the surface
-behind it was never observed; removing the objects first gives the depth model an
-unobstructed view of the terrain.
-
-\Cref{fig:rainier-cleaned} shows the effect on the running example. The near-field
-wildflower meadow, which dominates the lower half of the original panorama, is
-replaced by the bare ground and residual snow that the terrain track needs. Note
-that this is a destructive edit made deliberately: the flowers are not discarded but
-reconstructed separately as a ground-cover population (\cref{sec:distribution}), and
-the region typing that decides where they belong is read from the \emph{original}
-panorama, not this one.
+Depth taken from the panorama with objects still in it produces spurious values and
+raised bumps wherever an object stands in front of the ground, since the surface
+behind it was never observed; removing them first gives the depth model an
+unobstructed view. \Cref{fig:rainier-cleaned} shows the effect: the near-field
+meadow dominating the lower half is replaced by the bare ground the terrain track
+needs. The edit is destructive by design. The flowers are not discarded but
+reconstructed separately as a ground-cover population
+(\cref{sec:distribution}), and the region typing that places them is read from the
+\emph{original} panorama.
 
 \begin{figure}[htbp]
   \centering
@@ -212,12 +183,10 @@ panorama, not this one.
 
 \subsection{Semantic Region Map}
 
-A semantic region map is produced by determining per-pixel region types (sky, water,
-terrain, ground, vegetation, built objects, road, trail) from the panorama. This map
-drives much of the downstream scene understanding. We use
-SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} to determine these semantic
-regions, which are then used for terrain construction and for object understanding
-and placement.
+SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} assigns per-pixel region types
+(sky, water, terrain, ground, vegetation, built objects, road, trail) over the
+panorama. This map drives much of the downstream scene understanding, from terrain
+construction to object placement.
 
 \begin{figure}[htbp]
   \centering
