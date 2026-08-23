@@ -58,76 +58,138 @@
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Texture synthesis}{3}{subsection.2.5}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Segmentation, detection and recognition}{3}{subsection.2.6}\protected@file@percent }
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.7}Object reconstruction and inpainting}{3}{subsection.2.7}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The pipeline decomposes a single image into five tracks with different physical roles. Solid arrows carry geometry, dashed arrows carry semantics. The three panorama variants at the left are maintained deliberately: geometry is derived from the object-removed panorama, semantics from the original.}}{4}{figure.caption.1}\protected@file@percent }
-\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
-\newlabel{fig:pipeline}{{1}{4}{The pipeline decomposes a single image into five tracks with different physical roles. Solid arrows carry geometry, dashed arrows carry semantics. The three panorama variants at the left are maintained deliberately: geometry is derived from the object-removed panorama, semantics from the original}{figure.caption.1}{}}
-\newlabel{fig:pipeline@cref}{{[figure][1][]1}{[1][4][]4}{}{}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {2.8}Lighting}{4}{subsection.2.8}\protected@file@percent }
 \@writefile{toc}{\contentsline {section}{\numberline {3}Overview}{4}{section.3}\protected@file@percent }
 \newlabel{sec:overview}{{3}{4}{Overview}{section.3}{}}
 \newlabel{sec:overview@cref}{{[section][3][]3}{[1][4][]4}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Design principle: role-specialised decomposition}{4}{subsection.3.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.1}Design principle: role-specialized decomposition}{4}{subsection.3.1}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces The pipeline decomposes a single image into six tracks with different physical roles. Solid arrows carry geometry, dashed arrows carry semantics. The three panorama variants at the left are maintained deliberately: geometry is derived from the cleaned panorama, semantics from the original.}}{4}{figure.caption.1}\protected@file@percent }
+\providecommand*\caption@xref[2]{\@setref\relax\@undefined{#1}}
+\newlabel{fig:pipeline}{{1}{4}{The pipeline decomposes a single image into six tracks with different physical roles. Solid arrows carry geometry, dashed arrows carry semantics. The three panorama variants at the left are maintained deliberately: geometry is derived from the cleaned panorama, semantics from the original}{figure.caption.1}{}}
+\newlabel{fig:pipeline@cref}{{[figure][1][]1}{[1][4][]4}{}{}{}}
+\citation{worldgen2025ziyangxie}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{kalischek2025cubediffrepurposingdiffusionbasedimage}
+\citation{dreamcube}
+\citation{zhao2026objectclear}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{li2022blipbootstrappinglanguageimagepretraining}
+\citation{lin2025depth3recoveringvisual}
+\citation{worldgen2025ziyangxie}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{kalischek2025cubediffrepurposingdiffusionbasedimage}
+\citation{dreamcube}
+\citation{conde2022swin2srswinv2transformercompressed}
 \citation{lin2025dap}
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Execution model}{5}{subsection.3.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {3.3}Stage sequence}{5}{subsection.3.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {4}The Panoramic Substrate}{5}{section.4}\protected@file@percent }
-\newlabel{sec:panorama}{{4}{5}{The Panoramic Substrate}{section.4}{}}
-\newlabel{sec:panorama@cref}{{[section][4][]4}{[1][5][]5}{}{}{}}
+\citation{ravi2024sam2segmentimages}
+\citation{zheng2024birefnet}
+\citation{li2022blipbootstrappinglanguageimagepretraining}
+\citation{radford2021learningtransferablevisual}
+\citation{liu2024groundingdino}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{suvorov2021resolution}
+\citation{zhao2026objectclear}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{DBLP:journals/corr/abs-2105-15203}
+\citation{DBLP:journals/corr/abs-2105-15203}
+\citation{liang2025luxdit}
+\citation{Luo2024IntrinsicDiffusion}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{lin2025dap}
+\citation{barnhart2020landlab}
+\citation{hobley2017creative}
+\citation{Hutton_landlab_2020}
+\citation{neyret:inria-00537511}
+\citation{suvorov2021resolution}
+\citation{esser2024scalingrectifiedflowtransformers}
+\citation{huang2023open}
+\citation{liu2024groundingdino}
+\citation{ravi2024sam2segmentimages}
+\citation{ravi2024sam2segmentimages}
+\citation{oquab2024dinov2}
+\citation{radford2021learningtransferablevisual}
+\citation{sam3dteam2025sam3d3dfyimages}
+\citation{sam3dteam2025sam3d3dfyimages}
+\citation{huang2025spar3dstablepointawarereconstruction}
+\citation{xiang2025trellis2}
+\citation{suvorov2021resolution}
+\citation{lightricks2026ltx2}
+\citation{ravi2024sam2segmentimages}
+\@writefile{toc}{\contentsline {subsection}{\numberline {3.2}Stage sequence}{5}{subsection.3.2}\protected@file@percent }
+\citation{lin2025dap}
+\citation{lin2025depth3recoveringvisual}
 \@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Pipeline stages grouped by reconstruction track.}}{6}{table.caption.2}\protected@file@percent }
 \newlabel{tab:stages}{{1}{6}{Pipeline stages grouped by reconstruction track}{table.caption.2}{}}
 \newlabel{tab:stages@cref}{{[table][1][]1}{[1][5][]6}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Panorama generation and metric calibration}{6}{subsection.4.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Semantic region map}{6}{subsection.4.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {5}Terrain Geometry}{7}{section.5}\protected@file@percent }
-\newlabel{sec:terrain}{{5}{7}{Terrain Geometry}{section.5}{}}
-\newlabel{sec:terrain@cref}{{[section][5][]5}{[1][6][]7}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Projection with UV retention}{7}{subsection.5.1}\protected@file@percent }
-\newlabel{sec:uv-retention}{{5.1}{7}{Projection with UV retention}{subsection.5.1}{}}
-\newlabel{sec:uv-retention@cref}{{[subsection][1][5]5.1}{[1][6][]7}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Constrained harmonic completion}{7}{subsection.5.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Ridge anchoring and its assumption}{7}{subsection.5.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}De-spoking}{7}{subsection.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {4}The Panoramic Data}{6}{section.4}\protected@file@percent }
+\newlabel{sec:panorama}{{4}{6}{The Panoramic Data}{section.4}{}}
+\newlabel{sec:panorama@cref}{{[section][4][]4}{[1][5][]6}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.1}Panorama Generation and Metric Calibration}{6}{subsection.4.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Fitting the response curve.}{6}{section*.4}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Model behind each pipeline stage that depends on one, in configuration order. Stages that use no model are omitted, so the numbering is not contiguous; \cref  {tab:stages} gives the full sequence. When a stage supports several backends, the default is listed first. Stages marked $\dagger $ are defined but disabled in the default configuration.}}{7}{table.caption.3}\protected@file@percent }
+\newlabel{tab:stagemodels}{{2}{7}{Model behind each pipeline stage that depends on one, in configuration order. Stages that use no model are omitted, so the numbering is not contiguous; \cref {tab:stages} gives the full sequence. When a stage supports several backends, the default is listed first. Stages marked $\dagger $ are defined but disabled in the default configuration}{table.caption.3}{}}
+\newlabel{tab:stagemodels@cref}{{[table][2][]2}{[1][5][]7}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Extrapolating beyond the fitted range.}{8}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Fitting the scene into the terrain budget.}{8}{section*.6}\protected@file@percent }
+\citation{zhao2026objectclear}
+\citation{DBLP:journals/corr/abs-2105-15203}
+\@writefile{toc}{\contentsline {paragraph}{Consequences.}{9}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.2}Object-Removed Panorama}{9}{subsection.4.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {4.3}Semantic Region Map}{9}{subsection.4.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {5}Terrain Geometry}{9}{section.5}\protected@file@percent }
+\newlabel{sec:terrain}{{5}{9}{Terrain Geometry}{section.5}{}}
+\newlabel{sec:terrain@cref}{{[section][5][]5}{[1][9][]9}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.1}Projection with UV retention}{9}{subsection.5.1}\protected@file@percent }
+\newlabel{sec:uv-retention}{{5.1}{9}{Projection with UV retention}{subsection.5.1}{}}
+\newlabel{sec:uv-retention@cref}{{[subsection][1][5]5.1}{[1][9][]9}{}{}{}}
 \citation{barnhart2020landlab}
 \citation{hobley2017creative}
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.2}Constrained harmonic completion}{10}{subsection.5.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.3}Ridge anchoring and its assumption}{10}{subsection.5.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.4}De-spoking}{10}{subsection.5.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Erosion refinement}{10}{subsection.5.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}Meshing}{10}{subsection.5.6}\protected@file@percent }
 \citation{neyret:inria-00537511}
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.5}Erosion refinement}{8}{subsection.5.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {5.6}Meshing}{8}{subsection.5.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {6}Terrain Appearance}{8}{section.6}\protected@file@percent }
-\newlabel{sec:texture}{{6}{8}{Terrain Appearance}{section.6}{}}
-\newlabel{sec:texture@cref}{{[section][6][]6}{[1][8][]8}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Why projection alone fails}{8}{subsection.6.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Layered splat material}{8}{subsection.6.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Real-material pattern texturing}{8}{subsection.6.3}\protected@file@percent }
 \citation{ravi2024sam2segmentimages}
 \citation{li2022blipbootstrappinglanguageimagepretraining}
 \citation{huang2023open}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Terrain Appearance}{11}{section.6}\protected@file@percent }
+\newlabel{sec:texture}{{6}{11}{Terrain Appearance}{section.6}{}}
+\newlabel{sec:texture@cref}{{[section][6][]6}{[1][11][]11}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.1}Why projection alone fails}{11}{subsection.6.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.2}Layered splat material}{11}{subsection.6.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {6.3}Real-material pattern texturing}{11}{subsection.6.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {7}Object Decomposition}{11}{section.7}\protected@file@percent }
+\newlabel{sec:objects}{{7}{11}{Object Decomposition}{section.7}{}}
+\newlabel{sec:objects@cref}{{[section][7][]7}{[1][11][]11}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Detection, typing and verification}{11}{subsection.7.1}\protected@file@percent }
 \citation{sam3dteam2025sam3d3dfyimages}
-\@writefile{toc}{\contentsline {section}{\numberline {7}Object Decomposition}{9}{section.7}\protected@file@percent }
-\newlabel{sec:objects}{{7}{9}{Object Decomposition}{section.7}{}}
-\newlabel{sec:objects@cref}{{[section][7][]7}{[1][9][]9}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.1}Detection, typing and verification}{9}{subsection.7.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Correlation and clustering}{9}{subsection.7.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Asset generation and level of detail}{9}{subsection.7.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {8}Population Synthesis}{9}{section.8}\protected@file@percent }
-\newlabel{sec:distribution}{{8}{9}{Population Synthesis}{section.8}{}}
-\newlabel{sec:distribution@cref}{{[section][8][]8}{[1][9][]9}{}{}{}}
 \citation{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8}
 \citation{10.1145/1572614.1572623}
 \citation{10.1145/2766975}
-\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}Synthesis from observed statistics}{10}{subsection.8.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Density is measured in world units, not image units.}{10}{section*.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Density falls off radially, and the band is measured.}{10}{section*.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Synthesis is additive.}{10}{section*.5}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}Ground cover}{10}{subsection.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.2}Correlation and clustering}{12}{subsection.7.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {7.3}Asset generation and level of detail}{12}{subsection.7.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {8}Population Synthesis}{12}{section.8}\protected@file@percent }
+\newlabel{sec:distribution}{{8}{12}{Population Synthesis}{section.8}{}}
+\newlabel{sec:distribution@cref}{{[section][8][]8}{[1][12][]12}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.1}Synthesis from observed statistics}{12}{subsection.8.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Density is measured in world units, not image units.}{12}{section*.8}\protected@file@percent }
 \citation{liang2025luxdit}
 \citation{Luo2024IntrinsicDiffusion}
+\@writefile{toc}{\contentsline {paragraph}{Density falls off radially, and the band is measured.}{13}{section*.9}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Synthesis is additive.}{13}{section*.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {8.2}Ground cover}{13}{subsection.8.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {9}Lighting and Animation}{13}{section.9}\protected@file@percent }
+\newlabel{sec:lighting}{{9}{13}{Lighting and Animation}{section.9}{}}
+\newlabel{sec:lighting@cref}{{[section][9][]9}{[1][13][]13}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Illumination and de-lighting}{13}{subsection.9.1}\protected@file@percent }
 \citation{ravi2024sam2segmentimages}
-\@writefile{toc}{\contentsline {section}{\numberline {9}Lighting and Animation}{11}{section.9}\protected@file@percent }
-\newlabel{sec:lighting}{{9}{11}{Lighting and Animation}{section.9}{}}
-\newlabel{sec:lighting@cref}{{[section][9][]9}{[1][11][]11}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.1}Illumination and de-lighting}{11}{subsection.9.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}Motion}{11}{subsection.9.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}A shared wind field}{11}{subsection.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.2}Motion}{14}{subsection.9.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {9.3}A shared wind field}{14}{subsection.9.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {10}Implementation}{14}{section.10}\protected@file@percent }
+\newlabel{sec:implementation}{{10}{14}{Implementation}{section.10}{}}
+\newlabel{sec:implementation@cref}{{[section][10][]10}{[1][14][]14}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.1}System architecture}{14}{subsection.10.1}\protected@file@percent }
 \citation{li2022blipbootstrappinglanguageimagepretraining}
 \citation{huang2023open}
 \citation{zhang2023recognize}
@@ -150,74 +212,71 @@
 \citation{liang2025luxdit}
 \citation{Luo2024IntrinsicDiffusion}
 \citation{barnhart2020landlab}
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Learned components and their role in the pipeline.}}{12}{table.caption.6}\protected@file@percent }
-\newlabel{tab:models}{{2}{12}{Learned components and their role in the pipeline}{table.caption.6}{}}
-\newlabel{tab:models@cref}{{[table][2][]2}{[1][12][]12}{}{}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {10}Implementation}{12}{section.10}\protected@file@percent }
-\newlabel{sec:implementation}{{10}{12}{Implementation}{section.10}{}}
-\newlabel{sec:implementation@cref}{{[section][10][]10}{[1][12][]12}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.1}System architecture}{12}{subsection.10.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.2}Models}{12}{subsection.10.2}\protected@file@percent }
-\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Reconstructed environments viewed from near the capture point.}}{13}{figure.caption.7}\protected@file@percent }
-\newlabel{fig:scenes}{{2}{13}{Reconstructed environments viewed from near the capture point}{figure.caption.7}{}}
-\newlabel{fig:scenes@cref}{{[figure][2][]2}{[1][13][]13}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {10.3}Runtime and scene complexity}{13}{subsection.10.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {11}Results and Discussion}{13}{section.11}\protected@file@percent }
-\newlabel{sec:results}{{11}{13}{Results and Discussion}{section.11}{}}
-\newlabel{sec:results@cref}{{[section][11][]11}{[1][13][]13}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.1}Evaluation setup}{13}{subsection.11.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.2}Quantitative summary}{13}{subsection.11.2}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Scene composition per capture. \emph  {Relief added} is the elevation range introduced by terrain reconstruction beyond what the height field measured.}}{14}{table.caption.8}\protected@file@percent }
-\newlabel{tab:results}{{3}{14}{Scene composition per capture. \emph {Relief added} is the elevation range introduced by terrain reconstruction beyond what the height field measured}{table.caption.8}{}}
-\newlabel{tab:results@cref}{{[table][3][]3}{[1][13][]14}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.3}What works}{14}{subsection.11.3}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Terrain geometry on landform scenes.}{14}{section*.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{UV retention and fold repair.}{14}{section*.10}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Projected-size level of detail.}{14}{section*.11}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Ground-cover masking.}{14}{section*.12}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.4}Failure modes and their causes}{14}{subsection.11.4}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Skyline read as landform.}{14}{section*.14}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Confident misclassification on texture.}{14}{section*.16}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Learned components and their role in the pipeline.}}{15}{table.caption.11}\protected@file@percent }
+\newlabel{tab:models}{{3}{15}{Learned components and their role in the pipeline}{table.caption.11}{}}
+\newlabel{tab:models@cref}{{[table][3][]3}{[1][15][]15}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.2}Models}{15}{subsection.10.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {10.3}Runtime and scene complexity}{15}{subsection.10.3}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {2}{\ignorespaces Reconstructed environments viewed from near the capture point.}}{16}{figure.caption.12}\protected@file@percent }
+\newlabel{fig:scenes}{{2}{16}{Reconstructed environments viewed from near the capture point}{figure.caption.12}{}}
+\newlabel{fig:scenes@cref}{{[figure][2][]2}{[1][16][]16}{}{}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Scene composition per capture. \emph  {Relief added} is the elevation range introduced by terrain reconstruction beyond what the height field measured.}}{16}{table.caption.13}\protected@file@percent }
+\newlabel{tab:results}{{4}{16}{Scene composition per capture. \emph {Relief added} is the elevation range introduced by terrain reconstruction beyond what the height field measured}{table.caption.13}{}}
+\newlabel{tab:results@cref}{{[table][4][]4}{[1][16][]16}{}{}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {11}Results and Discussion}{16}{section.11}\protected@file@percent }
+\newlabel{sec:results}{{11}{16}{Results and Discussion}{section.11}{}}
+\newlabel{sec:results@cref}{{[section][11][]11}{[1][15][]16}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.1}Evaluation setup}{16}{subsection.11.1}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.2}Quantitative summary}{16}{subsection.11.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.3}What works}{16}{subsection.11.3}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Terrain geometry on landform scenes.}{16}{section*.14}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces The Paris failure. \textbf  {Left:} the measured height field, spanning \SI {-6.0}{\meter } to \SI {-0.2}{\meter } --- correctly flat, and near-featureless under a shared shading scale. \textbf  {Right:} after ridge-anchored reconstruction, spanning \SI {-13.1}{\meter } to \SI {+70.9}{\meter }. Hill \textsf  {A} (\SI {5966}{\meter \squared }) is the right-bank treeline; hill \textsf  {B} (\SI {2674}{\meter \squared }) is the cathedral. Both panels share one shading scale, so the left panel's flatness is the measurement, not a rendering choice.}}{17}{figure.caption.18}\protected@file@percent }
+\newlabel{fig:paris-terrain}{{3}{17}{The Paris failure. \textbf {Left:} the measured height field, spanning \SI {-6.0}{\meter } to \SI {-0.2}{\meter } --- correctly flat, and near-featureless under a shared shading scale. \textbf {Right:} after ridge-anchored reconstruction, spanning \SI {-13.1}{\meter } to \SI {+70.9}{\meter }. Hill \textsf {A} (\SI {5966}{\meter \squared }) is the right-bank treeline; hill \textsf {B} (\SI {2674}{\meter \squared }) is the cathedral. Both panels share one shading scale, so the left panel's flatness is the measurement, not a rendering choice}{figure.caption.18}{}}
+\newlabel{fig:paris-terrain@cref}{{[figure][3][]3}{[1][17][]17}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{UV retention and fold repair.}{17}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Projected-size level of detail.}{17}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Ground-cover masking.}{17}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.4}Failure modes and their causes}{17}{subsection.11.4}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Skyline read as landform.}{17}{section*.19}\protected@file@percent }
 \citation{lee2024tree}
-\@writefile{lof}{\contentsline {figure}{\numberline {3}{\ignorespaces The Paris failure. \textbf  {Left:} the measured height field, spanning \SI {-6.0}{\meter } to \SI {-0.2}{\meter } --- correctly flat, and near-featureless under a shared shading scale. \textbf  {Right:} after ridge-anchored reconstruction, spanning \SI {-13.1}{\meter } to \SI {+70.9}{\meter }. Hill \textsf  {A} (\SI {5966}{\meter \squared }) is the right-bank treeline; hill \textsf  {B} (\SI {2674}{\meter \squared }) is the cathedral. Both panels share one shading scale, so the left panel's flatness is the measurement, not a rendering choice.}}{15}{figure.caption.13}\protected@file@percent }
-\newlabel{fig:paris-terrain}{{3}{15}{The Paris failure. \textbf {Left:} the measured height field, spanning \SI {-6.0}{\meter } to \SI {-0.2}{\meter } --- correctly flat, and near-featureless under a shared shading scale. \textbf {Right:} after ridge-anchored reconstruction, spanning \SI {-13.1}{\meter } to \SI {+70.9}{\meter }. Hill \textsf {A} (\SI {5966}{\meter \squared }) is the right-bank treeline; hill \textsf {B} (\SI {2674}{\meter \squared }) is the cathedral. Both panels share one shading scale, so the left panel's flatness is the measurement, not a rendering choice}{figure.caption.13}{}}
-\newlabel{fig:paris-terrain@cref}{{[figure][3][]3}{[1][14][]15}{}{}{}}
-\@writefile{toc}{\contentsline {paragraph}{Thin vegetation reconstruction.}{15}{section*.17}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Water surface following terrain.}{15}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Far-field texture resolution.}{15}{section*.20}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.5}Corrective measures and their measured effect}{15}{subsection.11.5}\protected@file@percent }
-\newlabel{sec:remediation}{{11.5}{15}{Corrective measures and their measured effect}{subsection.11.5}{}}
-\newlabel{sec:remediation@cref}{{[subsection][5][11]11.5}{[1][15][]15}{}{}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces What each capture's horizon is made of. The gate at \SI {25}{\percent } separates Paris from every landform capture by a wide margin in both directions; it is a threshold on evidence the pipeline already computes, not a tuned constant.}}{16}{figure.caption.15}\protected@file@percent }
-\newlabel{fig:silhouette}{{4}{16}{What each capture's horizon is made of. The gate at \SI {25}{\percent } separates Paris from every landform capture by a wide margin in both directions; it is a threshold on evidence the pipeline already computes, not a tuned constant}{figure.caption.15}{}}
-\newlabel{fig:silhouette@cref}{{[figure][4][]4}{[1][14][]16}{}{}{}}
-\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Texture resolution against distance, log scale. The two captures are indistinguishable within \SI {25}{\meter }; beyond it Shark Fin degrades far faster, because a clifftop camera places most of its surface near the horizon where equirectangular compression is worst. Above roughly \SI {0.5}{\meter } per texel the ground reads as smeared.}}{16}{figure.caption.19}\protected@file@percent }
-\newlabel{fig:texel}{{5}{16}{Texture resolution against distance, log scale. The two captures are indistinguishable within \SI {25}{\meter }; beyond it Shark Fin degrades far faster, because a clifftop camera places most of its surface near the horizon where equirectangular compression is worst. Above roughly \SI {0.5}{\meter } per texel the ground reads as smeared}{figure.caption.19}{}}
-\newlabel{fig:texel@cref}{{[figure][5][]5}{[1][15][]16}{}{}{}}
-\@writefile{toc}{\contentsline {paragraph}{Caption plausibility requires conjunction.}{16}{section*.22}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Corrective measures, the premise each makes testable, and measured effect across captures. ``FP'' denotes false positives: correct content wrongly removed.}}{17}{table.caption.21}\protected@file@percent }
-\newlabel{tab:fixes}{{4}{17}{Corrective measures, the premise each makes testable, and measured effect across captures. ``FP'' denotes false positives: correct content wrongly removed}{table.caption.21}{}}
-\newlabel{tab:fixes@cref}{{[table][4][]4}{[1][16][]17}{}{}{}}
-\@writefile{toc}{\contentsline {paragraph}{Robust estimation must respect sampling density.}{17}{section*.23}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {11.6}Strengths and weaknesses}{17}{subsection.11.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Strengths.}{17}{section*.24}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Weaknesses.}{17}{section*.25}\protected@file@percent }
+\@writefile{lof}{\contentsline {figure}{\numberline {4}{\ignorespaces What each capture's horizon is made of. The gate at \SI {25}{\percent } separates Paris from every landform capture by a wide margin in both directions; it is a threshold on evidence the pipeline already computes, not a tuned constant.}}{18}{figure.caption.20}\protected@file@percent }
+\newlabel{fig:silhouette}{{4}{18}{What each capture's horizon is made of. The gate at \SI {25}{\percent } separates Paris from every landform capture by a wide margin in both directions; it is a threshold on evidence the pipeline already computes, not a tuned constant}{figure.caption.20}{}}
+\newlabel{fig:silhouette@cref}{{[figure][4][]4}{[1][17][]18}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Confident misclassification on texture.}{18}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Thin vegetation reconstruction.}{18}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Water surface following terrain.}{18}{section*.23}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Far-field texture resolution.}{18}{section*.25}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.5}Corrective measures and their measured effect}{18}{subsection.11.5}\protected@file@percent }
+\newlabel{sec:remediation}{{11.5}{18}{Corrective measures and their measured effect}{subsection.11.5}{}}
+\newlabel{sec:remediation@cref}{{[subsection][5][11]11.5}{[1][18][]18}{}{}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {5}{\ignorespaces Texture resolution against distance, log scale. The two captures are indistinguishable within \SI {25}{\meter }; beyond it Shark Fin degrades far faster, because a clifftop camera places most of its surface near the horizon where equirectangular compression is worst. Above roughly \SI {0.5}{\meter } per texel the ground reads as smeared.}}{19}{figure.caption.24}\protected@file@percent }
+\newlabel{fig:texel}{{5}{19}{Texture resolution against distance, log scale. The two captures are indistinguishable within \SI {25}{\meter }; beyond it Shark Fin degrades far faster, because a clifftop camera places most of its surface near the horizon where equirectangular compression is worst. Above roughly \SI {0.5}{\meter } per texel the ground reads as smeared}{figure.caption.24}{}}
+\newlabel{fig:texel@cref}{{[figure][5][]5}{[1][18][]19}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Caption plausibility requires conjunction.}{19}{section*.27}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Robust estimation must respect sampling density.}{19}{section*.28}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {11.6}Strengths and weaknesses}{19}{subsection.11.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Strengths.}{19}{section*.29}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Weaknesses.}{19}{section*.30}\protected@file@percent }
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Corrective measures, the premise each makes testable, and measured effect across captures. ``FP'' denotes false positives: correct content wrongly removed.}}{20}{table.caption.26}\protected@file@percent }
+\newlabel{tab:fixes}{{5}{20}{Corrective measures, the premise each makes testable, and measured effect across captures. ``FP'' denotes false positives: correct content wrongly removed}{table.caption.26}{}}
+\newlabel{tab:fixes@cref}{{[table][5][]5}{[1][19][]20}{}{}{}}
+\@writefile{toc}{\contentsline {paragraph}{Cost.}{20}{section*.31}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {12}Conclusions and Future Work}{20}{section.12}\protected@file@percent }
+\newlabel{sec:conclusions}{{12}{20}{Conclusions and Future Work}{section.12}{}}
+\newlabel{sec:conclusions@cref}{{[section][12][]12}{[1][20][]20}{}{}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.1}What we learned}{20}{subsection.12.1}\protected@file@percent }
 \citation{lee2024tree}
-\@writefile{toc}{\contentsline {paragraph}{Cost.}{18}{section*.26}\protected@file@percent }
-\@writefile{toc}{\contentsline {section}{\numberline {12}Conclusions and Future Work}{18}{section.12}\protected@file@percent }
-\newlabel{sec:conclusions}{{12}{18}{Conclusions and Future Work}{section.12}{}}
-\newlabel{sec:conclusions@cref}{{[section][12][]12}{[1][18][]18}{}{}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.1}What we learned}{18}{subsection.12.1}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.2}Future work}{18}{subsection.12.2}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Explicit scene classification.}{18}{section*.27}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Confidence propagation.}{18}{section*.28}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Better single-view reconstruction for thin structures.}{18}{section*.29}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Joint refinement.}{18}{section*.30}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Perceptual evaluation.}{18}{section*.31}\protected@file@percent }
 \bibstyle{plain}
 \bibdata{references}
 \bibcite{10.1145/3769047.3769053}{1}
 \bibcite{barnhart2020landlab}{2}
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.2}Future work}{21}{subsection.12.2}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Explicit scene classification.}{21}{section*.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Confidence propagation.}{21}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Better single-view reconstruction for thin structures.}{21}{section*.34}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Joint refinement.}{21}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Perceptual evaluation.}{21}{section*.36}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {12.3}Closing}{21}{subsection.12.3}\protected@file@percent }
 \bibcite{conde2022swin2srswinv2transformercompressed}{3}
 \bibcite{10.1145/2766975}{4}
 \bibcite{esser2024scalingrectifiedflowtransformers}{5}
@@ -227,7 +286,6 @@
 \bibcite{huang2023open}{9}
 \bibcite{huang2023tag2text}{10}
 \bibcite{dreamcube_arxiv}{11}
-\@writefile{toc}{\contentsline {subsection}{\numberline {12.3}Closing}{19}{subsection.12.3}\protected@file@percent }
 \bibcite{dreamcube}{12}
 \bibcite{huang2025spar3dstablepointawarereconstruction}{13}
 \bibcite{10.1145/1572614.1572623}{14}
@@ -239,25 +297,27 @@
 \bibcite{li2022blipbootstrappinglanguageimagepretraining}{20}
 \bibcite{li2022mat}{21}
 \bibcite{liang2025luxdit}{22}
-\bibcite{lin2025depth3recoveringvisual}{23}
-\bibcite{lin2025dap}{24}
-\bibcite{liu2024groundingdino}{25}
-\bibcite{Luo2024IntrinsicDiffusion}{26}
-\bibcite{neyret:inria-00537511}{27}
-\bibcite{paliwal2024panodreamer}{28}
-\bibcite{radford2021learningtransferablevisual}{29}
-\bibcite{ravi2024sam2segmentimages}{30}
-\bibcite{Rombach_2022_CVPR}{31}
-\bibcite{schnepf2026sphericaldreamer}{32}
-\bibcite{suvorov2021resolution}{33}
-\bibcite{sam3dteam2025sam3d3dfyimages}{34}
-\bibcite{wu360anything}{35}
-\bibcite{xiang2025trellis2}{36}
-\bibcite{DBLP:journals/corr/abs-2105-15203}{37}
-\bibcite{worldgen2025ziyangxie}{38}
-\bibcite{yang2024layerpano3d}{39}
-\bibcite{yu2023inpaint}{40}
-\bibcite{zhang2023recognize}{41}
-\bibcite{zhao2026objectclear}{42}
-\bibcite{zheng2024birefnet}{43}
-\gdef \@abspage@last{22}
+\bibcite{lightricks2026ltx2}{23}
+\bibcite{lin2025depth3recoveringvisual}{24}
+\bibcite{lin2025dap}{25}
+\bibcite{liu2024groundingdino}{26}
+\bibcite{Luo2024IntrinsicDiffusion}{27}
+\bibcite{neyret:inria-00537511}{28}
+\bibcite{oquab2024dinov2}{29}
+\bibcite{paliwal2024panodreamer}{30}
+\bibcite{radford2021learningtransferablevisual}{31}
+\bibcite{ravi2024sam2segmentimages}{32}
+\bibcite{Rombach_2022_CVPR}{33}
+\bibcite{schnepf2026sphericaldreamer}{34}
+\bibcite{suvorov2021resolution}{35}
+\bibcite{sam3dteam2025sam3d3dfyimages}{36}
+\bibcite{wu360anything}{37}
+\bibcite{xiang2025trellis2}{38}
+\bibcite{DBLP:journals/corr/abs-2105-15203}{39}
+\bibcite{worldgen2025ziyangxie}{40}
+\bibcite{yang2024layerpano3d}{41}
+\bibcite{yu2023inpaint}{42}
+\bibcite{zhang2023recognize}{43}
+\bibcite{zhao2026objectclear}{44}
+\bibcite{zheng2024birefnet}{45}
+\gdef \@abspage@last{25}

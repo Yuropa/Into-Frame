@@ -2,53 +2,76 @@
 
 \bibitem{10.1145/3769047.3769053}
 Danial Barazandeh and Gabriel Zachmann.
-\newblock Earthbender: An interactive system for stylistic heightmap generation using a guided diffusion model.
-\newblock In {\em Proceedings of the 2025 18th ACM SIGGRAPH Conference on Motion, Interaction, and Games}, MIG '25, New York, NY, USA, 2025. Association for Computing Machinery.
+\newblock Earthbender: An interactive system for stylistic heightmap generation
+  using a guided diffusion model.
+\newblock In {\em Proceedings of the 2025 18th ACM SIGGRAPH Conference on
+  Motion, Interaction, and Games}, MIG '25, New York, NY, USA, 2025.
+  Association for Computing Machinery.
 
 \bibitem{barnhart2020landlab}
-Katherine~R Barnhart, Eric~WH Hutton, Gregory~E Tucker, Nicole~M Gasparini, Erkan Istanbulluoglu, Daniel~EJ Hobley, Nathan~J Lyons, Margaux Mouchene, Sai~Siddhartha Nudurupati, Jordan~M Adams, et~al.
+Katherine~R Barnhart, Eric~WH Hutton, Gregory~E Tucker, Nicole~M Gasparini,
+  Erkan Istanbulluoglu, Daniel~EJ Hobley, Nathan~J Lyons, Margaux Mouchene,
+  Sai~Siddhartha Nudurupati, Jordan~M Adams, et~al.
 \newblock Landlab v2. 0: a software package for earth surface dynamics.
 \newblock {\em Earth Surface Dynamics}, 8(2):379--397, 2020.
 
 \bibitem{conde2022swin2srswinv2transformercompressed}
 Marcos~V. Conde, Ui-Jin Choi, Maxime Burchi, and Radu Timofte.
-\newblock Swin2sr: Swinv2 transformer for compressed image super-resolution and restoration.
-\newblock In {\em Computer Vision -- ECCV 2022 Workshops}, volume 13802 of {\em Lecture Notes in Computer Science}, pages 669--687. Springer, 2022.
+\newblock Swin2sr: Swinv2 transformer for compressed image super-resolution and
+  restoration.
+\newblock In {\em Computer Vision -- ECCV 2022 Workshops}, volume 13802 of {\em
+  Lecture Notes in Computer Science}, pages 669--687. Springer, 2022.
 
 \bibitem{10.1145/2766975}
-Arnaud Emilien, Ulysse Vimont, Marie-Paule Cani, Pierre Poulin, and Bedrich Benes.
-\newblock Worldbrush: interactive example-based synthesis of procedural virtual worlds.
+Arnaud Emilien, Ulysse Vimont, Marie-Paule Cani, Pierre Poulin, and Bedrich
+  Benes.
+\newblock Worldbrush: interactive example-based synthesis of procedural virtual
+  worlds.
 \newblock {\em ACM Trans. Graph.}, 34(4), July 2015.
 
 \bibitem{esser2024scalingrectifiedflowtransformers}
-Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas M{\"u}ller, Harry Saini, Yam Levi, Dominik Lorenz, Axel Sauer, Frederic Boesel, Dustin Podell, Tim Dockhorn, Zion English, and Robin Rombach.
-\newblock Scaling rectified flow transformers for high-resolution image synthesis.
-\newblock In {\em Proceedings of the 41st International Conference on Machine Learning (ICML)}, volume 235 of {\em Proceedings of Machine Learning Research}, pages 12606--12633. PMLR, 2024.
+Patrick Esser, Sumith Kulal, Andreas Blattmann, Rahim Entezari, Jonas
+  M{\"u}ller, Harry Saini, Yam Levi, Dominik Lorenz, Axel Sauer, Frederic
+  Boesel, Dustin Podell, Tim Dockhorn, Zion English, and Robin Rombach.
+\newblock Scaling rectified flow transformers for high-resolution image
+  synthesis.
+\newblock In {\em Proceedings of the 41st International Conference on Machine
+  Learning (ICML)}, volume 235 of {\em Proceedings of Machine Learning
+  Research}, pages 12606--12633. PMLR, 2024.
 
 \bibitem{genevaux:hal-01257198}
-Jean-David G{\'e}nevaux, Eric Galin, Adrien Peytavie, Eric Gu{\'e}rin, Cyril Briquet, Fran{\c c}ois Grosbellet, and Bedrich Benes.
+Jean-David G{\'e}nevaux, Eric Galin, Adrien Peytavie, Eric Gu{\'e}rin, Cyril
+  Briquet, Fran{\c c}ois Grosbellet, and Bedrich Benes.
 \newblock {Terrain Modelling from Feature Primitives}.
 \newblock {\em {Computer Graphics Forum}}, 34(6):198--210, May 2015.
 
 \bibitem{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8}
 Charles~J. Geyer and Jesper Møller.
-\newblock Simulation procedures and likelihood inference for spatial point processes.
+\newblock Simulation procedures and likelihood inference for spatial point
+  processes.
 \newblock {\em Scandinavian Journal of Statistics}, 21(4):359--373, 1994.
 
 \bibitem{hobley2017creative}
-Daniel~EJ Hobley, Jordan~M Adams, Sai~Siddhartha Nudurupati, Eric~WH Hutton, Nicole~M Gasparini, Erkan Istanbulluoglu, and Gregory~E Tucker.
-\newblock Creative computing with landlab: an open-source toolkit for building, coupling, and exploring two-dimensional numerical models of earth-surface dynamics.
+Daniel~EJ Hobley, Jordan~M Adams, Sai~Siddhartha Nudurupati, Eric~WH Hutton,
+  Nicole~M Gasparini, Erkan Istanbulluoglu, and Gregory~E Tucker.
+\newblock Creative computing with landlab: an open-source toolkit for building,
+  coupling, and exploring two-dimensional numerical models of earth-surface
+  dynamics.
 \newblock {\em Earth Surface Dynamics}, 5(1):21--46, 2017.
 
 \bibitem{huang2023open}
-Xinyu Huang, Yi-Jie Huang, Youcai Zhang, Weiwei Tian, Rui Feng, Yuejie Zhang, Yanchun Xie, Yaqian Li, and Lei Zhang.
+Xinyu Huang, Yi-Jie Huang, Youcai Zhang, Weiwei Tian, Rui Feng, Yuejie Zhang,
+  Yanchun Xie, Yaqian Li, and Lei Zhang.
 \newblock Open-set image tagging with multi-grained text supervision.
-\newblock In {\em Proceedings of the 33rd ACM International Conference on Multimedia (MM)}, pages 4117--4126. ACM, 2025.
+\newblock In {\em Proceedings of the 33rd ACM International Conference on
+  Multimedia (MM)}, pages 4117--4126. ACM, 2025.
 
 \bibitem{huang2023tag2text}
-Xinyu Huang, Youcai Zhang, Jinyu Ma, Weiwei Tian, Rui Feng, Yuejie Zhang, Yaqian Li, Yandong Guo, and Lei Zhang.
+Xinyu Huang, Youcai Zhang, Jinyu Ma, Weiwei Tian, Rui Feng, Yuejie Zhang,
+  Yaqian Li, Yandong Guo, and Lei Zhang.
 \newblock Tag2text: Guiding vision-language model via image tagging.
-\newblock In {\em The Twelfth International Conference on Learning Representations (ICLR)}, 2024.
+\newblock In {\em The Twelfth International Conference on Learning
+  Representations (ICLR)}, 2024.
 
 \bibitem{dreamcube_arxiv}
 Yukun Huang, Yanning Zhou, Jianan Wang, Kaiyi Huang, and Xihui Liu.
@@ -57,21 +80,31 @@ Yukun Huang, Yanning Zhou, Jianan Wang, Kaiyi Huang, and Xihui Liu.
 
 \bibitem{dreamcube}
 Yukun Huang, Yanning Zhou, Jianan Wang, Kaiyi Huang, and Xihui Liu.
-\newblock {DreamCube: RGB-D Panorama Generation via Multi-plane Synchronization}.
-\newblock In {\em Proceedings of the IEEE/CVF International Conference on Computer Vision (ICCV)}, pages 24922--24932, October 2025.
+\newblock {DreamCube: RGB-D Panorama Generation via Multi-plane
+  Synchronization}.
+\newblock In {\em Proceedings of the IEEE/CVF International Conference on
+  Computer Vision (ICCV)}, pages 24922--24932, October 2025.
 
 \bibitem{huang2025spar3dstablepointawarereconstruction}
 Zixuan Huang, Mark Boss, Aaryaman Vasishta, James~M. Rehg, and Varun Jampani.
-\newblock {SPAR3D}: Stable point-aware reconstruction of 3d objects from single images.
-\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 16860--16870, 2025.
+\newblock {SPAR3D}: Stable point-aware reconstruction of 3d objects from single
+  images.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 16860--16870, 2025.
 
 \bibitem{10.1145/1572614.1572623}
-T.~Hurtut, P.-E. Landes, J.~Thollot, Y.~Gousseau, R.~Drouillhet, and J.-F. Coeurjolly.
+T.~Hurtut, P.-E. Landes, J.~Thollot, Y.~Gousseau, R.~Drouillhet, and J.-F.
+  Coeurjolly.
 \newblock Appearance-guided synthesis of element arrangements by example.
-\newblock In {\em Proceedings of the 7th International Symposium on Non-Photorealistic Animation and Rendering}, NPAR '09, page 51–60, New York, NY, USA, 2009. Association for Computing Machinery.
+\newblock In {\em Proceedings of the 7th International Symposium on
+  Non-Photorealistic Animation and Rendering}, NPAR '09, page 51–60, New
+  York, NY, USA, 2009. Association for Computing Machinery.
 
 \bibitem{Hutton_landlab_2020}
-Eric Hutton, Katy Barnhart, Dan Hobley, Greg Tucker, Sai Nudurupati, Jordan Adams, Nicole Gasparini, Charlie Shobe, Ronda Strauch, Jenny Knuth, Margaux Mouchene, Nathan Lyons, David Litwin, Rachel Glade, {Giuseppecipolla95}, Amanda Manaster, Langston Abby, Kristen Thyng, and Francis Rengers.
+Eric Hutton, Katy Barnhart, Dan Hobley, Greg Tucker, Sai Nudurupati, Jordan
+  Adams, Nicole Gasparini, Charlie Shobe, Ronda Strauch, Jenny Knuth, Margaux
+  Mouchene, Nathan Lyons, David Litwin, Rachel Glade, {Giuseppecipolla95},
+  Amanda Manaster, Langston Abby, Kristen Thyng, and Francis Rengers.
 \newblock {landlab}, 4 2020.
 
 \bibitem{jain:hal-05617061}
@@ -82,106 +115,173 @@ Aryamaan Jain, James Gain, and Guillaume Cordonnier.
 \bibitem{jin2026sonoworld}
 Derong Jin, Xiyi Chen, Ming~C. Lin, and Ruohan Gao.
 \newblock Sonoworld: From one image to a 3d audio-visual scene.
-\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, 2026.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, 2026.
 
 \bibitem{kalischek2025cubediffrepurposingdiffusionbasedimage}
-Nikolai Kalischek, Michael Oechsle, Fabian Manhardt, Philipp Henzler, Konrad Schindler, and Federico Tombari.
-\newblock Cubediff: Repurposing diffusion-based image models for panorama generation.
-\newblock In {\em The Thirteenth International Conference on Learning Representations (ICLR)}, 2025.
+Nikolai Kalischek, Michael Oechsle, Fabian Manhardt, Philipp Henzler, Konrad
+  Schindler, and Federico Tombari.
+\newblock Cubediff: Repurposing diffusion-based image models for panorama
+  generation.
+\newblock In {\em The Thirteenth International Conference on Learning
+  Representations (ICLR)}, 2025.
 
 \bibitem{lee2024tree}
-Jae~Joong Lee, Bosheng Li, Sara Beery, Jonathan Huang, Songlin Fei, Raymond~A Yeh, and Bedrich Benes.
-\newblock Tree-d fusion: Simulation-ready tree dataset from single images with diffusion priors.
-\newblock In {\em European Conference on Computer Vision}, pages 439--460. Springer, 2024.
+Jae~Joong Lee, Bosheng Li, Sara Beery, Jonathan Huang, Songlin Fei, Raymond~A
+  Yeh, and Bedrich Benes.
+\newblock Tree-d fusion: Simulation-ready tree dataset from single images with
+  diffusion priors.
+\newblock In {\em European Conference on Computer Vision}, pages 439--460.
+  Springer, 2024.
 
 \bibitem{li2022blipbootstrappinglanguageimagepretraining}
 Junnan Li, Dongxu Li, Caiming Xiong, and Steven C.~H. Hoi.
-\newblock {BLIP}: Bootstrapping language-image pre-training for unified vision-language understanding and generation.
-\newblock In {\em Proceedings of the 39th International Conference on Machine Learning (ICML)}, volume 162 of {\em Proceedings of Machine Learning Research}, pages 12888--12900. PMLR, 2022.
+\newblock {BLIP}: Bootstrapping language-image pre-training for unified
+  vision-language understanding and generation.
+\newblock In {\em Proceedings of the 39th International Conference on Machine
+  Learning (ICML)}, volume 162 of {\em Proceedings of Machine Learning
+  Research}, pages 12888--12900. PMLR, 2022.
 
 \bibitem{li2022mat}
 Wenbo Li, Zhe Lin, Kun Zhou, Lu~Qi, Yi~Wang, and Jiaya Jia.
 \newblock Mat: Mask-aware transformer for large hole image inpainting.
-\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition}, 2022.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition}, 2022.
 
 \bibitem{liang2025luxdit}
-Ruofan Liang, Kai He, Zan Gojcic, Igor Gilitschenski, Sanja Fidler, Nandita Vijaykumar, and Zian Wang.
+Ruofan Liang, Kai He, Zan Gojcic, Igor Gilitschenski, Sanja Fidler, Nandita
+  Vijaykumar, and Zian Wang.
 \newblock Luxdit: Lighting estimation with video diffusion transformer.
-\newblock In {\em Advances in Neural Information Processing Systems 38 (NeurIPS)}, 2025.
+\newblock In {\em Advances in Neural Information Processing Systems 38
+  (NeurIPS)}, 2025.
+
+\bibitem{lightricks2026ltx2}
+{Lightricks}.
+\newblock {LTX-2}: Open-weights synchronised video and audio generation.
+\newblock Open-weights model release, 2026.
+\newblock Model release with an accompanying technical report; no peer-reviewed
+  publication. This work uses the LTX-2.3 22B checkpoint.
 
 \bibitem{lin2025depth3recoveringvisual}
-Haotong Lin, Sili Chen, Junhao Liew, Donny~Y. Chen, Zhenyu Li, Guang Shi, Jiashi Feng, and Bingyi Kang.
+Haotong Lin, Sili Chen, Junhao Liew, Donny~Y. Chen, Zhenyu Li, Guang Shi,
+  Jiashi Feng, and Bingyi Kang.
 \newblock Depth anything 3: Recovering the visual space from any views, 2025.
 
 \bibitem{lin2025dap}
-Xin Lin, Meixi Song, Dizhe Zhang, Wenxuan Lu, Haodong Li, Bo~Du, Ming-Hsuan Yang, Truong Nguyen, and Lu~Qi.
-\newblock Depth any panoramas: A foundation model for panoramic depth estimation.
+Xin Lin, Meixi Song, Dizhe Zhang, Wenxuan Lu, Haodong Li, Bo~Du, Ming-Hsuan
+  Yang, Truong Nguyen, and Lu~Qi.
+\newblock Depth any panoramas: A foundation model for panoramic depth
+  estimation.
 \newblock {\em arXiv}, 2025.
 
 \bibitem{liu2024groundingdino}
-Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Zhang, Jie Yang, Qing Jiang, Chunyuan Li, Jianwei Yang, Hang Su, Jun Zhu, and Lei Zhang.
-\newblock Grounding {DINO}: Marrying {DINO} with grounded pre-training for open-set object detection.
-\newblock In {\em Computer Vision -- ECCV 2024}, volume 15105 of {\em Lecture Notes in Computer Science}, pages 38--55. Springer, 2024.
+Shilong Liu, Zhaoyang Zeng, Tianhe Ren, Feng Li, Hao Zhang, Jie Yang, Qing
+  Jiang, Chunyuan Li, Jianwei Yang, Hang Su, Jun Zhu, and Lei Zhang.
+\newblock Grounding {DINO}: Marrying {DINO} with grounded pre-training for
+  open-set object detection.
+\newblock In {\em Computer Vision -- ECCV 2024}, volume 15105 of {\em Lecture
+  Notes in Computer Science}, pages 38--55. Springer, 2024.
 
 \bibitem{Luo2024IntrinsicDiffusion}
-Jundan Luo, Duygu Ceylan, Jae~Shin Yoon, Nanxuan Zhao, Julien Philip, Anna Fr{\"u}hst{\"u}ck, Wenbin Li, Christian Richardt, and Tuanfeng~Y. Wang.
-\newblock {IntrinsicDiffusion}: Joint intrinsic layers from latent diffusion models.
+Jundan Luo, Duygu Ceylan, Jae~Shin Yoon, Nanxuan Zhao, Julien Philip, Anna
+  Fr{\"u}hst{\"u}ck, Wenbin Li, Christian Richardt, and Tuanfeng~Y. Wang.
+\newblock {IntrinsicDiffusion}: Joint intrinsic layers from latent diffusion
+  models.
 \newblock In {\em SIGGRAPH 2024 Conference Papers}, 2024.
 
 \bibitem{neyret:inria-00537511}
 Fabrice Neyret and Marie-Paule Cani.
 \newblock {Pattern-Based Texturing Revisited}.
-\newblock In {\em {26th Annual Conference on Computer Graphics and interactive techniques (SIGGRAPH '99)}}, pages 235--242, Los Angeles, United States, August 1999. {ACM SIGGRAPH}.
+\newblock In {\em {26th Annual Conference on Computer Graphics and interactive
+  techniques (SIGGRAPH '99)}}, pages 235--242, Los Angeles, United States,
+  August 1999. {ACM SIGGRAPH}.
+
+\bibitem{oquab2024dinov2}
+Maxime Oquab, Timoth{\'e}e Darcet, Th{\'e}o Moutakanni, Huy~V. Vo, Marc
+  Szafraniec, Vasil Khalidov, Pierre Fernandez, Daniel Haziza, Francisco Massa,
+  Alaaeldin El-Nouby, Mido Assran, Nicolas Ballas, Wojciech Galuba, Russell
+  Howes, Po-Yao Huang, Shang-Wen Li, Ishan Misra, Michael Rabbat, Vasu Sharma,
+  Gabriel Synnaeve, Hu~Xu, Herv{\'e} J{\'e}gou, Julien Mairal, Patrick Labatut,
+  Armand Joulin, and Piotr Bojanowski.
+\newblock {DINOv2}: Learning robust visual features without supervision.
+\newblock {\em Transactions on Machine Learning Research}, 2024, 2024.
 
 \bibitem{paliwal2024panodreamer}
 Avinash Paliwal, Xilong Zhou, Andrii Tsarov, and Nima Kalantari.
-\newblock Panodreamer: Optimization-based single image to 360° 3d scene with diffusion.
-\newblock In {\em Proceedings of the SIGGRAPH Asia 2025 Conference Papers}, 2025.
+\newblock Panodreamer: Optimization-based single image to 360° 3d scene with
+  diffusion.
+\newblock In {\em Proceedings of the SIGGRAPH Asia 2025 Conference Papers},
+  2025.
 
 \bibitem{radford2021learningtransferablevisual}
-Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh, Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark, Gretchen Krueger, and Ilya Sutskever.
-\newblock Learning transferable visual models from natural language supervision.
-\newblock In {\em Proceedings of the 38th International Conference on Machine Learning}, volume 139 of {\em Proceedings of Machine Learning Research}, pages 8748--8763. PMLR, 2021.
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh,
+  Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark,
+  Gretchen Krueger, and Ilya Sutskever.
+\newblock Learning transferable visual models from natural language
+  supervision.
+\newblock In {\em Proceedings of the 38th International Conference on Machine
+  Learning}, volume 139 of {\em Proceedings of Machine Learning Research},
+  pages 8748--8763. PMLR, 2021.
 
 \bibitem{ravi2024sam2segmentimages}
-Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu, Chaitanya Ryali, Tengyu Ma, Haitham Khedr, Roman R{\"a}dle, Chlo{\'e} Rolland, Laura Gustafson, Eric Mintun, Junting Pan, Kalyan~Vasudev Alwala, Nicolas Carion, Chao-Yuan Wu, Ross Girshick, Piotr Doll{\'a}r, and Christoph Feichtenhofer.
+Nikhila Ravi, Valentin Gabeur, Yuan-Ting Hu, Ronghang Hu, Chaitanya Ryali,
+  Tengyu Ma, Haitham Khedr, Roman R{\"a}dle, Chlo{\'e} Rolland, Laura
+  Gustafson, Eric Mintun, Junting Pan, Kalyan~Vasudev Alwala, Nicolas Carion,
+  Chao-Yuan Wu, Ross Girshick, Piotr Doll{\'a}r, and Christoph Feichtenhofer.
 \newblock {SAM} 2: Segment anything in images and videos.
-\newblock In {\em The Thirteenth International Conference on Learning Representations (ICLR)}, 2025.
+\newblock In {\em The Thirteenth International Conference on Learning
+  Representations (ICLR)}, 2025.
 
 \bibitem{Rombach_2022_CVPR}
-Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Bj\"orn Ommer.
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick Esser, and Bj\"orn
+  Ommer.
 \newblock High-resolution image synthesis with latent diffusion models.
-\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR)}, pages 10684--10695, June 2022.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR)}, pages 10684--10695, June 2022.
 
 \bibitem{schnepf2026sphericaldreamer}
 Antoine Schnepf, Karim Kassab, Flavian Vasile, and Andrew Comport.
-\newblock {SphericalDreamer: Generating Navigable Immersive 3D Worlds with Panorama Fusion}.
-\newblock In {\em Forty-third International Conference on Machine Learning}, 2026.
+\newblock {SphericalDreamer: Generating Navigable Immersive 3D Worlds with
+  Panorama Fusion}.
+\newblock In {\em Forty-third International Conference on Machine Learning},
+  2026.
 
 \bibitem{suvorov2021resolution}
-Roman Suvorov, Elizaveta Logacheva, Anton Mashikhin, Anastasia Remizova, Arsenii Ashukha, Aleksei Silvestrov, Naejin Kong, Harshith Goka, Kiwoong Park, and Victor Lempitsky.
+Roman Suvorov, Elizaveta Logacheva, Anton Mashikhin, Anastasia Remizova,
+  Arsenii Ashukha, Aleksei Silvestrov, Naejin Kong, Harshith Goka, Kiwoong
+  Park, and Victor Lempitsky.
 \newblock Resolution-robust large mask inpainting with fourier convolutions.
-\newblock In {\em Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)}, pages 3172--3182, 2022.
+\newblock In {\em Proceedings of the IEEE/CVF Winter Conference on Applications
+  of Computer Vision (WACV)}, pages 3172--3182, 2022.
 
 \bibitem{sam3dteam2025sam3d3dfyimages}
-SAM~3D Team, Xingyu Chen, Fu-Jen Chu, Pierre Gleize, Kevin~J Liang, Alexander Sax, Hao Tang, Weiyao Wang, Michelle Guo, Thibaut Hardin, Xiang Li, Aohan Lin, Jiawei Liu, Ziqi Ma, Anushka Sagar, Bowen Song, Xiaodong Wang, Jianing Yang, Bowen Zhang, Piotr Dollár, Georgia Gkioxari, Matt Feiszli, and Jitendra Malik.
+SAM~3D Team, Xingyu Chen, Fu-Jen Chu, Pierre Gleize, Kevin~J Liang, Alexander
+  Sax, Hao Tang, Weiyao Wang, Michelle Guo, Thibaut Hardin, Xiang Li, Aohan
+  Lin, Jiawei Liu, Ziqi Ma, Anushka Sagar, Bowen Song, Xiaodong Wang, Jianing
+  Yang, Bowen Zhang, Piotr Dollár, Georgia Gkioxari, Matt Feiszli, and
+  Jitendra Malik.
 \newblock Sam 3d: 3dfy anything in images.
 \newblock 2025.
 
 \bibitem{wu360anything}
-Ziyi Wu, Daniel Watson, Andrea Tagliasacchi, David~J. Fleet, Marcus~A. Brubaker, and Saurabh Saxena.
+Ziyi Wu, Daniel Watson, Andrea Tagliasacchi, David~J. Fleet, Marcus~A.
+  Brubaker, and Saurabh Saxena.
 \newblock {360Anything}: Geometry-free lifting of images and videos to 360°.
 \newblock {\em arXiv}, 2026.
 
 \bibitem{xiang2025trellis2}
-Jianfeng Xiang, Xiaoxue Chen, Sicheng Xu, Ruicheng Wang, Zelong Lv, Yu~Deng, Hongyuan Zhu, Yue Dong, Hao Zhao, Nicholas~Jing Yuan, and Jiaolong Yang.
+Jianfeng Xiang, Xiaoxue Chen, Sicheng Xu, Ruicheng Wang, Zelong Lv, Yu~Deng,
+  Hongyuan Zhu, Yue Dong, Hao Zhao, Nicholas~Jing Yuan, and Jiaolong Yang.
 \newblock Native and compact structured latents for 3d generation.
 \newblock {\em Tech report}, 2025.
 
 \bibitem{DBLP:journals/corr/abs-2105-15203}
-Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar, Jos{\'e}~M. {\'A}lvarez, and Ping Luo.
-\newblock Segformer: Simple and efficient design for semantic segmentation with transformers.
-\newblock In {\em Advances in Neural Information Processing Systems 34 (NeurIPS)}, pages 12077--12090, 2021.
+Enze Xie, Wenhai Wang, Zhiding Yu, Anima Anandkumar, Jos{\'e}~M. {\'A}lvarez,
+  and Ping Luo.
+\newblock Segformer: Simple and efficient design for semantic segmentation with
+  transformers.
+\newblock In {\em Advances in Neural Information Processing Systems 34
+  (NeurIPS)}, pages 12077--12090, 2021.
 
 \bibitem{worldgen2025ziyangxie}
 Ziyang Xie.
@@ -189,28 +289,36 @@ Ziyang Xie.
 \newblock \url{https://github.com/ZiYang-xie/WorldGen}, 2025.
 
 \bibitem{yang2024layerpano3d}
-Shuai Yang, Jing Tan, Mengchen Zhang, Tong Wu, Gordon Wetzstein, Ziwei Liu, and Dahua Lin.
-\newblock Layerpano3d: Layered 3d panorama for hyper-immersive scene generation.
+Shuai Yang, Jing Tan, Mengchen Zhang, Tong Wu, Gordon Wetzstein, Ziwei Liu, and
+  Dahua Lin.
+\newblock Layerpano3d: Layered 3d panorama for hyper-immersive scene
+  generation.
 \newblock In {\em ACM SIGGRAPH 2025 Conference Papers}. ACM, 2025.
 
 \bibitem{yu2023inpaint}
-Tao Yu, Runseng Feng, Ruoyu Feng, Jinming Liu, Xin Jin, Wenjun Zeng, and Zhibo Chen.
+Tao Yu, Runseng Feng, Ruoyu Feng, Jinming Liu, Xin Jin, Wenjun Zeng, and Zhibo
+  Chen.
 \newblock Inpaint anything: Segment anything meets image inpainting.
 \newblock {\em arXiv preprint arXiv:2304.06790}, 2023.
 
 \bibitem{zhang2023recognize}
-Youcai Zhang, Xinyu Huang, Jinyu Ma, Zhaoyang Li, Zhaochuan Luo, Yanchun Xie, Yuzhuo Qin, Tong Luo, Yaqian Li, Shilong Liu, Yandong Guo, and Lei Zhang.
+Youcai Zhang, Xinyu Huang, Jinyu Ma, Zhaoyang Li, Zhaochuan Luo, Yanchun Xie,
+  Yuzhuo Qin, Tong Luo, Yaqian Li, Shilong Liu, Yandong Guo, and Lei Zhang.
 \newblock Recognize anything: A strong image tagging model.
-\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR) Workshops}, pages 1724--1732, 2024.
+\newblock In {\em Proceedings of the IEEE/CVF Conference on Computer Vision and
+  Pattern Recognition (CVPR) Workshops}, pages 1724--1732, 2024.
 
 \bibitem{zhao2026objectclear}
 Jixin Zhao, Zhouxia Wang, Peiqing Yang, and Shangchen Zhou.
-\newblock Precise object and effect removal with adaptive target-aware attention.
+\newblock Precise object and effect removal with adaptive target-aware
+  attention.
 \newblock In {\em CVPR}, 2026.
 
 \bibitem{zheng2024birefnet}
-Peng Zheng, Dehong Gao, Deng-Ping Fan, Li~Liu, Jorma Laaksonen, Wanli Ouyang, and Nicu Sebe.
-\newblock Bilateral reference for high-resolution dichotomous image segmentation.
+Peng Zheng, Dehong Gao, Deng-Ping Fan, Li~Liu, Jorma Laaksonen, Wanli Ouyang,
+  and Nicu Sebe.
+\newblock Bilateral reference for high-resolution dichotomous image
+  segmentation.
 \newblock {\em CAAI Artificial Intelligence Research}, 3:9150038, 2024.
 
 \end{thebibliography}

@@ -3,78 +3,91 @@
 \label{sec:overview}
 % =============================================================================
 
-\begin{figure}[t]
+\subsection{Design principle: role-specialized decomposition}
+
+The organizing commitment of Into Frame is that a scene is not one thing. Ground,
+discrete objects, ground cover, water and sky differ in how they must be
+reconstructed, how they are represented, how they are textured, and how they
+behave at runtime. Forcing them through a single representation means either
+accepting the limitations of that representation or developing a more general one,
+and the latter was outside the scope of this project.
+
+\begin{figure}[htbp]
   \centering
-  % Wider than the text block: the diagram bleeds 0.9cm into each margin (which
-  % are 2.4cm) so the stage labels stay legible. Change the 18cm to \linewidth
+  % Wider than the text block: the diagram bleeds 1.4cm into each margin (which
+  % are 2.4cm) so the stage labels stay legible. Change the 19cm to \linewidth
   % to keep it strictly inside the text block.
-  \makebox[\linewidth][c]{\resizebox{18cm}{!}{\input{figures/pipeline-overview}}}
-  \caption{The pipeline decomposes a single image into five tracks with different
+  \makebox[\linewidth][c]{\resizebox{19cm}{!}{\input{figures/pipeline-overview}}}
+  \caption{The pipeline decomposes a single image into six tracks with different
   physical roles. Solid arrows carry geometry, dashed arrows carry semantics.
   The three panorama variants at the left are maintained deliberately: geometry is
-  derived from the object-removed panorama, semantics from the original.}
+  derived from the cleaned panorama, semantics from the original.}
   \label{fig:pipeline}
 \end{figure}
 
-\subsection{Design principle: role-specialised decomposition}
+\Cref{fig:pipeline} shows the resulting structure. The pipeline begins by building
+three panoramic representations of the scene, each of which serves a different
+consumer downstream:
 
-The organising commitment of Into Frame is that a scene is not one thing. Ground,
-discrete objects, ground cover, water and sky differ in how they must be
-reconstructed, how they are represented, how they are textured, and how they
-behave at runtime. Forcing them through one representation means accepting the
-weakest common denominator.
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Original Panorama.] A synthetic equirectangular panorama generated from the
+  input photograph by WorldGen~\cite{worldgen2025ziyangxie}, with
+  FLUX~\cite{esser2024scalingrectifiedflowtransformers} outpainting,
+  CubeDiff~\cite{kalischek2025cubediffrepurposingdiffusionbasedimage} and
+  DreamCube~\cite{dreamcube} available as alternative backends. This is the
+  baseline scene representation, and the one every semantic stage reads from,
+  because it is the only variant in which the real objects are still present.
+  \item[Cleaned Panorama.] The original panorama processed with
+  ObjectClear~\cite{zhao2026objectclear} to remove foreground objects, followed by
+  a FLUX LoRA correction pass that restores equirectangular consistency at the
+  seams. This gives an unobstructed view of the environment, better suited to
+  terrain reconstruction, where occluders would otherwise punch holes in the ground.
+  \item[Sky-Inpainted Panorama.] The region above the horizon, completed with
+  FLUX~\cite{esser2024scalingrectifiedflowtransformers} inpainting where objects
+  were removed, producing a seamless sky used as both skybox and image-based
+  lighting source.
+\end{description}
 
-\Cref{fig:pipeline} shows the resulting structure. Concretely, the pipeline
-maintains five tracks:
+These three panoramas are then taken in concert to generate the rest of the scene:
 
 \begin{description}[leftmargin=1.2em,style=nextline]
   \item[Terrain.] A single continuous height field, meshed with variable density,
   carrying collision. Reconstructed from calibrated panoramic depth and completed
-  by a constrained solve.
-  \item[Objects.] Discrete entities detected, classified, clustered by visual
-  similarity, and reconstructed once per (class, appearance) group, then instanced
-  at every detection's position.
-  \item[Ground cover.] Populations too numerous to place individually as
-  reconstructions, scattered by density over a mask derived from semantics and
-  colour.
-  \item[Water.] Regions typed as water, extracted as a separate levelled surface
+  by a terrain constraint solver.
+  \item[Water.] Regions typed as water, extracted as a separate leveled surface
   with an animated shader.
-  \item[Sky.] The panorama above the horizon, inpainted where objects were removed,
-  used as both skybox and image-based lighting source.
+  \item[Objects.] Discrete entities detected, classified, clustered by visual
+  similarity, and reconstructed across the scene.
+  \item[Ground cover.] Populations too numerous to place individually as
+  reconstructions, scattered by density over a mask derived from the semantics and
+  color of the panorama.
+  \item[Motion.] Per-object animation, guided by a generated video of the scene and
+  used to decide which categories are rigid bodies and which need rigging.
+  \item[Sky.] The panorama above the horizon, used as both skybox and image-based
+  lighting source.
 \end{description}
-
-\subsection{Execution model}
-
-The pipeline comprises 40 active stages. Each declares typed inputs and outputs
-against a shared \emph{context}, and each may report whether its output already
-exists. When it does, the stage is skipped. A stage that runs marks everything
-downstream dirty, so a rerun is a linear cascade from the earliest changed stage.
-
-This is a development-time contribution as much as an engineering one. Full
-pipeline execution takes hours, so the ability to invalidate one stage and rerun
-only its consequences is what makes iteration possible at all. It also creates a
-specific hazard we encountered repeatedly: a stage's cache-validity predicate must
-mirror the conditions under which the stage itself would skip work. Where the two
-diverge, the stage reports incomplete forever and every downstream stage reruns on
-every invocation.
-
-A second consequence is that the configuration file is not part of the cache key.
-Changing a parameter therefore does not invalidate the stage it belongs to, and an
-explicit rerun directive is required. This is a deliberate trade --- hashing
-configuration would invalidate far more than necessary --- but it is a sharp edge.
 
 \subsection{Stage sequence}
 
-\Cref{tab:stages} groups the stages by track; \cref{sec:implementation} reports
-what each costs to run. The ordering is not arbitrary:
-several dependencies are counterintuitive and were established by failure. Object
-segmentation runs on the \emph{original} panorama, before foreground inpainting,
-because inpainting removes the objects that must be detected; but terrain geometry
-is derived from the \emph{inpainted} panorama, because occluders would otherwise
-punch holes in the ground. Maintaining both variants and routing each consumer to
-the correct one is a recurring structural theme.
+The pipeline defines 42 stages, of which 38 are active in the default
+configuration. \Cref{tab:stages} groups them by track and
+\cref{sec:implementation} reports what each costs to run;
+\cref{tab:stagemodels} gives the model behind each stage that uses one. Stage
+numbers follow configuration order throughout. The gap at 36--37 in
+\cref{tab:stages} is two stages that are defined but disabled by default, and so
+belong to no track.
 
-\begin{table}[t]
+The panorama stages build a $360^\circ$ representation of the scene. Semantics then
+runs against that representation to identify the objects within it. Cleanup
+produces a second panorama with those objects removed, better suited to terrain
+generation, and the geometry stages recover depth and a metric spatial
+understanding of the scene from it. Terrain is meshed and eroded using established
+techniques. Objects are detected and their spatial distributions learned, after
+which the scene is assembled from those statistics. Finally, a video generation
+model guides animation for each object and determines whether it should be treated
+as a rigid body.
+
+\begin{table}[htbp]
 \centering
 \small
 \caption{Pipeline stages grouped by reconstruction track.}
@@ -83,16 +96,61 @@ the correct one is a recurring structural theme.
 \toprule
 \textbf{Track} & \textbf{Stages} & \textbf{Purpose} \\
 \midrule
-Panorama    & 1--4   & Caption, perspective depth, $360^\circ$ outpainting, super-resolution \\
-Semantics   & 5--8   & Panoramic depth, object segmentation, classification, typing \\
-Cleanup     & 9--11  & Foreground removal, equirectangular LoRA correction \\
-Regions     & 12--15 & Semantic region typing (original and object-removed), lighting estimation, sky inpainting \\
-Geometry    & 16--19 & Panoramic depth, metric calibration, height field, region map \\
-Terrain     & 20--25 & Constrained reconstruction, erosion refinement, meshing, texturing \\
-Objects     & 26--30 & Recognition, detection, instance refinement, correlation, clustering \\
-Population  & 31--33 & Spatial statistics, population synthesis, ground cover \\
-Assembly    & 34--35 & Asset generation, scene assembly and placement \\
-Animation   & 38--42 & Video generation, motion extraction, rigging, animation \\
+Panorama    & 1--4   & Caption, Perspective Depth, $360^\circ$ Outpainting, Super-Resolution \\
+Semantics   & 5--8   & Panoramic Depth, Object Segmentation, Classification, Typing \\
+Cleanup     & 9--11  & Foreground Removal, Equirectangular LoRA Correction \\
+Regions     & 12--15 & Semantic Region Typing (original and cleaned), Lighting Estimation, Sky Inpainting \\
+Geometry    & 16--19 & Panoramic Depth, Metric Calibration, Height Field, Region Map \\
+Terrain     & 20--25 & Constrained Reconstruction, Erosion Refinement, Meshing, Texturing \\
+Objects     & 26--30 & Recognition, Detection, Instance Refinement, Correlation, Clustering \\
+Population  & 31--33 & Spatial Statistics, Population Synthesis, Ground Cover \\
+Assembly    & 34--35 & Asset Generation, Scene Assembly and Placement \\
+Animation   & 38--42 & Video Generation, Motion Extraction, Rigging, Animation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Model behind each pipeline stage that depends on one, in configuration
+order. Stages that use no model are omitted, so the numbering is not contiguous;
+\cref{tab:stages} gives the full sequence. When a stage supports several
+backends, the default is listed first. Stages marked $\dagger$ are defined but
+disabled in the default configuration.}
+\label{tab:stagemodels}
+\begin{tabular}{@{}r l >{\raggedright\arraybackslash}p{8.1cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Stage} & \textbf{Model} \\
+\midrule
+1  & Captioning                     & BLIP~\cite{li2022blipbootstrappinglanguageimagepretraining} \\
+2  & Depth Generation               & Depth Anything~3~\cite{lin2025depth3recoveringvisual} \\
+3  & Panorama                       & WorldGen~\cite{worldgen2025ziyangxie}; or FLUX~\cite{esser2024scalingrectifiedflowtransformers}, CubeDiff~\cite{kalischek2025cubediffrepurposingdiffusionbasedimage}, DreamCube~\cite{dreamcube} \\
+4  & Panorama Supersampling         & Swin2SR~\cite{conde2022swin2srswinv2transformercompressed} \\
+5  & Panorama Object Depth          & Depth Any Panoramas~\cite{lin2025dap} \\
+6  & Object Segmentation            & SAM~2~\cite{ravi2024sam2segmentimages}, with BiRefNet~\cite{zheng2024birefnet} matting \\
+7  & Object Classification          & BLIP~\cite{li2022blipbootstrappinglanguageimagepretraining} captioning with keyword matching \\
+8  & Object Typing                  & CLIP~\cite{radford2021learningtransferablevisual}, with Grounding DINO~\cite{liu2024groundingdino} label verification \\
+9  & Panorama Inpainting$\dagger$   & FLUX~\cite{esser2024scalingrectifiedflowtransformers}; or LaMa~\cite{suvorov2021resolution} \\
+10 & Panorama Foreground Inpainting & ObjectClear~\cite{zhao2026objectclear} \\
+11 & Panorama LoRA Correction       & FLUX~\cite{esser2024scalingrectifiedflowtransformers} with an equirectangular LoRA \\
+12 & Panorama Regions               & SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} \\
+13 & Panorama Regions (Terrain)     & SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} \\
+14 & Panorama Lighting              & LuxDiT~\cite{liang2025luxdit}, with IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion} albedo/shading separation \\
+15 & Skybox Inpainting              & FLUX~\cite{esser2024scalingrectifiedflowtransformers} \\
+16 & Panorama Depth                 & Depth Any Panoramas~\cite{lin2025dap} \\
+22 & Terrain Noise Refinement       & Landlab~\cite{barnhart2020landlab,hobley2017creative,Hutton_landlab_2020} fluvial incision \\
+25 & Terrain Texture Generation     & Pattern-based texturing~\cite{neyret:inria-00537511}, with LaMa~\cite{suvorov2021resolution} completion; or FLUX~\cite{esser2024scalingrectifiedflowtransformers} \\
+26 & Object Recognition             & RAM++~\cite{huang2023open} \\
+27 & Object Detection               & Grounding DINO~\cite{liu2024groundingdino} \\
+28 & Object Instance Refinement     & SAM~2~\cite{ravi2024sam2segmentimages} \\
+29 & Object Correlation             & SAM~2~\cite{ravi2024sam2segmentimages} \\
+30 & Object Category Clustering     & DINOv2~\cite{oquab2024dinov2}, with CLIP~\cite{radford2021learningtransferablevisual} corroboration \\
+33 & Grass Cover                    & SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} for the tuft mesh \\
+34 & Panorama Asset Generation      & SAM~3D~\cite{sam3dteam2025sam3d3dfyimages}; or SPAR3D~\cite{huang2025spar3dstablepointawarereconstruction}, TRELLIS~\cite{xiang2025trellis2} \\
+36 & Foreground Inpainting$\dagger$ & LaMa~\cite{suvorov2021resolution} \\
+38 & Video Generation               & LTX-2~\cite{lightricks2026ltx2} \\
+39 & Video Object Extraction        & SAM~2~\cite{ravi2024sam2segmentimages} \\
 \bottomrule
 \end{tabular}
 \end{table}

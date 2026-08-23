@@ -123,10 +123,15 @@
 % single line from its own east edge; the spine is where it fans out. Keep all
 % three above 4.55 or they cut back through the panorama boxes.
 %
-% Ordering is psky / pterr / porig, left to right. Three right-angle crossings
-% are unavoidable at any ordering, because the object-removed panorama feeds
-% both the topmost lane and a middle one while the original feeds top to bottom;
-% this ordering is one of the arrangements that achieves the minimum of three.
+% Ordering is psky / pterr / porig, left to right, which costs exactly one
+% right-angle crossing: the original's stub crosses the cleaned panorama's
+% spine. One is the minimum here. The cleaned panorama's spine has to reach up
+% from its own exit (6.625) to Terrain, so it spans the original's exit height
+% (7.775) whichever side it sits on.
+%
+% This is sensitive to the lane order. Grouping each variant's destinations
+% contiguously is what keeps it at one; the earlier Terrain/Objects/Ground/
+% Water/Sky/Motion order interleaved them and cost three.
 \def\spinesky{4.75}
 \def\spineterr{5.05}
 \def\spineorig{5.35}
@@ -134,69 +139,80 @@
 % Collector trunk, between the lane right edge (14.95) and asm.west (15.61).
 \def\xbus{15.20}
 
+% Lane slots, top to bottom, are fixed at 11.75 / 9.60 / 7.45 / 5.30 / 3.15 /
+% 1.00 (pitch 2.15). To reorder the tracks, permute ONLY the six assignments
+% below: the lane rectangles, the labels and all routing are derived from them.
+% Each track keeps its own colour, so the colours travel with the reordering.
 \def\yterrain{11.75}
-\def\yobjects{9.60}
-\def\yground{7.45}
-\def\ywater{5.30}
-\def\ysky{3.15}
-\def\ymotion{1.00}
+\def\ywater{9.60}
+\def\yobjects{7.45}
+\def\yground{5.30}
+\def\ymotion{3.15}
+\def\ysky{1.00}
+
+% Extreme slots. These are positions, not tracks, so they do NOT change when
+% the six assignments above are permuted.
+\def\ylanetop{11.75}
+\def\ylanebottom{1.00}
 
 % ---------------------------------------------------------------------------
 % Lane backgrounds
 % ---------------------------------------------------------------------------
 
+% A lane spans its slot centre minus 0.75 to plus 1.25; the extra 0.6 at the
+% top is the header strip that carries the label.
 \filldraw[
   fill=blue!4,
   draw=blue!20,
   line width=0.6pt,
   rounded corners=2.6pt
-] (\xleft,11.00) rectangle (\xright,13.00);
-
-\filldraw[
-  fill=orange!5,
-  draw=orange!25,
-  line width=0.6pt,
-  rounded corners=2.6pt
-] (\xleft,8.85) rectangle (\xright,10.85);
-
-\filldraw[
-  fill=green!4,
-  draw=green!20,
-  line width=0.6pt,
-  rounded corners=2.6pt
-] (\xleft,6.70) rectangle (\xright,8.70);
+] (\xleft,{\yterrain-0.75}) rectangle (\xright,{\yterrain+1.25});
 
 \filldraw[
   fill=violet!4,
   draw=violet!20,
   line width=0.6pt,
   rounded corners=2.6pt
-] (\xleft,4.55) rectangle (\xright,6.55);
+] (\xleft,{\ywater-0.75}) rectangle (\xright,{\ywater+1.25});
 
 \filldraw[
-  fill=yellow!6,
-  draw=yellow!30,
+  fill=orange!5,
+  draw=orange!25,
   line width=0.6pt,
   rounded corners=2.6pt
-] (\xleft,2.40) rectangle (\xright,4.40);
+] (\xleft,{\yobjects-0.75}) rectangle (\xright,{\yobjects+1.25});
+
+\filldraw[
+  fill=green!4,
+  draw=green!20,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,{\yground-0.75}) rectangle (\xright,{\yground+1.25});
 
 \filldraw[
   fill=black!3,
   draw=black!16,
   line width=0.6pt,
   rounded corners=2.6pt
-] (\xleft,0.25) rectangle (\xright,2.25);
+] (\xleft,{\ymotion-0.75}) rectangle (\xright,{\ymotion+1.25});
+
+\filldraw[
+  fill=yellow!6,
+  draw=yellow!30,
+  line width=0.6pt,
+  rounded corners=2.6pt
+] (\xleft,{\ysky-0.75}) rectangle (\xright,{\ysky+1.25});
 
 % ---------------------------------------------------------------------------
 % Lane labels
 % ---------------------------------------------------------------------------
 
-\node[lanelabel] at (6.08,12.70) {Terrain};
-\node[lanelabel] at (6.08,10.55) {Objects};
-\node[lanelabel] at (6.08, 8.40) {Ground cover};
-\node[lanelabel] at (6.08, 6.25) {Water};
-\node[lanelabel] at (6.08, 4.10) {Sky};
-\node[lanelabel] at (6.08, 1.95) {Motion};
+\node[lanelabel] at (6.08,{\yterrain+0.95}) {Terrain};
+\node[lanelabel] at (6.08,{\ywater+0.95}) {Water};
+\node[lanelabel] at (6.08,{\yobjects+0.95}) {Objects};
+\node[lanelabel] at (6.08,{\yground+0.95}) {Ground cover};
+\node[lanelabel] at (6.08,{\ymotion+0.95}) {Motion};
+\node[lanelabel] at (6.08,{\ysky+0.95}) {Sky};
 
 % ---------------------------------------------------------------------------
 % Input
@@ -240,45 +256,45 @@
 % ---------------------------------------------------------------------------
 
 % Terrain
-\node[stage] (t1) at (\xone,\yterrain) {Height field};
+\node[stage] (t1) at (\xone,\yterrain) {Height Field};
 \node[stage] (t2) at (\xtwo,\yterrain)
-  {Constrained\\reconstruction};
+  {Constrained\\Reconstruction};
 \node[stage] (t3) at (\xthree,\yterrain)
-  {Mesh + texture};
+  {Mesh + Texture};
 
 \draw[flow] (t1) -- (t2);
 \draw[flow] (t2) -- (t3);
 
 % Water
 \node[stage] (w1) at (\xone,\ywater)
-  {Region\\extraction};
+  {Region\\Extraction};
 \node[stage] (w2) at (\xthree,\ywater)
-  {Levelled\\surface};
+  {Levelled\\Surface};
 
 \draw[flow] (w1) -- (w2);
 
 % Objects
 \node[stage] (o1) at (\xone,\yobjects)
-  {Detection\\+ typing};
+  {Detection\\+ Typing};
 \node[stage] (o2) at (\xtwo,\yobjects)
-  {Appearance\\clustering};
+  {Appearance\\Clustering};
 \node[stage] (o3) at (\xthree,\yobjects)
-  {3D assets};
+  {3D Assets};
 
 \draw[flow] (o1) -- (o2);
 \draw[flow] (o2) -- (o3);
 
 % Ground cover
 \node[stage] (g1) at (\xone,\yground)
-  {Spatial\\statistics};
+  {Spatial\\Statistics};
 \node[stage] (g2) at (\xthree,\yground)
-  {Population\\synthesis};
+  {Population\\Synthesis};
 
 \draw[flow] (g1) -- (g2);
 
 % Sky
 \node[stage] (s1) at (\xone,\ysky)
-  {Lighting\\estimation};
+  {Lighting\\Estimation};
 \node[stage] (s2) at (\xthree,\ysky)
   {Skybox};
 
@@ -286,9 +302,9 @@
 
 % Motion
 \node[stage] (m1) at (\xone,\ymotion)
-  {Video\\generation};
+  {Video\\Generation};
 \node[stage] (m2) at (\xtwo,\ymotion)
-  {Motion\\extraction};
+  {Motion\\Extraction};
 \node[stage] (m3) at (\xthree,\ymotion)
   {Rigging};
 
@@ -309,15 +325,17 @@
   -- (\spinesky,\ysky)
   -- (\xleft,\ysky);
 
-% Object-removed -> Terrain, Water
-\draw[flowline] (pterr.east)          -- (\spineterr,6.625);
-\draw[flowline] (\spineterr,\ywater)  -- (\spineterr,\yterrain);
+% Cleaned -> Terrain, Water
+% The spine starts at the stub's own y (6.625), not at the nearest destination,
+% or it leaves a gap between the stub and the spine.
+\draw[flowline] (pterr.east)           -- (\spineterr,6.625);
+\draw[flowline] (\spineterr,6.625)     -- (\spineterr,\yterrain);
 \draw[flow]     (\spineterr,\yterrain) -- (\xleft,\yterrain);
 \draw[flow]     (\spineterr,\ywater)   -- (\xleft,\ywater);
 
 % Original -> Objects, Ground cover, Motion
 \draw[flowline] (porig.east)           -- (\spineorig,7.775);
-\draw[flowline] (\spineorig,\ymotion)  -- (\spineorig,\yobjects);
+\draw[flowline] (\spineorig,7.775)     -- (\spineorig,\ymotion);
 \draw[flow]     (\spineorig,\yobjects) -- (\xleft,\yobjects);
 \draw[flow]     (\spineorig,\yground)  -- (\xleft,\yground);
 \draw[flow]     (\spineorig,\ymotion)  -- (\xleft,\ymotion);
@@ -333,11 +351,24 @@
   -- (\xtwo,13.80)
   -- (t2.north);
 
-% Appearance clustering -> population synthesis
+% Appearance clustering -> spatial statistics.
+% Down out of o2, left along the gutter between the Objects and Ground cover
+% lanes, then down onto g1's top edge.
+%
+% The drop is at x=8.53, NOT at g1's centre (7.45). "Ground cover" is 2.21 units
+% wide and runs from 6.08 to 8.289, so a centred drop would come straight down
+% through the label. g1's top edge ends at 8.764, leaving 8.289..8.764 clear;
+% 8.53 is the middle of that window. Re-measure if the label text changes.
+\def\xsemdrop{8.53}
+% Midpoint of the 0.15-unit gap between the two lanes. Valid because Objects and
+% Ground cover occupy adjacent slots; revisit if they are separated.
+\def\ysemgutter{(\yobjects-0.75+\yground+1.25)/2}
+
 \draw[sem]
   (o2.south)
-  -- (o2.south |- g1.north)
-  -- (g1.north);
+  -- (o2.south |- 0,{\ysemgutter})
+  -- (\xsemdrop,{\ysemgutter})
+  -- (\xsemdrop,0 |- g1.north);
 
 % ---------------------------------------------------------------------------
 % Scene assembly
@@ -348,7 +379,7 @@
   minimum width=1.85cm,
   minimum height=1.05cm
 ] (asm) at (16.80,8.00)
-  {Scene\\assembly};
+  {Scene\\Assembly};
 
 % Lanes feed a collector trunk; a single arrow enters the assembly node, so
 % six arrowheads do not stack on asm.west.
@@ -359,7 +390,7 @@
 \draw[flowline] (s2.east) -- (\xbus,\ysky);
 \draw[flowline] (m3.east) -- (\xbus,\ymotion);
 
-\draw[flowline] (\xbus,\ymotion) -- (\xbus,\yterrain);
+\draw[flowline] (\xbus,\ylanebottom) -- (\xbus,\ylanetop);
 \draw[flow]     (\xbus,8.00) -- (asm.west);
 
 % ---------------------------------------------------------------------------
@@ -368,10 +399,10 @@
 
 \node[
   outbox,
-  minimum width=2.35cm,
+  minimum width=1.85cm,
   minimum height=1.15cm
 ] (out) at (16.80,4.50)
-  {Explorable 3D\\environment};
+  {3D\\Environment};
 
 \draw[flow] (asm) -- (out);
 

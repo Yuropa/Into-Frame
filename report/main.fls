@@ -386,6 +386,7 @@ INPUT ./sections/04-panorama.tex
 INPUT ./sections/04-panorama.tex
 INPUT ./sections/04-panorama.tex
 INPUT sections/04-panorama.tex
+INPUT /usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathex.enc
 INPUT ./sections/05-terrain.tex
 INPUT ./sections/05-terrain.tex
 INPUT ./sections/05-terrain.tex
@@ -393,7 +394,6 @@ INPUT ./sections/05-terrain.tex
 INPUT sections/05-terrain.tex
 INPUT /usr/local/texlive/2026/texmf-dist/fonts/tfm/public/lm/ec-lmr8.tfm
 INPUT /usr/local/texlive/2026/texmf-dist/fonts/tfm/public/lm/ec-lmr6.tfm
-INPUT /usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/lm/lm-mathex.enc
 INPUT ./sections/06-texturing.tex
 INPUT ./sections/06-texturing.tex
 INPUT ./sections/06-texturing.tex

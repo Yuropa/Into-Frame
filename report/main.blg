@@ -7,45 +7,45 @@ Warning--entry type for "Hutton_landlab_2020" isn't style-file defined
 --line 423 of file references.bib
 Warning--empty journal in dreamcube_arxiv
 Warning--empty journal in sam3dteam2025sam3d3dfyimages
-You've used 43 entries,
+You've used 45 entries,
             2118 wiz_defined-function locations,
-            723 strings with 15960 characters,
-and the built_in function-call counts, 22480 in all, are:
-= -- 2001
-> -- 1748
+            732 strings with 16829 characters,
+and the built_in function-call counts, 23685 in all, are:
+= -- 2095
+> -- 1888
 < -- 20
-+ -- 691
-- -- 648
-* -- 1850
-:= -- 3722
-add.period$ -- 138
-call.type$ -- 43
-change.case$ -- 452
++ -- 747
+- -- 702
+* -- 1966
+:= -- 3949
+add.period$ -- 145
+call.type$ -- 45
+change.case$ -- 485
 chr.to.int$ -- 0
-cite$ -- 45
-duplicate$ -- 710
-empty$ -- 1327
-format.name$ -- 648
-if$ -- 4579
+cite$ -- 47
+duplicate$ -- 727
+empty$ -- 1366
+format.name$ -- 702
+if$ -- 4796
 int.to.chr$ -- 0
-int.to.str$ -- 43
-missing$ -- 40
-newline$ -- 216
-num.names$ -- 86
-pop$ -- 531
+int.to.str$ -- 45
+missing$ -- 41
+newline$ -- 227
+num.names$ -- 90
+pop$ -- 566
 preamble$ -- 1
-purify$ -- 409
+purify$ -- 440
 quote$ -- 0
-skip$ -- 543
+skip$ -- 557
 stack$ -- 0
-substring$ -- 900
-swap$ -- 246
+substring$ -- 910
+swap$ -- 248
 text.length$ -- 20
 text.prefix$ -- 0
 top$ -- 0
-type$ -- 172
+type$ -- 180
 warning$ -- 2
-while$ -- 135
-width$ -- 45
-write$ -- 469
+while$ -- 139
+width$ -- 47
+write$ -- 492
 (There were 3 warnings)
