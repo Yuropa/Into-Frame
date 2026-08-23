@@ -71,7 +71,6 @@ These three panoramas are then taken in concert to generate the rest of the scen
 
 The pipeline defines 42 stages, of which 38 are active in the default
 configuration. \Cref{tab:stages} groups them by track and
-\cref{sec:implementation} reports what each costs to run;
 \cref{tab:stagemodels} gives the model behind each stage that uses one. Stage
 numbers follow configuration order throughout. The gap at 36--37 in
 \cref{tab:stages} is two stages that are defined but disabled by default, and so
@@ -154,3 +153,16 @@ disabled in the default configuration.}
 \bottomrule
 \end{tabular}
 \end{table}
+
+\subsection{System Architecture}
+
+The system is split into a Python generation server and a rendering client. The
+server executes the pipeline described above and exposes the result as a
+\texttt{.frame} archive over a WebSocket control channel and an HTTP asset
+channel, so a client streams assets as they become available rather than waiting
+for the whole scene.
+
+A Unity client (C\#, URP) targets desktop VR and carries the runtime shading work:
+a terrain splat shader blending the layered material of \cref{sec:texture}, an
+animated water surface, and wind-driven foliage sway sharing one global wind field
+so that grass, foliage and water gust together.

@@ -289,8 +289,3 @@ exactly this. Reconstruction quality is bounded by single-view 3D, which is
 unreliable for thin structures. And the system has no way to know it is wrong: it
 produces the same confident output on a coastal cliff face typed as furniture as on
 a correctly reconstructed meadow.
-
-\paragraph{Cost.}
-End-to-end generation takes several hours on a single GPU, dominated by per-group
-3D reconstruction (roughly 22 minutes for 18 groups) and video generation (around
-15 minutes). This is offline content creation, not interactive authoring.
