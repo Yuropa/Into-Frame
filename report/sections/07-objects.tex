@@ -3,7 +3,7 @@
 \label{sec:objects}
 % =============================================================================
 
-\subsection{Detection, typing and verification}
+\subsection{Detection, Typing and Verification}
 
 Objects are segmented on the original panorama with
 SAM~2~\cite{ravi2024sam2segmentimages}, tiled and merged to handle equirectangular
@@ -31,7 +31,7 @@ crops and real flowers were numerically indistinguishable.
   \label{fig:rainier-detections}
 \end{figure}
 
-\subsection{Correlation and clustering}
+\subsection{Correlation and Clustering}
 
 Surviving detections are grouped by class, then sub-clustered by visual similarity
 using DINOv2 embeddings and agglomerative clustering, splitting a class into
@@ -40,7 +40,7 @@ undersized buckets folded into their nearest neighbor, because an unbounded
 distance cut produces one bucket per instance, measured at 302 groups on one
 capture, each demanding its own reconstruction.
 
-\subsection{Asset generation and level of detail}
+\subsection{Asset Generation and Level of Detail}
 
 One mesh is reconstructed per (class, bucket) group with
 SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} and instanced at every member's

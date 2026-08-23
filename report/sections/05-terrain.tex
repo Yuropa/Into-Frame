@@ -3,28 +3,21 @@
 \label{sec:terrain}
 % =============================================================================
 
-\subsection{Projection with UV retention}
+\subsection{Projection with UV Retention}
 \label{sec:uv-retention}
 
 The height field is a $4096^2$ top-down grid spanning \SI{200}{\meter}. Each
 panorama pixel below the horizon is unprojected to a 3D point using calibrated
-depth and accumulated into the grid cell containing its $(x,z)$.
+depth and accumulated into the grid cell containing its $(x,z)$. Pixels typed as
+sky are excluded, since they have no ground intersection to unproject onto.
 
-The contribution here is what is retained alongside the height. For every cell
+For every cell
 that receives a genuine measurement we store the panorama $(u,v)$ it was observed
 through, together with a mask distinguishing directly measured cells from those
-later filled by interpolation. This costs two float channels and removes an entire
-class of error.
+later filled by interpolation. This correspondence is what the terrain material of
+\cref{sec:texture} samples.
 
-The alternative, re-deriving $(u,v)$ from the final geometry, is what a
-naive implementation does, and it fails in a specific way. The elevation angle of
-a ground point is $\varphi = \arcsin(y/d)$, so near the nadir a small error in $y$
-produces a large error in $\varphi$ and therefore in panorama row. Since $y$ has
-by then passed through reconstruction, erosion and meshing, it is not the value
-that was measured. Retaining the observed UV means downstream texturing samples
-the correspondence that was actually observed.
-
-\subsection{Constrained harmonic completion}
+\subsection{Constrained Harmonic Completion}
 
 The projected height field is sparse and uneven: dense near the camera, sparse at
 range, and empty wherever an object occluded the ground. Completion is posed as a
@@ -57,35 +50,36 @@ unobserved terrain is the smoothest surface consistent with it.
     \label{fig:hf-eroded}
   \end{subfigure}
   \caption{Height field completion for the Rainier capture, viewed top-down over
-  the \SI{200}{\meter} grid with the camera at the center. Only the small region
-  around the camera carries direct measurements (a); the radial structure there is
-  the projection of panorama columns onto the grid, and the streaks are the spokes
-  removed in \cref{sec:despoke}. Completion fills the remaining
-  $\sim$\SI{89}{\percent} of cells (b), and erosion adds drainage structure to the
-  invented relief (c). The difference between (b) and (c) is deliberately small:
+  the \SI{200}{\meter} grid with the camera at the center. Direct measurements
+  cover only \SI{7}{\percent} of the grid, concentrated around the camera (a); the
+  radial structure there is the projection of panorama columns onto the grid, and
+  the streaks are the spokes removed in \cref{sec:despoke}. Completion supplies the
+  rest (b), and erosion adds drainage structure to the invented relief (c). The difference between (b) and (c) is deliberately small:
   erosion is restricted to unobserved cells and modulated by the ridge silhouette,
   so it perturbs the completed surface rather than reshaping it.}
   \label{fig:rainier-heightfield}
 \end{figure}
 
-\subsection{Ridge anchoring and its assumption}
+\subsection{Ridge Anchoring and Its Assumption}
 
 Terrain beyond depth range has no usable measurement, so its elevation comes from
 the sky boundary: for each panorama column, the first non-sky pixel below sky
 gives an elevation angle, placed at a fixed radius on the grid. This is a
 deliberate scale compromise: a mountain kilometers away cannot be walkable
 terrain in a \SI{200}{\meter} grid, so it is brought close and shrunk, preserving
-silhouette shape rather than true distance.
+silhouette shape rather than true distance. We work around the limitation rather
+than solve it: past a few hundred meters the depth model has saturated and no
+longer provides usable values, so the silhouette is the only signal left.
 
 The assumption embedded here is that the sky boundary is the crest of
-\emph{ground}. \Cref{sec:results} shows what happens when it is not.
+\emph{ground}.
 
 \subsection{De-spoking}
 \label{sec:despoke}
 
 The equirectangular-to-grid projection maps each panorama column onto a radial
 line on the grid. Any per-column bias in the depth prediction therefore becomes a
-radial streak, and because those streaks lie in the \emph{observed} data (around
+radial streak, and because those streaks lie in the observed data (around
 $89\%$ of solve nodes are fixed), the harmonic solve cannot remove them.
 
 We remove them with a targeted filter that subtracts only the tangential
@@ -102,7 +96,7 @@ $r=45/60/\SI{80}{\meter}$ against \SI{18.1}{\meter}/\SI{30.7}{\meter}/%
 \SI{21.9}{\meter} before), the cliff mask is bit-identical, and the mean absolute
 change is \SI{0.19}{\meter} concentrated in the spoke regions.
 
-\subsection{Erosion refinement}
+\subsection{Erosion Refinement}
 
 Harmonic completion is smooth by construction, which is correct as an estimator
 and wrong as terrain. Real landforms carry drainage structure. We therefore run
@@ -119,8 +113,7 @@ density bias, then Delaunay triangulation, giving natural level-of-detail withou
 axis-aligned artifacts. Water regions are extracted as a separate surface, and the
 terrain beneath is depressed so an animated water plane never clips through its
 bed. Disconnected landmasses above a plausibility threshold are extracted as
-separate formation meshes. A coarser collision mesh is generated by the same
-procedure with sparser parameters.
+separate formation meshes.
 
 Each vertex carries a second UV channel holding the retained panorama coordinate
 from \cref{sec:uv-retention}. Because that channel is per-vertex and interpolated

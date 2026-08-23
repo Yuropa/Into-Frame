@@ -3,7 +3,7 @@
 \label{sec:related}
 % =============================================================================
 
-\subsection{Single-image panorama generation}
+\subsection{Single-Image Panorama Generation}
 
 Extending a narrow-field photograph to a full $360^\circ$ environment is the
 first step in most single-image scene systems. Diffusion models adapted to
@@ -23,7 +23,7 @@ with WorldGen~\cite{worldgen2025ziyangxie} and DreamCube as alternatives. The
 relevant distinction is that we treat the panorama as an intermediate
 representation rather than as the deliverable.
 
-\subsection{Single-image 3D scene generation}
+\subsection{Single-Image 3D Scene Generation}
 
 A growing body of work targets navigable 3D scenes from one image.
 SphericalDreamer~\cite{schnepf2026sphericaldreamer} generates navigable immersive
@@ -39,7 +39,7 @@ placed object meshes, an instanced ground-cover population, and an animated wate
 surface. Each of these is required before a scene can be dynamic rather than
 merely viewable.
 
-\subsection{Depth estimation and panoramic depth}
+\subsection{Depth Estimation and Panoramic Depth}
 
 Monocular depth estimation underpins all geometry in the pipeline. We use
 Depth Anything 3~\cite{lin2025depth3recoveringvisual} for perspective depth and
@@ -50,7 +50,7 @@ in \cref{sec:panorama}, is that monocular depth is relative and saturates: real
 distant terrain and sky receive indistinguishable predictions, so calibrated depth
 at a ridge crest is an extrapolation rather than a measurement.
 
-\subsection{Terrain modeling and heightmap synthesis}
+\subsection{Terrain Modeling and Heightmap Synthesis}
 
 Recovering terrain from imagery connects to a long line of graphics work.
 Pixels2Peaks~\cite{jain:hal-05617061} converts terrain images to heightmaps
@@ -67,7 +67,7 @@ terrain obeys drainage structure rather than reading as smooth interpolation or
 undirected noise. The regions we never observed are therefore shaped by the same
 process that shapes real landscapes.
 
-\subsection{Texture synthesis}
+\subsection{Texture Synthesis}
 
 Projecting a panorama onto ground fails at grazing incidence: a single panorama
 row covers meters of ground at distance. Pattern-based
@@ -79,7 +79,7 @@ FLUX~\cite{esser2024scalingrectifiedflowtransformers} and latent diffusion
 models~\cite{Rombach_2022_CVPR}, with
 Swin2SR~\cite{conde2022swin2srswinv2transformercompressed} for super-resolution.
 
-\subsection{Segmentation, detection and recognition}
+\subsection{Segmentation, Detection and Recognition}
 
 Object decomposition uses SAM~2~\cite{ravi2024sam2segmentimages} for segmentation
 and video tracking, Grounding DINO~\cite{liu2024groundingdino} for
@@ -95,7 +95,7 @@ models solves a similar but subtly different problem. We combine them rather tha
 choosing between them, using their agreement where they overlap to build a more
 reliable reading of the scene than any one model provides alone.
 
-\subsection{Object reconstruction and inpainting}
+\subsection{Object Reconstruction and Inpainting}
 
 Individual objects are reconstructed with
 SAM~3D~\cite{sam3dteam2025sam3d3dfyimages}, with

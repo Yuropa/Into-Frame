@@ -3,7 +3,7 @@
 \label{sec:results}
 % =============================================================================
 
-\subsection{Evaluation setup}
+\subsection{Evaluation Setup}
 
 We evaluate on five captures chosen to stress different assumptions:
 \textbf{Mount Rainier} (alpine meadow, dense vegetation, snow),
@@ -35,7 +35,7 @@ what the scene demonstrably contains, and localize defects to specific stages.
 \Cref{fig:scenes} shows two reconstructed environments viewed from near the
 capture point.
 
-\subsection{Quantitative summary}
+\subsection{Quantitative Summary}
 
 \Cref{tab:results} summarizes scene composition. The mesh/card/billboard split is
 the clearest single indicator of how well object reconstruction served each
@@ -61,7 +61,7 @@ Irises          & 0   & 10\,738 & 0 & --- & Painting; ground cover only \\
 \end{tabular}
 \end{table}
 
-\subsection{What works}
+\subsection{What Works}
 
 \paragraph{Terrain geometry on landform scenes.}
 Where the horizon genuinely is terrain, reconstruction behaves as intended.
@@ -88,7 +88,7 @@ Color-vetoed grass masking correctly excludes snowfields that type identically t
 meadow. After ordering the veto to run after morphological closing, zero grass
 instances remain on cells the veto rejected.
 
-\subsection{Failure modes and their causes}
+\subsection{Failure Modes and Their Causes}
 
 The more instructive result is where the system fails, because in every case we
 were able to localize the failure to an \emph{assumption} rather than a model.
@@ -177,7 +177,7 @@ Even with folds repaired, $67.8\%$ of Shark Fin's terrain area exceeds
 places most of its surface near the horizon where equirectangular compression is
 worst (\cref{fig:texel}).
 
-\subsection{Corrective measures and their measured effect}
+\subsection{Corrective Measures and Their Measured Effect}
 \label{sec:remediation}
 
 Each failure above was addressed by making its implicit premise testable from
@@ -269,7 +269,7 @@ rather than the sea: \SI{-4.54}{\meter} against a shoreline at
 \SI{-1.13}{\meter} and a \SI{0.14}{\meter} shoreline step. The estimator was
 correct; the sample weighting was not.
 
-\subsection{Strengths and weaknesses}
+\subsection{Strengths and Weaknesses}
 
 \paragraph{Strengths.}
 The decomposition is the system's main asset. Because terrain, objects and ground

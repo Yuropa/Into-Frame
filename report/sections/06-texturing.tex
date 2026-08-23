@@ -3,8 +3,6 @@
 \label{sec:texture}
 % =============================================================================
 
-\subsection{Why projection alone fails}
-
 The obvious way to texture the ground is to project the panorama onto it. This
 fails in two distinct ways.
 
@@ -18,34 +16,9 @@ at elevation $\varphi$ is ground at radius $h/\tan(-\varphi)$. That holds for ba
 terrain and fails completely for anything vertical: a \SI{0.5}{\meter} flower spans
 a range of elevations, each landing at a different ground radius, so one flower
 smears into a streak meters long. Rendered top-down this produces a radial
-pinwheel. It is also double-counting, since the same flowers are placed as 3D
-instances on top of the ground.
+pinwheel.
 
-\begin{figure}[htbp]
-  \centering
-  \begin{subfigure}{0.42\linewidth}
-    \includegraphics[width=\linewidth]{rainier/tile-terrain.jpg}
-    \caption{Terrain layer, near the camera.}
-    \label{fig:tex-terrain}
-  \end{subfigure}\hfill
-  \begin{subfigure}{0.42\linewidth}
-    \includegraphics[width=\linewidth]{rainier/formation-texture.jpg}
-    \caption{A distant formation's baked texture.}
-    \label{fig:tex-formation}
-  \end{subfigure}
-  \caption{Both failure modes of \cref{sec:texture} in the baked output for the
-  Rainier capture, viewed in texture space. The radial structure in (a) is the
-  signature of the equirectangular-to-ground mapping: each panorama column becomes
-  one ray on the ground, so any upright content along that column is drawn out along
-  it. In (b), a formation far from the camera, grazing incidence dominates and the
-  texture degenerates into streaks, because a single panorama row there covers
-  meters of ground. These are the artifacts the layered material and the
-  pattern-texturing path are meant to suppress; \cref{sec:results} quantifies how
-  much of the terrain is still affected.}
-  \label{fig:rainier-texture}
-\end{figure}
-
-\subsection{Layered splat material}
+\subsection{Layered Splat Material}
 
 Texturing is therefore a weighted blend of layers. A panorama layer supplies real
 photographic color where projection is trustworthy, gated by a visibility weight
@@ -53,18 +26,17 @@ that falls off near the nadir and the horizon and is withheld where a texel's ow
 panorama pixel is vegetation or built structure rather than ground. Synthetic
 material layers, generated per region type, supply the rest.
 
-\subsection{Real-material pattern texturing}
+TODO: Little blurb on how we generate the synthetic texture. 
+
+\subsection{Real-Material Pattern Texturing}
 
 Where the panorama layer is withheld, we prefer real material over generated
 material. Following pattern-based texturing~\cite{neyret:inria-00537511}, small
 reference patches are extracted from the most solid interior of each region in the
-panorama and flattened (by fitting a local plane to the patch's own depth
-points and reprojecting, which removes genuine oblique foreshortening rather than
-only equirectangular stretch), then assembled over the mesh's own triangles with
+panorama and flattened, then assembled over the mesh's own triangles with
 blended borders so the tiling does not read as faceted.
 
 Reference patches are drawn from the object-removed panorama with real ground
 color restored from the original wherever foreground removal ate the ground
 rather than an occluder. Where an occluder genuinely was removed, its footprint is
-refilled by inpainting from the surrounding real ground, so what remains is
-neither the occluder nor fabricated fill.
+refilled by inpainting from the surrounding real ground.
