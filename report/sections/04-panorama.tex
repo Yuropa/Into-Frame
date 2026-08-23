@@ -162,7 +162,7 @@ selected by depth threshold, taking those closest to the camera.
 Depth taken from the panorama with objects still in it produces spurious values and
 raised bumps wherever an object stands in front of the ground, since the surface
 behind it was never observed; removing them first gives the depth model an
-unobstructed view. \Cref{fig:rainier-cleaned} shows the effect: the near-field
+unobstructed view. \Cref{fig:rainier-object-removed} shows the effect: the near-field
 meadow dominating the lower half is replaced by the bare ground the terrain track
 needs. The edit is destructive by design. The flowers are not discarded but
 reconstructed separately as a ground-cover population
@@ -172,13 +172,13 @@ reconstructed separately as a ground-cover population
 \begin{figure}[htbp]
   \centering
   \includegraphics[width=\linewidth]{rainier/panorama.jpg}\\[0.4em]
-  \includegraphics[width=\linewidth]{rainier/panorama-cleaned.jpg}
-  \caption{Foreground removal. The original panorama (top) and the cleaned panorama
-  (bottom) used for terrain reconstruction. The near-field meadow and the individual
+  \includegraphics[width=\linewidth]{rainier/panorama-object-removed.jpg}
+  \caption{Foreground removal. The original panorama (top) and the object-removed
+  panorama (bottom) used for terrain reconstruction. The near-field meadow and the individual
   trees have been removed together with their shadows, exposing the ground surface
   behind them. Depth taken from the top image would place the flower canopy, not the
   ground, at the bottom of the height field.}
-  \label{fig:rainier-cleaned}
+  \label{fig:rainier-object-removed}
 \end{figure}
 
 \subsection{Semantic Region Map}
@@ -194,7 +194,7 @@ construction to object placement.
   \caption{Resolved semantic region typing for the Rainier capture, overlaid on the
   panorama. Vegetation, bare terrain, snow and standing water separate cleanly in
   the near field. The typing is run twice, once on the original panorama and once on
-  the cleaned one, because the two answer different questions: where ground cover
+  the object-removed one, because the two answer different questions: where ground cover
   should be scattered is a property of the scene as photographed, while what the
   terrain surface is made of is a property of the scene with the objects taken away.}
   \label{fig:rainier-regions}

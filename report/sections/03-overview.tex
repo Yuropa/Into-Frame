@@ -21,7 +21,7 @@ and the latter was outside the scope of this project.
   \caption{The pipeline decomposes a single image into six tracks with different
   physical roles. Solid arrows carry geometry, dashed arrows carry semantics.
   The three panorama variants at the left are maintained deliberately: geometry is
-  derived from the cleaned panorama, semantics from the original.}
+  derived from the object-removed panorama, semantics from the original.}
   \label{fig:pipeline}
 \end{figure}
 
@@ -37,7 +37,7 @@ consumer downstream:
   DreamCube~\cite{dreamcube} available as alternative backends. This is the
   baseline scene representation, and the one every semantic stage reads from,
   because it is the only variant in which the real objects are still present.
-  \item[Cleaned Panorama.] The original panorama processed with
+  \item[Object-Removed Panorama.] The original panorama processed with
   ObjectClear~\cite{zhao2026objectclear} to remove foreground objects, followed by
   a FLUX LoRA correction pass that restores equirectangular consistency at the
   seams. This gives an unobstructed view of the environment, better suited to
@@ -95,7 +95,7 @@ per-object animation and decides which objects are rigid bodies.
 Panorama    & 1--4   & Caption, Perspective Depth, $360^\circ$ Outpainting, Super-Resolution \\
 Semantics   & 5--8   & Panoramic Depth, Object Segmentation, Classification, Typing \\
 Cleanup     & 9--11  & Foreground Removal, Equirectangular LoRA Correction \\
-Regions     & 12--15 & Semantic Region Typing (original and cleaned), Lighting Estimation, Sky Inpainting \\
+Regions     & 12--15 & Semantic Region Typing (original and object-removed), Lighting Estimation, Sky Inpainting \\
 Geometry    & 16--19 & Panoramic Depth, Metric Calibration, Height Field, Region Map \\
 Terrain     & 20--25 & Constrained Reconstruction, Erosion Refinement, Meshing, Texturing \\
 Objects     & 26--30 & Recognition, Detection, Instance Refinement, Correlation, Clustering \\
@@ -159,4 +159,7 @@ WebSocket control channel and an HTTP asset channel, so the client streams asset
 as they become available rather than waiting for the whole scene. A Unity client
 (C\#, URP) targets desktop VR and carries the runtime shading: a terrain splat
 shader blending the layered material of \cref{sec:texture}, an animated water
-surface, and wind-driven foliage sway on one global wind field.
+surface, and wind-driven foliage sway on one global wind field. It also runs the
+scene's physics: the terrain mesh carries a collision surface, so placed objects
+rest on the ground rather than floating above it, and the rigid bodies of
+\cref{sec:lighting} resolve against the terrain and against each other.

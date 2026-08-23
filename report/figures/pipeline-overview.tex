@@ -124,8 +124,8 @@
 % three above 4.55 or they cut back through the panorama boxes.
 %
 % Ordering is psky / pterr / porig, left to right, which costs exactly one
-% right-angle crossing: the original's stub crosses the cleaned panorama's
-% spine. One is the minimum here. The cleaned panorama's spine has to reach up
+% right-angle crossing: the original's stub crosses the object-removed
+% panorama's spine. One is the minimum here. That spine has to reach up
 % from its own exit (6.625) to Terrain, so it spans the original's exit height
 % (7.775) whichever side it sits on.
 %
@@ -243,7 +243,7 @@
   {Original\\Panorama};
 
 \node[pano] (pterr) at (3.15,6.625)
-  {Cleaned\\Panorama};
+  {Object-Removed\\Panorama};
 
 \node[pano] (psky) at (3.15,5.475)
   {Sky-Inpainted\\Panorama};
@@ -325,7 +325,7 @@
   -- (\spinesky,\ysky)
   -- (\xleft,\ysky);
 
-% Cleaned -> Terrain, Water
+% Object-removed -> Terrain, Water
 % The spine starts at the stub's own y (6.625), not at the nearest destination,
 % or it leaves a gap between the stub and the spine.
 \draw[flowline] (pterr.east)           -- (\spineterr,6.625);

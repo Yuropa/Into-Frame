@@ -111,18 +111,9 @@ roofline \SI{40}{\meter} away. The measured height field spans
 produced \SI{-13.1}{\meter} to \SI{+70.9}{\meter}: a \SI{5966}{\meter\squared}
 hill on the right-bank treeline and a \SI{2674}{\meter\squared} hill on the
 cathedral (\cref{fig:paris-terrain}). The discriminator is what the silhouette is \emph{made of}: the fraction
-of silhouette columns typing terrain is $0\%$ for Paris against $87\%$, $98\%$ and
-$100\%$ for Iceland, Rainier and Shark Fin. Paris is not merely lowest; not one
-column of its horizon is a landform (\cref{fig:silhouette}).
-
-\begin{figure}[t]
-  \centering
-  \figbox{silhouette-composition.pdf}{Terrain share of the sky boundary per capture.}{0.86}
-  \caption{What each capture's horizon is made of. The gate at \SI{25}{\percent}
-  separates Paris from every landform capture by a wide margin in both directions;
-  it is a threshold on evidence the pipeline already computes, not a tuned constant.}
-  \label{fig:silhouette}
-\end{figure}
+of silhouette columns typing terrain is $0\%$ for Paris against $98\%$ for Rainier
+and $100\%$ for Shark Fin. Paris is not merely lowest; not one column of its
+horizon is a landform.
 
 \paragraph{Confident misclassification on texture.}
 Shark Fin Cove produced 49 detections at median confidence $0.95$; the two
@@ -158,22 +149,14 @@ if the ground under a lake is flat. On Shark Fin one \SI{11872}{\meter\squared}
 body of sea spanned \SI{73.5}{\meter} in elevation, with $21.7\%$ of its vertices
 more than a meter above the median: the ocean draped up the cliffs.
 
-\begin{figure}[t]
-  \centering
-  \figbox{texel-density.pdf}{Terrain texel density by distance ring.}{0.86}
-  \caption{Texture resolution against distance, log scale. The two captures are
-  indistinguishable within \SI{25}{\meter}; beyond it Shark Fin degrades far
-  faster, because a clifftop camera places most of its surface near the horizon
-  where equirectangular compression is worst. Above roughly
-  \SI{0.5}{\meter} per texel we take the ground to read as smeared.}
-  \label{fig:texel}
-\end{figure}
-
 \paragraph{Far-field texture resolution.}
 Even with folds repaired, $67.8\%$ of Shark Fin's terrain area exceeds
 \SI{0.5}{\meter} per texel against $20.9\%$ for Rainier, because a clifftop camera
 places most of its surface near the horizon where equirectangular compression is
-worst (\cref{fig:texel}).
+worst. The degradation is entirely a far-field effect: within \SI{25}{\meter} the
+two captures are indistinguishable at $0.02$--\SI{0.07}{\meter} per texel, but by
+the $50$--\SI{100}{\meter} ring Shark Fin reaches \SI{1.42}{\meter} per texel
+against Rainier's \SI{0.17}{\meter}.
 
 \subsection{Corrective Measures and Their Measured Effect}
 \label{sec:remediation}
@@ -182,7 +165,7 @@ Each failure above was addressed by making its implicit premise testable from
 evidence already computed elsewhere in the pipeline, rather than by tuning a
 threshold or replacing a model. \Cref{tab:fixes} reports the measured effect of
 each, evaluated by replaying the modified stage over saved pipeline state from all
-five captures. We report effects on \emph{every} capture, not only the one that
+three captures. We report effects on \emph{every} capture, not only the one that
 motivated the change, because the risk being managed is regression on scenes that
 were already correct.
 
@@ -198,18 +181,18 @@ across captures. ``FP'' denotes false positives: correct content wrongly removed
 \midrule
 Silhouette composition gate &
 ``The sky boundary is the crest of ground'' &
-Terrain-typed silhouette fraction: Paris $0\%$; Iceland $87\%$; Rainier $98\%$;
+Terrain-typed silhouette fraction: Paris $0\%$; Rainier $98\%$;
 Shark Fin $100\%$. Ridge anchoring suppressed on Paris only; other captures
 bit-identical. \\
 \addlinespace
 Per-crop region plausibility &
 ``This class can occupy the region its box sits in'' &
-Removes 9/109 (Paris), 4/237 (Rainier), 12/49 (Shark Fin), 5/101 (Iceland).
-0 FP; Rainier's four are phantom aircraft inside the snowfield. \\
+Removes 9/109 (Paris), 4/237 (Rainier), 12/49 (Shark Fin). 0 FP;
+Rainier's four are phantom aircraft inside the snowfield. \\
 \addlinespace
 Caption--scene plausibility &
 ``The caption describes something this scene can contain'' &
-Removes a further 16 (Shark Fin), 16 (Iceland), 9 (Rainier), 2 (Paris). 0 FP.
+Removes a further 16 (Shark Fin), 9 (Rainier), 2 (Paris). 0 FP.
 Requires four conjunctive conditions; each weaker variant deletes real content
 (see text). \\
 \addlinespace

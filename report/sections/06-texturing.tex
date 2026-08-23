@@ -68,24 +68,13 @@ refilled by inpainting from the surrounding real ground.
 
 \begin{figure}[htbp]
   \centering
-  \begin{subfigure}{0.42\linewidth}
-    \includegraphics[width=\linewidth]{rainier/tile-terrain.jpg}
-    \caption{Terrain layer, near the camera.}
-    \label{fig:tex-terrain}
-  \end{subfigure}\hfill
-  \begin{subfigure}{0.42\linewidth}
-    \includegraphics[width=\linewidth]{rainier/formation-texture.jpg}
-    \caption{A distant formation's baked texture.}
-    \label{fig:tex-formation}
-  \end{subfigure}
-  \caption{Both failure modes of \cref{sec:texture} in the baked output for the
-  Rainier capture, viewed in texture space. The radial structure in (a) is the
+  \includegraphics[width=0.52\linewidth]{rainier/tile-terrain.jpg}
+  \caption{The baked terrain layer for the Rainier capture, viewed top-down in
+  texture space with the camera at the center. The radial structure is the
   signature of the equirectangular-to-ground mapping: each panorama column becomes
-  one ray on the ground, so any upright content along that column is drawn out along
-  it. In (b), a formation far from the camera, grazing incidence dominates and the
-  texture degenerates into streaks, because a single panorama row there covers
-  meters of ground. These are the artifacts the layered material and the
-  pattern-texturing path are meant to suppress; \cref{sec:results} quantifies how
-  much of the terrain is still affected.}
+  one ray on the ground, so upright content along that column is drawn out along it.
+  This is the artifact the layered material and the pattern-texturing path are meant
+  to suppress; \cref{sec:results} quantifies how much of the terrain is still
+  affected.}
   \label{fig:rainier-texture}
 \end{figure}
