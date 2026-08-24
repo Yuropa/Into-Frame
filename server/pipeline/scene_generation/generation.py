@@ -34,6 +34,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         eye_height_meters: float = 1.8,
+        min_mesh_height_fraction: float | None = None,
         min_mesh_angular_px: float = 250.0,
         viewer_px_per_degree: float = 34.0,
         viewer_move_radius_m: float = 2.0,
@@ -52,6 +53,15 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
+        # Floor on a category mesh's own vertical extent, as a fraction of its
+        # largest, below which the instance is billboarded rather than scaled to
+        # match its detection's height. Resolved here rather than as a default
+        # argument because _MIN_MESH_HEIGHT_FRACTION is defined below this class;
+        # see it for the four-capture sweep behind the value.
+        self.min_mesh_height_fraction = (
+            _MIN_MESH_HEIGHT_FRACTION if min_mesh_height_fraction is None
+            else float(min_mesh_height_fraction)
+        )
         # Bake-time mesh-vs-billboard cutoff, as the screen height the instance
         # subtends rather than its distance from the camera. An instance that
         # renders at least this many display pixels tall uses its bucket's 3D
@@ -182,15 +192,45 @@ _MAX_OBJECT_SIZE_M = 25.0
 # is noise, and matching height would blow the other axes up by 1/extent_y -- so the
 # instance is billboarded instead.
 #
-# Raised 0.05 -> 0.25. At 0.05 the bar permitted a 20x amplification of the other two
-# axes and the pancake that motivated it cleared the bar: measured on the Rainier
-# capture, category_mesh_other_0 has extents [1.000, 0.0636, 0.468], i.e. 0.0636 of
-# its largest -- 27% ABOVE the old floor, so no warning fired and the height branch
-# was taken. Its two largest instances rendered at 15.9x and 47.2x, the second a
-# 47.2 m x 3.0 m x 22.1 m sheet whose near-flat geometry read as a slab hanging over
-# the meadow. The upright meshes this gate exists to pass are nowhere near it: the
-# same capture's category_mesh_flower_0 is [0.418, 1.000, 0.116], y/max = 1.000.
-_MIN_MESH_HEIGHT_FRACTION = 0.25
+# Config default only; the live value is SceneGenerationConfiguration's
+# min_mesh_height_fraction. See config.yaml for the sweep this was chosen from.
+#
+# Lowered 0.25 -> 0.10. At 0.25 this is not the sheet test it reads as: dividing by
+# the LARGEST extent makes it "is this taller than a quarter of its length?", which a
+# low-profile subject fails by being correctly shaped. On the Paris capture it
+# rejected all four boat reconstructions -- category_mesh_boat_0 is [1.000, 0.560,
+# 2.613], a 2.6-long, 1.0-wide, 0.56-tall riverboat, and it missed the bar by 0.036 --
+# and with them all 27 boat instances on the Seine, which is the whole subject of that
+# capture. building_0 (0.205) went the same way.
+#
+# Replayed over every instance of all four landscape captures, the threshold turns out
+# to be almost entirely inert. Instances admitted to a mesh, by threshold:
+#
+#     thresh   Paris     Rainier    Iceland   Shark Fin
+#     0.25     49/86     294/473    0/80      0/42
+#     0.20     54/86     294/473    0/80      0/42
+#     0.15     69/86     294/473    0/80      0/42
+#     0.10     70/86     294/473    0/80      0/42
+#     0.00     70/86     294/473    0/80      0/42
+#
+# Rainier does not move at all -- not the count and not the class histogram (211
+# flower, 46 plant, 15 person, 11 tree, 6 rock, 3 bush, 2 boat at 0.25 and at 0.00
+# alike) -- and neither do Iceland or Shark Fin. Only Paris ever depended on it.
+#
+# What makes that safe is that the three gates below already catch everything this one
+# was raised to catch. Rainier's own Y-gate rejections all fail the aspect test
+# independently: aircraft_0 at 12.8:1 against its box, animal_0 at 11.9:1, and ship_0,
+# whose extents are [0.926, 1.000, 41.182] -- 41x longer in Z than tall, and note it
+# passes the THICKNESS test at min/mid 0.926, so aspect is the only thing standing
+# between that mesh and the scene. The original 47.2 m other_0 sheet is likewise an
+# aspect and rendered-size failure, not a Y failure.
+#
+# 0.10 rather than 0.00 because the divisor still wants a floor: extent_y is what
+# scale divides by, and while the rendered-size backstop bounds the result, leaving
+# the ratio unguarded means a near-degenerate mesh reaches that backstop by way of a
+# 1000x scale. 0.10 sits below Paris's lowest legitimate keeper (boat_3 at 0.156, and
+# table_0 at 0.134) with room, and 2.5x under the old value.
+_MIN_MESH_HEIGHT_FRACTION = 0.10
 
 # "Is this a flat picture, or does it have volume in the round?", asked as the thinnest
 # extent over the SECOND largest -- which is what catches a mesh that is a flat CARD
@@ -252,13 +292,19 @@ _MAX_MESH_ASPECT_RATIO = 4.0
 
 
 def mesh_instance_scale(
-    mesh_extents: "np.ndarray", width: float, height: float
-) -> tuple[float, str | None]:
+    mesh_extents: "np.ndarray",
+    width: float,
+    height: float,
+    min_height_fraction: float = _MIN_MESH_HEIGHT_FRACTION,
+) -> tuple[float, str | None, str | None]:
     """Uniform scale that renders `mesh_extents` at the instance's detected size.
 
-    Returns (scale, rejection_reason). A non-None reason means this mesh does not
-    describe this detection and the caller should billboard the instance instead --
-    the scale is still returned for the log line, not for use.
+    Returns (scale, rejection_reason, gate). A non-None reason means this mesh does
+    not describe this detection and the caller should billboard the instance instead
+    -- the scale is still returned for the log line, not for use. `gate` names which
+    of the four tests fired, as a stable short slug ("height", "sheet", "aspect",
+    "rendered_size", "degenerate"), so a run's rejections can be attributed without
+    re-parsing the prose reason. It is None exactly when the reason is.
 
     Scale is set by HEIGHT, for the reason object_scale.py's prior table documents:
     an equirectangular box's horizontal extent depends on the object's yaw relative
@@ -266,23 +312,25 @@ def mesh_instance_scale(
     vertical extent does not. Width is the unreliable axis, so it must not be what
     sets scale.
 
-    The two rejections below both exist because that divisor is unbounded. Dividing
-    by a small extent_y is how a mesh of one object becomes a scene-spanning sheet
-    over another, and neither the detected size cull (_MAX_OBJECT_SIZE_M, which reads
-    the box, not the render) nor the classifier that assigned the class can see it
-    happen.
+    The gates below exist because that divisor is unbounded. Dividing by a small
+    extent_y is how a mesh of one object becomes a scene-spanning sheet over another,
+    and neither the detected size cull (_MAX_OBJECT_SIZE_M, which reads the box, not
+    the render) nor the classifier that assigned the class can see it happen. Note
+    that the height gate is the WEAKEST of the four and deliberately so -- see
+    _MIN_MESH_HEIGHT_FRACTION for the sweep showing the other three do the work.
     """
     extent_y = float(mesh_extents[1])
     extent_max = float(max(mesh_extents))
     extent_horizontal = float(max(mesh_extents[0], mesh_extents[2]))
     if extent_max <= 0.0 or extent_y <= 0.0:
-        return 0.0, "mesh has no extent"
+        return 0.0, "mesh has no extent", "degenerate"
 
-    if extent_y < _MIN_MESH_HEIGHT_FRACTION * extent_max:
+    if extent_y < min_height_fraction * extent_max:
         return (
             float(height) / extent_y,
             f"flat in Y (extent_y {extent_y:.4f} is {extent_y / extent_max:.3f} of "
-            f"its largest {extent_max:.4f}, under {_MIN_MESH_HEIGHT_FRACTION})",
+            f"its largest {extent_max:.4f}, under {min_height_fraction})",
+            "height",
         )
 
     # Flat in ANY axis -- an upright card clears the vertical test above with a perfect
@@ -295,6 +343,7 @@ def mesh_instance_scale(
             f"a flat sheet (thinnest axis {extent_min:.4f} is "
             f"{extent_min / extent_mid:.3f} of its second largest {extent_mid:.4f}, "
             f"under {_MIN_MESH_THICKNESS_FRACTION})",
+            "sheet",
         )
 
     # Aspect agreement. Compared as a ratio-of-ratios so it is symmetric: a mesh far
@@ -309,6 +358,7 @@ def mesh_instance_scale(
                 f"aspect {mesh_aspect:.2f}:1 disagrees with the detection's "
                 f"{box_aspect:.2f}:1 by {disagreement:.1f}x "
                 f"(over {_MAX_MESH_ASPECT_RATIO:.1f}x)",
+                "aspect",
             )
 
     scale = float(height) / extent_y
@@ -317,14 +367,17 @@ def mesh_instance_scale(
     # box, which is the wrong quantity for this failure and always passes it: the
     # 47.2 m Rainier sheet was a 3.0 m detection, well inside a 25 m cull. What
     # reaches the scene is scale * extents, so that is what has to be bounded.
+    #
+    # This is also what bounds the height gate's relaxation: a low-profile mesh scaled
+    # by a small extent_y arrives here at a large scale, and this is where it stops.
     rendered_max = scale * extent_max
     if rendered_max > _MAX_OBJECT_SIZE_M:
         return scale, (
             f"would render {rendered_max:.1f} m across at {scale:.1f}x, "
             f"over the {_MAX_OBJECT_SIZE_M:.0f} m limit"
-        )
+        ), "rendered_size"
 
-    return scale, None
+    return scale, None, None
 
 
 def _mesh_geometry_record(
@@ -1020,7 +1073,10 @@ class SceneGenerationStage(PipelineStage):
                     # scaled directly to (width, height) and so cannot blow up the way
                     # an unbounded 1/extent_y can.
                     mesh_extents = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
-                    mesh_scale, mesh_rejection = mesh_instance_scale(mesh_extents, width, height)
+                    mesh_scale, mesh_rejection, mesh_gate = mesh_instance_scale(
+                        mesh_extents, width, height,
+                        min_height_fraction=self.config.min_mesh_height_fraction,
+                    )
 
                     record = _mesh_geometry_record(
                         mesh_geometry, mesh_key, cls, mesh_extents, idx, mesh_scale
@@ -1046,6 +1102,16 @@ class SceneGenerationStage(PipelineStage):
                         mesh_rejections[mesh_key] = mesh_rejections.get(mesh_key, 0) + 1
                         record["rejected"] += 1
                         record.setdefault("reason", mesh_rejection)
+                        # Which gate fired, tallied per mesh. The prose reason above
+                        # only survives for the FIRST rejected instance of a bucket
+                        # (setdefault), but every instance is judged separately and a
+                        # bucket can fail different gates for different detections --
+                        # aspect is per-instance, height and sheet are not. Counting
+                        # them is what makes the threshold sweep reproducible from a
+                        # debug bundle instead of re-derived from GLB extents.
+                        if mesh_gate is not None:
+                            gates = record.setdefault("gates", {})
+                            gates[mesh_gate] = gates.get(mesh_gate, 0) + 1
                         if card_mesh is not None:
                             category_mesh, mesh_key = card_mesh, card_mesh_key
                             using_card = True
@@ -1348,7 +1414,7 @@ class SceneGenerationStage(PipelineStage):
             try:
                 out.write_text(json.dumps({
                     "thresholds": {
-                        "min_mesh_height_fraction": _MIN_MESH_HEIGHT_FRACTION,
+                        "min_mesh_height_fraction": self.config.min_mesh_height_fraction,
                         "min_mesh_thickness_fraction": _MIN_MESH_THICKNESS_FRACTION,
                         "max_mesh_aspect_ratio": _MAX_MESH_ASPECT_RATIO,
                         "max_object_size_m": _MAX_OBJECT_SIZE_M,

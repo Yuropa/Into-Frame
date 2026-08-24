@@ -1511,6 +1511,34 @@ stages:
       panorama: panorama_sky
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
+    # Floor on a category mesh's own vertical extent as a fraction of its largest
+    # extent. Below it the instance is billboarded instead of scaled to its detected
+    # height, because extent_y is what that scale divides by.
+    #
+    # Lowered 0.25 -> 0.10. Dividing by the LARGEST extent makes this "is it taller
+    # than a quarter of its length?", which a correctly-shaped low-profile subject
+    # fails on its merits. It rejected all four Paris boat reconstructions -- boat_0
+    # is [1.000, 0.560, 2.613], a 2.6-long 0.56-tall riverboat missing the bar by
+    # 0.036 -- and with them all 27 boat instances on the Seine.
+    #
+    # Instances admitted to a mesh, replayed over every instance of all four
+    # landscape captures:
+    #
+    #     thresh   Paris     Rainier    Iceland   Shark Fin
+    #     0.25     49/86     294/473    0/80      0/42
+    #     0.15     69/86     294/473    0/80      0/42
+    #     0.10     70/86     294/473    0/80      0/42
+    #     0.00     70/86     294/473    0/80      0/42
+    #
+    # Rainier does not move anywhere in that range -- not the count, not the class
+    # histogram -- and neither do Iceland or Shark Fin. The other three gates
+    # (thickness, aspect agreement, rendered size) already catch everything this one
+    # was raised to 0.25 for: Rainier's ship_0 is [0.926, 1.000, 41.182] and is held
+    # only by aspect, since it passes thickness at 0.926.
+    #
+    # Not 0, because scale = height / extent_y still wants a floor. 0.10 sits under
+    # Paris's lowest legitimate keeper (boat_3 at 0.156) with room to spare.
+    min_mesh_height_fraction: 0.10
     # Bake-time mesh-vs-billboard cutoff, as the screen HEIGHT an instance renders at
     # rather than its distance from the camera. At or above this it takes its bucket's
     # reconstructed mesh; below it, the crossed-card LOD or a billboard.
