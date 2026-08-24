@@ -184,10 +184,23 @@ def stored_uv_on_sky(ctx: Path) -> dict | None:
     """How many observed cells' STORED panorama UVs land on sky.
 
     terrain_generator prefers these over the sky-corrected UVs from mesh_uvs for
-    every observed vertex, and nothing applies the sky rescale to them -- so this is
-    the rate at which the guard is bypassed at source. Not the same quantity as the
-    final-mesh rate above (downstream fixups clean some of it up), which is exactly
-    why both are worth having.
+    every observed vertex, so if they were dirty the guard would be bypassed at
+    source. Measured: they are not -- 0.00% (Paris, Rainier) to 0.01% (Iceland,
+    Shark Fin). Kept as a standing check that they stay that way.
+
+    MIND THE V CONVENTION, which differs between the two places this file reads UVs
+    from and cost one wrong diagnosis already:
+
+      * HEIGHT_MAP_PANO_V here is v = 0.5 + lat/pi -- FLIPPED, v = 1 at the zenith
+        (see HeightMapGenerator._panorama_uv_from_height). Row = (1 - v) * (H - 1).
+      * TEXCOORD_0 in the exported GLB is the DIRECT top-down row fraction, because
+        mesh_uvs pre-flips to cancel trimesh's export-time flip and the two cancel.
+        Row = v * (H - 1), as sky_on_ground uses.
+
+    Confirmed empirically rather than assumed: under the correct convention a higher
+    vertex Y correlates NEGATIVELY with panorama row on every capture (-0.28 to
+    -0.77), i.e. higher ground samples higher in the image. Getting it backwards
+    turns 0.00% into 86% and invents a bug that is not there.
     """
     masks = _sky_masks(ctx)
     mask = masks.get("sky_mask")
@@ -209,7 +222,7 @@ def stored_uv_on_sky(ctx: Path) -> dict | None:
         return {"observed_cells": int(observed.sum()), "on_sky": None}
     height, width = mask.shape
     col = np.clip((uu[valid] * (width - 1)).astype(int), 0, width - 1)
-    row = np.clip((vv[valid] * (height - 1)).astype(int), 0, height - 1)
+    row = np.clip(((1.0 - vv[valid]) * (height - 1)).astype(int), 0, height - 1)
     return {"observed_cells": int(observed.sum()),
             "on_sky": float(mask[row, col].mean())}
 

@@ -551,6 +551,33 @@ stages:
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
     solve_resolution: 512           # downsample to this for the harmonic solve, upsample after
+    # Ceiling on how far this stage may inflate the measured height span, as a
+    # multiple of it. Ridge anchoring, the slope envelopes and the harmonic solve
+    # only ever ADD relief, and nothing else bounds how much.
+    #
+    # Measured input span -> this stage's output, 2026-08-18 run:
+    #
+    #     Paris       5.8 m ->  90.2 m   15.55x
+    #     Shark Fin  12.9 m ->  98.3 m    7.62x
+    #     Iceland    23.2 m ->  78.7 m    3.39x   <- binding constraint
+    #     Rainier    20.0 m ->  57.7 m    2.89x
+    #
+    # Note it is THIS stage and not Terrain Noise Refinement, which was the obvious
+    # suspect and comes in at 0.93-0.95x on every capture -- it slightly REDUCES the
+    # span it inherits.
+    #
+    # 4.0 clears Rainier by 39% and Iceland by 18%. Paris should now fall under it
+    # unaided (min_terrain_silhouette_frac refuses to anchor a city skyline); this
+    # is the backstop for Shark Fin, whose silhouette is 100% terrain, so that gate
+    # passes and a 13 m cove still reconstructs into 98 m of cliff.
+    #
+    # Scales the synthetic component (output - measured), not the surface. Replayed
+    # on the two captures it fires on, that moves 100% of observed cells CLOSER to
+    # their own measurement -- mean error 0.111 -> 0.028 m on Paris and 7.227 ->
+    # 3.811 m on Shark Fin -- because the certainty-weighted restore upstream leaves
+    # low-certainty real cells well off their measured elevation in the first place.
+    # 0 disables.
+    max_relief_inflation: 4.0
     # Cells are held fixed at their observed elevation based on HEIGHT_MAP_OBSERVED_MASK
     # (a genuine direct point-cloud measurement), not HEIGHT_MAP_CERTAINTY -- certainty
     # decays with distance from camera and would leave most real terrain beyond ~43 m
