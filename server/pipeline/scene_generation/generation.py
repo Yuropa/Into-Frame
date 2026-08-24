@@ -290,6 +290,33 @@ _MIN_MESH_THICKNESS_FRACTION = 0.4
 # broad flat shell against a tall narrow box.
 _MAX_MESH_ASPECT_RATIO = 4.0
 
+# How horizontally elongated a mesh must be before the aspect test above will judge
+# it against its END-ON silhouette instead of its broadside one.
+#
+# The relaxation only makes sense for a shape that HAS a distinct end-on view. For a
+# compact or upright mesh the two horizontal extents are nearly equal and the
+# relaxation is free permissiveness. Measured elongation, max(x,z)/min(x,z):
+#
+#     Paris   boat_3      7.86     boat_2  3.92     boat_0  2.41     building_0 8.79
+#     Rainier tree_0      1.76     plant_2 1.09     flower_0 1.11    person_0   1.05
+#
+# 2.0 sits in the gap. Above it are the long, low subjects the gate was mis-reading;
+# below it are the upright ones it was reading correctly all along.
+#
+# Replayed over every instance of all four landscape captures, with the band form
+# below: Rainier and Shark Fin come out BYTE-IDENTICAL (294/473 and 0/42, same class
+# histograms), Paris gains 6 boats on the 2026-08-24 run and 7 boats plus 2 landmark
+# on the 2026-08-18 one, and no capture loses an instance.
+#
+# The one cost is Iceland, which gains 3 `animal` meshes (category_mesh_animal_2,
+# [1.000, 0.560, 2.833] -- elongated enough to qualify, and it clears the height and
+# sheet gates on its own). Those are hallucinated detections and this makes them
+# meshes rather than billboards. Judged acceptable because they were junk either way
+# and the junk vetoes are the right place to remove them, but it is a real cost and
+# worth re-checking if Iceland's typing improves.
+_MIN_MESH_ELONGATION_FOR_END_ON = 2.0
+
+
 
 def mesh_instance_scale(
     mesh_extents: "np.ndarray",
@@ -321,7 +348,7 @@ def mesh_instance_scale(
     """
     extent_y = float(mesh_extents[1])
     extent_max = float(max(mesh_extents))
-    extent_horizontal = float(max(mesh_extents[0], mesh_extents[2]))
+    extent_x, extent_z = float(mesh_extents[0]), float(mesh_extents[2])
     if extent_max <= 0.0 or extent_y <= 0.0:
         return 0.0, "mesh has no extent", "degenerate"
 
@@ -346,16 +373,57 @@ def mesh_instance_scale(
             "sheet",
         )
 
-    # Aspect agreement. Compared as a ratio-of-ratios so it is symmetric: a mesh far
-    # too squat for its box and one far too tall are the same kind of wrong.
+    # Aspect agreement: does the detection's width:height match a silhouette this
+    # mesh could actually cast? Compared as a ratio-of-ratios so it stays symmetric.
+    #
+    # The original test used max(extent_x, extent_z) / extent_y -- the mesh seen
+    # BROADSIDE -- and so assumed the detection caught the mesh along its longest
+    # horizontal axis. Anything photographed end-on fails that on its merits.
+    # Measured on the 2026-08-24 Paris run it rejected 5 of the 7 boat instances that
+    # reached it, the hero riverboat among them: idx 66 is a bow-on detection whose
+    # box is 334x355 px -- nearly square, correctly, because you are looking at the
+    # stern -- against a correct 1.00 x 0.58 x 2.41 reconstruction. The gate took the
+    # 2.41 LENGTH, called the mesh 4.13:1, compared it to the box's 0.72:1 and
+    # rejected at 5.8x. category_mesh_building_0 failed the same way at 20.3x.
+    #
+    # So a box NARROWER than broadside is measured against the end-on extent instead.
+    # But only for a mesh that is actually elongated horizontally, which is the whole
+    # of the fix and the reason for _MIN_MESH_ELONGATION_FOR_END_ON: for a compact or
+    # upright mesh the two extents are nearly equal, "end-on" is not a meaningfully
+    # different view, and applying the relaxation there just weakens the gate for
+    # everything. Rainier is what forces that restraint -- ungated, the same
+    # relaxation admits category_mesh_tree_0, normalised extents
+    # [0.567, 0.285, 1.000] (a tree reconstructed lying down) and 15 more instances
+    # of it, which is exactly the flat-slab artefact this gate family exists to stop.
+    #
+    # A box WIDER than broadside is left exactly as it was: no yaw can explain it, so
+    # it is real evidence, and touching that branch costs well-formed upright meshes
+    # the old test passed.
     if height > 1e-6 and width > 1e-6:
-        mesh_aspect = extent_horizontal / extent_y
+        aspect_broadside = max(extent_x, extent_z) / extent_y
+        aspect_end_on = min(extent_x, extent_z) / extent_y
+        elongation = max(extent_x, extent_z) / max(min(extent_x, extent_z), 1e-6)
         box_aspect = float(width) / float(height)
-        disagreement = max(mesh_aspect / box_aspect, box_aspect / mesh_aspect)
+
+        # For an elongated mesh, every silhouette between end-on and broadside is
+        # reachable by some yaw, so a box anywhere in that band is no evidence at
+        # all. For anything else the band collapses to a point and this reduces
+        # exactly to the original symmetric test.
+        if elongation >= _MIN_MESH_ELONGATION_FOR_END_ON:
+            reachable_lo, reachable_hi = aspect_end_on, aspect_broadside
+        else:
+            reachable_lo = reachable_hi = aspect_broadside
+
+        if box_aspect < reachable_lo:
+            disagreement, reference, view = reachable_lo / box_aspect, reachable_lo, "end-on"
+        elif box_aspect > reachable_hi:
+            disagreement, reference, view = box_aspect / reachable_hi, reachable_hi, "broadside"
+        else:
+            disagreement, reference, view = 1.0, box_aspect, "within range"
         if disagreement > _MAX_MESH_ASPECT_RATIO:
             return (
                 float(height) / extent_y,
-                f"aspect {mesh_aspect:.2f}:1 disagrees with the detection's "
+                f"aspect {reference:.2f}:1 ({view}) disagrees with the detection's "
                 f"{box_aspect:.2f}:1 by {disagreement:.1f}x "
                 f"(over {_MAX_MESH_ASPECT_RATIO:.1f}x)",
                 "aspect",

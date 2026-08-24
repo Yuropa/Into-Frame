@@ -122,6 +122,7 @@ def grid_cell_panorama_uv(
     camera_height_meters: float,
     pano_h: int,
     pano_w: int,
+    elevation: "np.ndarray | None" = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Forward-project every top-down grid cell (assuming a flat ground plane
@@ -133,6 +134,19 @@ def grid_cell_panorama_uv(
     grid-derived features (region types, ridgelines, skeletons, ...) back OUT
     onto the panorama, e.g. for debug visualisation of extracted features
     against the source photo.
+
+    elevation (optional, (grid_resolution, grid_resolution)): each cell's REAL Y in
+    metres relative to the camera (negative = below it), normally HEIGHT_MAP. When
+    given it replaces the flat-plane assumption cell by cell, which matters far more
+    than it sounds: with a flat plane the depression angle is atan(camera_height / r),
+    so at camera_height 1 m a cell 50 m out is looked up 1.1 deg below the horizon --
+    essentially ON the horizon line -- no matter what is actually there. Every distant
+    cell then samples the same near-horizon band of the panorama. Measured on the
+    Paris capture, whose river surface sits ~10 m below a bridge-mounted camera: the
+    ground region map came back 0.0% water and 72% vegetation, having sampled the far
+    treeline for the whole grid, while the panorama itself segments 37.5% water in a
+    single clean component. Pass None to keep the flat-plane bootstrap, which is
+    correct for HeightMapStage (elevation is not known yet there).
 
     Grid layout: rows index Z (near → far), cols index X (left → right).
 
@@ -152,8 +166,14 @@ def grid_cell_panorama_uv(
 
     # Azimuth: 0 at +Z (forward), matches equirectangular_unproject convention.
     theta = np.arctan2(X_grid, Z_grid)
-    # Depression angle: negative = below horizon, magnitude = atan(h / r).
-    phi = -np.arctan2(camera_height_meters, r_safe)
+    # Depression angle: negative = below horizon, magnitude = atan(drop / r), where
+    # drop is how far the ground at this cell sits below the camera. That is the flat
+    # camera_height_meters unless a real per-cell elevation was supplied.
+    if elevation is not None and np.shape(elevation) == X_grid.shape:
+        drop = -np.asarray(elevation, dtype=np.float64)
+    else:
+        drop = np.full_like(X_grid, float(camera_height_meters))
+    phi = -np.arctan2(drop, r_safe)
 
     pano_u = ((theta / (2.0 * np.pi)) + 0.5) * pano_w  # col in [0, W]
     pano_v = (0.5 - phi / np.pi) * pano_h               # row in [H/2, H]
@@ -171,6 +191,7 @@ def inverse_map_panorama_to_grid(
     grid_size_meters: float,
     grid_resolution: int,
     camera_height_meters: float,
+    elevation: "np.ndarray | None" = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """
     Inverse mapping from terrain grid cells to equirectangular panorama pixels.
@@ -197,7 +218,8 @@ def inverse_map_panorama_to_grid(
     pano_h, pano_w = d.shape
 
     pano_u, pano_v, X_grid, Z_grid = grid_cell_panorama_uv(
-        grid_size_meters, grid_resolution, camera_height_meters, pano_h, pano_w
+        grid_size_meters, grid_resolution, camera_height_meters, pano_h, pano_w,
+        elevation=elevation,
     )
     sampled = bilinear_sample_grid(d, pano_u, pano_v)
     return sampled.astype(np.float32), pano_u, pano_v, X_grid, Z_grid

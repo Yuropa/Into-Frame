@@ -29,6 +29,7 @@ class RegionMapGenerator:
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
         certainty_falloff_meters: float = 20.0,
+        elevation: Optional[np.ndarray] = None,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
         Project per-pixel region type labels from an equirectangular panorama onto a
@@ -59,8 +60,15 @@ class RegionMapGenerator:
         if sky_mask is not None and sky_mask.shape == d.shape:
             d_masked[sky_mask] = np.nan
 
+        # elevation (HEIGHT_MAP) makes this lookup follow the real reconstructed
+        # surface instead of a flat plane camera_height_meters down. See
+        # grid_cell_panorama_uv's own note: without it every distant cell samples the
+        # near-horizon band regardless of what is there, which is how the Paris
+        # capture produced a ground region map with 0.0% water from a panorama that
+        # segments 37.5% water in one component.
         sampled_depth, pano_u, pano_v, X_grid, Z_grid = inverse_map_panorama_to_grid(
-            Depth(d_masked), grid_size_meters, grid_resolution, camera_height_meters
+            Depth(d_masked), grid_size_meters, grid_resolution, camera_height_meters,
+            elevation=elevation,
         )
 
         # Sample the discrete region type at each cell's panorama pixel.
@@ -69,10 +77,19 @@ class RegionMapGenerator:
         r_grid = np.sqrt(
             X_grid.astype(np.float64) ** 2 + Z_grid.astype(np.float64) ** 2
         ).astype(np.float32)
-        phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
-        Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
-
-        ground_y_min = -(camera_height_meters + 5.0)
+        # With a real elevation field the cell's Y is known directly; deriving it from
+        # the sampled depth would just re-introduce the flat-plane angle this is here
+        # to avoid. The acceptance band widens with it, because the band exists to
+        # reject a lookup that landed on something other than ground and its old
+        # +-5 m span was written around a 1 m flat assumption.
+        if elevation is not None and np.shape(elevation) == X_grid.shape:
+            Y_grid = np.asarray(elevation, dtype=np.float32)
+            span = max(5.0, float(np.nanmax(Y_grid) - np.nanmin(Y_grid)))
+            ground_y_min = float(np.nanmin(Y_grid)) - span
+        else:
+            phi_grid = -np.arctan2(camera_height_meters, np.maximum(r_grid, 1e-6)).astype(np.float32)
+            Y_grid = (sampled_depth * np.sin(phi_grid)).astype(np.float32)
+            ground_y_min = -(camera_height_meters + 5.0)
         has_data = (
             np.isfinite(sampled_depth) & (sampled_depth > 0)
             & (Y_grid <= ground_y_max) & (Y_grid >= ground_y_min)

@@ -484,6 +484,29 @@ stages:
 
   - name: Region Map
     stage: RegionMapStage
+    # Look each grid cell up in the panorama along the ray to its REAL reconstructed
+    # elevation (HEIGHT_MAP, computed by the previous stage) instead of assuming a
+    # flat plane camera_height_meters below the camera.
+    #
+    # The flat assumption makes the depression angle atan(camera_height / r), so at
+    # camera_height 1 m a cell 50 m out is looked up 1.1 deg below the horizon --
+    # essentially ON the horizon -- whatever is actually there. Every distant cell
+    # then samples the same near-horizon band. This stage's own debug path already
+    # used HEIGHT_MAP for exactly this reason; the real path did not.
+    #
+    # Replayed at 1024 grid resolution on the existing bundles (flat -> elevation):
+    #
+    #     Shark Fin  water 30.3% -> 31.2%, components 2590 -> 669,
+    #                largest body 7,078 -> 11,456 m2   (the speckle fix)
+    #     Paris      water  0.0% ->  2.1%, largest body 12 -> 842 m2
+    #     Rainier    vegetation 87.0% -> 86.9%; ground 12.1% -> 8.1% with
+    #                terrain appearing at 3.8%
+    #
+    # Rainier does move a little -- watch it. Paris improves but is not fixed: its
+    # HEIGHT_MAP is itself clipped to -6.0..-0.2 m by HeightMapGenerator's own
+    # flat-plane bootstrap, so the elevation this reads is only as good as that.
+    # false restores the flat-plane lookup.
+    use_height_map_elevation: true
     grid_size_meters: 200.0     # must match Height Map grid extent
     grid_resolution: 4096       # must match Height Map resolution
     ground_y_max: -0.5
@@ -1601,7 +1624,30 @@ stages:
     # This is measured on the PLACED size, i.e. after object_scale.py's correction, so
     # it is not the same measurement as Panorama Asset Generation's like-named value
     # (raw detected angle) and must stay well ABOVE it. See that block.
-    min_mesh_angular_px: 250.0
+    # Lowered 250 -> 120. The 250 figure was set when grass_tuft still built near
+    # meshes; it does not any more (Grass Cover's build_near_meshes: false makes
+    # every tuft a crossed card), so the triangle argument for 250 no longer holds.
+    # Re-measured against real per-mesh face counts rather than instance counts,
+    # counting a below-LOD instance at its card or billboard cost:
+    #
+    #     thresh   Rainier meshed / triangles      Paris boats meshed
+    #       250      251     2.03 M                       9 / 26
+    #       150      274     2.21 M                      13 / 26
+    #       120      303     2.44 M                      21 / 26
+    #        90      339     2.73 M                      25 / 26
+    #
+    # 120 costs Rainier +20% triangles (2.03 -> 2.44 M) and takes Paris from 9 of 26
+    # boats meshed to 21. Boats are the case that forces it: they sit on open water
+    # where a camera-facing quad has nothing to hide its swing against, and the Paris
+    # boat population clusters at 90-160 px -- just under the old cutoff.
+    #
+    # Stays above Panorama Asset Generation's own min_mesh_angular_px (90), so a
+    # group is still reconstructed before this stage asks for it. The margin is
+    # narrower than it was (1.33x, not 2.8x) and the two are in different units --
+    # that one is the RAW detected angle, this one the PLACED size -- so on a capture
+    # where object_scale.py applies a large correction this is effectively far above
+    # 90 anyway. Paris applies none (too few anchors), which is the tight case.
+    min_mesh_angular_px: 120.0
     # Display angular resolution the threshold above is quoted against; 34 px/deg is
     # Vision Pro class, so 250 px is ~7.4 deg. Exists so the threshold reads as the
     # resolvability limit it is, and tracks the target display instead of silently

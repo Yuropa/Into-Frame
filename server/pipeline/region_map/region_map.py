@@ -32,6 +32,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
+        use_height_map_elevation: bool = True,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
         certainty_falloff_meters: float = 20.0,
@@ -49,6 +50,12 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.grid_resolution = grid_resolution
         self.ground_y_max = ground_y_max
         self.camera_height_meters = camera_height_meters
+        # Look each grid cell up in the panorama along the ray to its REAL
+        # reconstructed elevation (HEIGHT_MAP) rather than to a flat plane
+        # camera_height_meters below the camera. False restores the flat-plane
+        # bootstrap. See grid_cell_panorama_uv and the Paris measurement in
+        # config.yaml.
+        self.use_height_map_elevation = bool(use_height_map_elevation)
         self.nadir_exclusion_radius = nadir_exclusion_radius
         self.nadir_ramp_width = nadir_ramp_width
         # Depth-model-trust radius (metres) at which certainty decays to 0.5 — must
@@ -201,6 +208,22 @@ class RegionMapStage(PipelineStage):
 
         type_idx_map = type_idx_depth.depth.astype(np.uint8)
 
+        cell_elevation = None
+        if cfg.use_height_map_elevation:
+            hm = context.input_depth(ContextKey.HEIGHT_MAP)
+            if hm is not None and hm.depth.shape == (cfg.grid_resolution, cfg.grid_resolution):
+                cell_elevation = hm.depth.astype(np.float32)
+                self.log_info(
+                    "Region map lookup following HEIGHT_MAP elevation "
+                    f"({float(np.nanmin(cell_elevation)):.1f} to "
+                    f"{float(np.nanmax(cell_elevation)):.1f} m), not a flat plane"
+                )
+            else:
+                self.log_warning(
+                    "use_height_map_elevation set but HEIGHT_MAP is missing or the "
+                    "wrong shape — falling back to the flat-plane lookup"
+                )
+
         region_map, certainty_array = RegionMapGenerator.generate(
             panorama_depth=panorama_depth,
             type_idx_map=type_idx_map,
@@ -212,6 +235,7 @@ class RegionMapStage(PipelineStage):
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
+            elevation=cell_elevation,
         )
         self.advance_progress(task)
 
