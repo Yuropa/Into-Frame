@@ -253,10 +253,28 @@ def seam_count(ctx: Path, threshold: float = 0.25) -> dict | None:
     lower = a[a.shape[0] // 2:, :]
     vertical = (lower[:, 1:] != lower[:, :-1]).mean(axis=0)
     horizontal = (lower[1:, :] != lower[:-1, :]).mean(axis=1)
+    cols = np.where(vertical > threshold)[0]
+
+    # Split the flagged columns by whether they sit on a tile feather crossover.
+    #
+    # Panorama segmentation runs in _TILE_SIZE 640 tiles at _TILE_OVERLAP_FRAC 0.25
+    # (stride 480), and _paste_tiles hands each pixel to whichever tile's feather
+    # weight is highest -- so the label flips at the MIDPOINT between adjacent tile
+    # centres, a straight vertical line. Splitting them this way says whether a
+    # capture's seams are that artifact or a real segmentation boundary that happens
+    # to be straight; on the 2026-08-25 run it was 6/11 Iceland, 5/8 Shark Fin,
+    # 4/7 Irises and 1/1 Rainier on crossovers.
+    width = a.shape[1]
+    stride = int(640 * (1 - 0.25))
+    centres = sorted({(x + 640 // 2) % width for x in range(0, width, stride)})
+    crossings = {int((p + q) / 2) % width for p, q in zip(centres, centres[1:])}
+    on_tile = [int(c) for c in cols if any(abs(int(c) - x) <= 2 for x in crossings)]
+
     return {
         "vertical": int((vertical > threshold).sum()),
         "horizontal": int((horizontal > threshold).sum()),
-        "columns": np.where(vertical > threshold)[0].tolist()[:16],
+        "columns": cols.tolist()[:16],
+        "on_tile_crossover": len(on_tile),
     }
 
 
@@ -291,8 +309,16 @@ def scene_objects(ctx: Path) -> dict | None:
 
 def mesh_gates(ctx: Path) -> dict | None:
     """Rejections by gate, from whichever stage directory wrote the debug file."""
-    for stage in ("Scene Generation", "Panorama Asset Generation"):
-        path = ctx / stage / "mesh_geometry_debug.json"
+    # Both the stage directory and its build/ subdirectory: Scene Generation writes
+    # this one under build/, Panorama Asset Generation writes its own at the top
+    # level. Checking only the top level silently reported "no mesh data" for every
+    # capture in the 2026-08-25 run while the file was sitting one level down.
+    candidates = [
+        ctx / stage / sub / "mesh_geometry_debug.json"
+        for stage in ("Scene Generation", "Panorama Asset Generation")
+        for sub in ("", "build")
+    ]
+    for path in candidates:
         if not path.exists():
             continue
         try:
@@ -372,6 +398,7 @@ def report(results: dict[str, dict]) -> None:
     print("\nRegion map")
     row("seams (vertical)", [_fmt((r["seams"] or {}).get("vertical"), "{:d}") for r in results.values()])
     row("seams (horizontal)", [_fmt((r["seams"] or {}).get("horizontal"), "{:d}") for r in results.values()])
+    row("  of which tile crossover", [_fmt((r["seams"] or {}).get("on_tile_crossover"), "{:d}") for r in results.values()])
     for key in ("water", "terrain", "vegetation", "built", "ground"):
         row(f"{key}", [_fmt((r["region"] or {}).get(key), "{:.1%}") for r in results.values()])
 
