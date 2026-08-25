@@ -74,14 +74,36 @@ public class SceneParamManager : MonoBehaviour
             camera.transform.SetPositionAndRotation(position, rotation);
         }
 
-        // Push the whole scene down so the terrain center sits eyeHeightMeters below
-        // the floor. The XR Origin always stays at the real-world floor (y=0); we
+        // Push the whole scene down so the viewer ends up where the photograph was
+        // taken from. The XR Origin always stays at the real-world floor (y=0); we
         // never move the player, only the content, so tracking/teleport/physics
         // keep their usual floor-relative meaning.
+        //
+        // The server reconstructs everything in a CAMERA-CENTRED frame -- the capture
+        // camera is the world origin (scene.extrinsics.translation is ~0 on all five
+        // sample captures) and terrainCenterY is the ground directly under it. So an
+        // offset of 0 puts the viewer at the photographer's own viewpoint, which is
+        // the one viewpoint the panorama, the depth and the skybox were all built for.
+        //
+        // -eyeHeightMeters - terrainCenterY instead RE-GROUNDS the viewer 1.8 m above
+        // whatever the terrain reconstruction put underneath them, throwing the real
+        // elevation away. On the Paris capture -- shot from a bridge, terrainCenterY
+        // -6.17 m -- that raised the whole scene 4.37 m and dropped the viewer from
+        // the bridge onto the Seine, 1.8 m over the water, looking up at boats that
+        // should be below them. Shark Fin Cove (a clifftop, -3.99 m) loses its cliff
+        // the same way.
+        //
+        // Clamped at 0 rather than dropped, because the offset is still load-bearing
+        // in the other direction: when the reconstruction puts the ground implausibly
+        // close under the camera (Iceland -0.72 m, Irises -0.48 m -- both well under a
+        // standing eye height) the viewer would be left kneeling in the terrain, so
+        // the scene is still pushed down to restore eyeHeightMeters of clearance.
+        // Min() takes the correction only when it lowers the scene, never when it
+        // would lift the viewer down off a real vantage point.
         if (sceneRoot != null)
         {
             var pos = sceneRoot.transform.position;
-            pos.y = -p.eyeHeightMeters - p.terrainCenterY;
+            pos.y = Mathf.Min(0f, -p.eyeHeightMeters - p.terrainCenterY);
             sceneRoot.transform.position = pos;
         }
 

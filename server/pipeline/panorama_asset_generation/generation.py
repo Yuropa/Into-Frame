@@ -107,11 +107,13 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         occlusion_disqualify_fraction: float = 0.6,
         occlusion_depth_margin: float = 0.10,
         max_background_fraction: float = 0.5,
+        mask_background_fraction: bool = True,
         use_intrinsic_delighting: bool = True,
         intrinsic_delight_strength: float = 0.6,
         intrinsic_resolution: int = 768,
         intrinsic_agg_num: int = 2,
         max_mesh_faces: int = 8000,
+        repair_meshes: bool = False,
         card_categories: list[str] | None = None,
         card_planes: int = 3,
     ):
@@ -152,6 +154,32 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # Mesh.decimate returns the original untouched when it is already inside
         # budget -- so a small asset pays nothing. 0 disables.
         self.max_mesh_faces = int(max_mesh_faces)
+        # Run Mesh.repair() (Poisson reconstruction + MeshFix) on each reconstruction
+        # before decimating it. OFF, because it is what makes every category mesh
+        # untextured.
+        #
+        # Poisson reconstruction discards the input topology, so a UV-mapped texture
+        # cannot survive it -- repair() bakes the texture down to per-vertex colour
+        # instead and returns a colour-only mesh. Every category mesh in a run
+        # therefore shipped with zero materials and zero images, wearing one averaged
+        # RGB per vertex over a 4000-vertex budget. Reported on the Paris capture as
+        # the Seine riverboats being untextured: SAM3D reconstructs each one from its
+        # crop with hull lettering, windows and railings baked into a texture atlas
+        # (with_texture_baking=True, see ModelGenerator.meshify) and repair() threw
+        # all of it away before the mesh ever reached the client.
+        #
+        # Off is also safe on the geometry side, which is the only thing repair()
+        # was ever for: this stage's generator is SAM3D, whose own postprocessing
+        # already runs a decimation + pymeshfix hole-filling pass before it bakes
+        # the texture (see setup_sam3d's simplify= patch in scripts/setup.sh), so
+        # the watertightness repair() is chasing has largely already happened
+        # upstream -- on the topology the UVs actually belong to. Meshes that come
+        # back WITHOUT a texture (the OOM fallback path retries vertex-colour-only)
+        # are still repaired regardless of this flag: there is nothing to lose.
+        #
+        # Turn back on to bisect against the old behaviour, or if a reconstruction
+        # renders with holes that SAM3D's own pass did not close.
+        self.repair_meshes = bool(repair_meshes)
         # Strip the baked-in sun out of the crops that become billboards and
         # category meshes, the same way TerrainTextureGenerationStage already
         # strips it out of its reference patches -- and, critically, by the same
@@ -204,6 +232,30 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # and boats measured 0.00-0.47 on both fractions and the rejects 0.54-1.00.
         # 1.0 disables the gate.
         self.max_background_fraction = float(max_background_fraction)
+        # Measure both fractions over the detection's own alpha MASK rather than over
+        # the whole bounding box.
+        #
+        # The box form asks "how much of this rectangle is background", which is the
+        # wrong question for anything that does not fill its rectangle. An open
+        # lattice is the extreme case and it is exactly what the gate lost: the Eiffel
+        # Tower on the Paris capture is a clean 126x529 SAM cutout of a tower, and its
+        # BOX reads 60% sky / 65% unmeasured depth purely because you can see through
+        # it. Its own pixels read 2% and 10%. It was rejected as background, and the
+        # capture's one landmark never reached the scene.
+        #
+        # Nothing else moves. Replayed over the five sample captures' stored region
+        # maps, depth maps and crops, all 107 boxes the box form rejects: exactly two
+        # verdicts flip the permissive way, both Paris towers -- the Eiffel Tower
+        # (0.02/0.10 by mask) and a second real tower (0.08/0.04). The other 105 read
+        # the same way through their masks and stay rejected: the blank-sky
+        # "lighthouse" at 1.00/1.00, the sky "aircraft", the "boats" in the clouds.
+        # One flips the strict way, and is a correction too -- Iceland's aircraft::0
+        # representative is a featureless grey blob of cloud, 54% sky by mask.
+        #
+        # false restores the box form for bisecting. Note this is only ever a
+        # fallback, not a switch: a detection with no crop, or with a crop that has no
+        # alpha, is still measured over its whole box.
+        self.mask_background_fraction = bool(mask_background_fraction)
         self.billboard_distance_m = float(billboard_distance_m)
         # A group only earns a bespoke category mesh if some instance of it
         # subtends at least this many display pixels of HEIGHT. Meshing is
@@ -407,7 +459,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 super().clean_up()
                 try:
                     mesh = gen.meshify(crop, temp_path, seed=self.seed)
-                    mesh = mesh.repair()
+                    # See repair_meshes: Poisson reconstruction cannot carry a UV
+                    # texture through, so it only runs when asked for, or when the
+                    # reconstruction came back colour-only anyway (SAM3D's
+                    # out-of-memory fallback) and there is no texture to protect.
+                    if self.config.repair_meshes or not mesh.has_texture:
+                        mesh = mesh.repair()
                     raw_faces = mesh.face_count
                     mesh = mesh.decimate(self.config.max_mesh_faces)
                     mesh.fit_to_box(1.0, 1.0)
@@ -427,6 +484,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 )
                 self.log_info(
                     f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f{decimated}"
+                    + (" textured" if mesh.has_texture else " vertex-colour only")
                 )
                 self.advance_progress(asset_task)
         finally:
@@ -579,18 +637,47 @@ class PanoramaAssetGenerationStage(PipelineStage):
         patch = array[y1:y2, x1:x2]
         return patch if patch.size else None
 
+    @staticmethod
+    def _crop_mask(crop, shape) -> "np.ndarray | None":
+        """The crop's own alpha silhouette, resampled to a _box_patch's shape.
+
+        crop_{i} is cut tight to its detection box, so its alpha is that box's mask
+        in the same pixel space -- nearest-neighbour is the right resampler onto a
+        map at a different resolution, and the only one that keeps a one-pixel
+        lattice member from dissolving. None when there is no usable mask.
+        """
+        if crop is None or shape is None:
+            return None
+        image = getattr(crop, "image", None)
+        if image is None or image.mode != "RGBA":
+            return None
+        from PIL import Image as PILImage
+
+        alpha = image.getchannel("A").resize((shape[1], shape[0]), PILImage.NEAREST)
+        mask = np.asarray(alpha) > 0
+        return mask if mask.any() else None
+
     def _background_fractions(
-        self, box, region_type_map, panorama_depth, far_depth, pano_w, pano_h,
+        self, box, crop, region_type_map, panorama_depth, far_depth, pano_w, pano_h,
     ) -> tuple[float, float]:
-        """(sky fraction, unmeasured-depth fraction) of this box. See max_background_fraction."""
+        """(sky fraction, unmeasured-depth fraction) of this detection.
+
+        Measured over the detection's own SEGMENTATION MASK where it has one, and
+        only over the whole box as a fallback. See max_background_fraction for what
+        the two readings mean and mask_background_fraction for why the mask.
+        """
         sky = clamped = 0.0
         patch = self._box_patch(region_type_map, box, pano_w, pano_h)
         if patch is not None:
-            sky = float(np.mean(patch == int(RegionType.SKY)))
+            mask = self._crop_mask(crop, patch.shape) if self.config.mask_background_fraction else None
+            sampled = patch[mask] if mask is not None else patch
+            sky = float(np.mean(sampled == int(RegionType.SKY)))
         if panorama_depth is not None and far_depth:
             patch = self._box_patch(panorama_depth.depth, box, pano_w, pano_h)
             if patch is not None:
-                clamped = float(np.mean(patch >= far_depth * 0.99))
+                mask = self._crop_mask(crop, patch.shape) if self.config.mask_background_fraction else None
+                sampled = patch[mask] if mask is not None else patch
+                clamped = float(np.mean(sampled >= far_depth * 0.99))
         return sky, clamped
 
     def _curate(
@@ -645,7 +732,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
             if not metadata.get("synthetic") and self.config.max_background_fraction < 1.0:
                 sky_fraction, clamped_fraction = self._background_fractions(
-                    box, region_type_map, panorama_depth, far_depth, pano_w, pano_h,
+                    box, get_image(f"crop_{idx}"),
+                    region_type_map, panorama_depth, far_depth, pano_w, pano_h,
                 )
                 limit = self.config.max_background_fraction
                 if sky_fraction > limit or clamped_fraction > limit:
