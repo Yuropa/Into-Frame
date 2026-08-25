@@ -178,9 +178,19 @@ class _ProbabilityAccumulator:
         # the same arithmetic and hold only a handful of (H, W) arrays at once --
         # measured 4.37 GB -> 1.4 GB peak RSS on a full-resolution panorama, which
         # matters because this runs in the same process as the segmentation model.
-        class_ids = sorted(self.scores)
-        lookup = np.asarray(class_ids, dtype=np.int16)
         shape = (self.height, self.width)
+        class_ids = sorted(self.scores)
+        if not class_ids:
+            # No tile ever contributed a class. Not reachable with a real model
+            # (every tile's top-2 yields two), but finalize() is the only thing
+            # standing between an empty accumulator and an IndexError on lookup[best]
+            # partway through a multi-hour run, so it returns an empty labelling
+            # rather than raising.
+            return (
+                np.zeros(shape, dtype=np.int16), np.zeros(shape, dtype=np.float32),
+                np.zeros(shape, dtype=np.int16), np.zeros(shape, dtype=np.float32),
+            )
+        lookup = np.asarray(class_ids, dtype=np.int16)
 
         best_score = np.full(shape, -np.inf, dtype=np.float32)
         best = np.zeros(shape, dtype=np.int16)
@@ -298,9 +308,13 @@ class PanoramaSegmentationServer(RemoteServer):
             (label_canvas, confidence_canvas,
              runnerup_canvas, runnerup_confidence_canvas) = accumulator.finalize()
             if accumulator.overflow:
-                print(
-                    f"  tile blending: {accumulator.overflow} class sighting(s) past the "
-                    f"{_MAX_ACCUMULATED_CLASSES}-class accumulator ceiling were dropped"
+                # report_progress is the only channel this process has back to the
+                # pipeline log -- there is no logger on RemoteServer, and a bare
+                # print here goes to a subprocess stdout nothing reads.
+                self.report_progress(
+                    0.95,
+                    f"tile blending: {accumulator.overflow} class sighting(s) past the "
+                    f"{_MAX_ACCUMULATED_CLASSES}-class ceiling were dropped",
                 )
 
         self.report_progress(0.95, "Done")
