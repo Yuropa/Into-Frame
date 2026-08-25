@@ -26,6 +26,7 @@ from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
 from util.device_utils import DeviceStrategy, preferred_device
 from util.panorama_utils import Panorama
+from util.seam_repair import close_wrap_seam
 
 
 _GROUND_TYPES: frozenset[RegionType] = frozenset({
@@ -164,6 +165,11 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # non-square texture is not a problem. Native resolution is used as-is
         # whenever it's already under this cap.
         panorama_layer_max_resolution: int = 4096,
+        # Columns at each end over which the panorama layer's left/right edge
+        # mismatch is spread so the two match exactly -- see
+        # util.seam_repair.close_wrap_seam. This layer is equirect=True and wraps the
+        # viewer, so its edges are adjacent in the scene. 0 disables.
+        wrap_seam_band_px: int = 512,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
         use_photo_reference: bool = True,
@@ -322,6 +328,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.panorama_upright_falloff_radius_m = panorama_upright_falloff_radius_m
         self.horizon_fade_deg = horizon_fade_deg
         self.panorama_layer_max_resolution = panorama_layer_max_resolution
+        self.wrap_seam_band_px = int(wrap_seam_band_px)
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
@@ -785,7 +792,10 @@ class TerrainTextureGenerationStage(PipelineStage):
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
             half = grid_size / 2.0
 
-            pano_tile = self._panorama_tile(panorama_terrain, cfg.panorama_layer_max_resolution)
+            pano_tile = self._panorama_tile(
+                panorama_terrain, cfg.panorama_layer_max_resolution,
+                band_px=cfg.wrap_seam_band_px, log_fn=self.log_info,
+            )
             # The ORIGINAL-photo typing, not the terrain-scoped one, because this has
             # to describe the pixels this layer actually paints. _ground_colour_panorama
             # above puts the original photograph's pixels back wherever foreground
@@ -984,7 +994,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         )))
 
     @staticmethod
-    def _panorama_tile(panorama, max_resolution: int) -> PIL.Image.Image:
+    def _panorama_tile(panorama, max_resolution: int, band_px: int = 512, log_fn=None) -> PIL.Image.Image:
         """
         Prepare the full equirectangular panorama as a texture for storage.
 
@@ -1010,6 +1020,19 @@ class TerrainTextureGenerationStage(PipelineStage):
         scale = min(1.0, max_resolution / max(w, h))
         if scale < 1.0:
             img = img.resize((round(w * scale), round(h * scale)), PIL.Image.LANCZOS)
+        # This layer is declared equirect=True and wraps the viewer through a full
+        # 360 degrees, so its left and right edges are adjacent in the rendered
+        # scene and any mismatch between them is a vertical line on the ground.
+        # Panorama LoRA Correction, which produces the panorama this resizes, leaves
+        # one: measured on its stored output for the five sample captures the wrap
+        # column is the single largest column step in the whole image every time --
+        # Iceland 66.22 against a 99th-percentile 8.58, Paris 15.20 against 8.46.
+        # It sits at the same longitude as the sky's own seam (see
+        # SkyboxInpaintingStage's Pass 4), so untreated the two read as one line
+        # running from underfoot up through the sky. Closed here rather than at the
+        # source because this is where the image becomes a wrap.
+        if band_px > 0:
+            img = close_wrap_seam(img, band_px=band_px, log_fn=log_fn, label="terrain wrap")
         return img
 
     @staticmethod

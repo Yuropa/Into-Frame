@@ -315,6 +315,41 @@ stages:
                                 # sky) survives Pass 2 vs. being replaced by FLUX's own
                                 # generation. 1.0 = fully overwritten, ignores the input almost
                                 # entirely; lower keeps more of the original sky's colour/texture.
+    close_sky_wrap_seam: true
+    # Pass 4: after the generative seam repair, force column 0 and column W-1 to match
+    # EXACTLY by spreading their per-row difference back over wrap_seam_band_px columns
+    # at each end (util.seam_repair.close_wrap_seam).
+    #
+    # THIS IS THE VISIBLE SEAM IN THE SKY. Pass 3 already rolls the wrap to the middle
+    # of the frame and asks FLUX to inpaint across it, which is the only thing that can
+    # invent cloud structure over the join -- but a diffusion model has no continuity
+    # constraint and nothing checked its result. It did not close: this stage's stored
+    # output for the Paris capture steps 11.53 RGB levels at the wrap column, against a
+    # median adjacent-column difference of 0.145 and a 99th percentile of 0.523 across
+    # the whole sky. That is a hard vertical line at 80x the surrounding variation, in
+    # a smooth gradient, at eye level. The other four captures measure 0.11-0.33 and
+    # were already fine.
+    #
+    # What Pass 3 leaves is mostly low-frequency -- the two ends of the same sky at
+    # slightly different exposures -- which closes in closed form. close_wrap_seam
+    # splits the edge difference by vertical frequency and treats the halves
+    # differently (a single treatment trades the vertical line for horizontal banding;
+    # the docstring has the measurements), then flattens the narrow ridge Pass 3's own
+    # feathered composite leaves at the join.
+    #
+    # Replayed over all five captures' stored panorama_sky: the wrap step goes from
+    # 11.53 to 0.29 on Paris and to 0.00-0.10 on the rest, in every case landing under
+    # that image's OWN 99th-percentile column step, i.e. no longer distinguishable from
+    # ordinary sky variation. The median adjacent-column difference moves by at most
+    # 0.001, the largest column step away from the seam is unchanged, and the row-to-row
+    # variation inside the corrected band grows by 0.2% (1.656 -> 1.661).
+    wrap_seam_band_px: 512
+    # How far the low-frequency half is spread. Larger is gentler: the steepest gradient
+    # it can introduce is pi*|delta| / (4*band), so 512 puts Paris's worst row (delta 43)
+    # at 0.066 levels per column against the 0.145 the sky already varies by. Measured
+    # at 256 / 512 / 1024 the outcome is indistinguishable, so this is headroom rather
+    # than a tuned value. The other two scales (the 16 px band the row-detail half is
+    # confined to, and the 16 px ridge flattening) are close_wrap_seam's own defaults.
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
@@ -982,6 +1017,23 @@ stages:
                                  # photo). Keeps native ~2:1 aspect; only downscales past
                                  # this cap. Matches ground_point_cloud.glb's color fidelity
                                  # much more closely than the old square 1024px resize did.
+    wrap_seam_band_px: 512
+    # The panorama layer is declared equirect=True and wraps the viewer through a full
+    # 360 degrees, so its left and right edges are adjacent on the ground in front of
+    # them. Panorama LoRA Correction leaves them mismatched, and by more than the sky:
+    # over the five sample captures the wrap column is the single largest column step
+    # in the whole tile every time -- Iceland 66.22 against a 99th percentile of 8.58,
+    # Paris 15.20 against 8.46, Shark Fin 12.23 against 3.95. It sits at the same
+    # longitude as the sky's seam, so left alone the two read as ONE line running from
+    # underfoot straight up through the sky, which is why fixing only the sky would
+    # have looked like fixing half of it. Same closed-form correction, same band. 0
+    # disables. See util.seam_repair.close_wrap_seam.
+    #
+    # Measured on the stored tiles, the wrap step goes to 0.005 or less on all five,
+    # while the median adjacent-column difference and the largest column step anywhere
+    # else are unchanged to three decimals. The ridge flattening self-gates and does not
+    # fire on any of them: once the edges match, every terrain seam neighbourhood is
+    # already below its own image's 99th-percentile column step.
     # Debug: save every intermediate image of the generation process (reference patch,
     # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
     # <temp>/texture_generation/, so each step can be inspected.
