@@ -8,13 +8,12 @@ Upload a photo, painting, or any scene — and step inside it.
 
 ## How It Works
 
-Into Frame is built around a two-part architecture: a Python server that runs the AI generation pipeline, and one of two clients that render the resulting scene.
+Into Frame is built around a two-part architecture: a Python server that runs the AI generation pipeline, and a Unity client that renders the resulting scene.
 
 | Component | Description |
 |-----------|-------------|
 | **`server/`** | A Python server that runs the AI generation pipeline. Handles model inference, scene construction, and serves assets to connected clients. |
 | **`Into Frame/`** | A Unity project (C#) that connects to the Python server and renders the generated 3D scene in real time. |
-| **`IntoFrame visionOS/`** | A native macOS app (Swift + Metal 4) that connects to the Python server, renders the generated scene, and streams it as a full-immersion experience to an Apple Vision Pro via Remote Immersive Space. |
 
 ---
 
@@ -26,7 +25,6 @@ Into Frame is built around a two-part architecture: a Python server that runs th
 - Conda (Miniconda or Anaconda)
 - CUDA 13.0 + CUDA Toolkit *(recommended — see note below)*
 - **For the Unity client:** Unity 2022.3 LTS or later
-- **For the macOS app:** Xcode, macOS 26.4+
 
 > **Note on CUDA:** The pipeline can run without a CUDA-compatible GPU, but output quality and performance may vary. macOS MPS is supported automatically where available.
 
@@ -78,14 +76,6 @@ By default this binds to `localhost:8080`, with an asset server on port `3000`.
 #### Unity
 
 Open the `Into Frame/` folder as a Unity project. With the Python server running, press **Play** to connect and explore your generated scene.
-
-#### macOS App (Apple Vision Pro)
-
-Open `IntoFrame visionOS/IntoFrame.xcodeproj` in Xcode, build, and run. The app connects to the Python server, downloads the generated scene assets, and renders them using a custom Metal 4 renderer. Once a scene is ready, tap **Enter Immersive Space** to stream a full-immersion view of the environment to a nearby Apple Vision Pro via [Remote Immersive Space](https://developer.apple.com/documentation/visionos/creating-immersive-spaces-in-visionos-with-swiftui).
-
-The main window shows connection status, scene generation progress, and asset download progress before the immersive view is available.
-
-The server URL defaults to `ws://localhost:8080` and can be overridden via the `ServerWSURL` key in the app's `Info.plist`.
 
 ---
 
@@ -234,6 +224,5 @@ into-frame/
 │   └── remote-server.sh # Standalone remote SSH launcher
 ├── requirements/        # Per-environment pip requirements
 ├── Into Frame/          # Unity client (C#)
-├── IntoFrame visionOS/  # macOS client (Swift + Metal, Xcode)
 └── docs/                # Project website
 ```

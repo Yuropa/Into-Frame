@@ -215,7 +215,7 @@ public class SceneObjectManager : MonoBehaviour
     // 6,661 grass instances is 6,661 frames, over a minute of nothing on screen even
     // once the meshes are cached and each instantiation costs under a millisecond.
     // Draining on a time budget instead keeps the frame responsive (this runs on the
-    // main thread, and on visionOS a dropped frame is felt) while letting cheap tasks
+    // main thread, and in a headset a dropped frame is felt) while letting cheap tasks
     // batch up. Cache misses still cost a web request each and yield internally, so
     // they cannot monopolise the budget.
     private const float QueueFrameBudgetSeconds = 0.008f;

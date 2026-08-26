@@ -417,9 +417,9 @@ class TerrainMeshGenerator:
                 water_vertices = np.stack([X_pos, water_Y, Z_pos], axis=-1).astype(np.float32)
                 # Mirrored by Unity's IntoFrame/WaterSurface shader, which replaces
                 # this material outright and re-declares the same two numbers as its
-                # own defaults -- keep the two in step. It is also what renders
-                # unaided on clients with no water shader of their own (the visionOS
-                # app has none), so this is not merely a fallback.
+                # own defaults -- keep the two in step. It is also what the exported
+                # glTF carries, and what renders unaided in any viewer with no water
+                # shader of its own, so this is not merely a fallback.
                 #
                 # Alpha 0.90, raised from 0.75: the lakebed under this sheet is
                 # carved water_depression_m below it and painted with the panorama's

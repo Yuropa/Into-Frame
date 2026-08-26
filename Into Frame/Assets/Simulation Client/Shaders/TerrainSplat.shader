@@ -59,12 +59,13 @@ Shader "IntoFrame/TerrainSplat"
         // coordinates confined to v ∈ [0.29, 0.54] reads layer weights from
         // unrelated world positions and tiles synthetic layers in equirect space.
         //
-        // Deriving it here instead of fixing the mesh export keeps the glTF format
-        // unchanged, which matters: the visionOS renderer binds a single
-        // MDLVertexAttributeTextureCoordinate (set 0) and samples the embedded
-        // panorama preview through it, so it renders correctly today precisely
-        // because UV0 holds the panorama UV. Writing a top-down UV0 server-side
-        // would fix Unity and break visionOS in the same commit.
+        // Deriving it here rather than fixing the mesh export keeps the glTF format
+        // unchanged: UV0 holding the panorama UV is what lets a plain glTF viewer
+        // sample the embedded panorama preview through the mesh's only texture
+        // coordinate set. That constraint used to be hard -- the since-removed
+        // visionOS renderer bound exactly one UV set -- and is now merely a
+        // compatibility preference, so writing a top-down UV0 server-side (and
+        // dropping this derivation) is an option if the export is ever revisited.
         _TerrainExtent ("Terrain XZ Extent (minX, minZ, maxX, maxZ)", Vector) = (-100, -100, 100, 100)
 
         // Height-biased blending: each layer tile's alpha channel carries a local

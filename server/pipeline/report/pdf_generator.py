@@ -66,7 +66,7 @@ _PIPELINE_OVERVIEW = (
     "camera and sparse at the horizon. A texture baked from the panorama is applied to "
     "the terrain surface. Foreground objects are detected, segmented, and individually "
     "reconstructed as textured 3D meshes. All assets are assembled into a scene "
-    "description streamed to the Unity or visionOS client for real-time exploration."
+    "description streamed to the Unity client for real-time exploration."
 )
 
 

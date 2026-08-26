@@ -9,8 +9,8 @@ Shader "IntoFrame/WaterSurface"
         // material at runtime (see WaterMaterialManager): this shader replaces that
         // material outright, so there is nothing reliable to read the color from
         // beyond re-deriving it from the same two numbers python already picked.
-        // Keep the two in step -- the baked material is what renders on a client with
-        // no water shader of its own, which today means the visionOS app.
+        // Keep the two in step -- the baked material is what the exported glTF
+        // carries, and what renders in any viewer that has no water shader of its own.
         // Alpha raised 0.75 -> 0.90. At 0.75 a quarter of the terrain under the
         // water read straight through it, and that terrain is a lakebed carved
         // water_depression_m below the surface with the panorama's own water pixels
