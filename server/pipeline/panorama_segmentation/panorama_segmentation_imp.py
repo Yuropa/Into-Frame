@@ -88,6 +88,142 @@ def _paste_tiles(
     weight_canvas[row_grid, col_grid] = np.where(better, tile_weight, current_weight)
 
 
+# Blend overlapping tiles by accumulating weighted class probabilities and taking
+# the argmax once, at the end, instead of letting the highest-feather tile win each
+# pixel outright.
+#
+# Winner-take-all does not remove a tile seam, it MOVES it. The feather weight is
+# highest at a tile's own centre, so the pixel where the winner flips from tile A to
+# tile B is the midpoint between their two centres -- a perfectly straight vertical
+# line, at which the label changes discontinuously wherever the two tiles disagree.
+# Measured on the 2026-08-25 run at _TILE_SIZE 640 / _TILE_OVERLAP_FRAC 0.25 (stride
+# 480, centres at 320 + 480k, midpoints at 560 + 480k): straight label edges in the
+# nadir half sit at columns 560, 1040, 1520, 2000, 2480 and 3440 on Iceland, Shark
+# Fin and Irises alike, and Rainier's single seam is at 3440. Every one of those is
+# a feather crossover, not a region boundary.
+#
+# Accumulating instead makes the handover continuous: near the midpoint both tiles
+# contribute about equally, so the winning class changes where the EVIDENCE changes
+# rather than where the geometry does.
+_BLEND_TILE_PROBABILITIES = True
+# Ceiling on how many distinct classes the accumulator will track. Each one costs a
+# full-resolution float32 canvas (~34 MB at 2048x4096), and only classes that reach
+# some tile's top-2 are ever allocated -- measured at 21-34 distinct classes per
+# capture, so this is roughly 4x headroom rather than a limit expected to bind. Past
+# it, further new classes fall back to competing on their own weighted score alone,
+# which is the old behaviour for those classes only.
+_MAX_ACCUMULATED_CLASSES = 128
+
+
+class _ProbabilityAccumulator:
+    """
+    Per-class weighted-probability canvases, argmaxed once when every tile is in.
+
+    Sparse by class: SegFormer's ADE20K head has 150 classes and a dense
+    (H, W, 150) float32 accumulator is 5 GB at panorama resolution, but a single
+    capture only ever puts a couple of dozen of them in a tile's top-2. Canvases are
+    therefore allocated lazily, on first sight of a class.
+
+    Only each tile's top-2 classes are accumulated, not its full softmax -- that is
+    what the tile loop already computes, and a class that never places in any tile's
+    top two cannot win a blended argmax either. The consequence is that a class
+    sitting consistently third contributes nothing, which is the intended tradeoff:
+    it could not have been the answer anyway.
+    """
+
+    def __init__(self, height: int, width: int):
+        self.height = height
+        self.width = width
+        self.scores: dict[int, np.ndarray] = {}
+        # Sum of the feather weights of every tile covering each pixel. Dividing the
+        # accumulated scores by it turns them back into a weighted MEAN of the
+        # per-tile softmax probabilities, on the same 0..1 scale the old top-1 value
+        # had. That scale is load-bearing: downstream reads confidence and runner-up
+        # confidence as softmax probabilities and thresholds their difference as a
+        # margin (see ambiguity_strategy_for_label), so rescaling them -- e.g.
+        # normalising the pair to sum to 1 -- would silently move every one of those
+        # thresholds.
+        self.weight = np.zeros((height, width), dtype=np.float32)
+        self.overflow = 0
+
+    def add(self, tile: _Tile, tile_weight: np.ndarray,
+            ids: list[np.ndarray], vals: list[np.ndarray]) -> None:
+        cols = np.arange(tile.x0, tile.x0 + tile.w) % self.width
+        rows = np.arange(tile.y0, tile.y0 + tile.h)
+        row_grid, col_grid = np.meshgrid(rows, cols, indexing="ij")
+        np.add.at(self.weight, (row_grid, col_grid), tile_weight.astype(np.float32))
+
+        for tile_ids, tile_vals in zip(ids, vals):
+            weighted = (tile_vals * tile_weight).astype(np.float32)
+            for class_id in np.unique(tile_ids):
+                key = int(class_id)
+                canvas = self.scores.get(key)
+                if canvas is None:
+                    if len(self.scores) >= _MAX_ACCUMULATED_CLASSES:
+                        self.overflow += 1
+                        continue
+                    canvas = np.zeros((self.height, self.width), dtype=np.float32)
+                    self.scores[key] = canvas
+                hit = tile_ids == class_id
+                # np.add.at rather than plain += : a tile straddling the wrap seam
+                # has repeated column indices, and fancy-index += would apply only
+                # the last write instead of summing them.
+                np.add.at(canvas, (row_grid[hit], col_grid[hit]), weighted[hit])
+
+    def finalize(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """(label, confidence, runner-up label, runner-up confidence)."""
+        # Running maxima over the per-class canvases rather than np.stack + argmax:
+        # stacking 34 classes at 2048x4096 is a 1.1 GB temporary, and masking the
+        # winner out for the second pass copies it again. Two sequential sweeps cost
+        # the same arithmetic and hold only a handful of (H, W) arrays at once --
+        # measured 4.37 GB -> 1.4 GB peak RSS on a full-resolution panorama, which
+        # matters because this runs in the same process as the segmentation model.
+        shape = (self.height, self.width)
+        class_ids = sorted(self.scores)
+        if not class_ids:
+            # No tile ever contributed a class. Not reachable with a real model
+            # (every tile's top-2 yields two), but finalize() is the only thing
+            # standing between an empty accumulator and an IndexError on lookup[best]
+            # partway through a multi-hour run, so it returns an empty labelling
+            # rather than raising.
+            return (
+                np.zeros(shape, dtype=np.int16), np.zeros(shape, dtype=np.float32),
+                np.zeros(shape, dtype=np.int16), np.zeros(shape, dtype=np.float32),
+            )
+        lookup = np.asarray(class_ids, dtype=np.int16)
+
+        best_score = np.full(shape, -np.inf, dtype=np.float32)
+        best = np.zeros(shape, dtype=np.int16)
+        for idx, class_id in enumerate(class_ids):
+            canvas = self.scores[class_id]
+            wins = canvas > best_score
+            best_score = np.where(wins, canvas, best_score)
+            best = np.where(wins, np.int16(idx), best)
+
+        second_score = np.full(shape, -np.inf, dtype=np.float32)
+        second = np.zeros(shape, dtype=np.int16)
+        for idx, class_id in enumerate(class_ids):
+            # Skip only the pixels this class actually won, not the whole plane --
+            # a class that is the winner somewhere is still a legitimate runner-up
+            # everywhere else.
+            canvas = np.where(best == idx, -np.inf, self.scores[class_id])
+            wins = canvas > second_score
+            second_score = np.where(wins, canvas, second_score)
+            second = np.where(wins, np.int16(idx), second)
+
+        best_score[~np.isfinite(best_score)] = 0.0
+        second_score[~np.isfinite(second_score)] = 0.0
+
+        # Back to the per-tile softmax scale -- see self.weight.
+        coverage = np.where(self.weight > 0, self.weight, 1.0)
+        return (
+            lookup[best],
+            (best_score / coverage).astype(np.float32),
+            lookup[second],
+            (second_score / coverage).astype(np.float32),
+        )
+
+
 class PanoramaSegmentationServer(RemoteServer):
     def setup(self):
         self.processor = SegformerImageProcessor.from_pretrained(_MODEL_ID)
@@ -120,6 +256,9 @@ class PanoramaSegmentationServer(RemoteServer):
         runnerup_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
         runnerup_confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
         weight_canvas = np.full((orig_h, orig_w), -1.0, dtype=np.float32)
+        # See _BLEND_TILE_PROBABILITIES. None -> the winner-take-all canvases above
+        # are used exactly as before, so the flag bisects cleanly.
+        accumulator = _ProbabilityAccumulator(orig_h, orig_w) if _BLEND_TILE_PROBABILITIES else None
 
         for batch_start in range(0, len(tiles), _MAX_BATCH):
             batch = tiles[batch_start: batch_start + _MAX_BATCH]
@@ -149,14 +288,34 @@ class PanoramaSegmentationServer(RemoteServer):
                 tile_runnerup = top2_idx[:, 1].squeeze(0).cpu().numpy().astype(np.int16)
                 tile_runnerup_confidence = top2_val[:, 1].squeeze(0).cpu().numpy().astype(np.float32)
                 tile_weight = _feather_window(tile.h, tile.w)
-                _paste_tiles(
-                    [label_canvas, confidence_canvas, runnerup_canvas, runnerup_confidence_canvas],
-                    [tile_label, tile_confidence, tile_runnerup, tile_runnerup_confidence],
-                    weight_canvas, tile_weight, tile,
-                )
+                if accumulator is not None:
+                    accumulator.add(
+                        tile, tile_weight,
+                        [tile_label, tile_runnerup],
+                        [tile_confidence, tile_runnerup_confidence],
+                    )
+                else:
+                    _paste_tiles(
+                        [label_canvas, confidence_canvas, runnerup_canvas, runnerup_confidence_canvas],
+                        [tile_label, tile_confidence, tile_runnerup, tile_runnerup_confidence],
+                        weight_canvas, tile_weight, tile,
+                    )
 
             done = min(len(tiles), batch_start + len(batch))
             self.report_progress(0.05 + 0.85 * done / len(tiles), f"Segmenting tiles… ({done}/{len(tiles)})")
+
+        if accumulator is not None:
+            (label_canvas, confidence_canvas,
+             runnerup_canvas, runnerup_confidence_canvas) = accumulator.finalize()
+            if accumulator.overflow:
+                # report_progress is the only channel this process has back to the
+                # pipeline log -- there is no logger on RemoteServer, and a bare
+                # print here goes to a subprocess stdout nothing reads.
+                self.report_progress(
+                    0.95,
+                    f"tile blending: {accumulator.overflow} class sighting(s) past the "
+                    f"{_MAX_ACCUMULATED_CLASSES}-class ceiling were dropped",
+                )
 
         self.report_progress(0.95, "Done")
 

@@ -315,6 +315,41 @@ stages:
                                 # sky) survives Pass 2 vs. being replaced by FLUX's own
                                 # generation. 1.0 = fully overwritten, ignores the input almost
                                 # entirely; lower keeps more of the original sky's colour/texture.
+    close_sky_wrap_seam: true
+    # Pass 4: after the generative seam repair, force column 0 and column W-1 to match
+    # EXACTLY by spreading their per-row difference back over wrap_seam_band_px columns
+    # at each end (util.seam_repair.close_wrap_seam).
+    #
+    # THIS IS THE VISIBLE SEAM IN THE SKY. Pass 3 already rolls the wrap to the middle
+    # of the frame and asks FLUX to inpaint across it, which is the only thing that can
+    # invent cloud structure over the join -- but a diffusion model has no continuity
+    # constraint and nothing checked its result. It did not close: this stage's stored
+    # output for the Paris capture steps 11.53 RGB levels at the wrap column, against a
+    # median adjacent-column difference of 0.145 and a 99th percentile of 0.523 across
+    # the whole sky. That is a hard vertical line at 80x the surrounding variation, in
+    # a smooth gradient, at eye level. The other four captures measure 0.11-0.33 and
+    # were already fine.
+    #
+    # What Pass 3 leaves is mostly low-frequency -- the two ends of the same sky at
+    # slightly different exposures -- which closes in closed form. close_wrap_seam
+    # splits the edge difference by vertical frequency and treats the halves
+    # differently (a single treatment trades the vertical line for horizontal banding;
+    # the docstring has the measurements), then flattens the narrow ridge Pass 3's own
+    # feathered composite leaves at the join.
+    #
+    # Replayed over all five captures' stored panorama_sky: the wrap step goes from
+    # 11.53 to 0.29 on Paris and to 0.00-0.10 on the rest, in every case landing under
+    # that image's OWN 99th-percentile column step, i.e. no longer distinguishable from
+    # ordinary sky variation. The median adjacent-column difference moves by at most
+    # 0.001, the largest column step away from the seam is unchanged, and the row-to-row
+    # variation inside the corrected band grows by 0.2% (1.656 -> 1.661).
+    wrap_seam_band_px: 512
+    # How far the low-frequency half is spread. Larger is gentler: the steepest gradient
+    # it can introduce is pi*|delta| / (4*band), so 512 puts Paris's worst row (delta 43)
+    # at 0.066 levels per column against the 0.145 the sky already varies by. Measured
+    # at 256 / 512 / 1024 the outcome is indistinguishable, so this is headroom rather
+    # than a tuned value. The other two scales (the 16 px band the row-detail half is
+    # confined to, and the 16 px ridge flattening) are close_wrap_seam's own defaults.
 
   - name: Panorama Depth
     stage: PanoramaDepthStage
@@ -484,6 +519,29 @@ stages:
 
   - name: Region Map
     stage: RegionMapStage
+    # Look each grid cell up in the panorama along the ray to its REAL reconstructed
+    # elevation (HEIGHT_MAP, computed by the previous stage) instead of assuming a
+    # flat plane camera_height_meters below the camera.
+    #
+    # The flat assumption makes the depression angle atan(camera_height / r), so at
+    # camera_height 1 m a cell 50 m out is looked up 1.1 deg below the horizon --
+    # essentially ON the horizon -- whatever is actually there. Every distant cell
+    # then samples the same near-horizon band. This stage's own debug path already
+    # used HEIGHT_MAP for exactly this reason; the real path did not.
+    #
+    # Replayed at 1024 grid resolution on the existing bundles (flat -> elevation):
+    #
+    #     Shark Fin  water 30.3% -> 31.2%, components 2590 -> 669,
+    #                largest body 7,078 -> 11,456 m2   (the speckle fix)
+    #     Paris      water  0.0% ->  2.1%, largest body 12 -> 842 m2
+    #     Rainier    vegetation 87.0% -> 86.9%; ground 12.1% -> 8.1% with
+    #                terrain appearing at 3.8%
+    #
+    # Rainier does move a little -- watch it. Paris improves but is not fixed: its
+    # HEIGHT_MAP is itself clipped to -6.0..-0.2 m by HeightMapGenerator's own
+    # flat-plane bootstrap, so the elevation this reads is only as good as that.
+    # false restores the flat-plane lookup.
+    use_height_map_elevation: true
     grid_size_meters: 200.0     # must match Height Map grid extent
     grid_resolution: 4096       # must match Height Map resolution
     ground_y_max: -0.5
@@ -551,6 +609,33 @@ stages:
   - name: Terrain Reconstruction
     stage: TerrainReconstructionStage
     solve_resolution: 512           # downsample to this for the harmonic solve, upsample after
+    # Ceiling on how far this stage may inflate the measured height span, as a
+    # multiple of it. Ridge anchoring, the slope envelopes and the harmonic solve
+    # only ever ADD relief, and nothing else bounds how much.
+    #
+    # Measured input span -> this stage's output, 2026-08-18 run:
+    #
+    #     Paris       5.8 m ->  90.2 m   15.55x
+    #     Shark Fin  12.9 m ->  98.3 m    7.62x
+    #     Iceland    23.2 m ->  78.7 m    3.39x   <- binding constraint
+    #     Rainier    20.0 m ->  57.7 m    2.89x
+    #
+    # Note it is THIS stage and not Terrain Noise Refinement, which was the obvious
+    # suspect and comes in at 0.93-0.95x on every capture -- it slightly REDUCES the
+    # span it inherits.
+    #
+    # 4.0 clears Rainier by 39% and Iceland by 18%. Paris should now fall under it
+    # unaided (min_terrain_silhouette_frac refuses to anchor a city skyline); this
+    # is the backstop for Shark Fin, whose silhouette is 100% terrain, so that gate
+    # passes and a 13 m cove still reconstructs into 98 m of cliff.
+    #
+    # Scales the synthetic component (output - measured), not the surface. Replayed
+    # on the two captures it fires on, that moves 100% of observed cells CLOSER to
+    # their own measurement -- mean error 0.111 -> 0.028 m on Paris and 7.227 ->
+    # 3.811 m on Shark Fin -- because the certainty-weighted restore upstream leaves
+    # low-certainty real cells well off their measured elevation in the first place.
+    # 0 disables.
+    max_relief_inflation: 4.0
     # Cells are held fixed at their observed elevation based on HEIGHT_MAP_OBSERVED_MASK
     # (a genuine direct point-cloud measurement), not HEIGHT_MAP_CERTAINTY -- certainty
     # decays with distance from camera and would leave most real terrain beyond ~43 m
@@ -932,6 +1017,23 @@ stages:
                                  # photo). Keeps native ~2:1 aspect; only downscales past
                                  # this cap. Matches ground_point_cloud.glb's color fidelity
                                  # much more closely than the old square 1024px resize did.
+    wrap_seam_band_px: 512
+    # The panorama layer is declared equirect=True and wraps the viewer through a full
+    # 360 degrees, so its left and right edges are adjacent on the ground in front of
+    # them. Panorama LoRA Correction leaves them mismatched, and by more than the sky:
+    # over the five sample captures the wrap column is the single largest column step
+    # in the whole tile every time -- Iceland 66.22 against a 99th percentile of 8.58,
+    # Paris 15.20 against 8.46, Shark Fin 12.23 against 3.95. It sits at the same
+    # longitude as the sky's seam, so left alone the two read as ONE line running from
+    # underfoot straight up through the sky, which is why fixing only the sky would
+    # have looked like fixing half of it. Same closed-form correction, same band. 0
+    # disables. See util.seam_repair.close_wrap_seam.
+    #
+    # Measured on the stored tiles, the wrap step goes to 0.005 or less on all five,
+    # while the median adjacent-column difference and the largest column step anywhere
+    # else are unchanged to three decimals. The ridge flattening self-gates and does not
+    # fire on any of them: once the edges match, every terrain seam neighbourhood is
+    # already below its own image's 99th-percentile column step.
     # Debug: save every intermediate image of the generation process (reference patch,
     # Pass 1 canvas/mask/result, Pass 2 raw/seam-fixed/sharpened/final) per region to
     # <temp>/texture_generation/, so each step can be inspected.
@@ -1072,6 +1174,40 @@ stages:
     # nearest surviving neighbour. Tune against clustering_debug.json's bucket_sizes.
     max_buckets_per_class: 8          # 0 disables (distance-cut only, prior behaviour)
     min_bucket_size: 3                # 0/1 disables the fold
+    outsize_split_ratio: 2.5
+    # A last pass over the finished buckets: split the tallest member of a bucket into
+    # a bucket of its own when it is this many times taller IN METRES than the next
+    # tallest. <= 1.0 disables.
+    #
+    # A bucket promises that one reconstruction, scaled per instance, stands in for
+    # all its members, and DINOv2 similarity alone cannot keep that promise — it sees
+    # shape and texture, and every tall pale structure against the sky looks alike.
+    # THIS IS THE SECOND HALF OF THE MISSING EIFFEL TOWER (mask_background_fraction is
+    # the first): the tower is 36.9 m and shares tower::2 with five cathedral
+    # fragments across the river at 12.6, 7.2, 7.1, 5.4 and 4.7 m. The bucket's
+    # representative is picked by composite_score — confidence, fill ratio, proximity,
+    # occlusion, and no size term whatsoever — which ranks the tower LAST of the six
+    # (0.542 against 0.660 for the 12.6 m spire). Without this the tower reaches the
+    # scene wearing a cathedral spire stretched to 36 m, which is not the Eiffel Tower
+    # arriving.
+    #
+    # Metres, not pixels: angular height in an equirect falls off with distance, so a
+    # pixel rule splits a near flower from a far one of the same species — replayed on
+    # these captures it fires on 14 groups, mostly for exactly that reason. Metric
+    # height is distance-invariant and computed by the same unproject_bbox_equirect
+    # Scene Generation places with, rather than by a second convention of its own.
+    #
+    # Replayed at 2.5 with the floor below, the five captures split 8 groups of 82:
+    # Paris tower::2 (the tower, 2.9x), boat::1 and landmark::0; Iceland tree::1 (14.1
+    # over 4.4 m); Shark Fin aircraft::0 and person::0; Rainier aircraft::0; Irises
+    # table::0. Three of those eight are detections the background gate rejects
+    # anyway, so they cost nothing at all. Irises — 10,739 detections, the capture
+    # most at risk of an explosion here — splits exactly one.
+    outsize_split_min_height_m: 2.0
+    # Floor on the outsized member's own height, so the ratio only runs where getting
+    # the size wrong is worth a second SAM3D reconstruction (~1 min each). Without it
+    # the rule fires on sub-metre noise: a 0.3 m "ship" over a 0.1 m one on Rainier,
+    # and most of the Irises painting, whose detections are all centimetres tall.
 
   - name: Object Distribution
     stage: ObjectDistributionStage
@@ -1443,6 +1579,28 @@ stages:
     # 0.5 because a real structure legitimately silhouettes against sky. Over those
     # same captures the genuine buildings and boats measured 0.00-0.47 on both
     # fractions and the rejects 0.54-1.00. 1.0 disables the gate.
+    mask_background_fraction: true
+    # Measure both fractions above over the detection's own alpha MASK (crop_{i}'s
+    # silhouette) rather than over its whole bounding box.
+    #
+    # The box form asks "how much of this rectangle is background", which is the wrong
+    # question for a subject that does not fill its rectangle -- and an open lattice is
+    # the extreme case. THIS IS WHY THE PARIS CAPTURE HAS NO EIFFEL TOWER: the tower is
+    # a clean 126x529 SAM cutout, but its BOX reads 60% sky and 65% unmeasured depth
+    # purely because you can see through the ironwork, so the gate rejected the one
+    # landmark in the scene as background. Its own pixels read 2% and 10%.
+    #
+    # Nothing else moves. Replayed over the five sample captures' stored region maps,
+    # depth maps and crops, all 107 boxes the box form rejects, exactly two verdicts
+    # flip the permissive way and both are Paris towers: the Eiffel Tower (0.02/0.10
+    # by mask) and a second real tower (0.08/0.04). The other 105 read the same way
+    # through their masks and stay rejected -- the blank-sky "lighthouse" at 1.00/1.00,
+    # the sky "aircraft", the "boats" floating in the clouds. One verdict flips the
+    # strict way, and it is a correction too: Iceland's aircraft::0 representative is a
+    # featureless grey blob of cloud, 54% sky by mask against 40% by box.
+    #
+    # false restores the box form. Only ever a fallback either way: a detection with no
+    # crop, or a crop with no alpha, is still measured over its whole box.
     # Reconstruction-quality guard, not an LOD cutoff: past this the crop a mesh
     # would be built FROM is too far away to carry usable detail, whatever size it
     # renders at. The mesh-vs-billboard decision itself is min_mesh_angular_px
@@ -1494,6 +1652,31 @@ stages:
     # Grass Cover's equivalent (max_near_mesh_faces) is 4000; 8000 here because these
     # are subjects you look at rather than ground cover underfoot. 0 disables.
     max_mesh_faces: 8000
+    repair_meshes: false
+    # Poisson reconstruction + MeshFix (Mesh.repair) over each reconstruction before
+    # it is decimated. OFF: it is what made every category mesh UNTEXTURED.
+    #
+    # Poisson discards the input topology, so a UV-mapped texture cannot survive it;
+    # repair() bakes the texture down to per-vertex colour and returns a colour-only
+    # mesh. Inspecting the GLBs from the 2026-08-25 five-capture run, every one of the
+    # 16 category meshes has 0 materials and 0 images and carries COLOR_0 instead of
+    # TEXCOORD_0 -- one averaged RGB per vertex over a ~3,700-vertex budget. Only the
+    # _card variants, which never go through this path, are textured.
+    #
+    # This is the Paris riverboats reading as untextured grey hulls. SAM3D reconstructs
+    # each boat from its crop WITH a baked texture atlas (with_texture_baking=True) --
+    # hull lettering, windows, the crowd on the deck -- and repair() threw all of it
+    # away before the mesh reached the client.
+    #
+    # Safe to turn off on the geometry side, which is all repair() was ever for: SAM3D
+    # runs its own decimation + pymeshfix hole-filling before it bakes the texture (see
+    # setup_sam3d's simplify= patch in scripts/setup.sh), i.e. the same repair, applied
+    # to the topology the UVs actually belong to. A reconstruction that comes back with
+    # no texture at all -- SAM3D's OOM path retries vertex-colour-only -- is still
+    # repaired regardless of this flag, since there is nothing left to protect.
+    #
+    # true restores the old behaviour for bisecting, or if some reconstruction renders
+    # with holes SAM3D's own pass did not close.
     # Crossed-card LOD for vegetation, published as category_mesh_{class}_{bucket}_card
     # and textured with the group's top curated crop. Scene Generation takes it below
     # min_mesh_angular_px, when a bucket never got a reconstruction, and when one was
@@ -1511,6 +1694,34 @@ stages:
       panorama: panorama_sky
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
+    # Floor on a category mesh's own vertical extent as a fraction of its largest
+    # extent. Below it the instance is billboarded instead of scaled to its detected
+    # height, because extent_y is what that scale divides by.
+    #
+    # Lowered 0.25 -> 0.10. Dividing by the LARGEST extent makes this "is it taller
+    # than a quarter of its length?", which a correctly-shaped low-profile subject
+    # fails on its merits. It rejected all four Paris boat reconstructions -- boat_0
+    # is [1.000, 0.560, 2.613], a 2.6-long 0.56-tall riverboat missing the bar by
+    # 0.036 -- and with them all 27 boat instances on the Seine.
+    #
+    # Instances admitted to a mesh, replayed over every instance of all four
+    # landscape captures:
+    #
+    #     thresh   Paris     Rainier    Iceland   Shark Fin
+    #     0.25     49/86     294/473    0/80      0/42
+    #     0.15     69/86     294/473    0/80      0/42
+    #     0.10     70/86     294/473    0/80      0/42
+    #     0.00     70/86     294/473    0/80      0/42
+    #
+    # Rainier does not move anywhere in that range -- not the count, not the class
+    # histogram -- and neither do Iceland or Shark Fin. The other three gates
+    # (thickness, aspect agreement, rendered size) already catch everything this one
+    # was raised to 0.25 for: Rainier's ship_0 is [0.926, 1.000, 41.182] and is held
+    # only by aspect, since it passes thickness at 0.926.
+    #
+    # Not 0, because scale = height / extent_y still wants a floor. 0.10 sits under
+    # Paris's lowest legitimate keeper (boat_3 at 0.156) with room to spare.
+    min_mesh_height_fraction: 0.10
     # Bake-time mesh-vs-billboard cutoff, as the screen HEIGHT an instance renders at
     # rather than its distance from the camera. At or above this it takes its bucket's
     # reconstructed mesh; below it, the crossed-card LOD or a billboard.
@@ -1546,7 +1757,30 @@ stages:
     # This is measured on the PLACED size, i.e. after object_scale.py's correction, so
     # it is not the same measurement as Panorama Asset Generation's like-named value
     # (raw detected angle) and must stay well ABOVE it. See that block.
-    min_mesh_angular_px: 250.0
+    # Lowered 250 -> 120. The 250 figure was set when grass_tuft still built near
+    # meshes; it does not any more (Grass Cover's build_near_meshes: false makes
+    # every tuft a crossed card), so the triangle argument for 250 no longer holds.
+    # Re-measured against real per-mesh face counts rather than instance counts,
+    # counting a below-LOD instance at its card or billboard cost:
+    #
+    #     thresh   Rainier meshed / triangles      Paris boats meshed
+    #       250      251     2.03 M                       9 / 26
+    #       150      274     2.21 M                      13 / 26
+    #       120      303     2.44 M                      21 / 26
+    #        90      339     2.73 M                      25 / 26
+    #
+    # 120 costs Rainier +20% triangles (2.03 -> 2.44 M) and takes Paris from 9 of 26
+    # boats meshed to 21. Boats are the case that forces it: they sit on open water
+    # where a camera-facing quad has nothing to hide its swing against, and the Paris
+    # boat population clusters at 90-160 px -- just under the old cutoff.
+    #
+    # Stays above Panorama Asset Generation's own min_mesh_angular_px (90), so a
+    # group is still reconstructed before this stage asks for it. The margin is
+    # narrower than it was (1.33x, not 2.8x) and the two are in different units --
+    # that one is the RAW detected angle, this one the PLACED size -- so on a capture
+    # where object_scale.py applies a large correction this is effectively far above
+    # 90 anyway. Paris applies none (too few anchors), which is the tight case.
+    min_mesh_angular_px: 120.0
     # Display angular resolution the threshold above is quoted against; 34 px/deg is
     # Vision Pro class, so 250 px is ~7.4 deg. Exists so the threshold reads as the
     # resolvability limit it is, and tracks the target display instead of silently

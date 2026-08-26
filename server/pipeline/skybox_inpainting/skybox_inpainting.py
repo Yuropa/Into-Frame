@@ -22,7 +22,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 from util.panorama_utils import Panorama
-from util.seam_repair import heal_wrap_seam
+from util.seam_repair import close_wrap_seam, heal_wrap_seam
 
 
 def _clean_sky_mask(sky_mask: np.ndarray, top_rows_frac: float = 0.02) -> np.ndarray:
@@ -227,10 +227,26 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         # the composite itself, letting its real sky colour/texture blend through
         # into the result instead of being fully replaced.
         strength: float = 0.85,
+        close_sky_wrap_seam: bool = True,
+        wrap_seam_band_px: int = 512,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.guidance_scale = guidance_scale
         self.strength = strength
+        # Force column 0 and column W-1 to match exactly after the generative seam
+        # pass, by spreading their per-row difference back over wrap_seam_band_px
+        # columns at each end. See util.seam_repair.close_wrap_seam. false leaves
+        # whatever the generative pass produced, which on the stored Paris output
+        # is an 11.53-level vertical step in a sky that otherwise varies by 0.145
+        # per column.
+        self.close_sky_wrap_seam = bool(close_sky_wrap_seam)
+        # How far the correction is spread. Bigger is gentler: the steepest
+        # gradient it introduces is pi*|delta| / (4*band), so 512 puts Paris's
+        # worst row at 0.066 levels per column against the 0.145 the image already
+        # varies by. Measured at 256/512/1024 the seam closes to 0.000 at all
+        # three and the interior statistics are indistinguishable, so this is
+        # chosen for headroom rather than because the outcome is sensitive to it.
+        self.wrap_seam_band_px = int(wrap_seam_band_px)
 
 
 class SkyboxInpaintingStage(PipelineStage):
@@ -513,6 +529,23 @@ class SkyboxInpaintingStage(PipelineStage):
             log_fn=self.log_warning,
         )
         flux.close()
+
+        # --- Pass 4: close whatever step Pass 3 left, in closed form ---
+        # Pass 3 is a generative fill and has no continuity constraint, so it
+        # closes the seam only as well as it happens to -- and nothing checked.
+        # It did not: this stage's own stored output for the Paris capture has an
+        # 11.53-level step at the wrap column against a 0.145 median
+        # adjacent-column difference over the whole sky, i.e. the hard vertical
+        # line Pass 3 exists to remove, still there and 80x the surrounding
+        # variation. Pass 3 is still what invents cloud STRUCTURE across the
+        # join; this makes the join itself exact afterwards. See close_wrap_seam.
+        if self.config.close_sky_wrap_seam:
+            result_pil = close_wrap_seam(
+                result_pil,
+                band_px=self.config.wrap_seam_band_px,
+                log_fn=self.log_info,
+                label="sky wrap",
+            )
 
         if self.output is not None:
             result_pil.save(self.output / "panorama_sky.png")

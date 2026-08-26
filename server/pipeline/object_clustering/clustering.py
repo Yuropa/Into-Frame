@@ -41,6 +41,8 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         min_bucket_size: int = 3,
         region_veto_fraction: float = 0.85,
         caption_veto: bool = True,
+        outsize_split_ratio: float = 2.5,
+        outsize_split_min_height_m: float = 2.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
@@ -85,6 +87,33 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         # DOMESTIC_CAPTION_SUBJECTS for what BLIP writes when it cannot parse a
         # texture. False disables it.
         self.caption_veto = bool(caption_veto)
+        # Split the tallest member of a bucket out into a bucket of its own when it is
+        # this many times taller IN METRES than the next tallest.
+        #
+        # A bucket is a promise that one reconstruction, scaled to each member's own
+        # detected height, can stand in for all of them. DINOv2 similarity cannot keep
+        # that promise on its own: it sees shape and texture, and a landmark against
+        # the sky looks like every other tall pale structure against the sky. On the
+        # Paris capture the Eiffel Tower (36.9 m) shares tower::2 with five fragments
+        # of the cathedral on the far bank (12.6, 7.2, 7.1, 5.4, 4.7 m), and the
+        # bucket's representative is chosen by composite_score -- confidence, fill
+        # ratio, proximity, occlusion, no size term at all -- which ranks the tower
+        # LAST of the six. Every instance in that bucket, the tower included, then
+        # renders a cathedral spire stretched to its own height.
+        #
+        # Metres, not pixels. Angular height in an equirect is a function of distance,
+        # so a pixel-height rule splits a near flower from a far one of the same
+        # species -- measured on these captures it fires on 14 groups, mostly for
+        # exactly that reason. Metric height (angular extent x depth, computed exactly
+        # as scene_generation/projection.py computes it) is distance-invariant, which
+        # is the property the test needs.
+        self.outsize_split_ratio = float(outsize_split_ratio)
+        # Floor on the outsized member's own height, so the ratio test only ever runs
+        # where being wrong about size is worth a second reconstruction. Without it the
+        # rule fires on sub-metre noise -- a 0.3 m "ship" over a 0.1 m one on the
+        # Rainier capture, and every small bucket on the Irises painting, whose 10,739
+        # detections are all centimetres tall.
+        self.outsize_split_min_height_m = float(outsize_split_min_height_m)
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -493,9 +522,19 @@ class ObjectCategoryClusteringStage(PipelineStage):
             context, correlation, low_confidence_by_class, centroids_by_class, task
         )
 
+        # After reassignment, so a low-confidence crop that just joined a bucket is
+        # weighed with it rather than against the bucket it was about to change.
+        try:
+            splits = self._split_outsized(context)
+        except Exception as e:
+            # A bucket layout that is merely coarser is a far smaller defect than a
+            # stage that fails outright and takes the whole clustering with it.
+            self.log_warning(f"Could not split outsized bucket members ({type(e).__name__}: {e})")
+            splits = []
+
         context.add_object_correlation(ContextKey.OBJECT_CORRELATION, correlation)
         self.finish_progress(task)
-        self._write_debug(context, debug_by_class, reassigned, rejected)
+        self._write_debug(context, debug_by_class, reassigned, rejected, splits)
         return context
 
     def _cluster_class(
@@ -640,6 +679,104 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 correlation.groups[new_class] = ObjectGroupStats(object_type=new_class)
             correlation.groups[new_class].indices.append(idx)
 
+    def _split_outsized(self, context: PipelineContext) -> list[dict]:
+        """Give a bucket's outsized member its own bucket. See outsize_split_ratio.
+
+        Runs last, over the buckets as they finally stand (low-confidence crops
+        already reassigned), and only moves 'bucket' -- so every downstream consumer
+        that reads metadata_{i}['bucket'] picks the split up for free: Panorama Asset
+        Generation reconstructs the new bucket from the outsized crop itself and
+        curates it its own billboard pool, and Scene Generation resolves its
+        instance to that mesh by the same key lookup as any other.
+
+        Returns one debug record per split, for clustering_debug.json.
+        """
+        ratio = self.config.outsize_split_ratio
+        if ratio <= 1.0:
+            return []
+
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        panorama_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
+        if panorama is None or panorama_depth is None:
+            return []
+
+        from pipeline.scene_generation.projection import unproject_bbox_equirect
+        from scene.camera import CameraExtrinsics
+
+        # Identity pose: only the HEIGHT of the returned triple is read, and height is
+        # measured in the camera's own frame before the extrinsics transform touches
+        # the position. Using the real pose here would change nothing and would make
+        # this stage depend on one it currently doesn't.
+        extrinsics = CameraExtrinsics.identity()
+
+        # (class, bucket) -> [(height_m, idx), ...], over every detection that still
+        # carries a bucket at this point. Read through context.object (not
+        # input_object) so this sees the buckets THIS stage just assigned, and the
+        # classes _reassign_low_confidence just changed.
+        groups: dict[tuple[str, int], list[tuple[float, int]]] = {}
+        buckets_in_class: dict[str, set[int]] = {}
+        count = context.input_object(ContextKey.OBJECT_COUNT) or 0
+        for idx in range(count):
+            metadata = context.object(f"metadata_{idx}")
+            if not metadata:
+                continue
+            obj_class, bucket, box = metadata.get("class"), metadata.get("bucket"), metadata.get("box")
+            if not obj_class or bucket is None or not box or obj_class == "indeterminate":
+                continue
+            buckets_in_class.setdefault(obj_class, set()).add(int(bucket))
+            if metadata.get("position_only"):
+                # Its bucket id is registered above, but it takes no part in the
+                # comparison -- neither as the outsized member nor as the runner-up
+                # measured against. Panorama Asset Generation declines to mesh a
+                # position_only crop or to put it in a billboard pool, so a bucket
+                # founded on one would hold no asset at all and its instance would
+                # render nothing.
+                continue
+            unprojected = unproject_bbox_equirect(
+                box, panorama.width, panorama.height,
+                pano_depth=panorama_depth, extrinsics=extrinsics,
+            )
+            if unprojected is None:
+                continue
+            groups.setdefault((obj_class, int(bucket)), []).append((float(unprojected[2]), idx))
+
+        splits: list[dict] = []
+        for (obj_class, bucket), members in sorted(groups.items()):
+            if len(members) < 2:
+                continue
+            members.sort(reverse=True)
+            (tallest, tallest_idx), (runner_up, _) = members[0], members[1]
+            if tallest < self.config.outsize_split_min_height_m:
+                continue
+            if runner_up <= 0 or tallest < ratio * runner_up:
+                continue
+
+            new_bucket = max(buckets_in_class[obj_class]) + 1
+            buckets_in_class[obj_class].add(new_bucket)
+            # Not _set_bucket: that rebuilds metadata from input_object, i.e. from
+            # this crop's state BEFORE the stage ran, which would silently undo
+            # _reassign_low_confidence's own writes (class, position_only,
+            # visual_match_similarity). Only the bucket changes here.
+            metadata = context.object(f"metadata_{tallest_idx}") or {}
+            context.add_object(
+                f"metadata_{tallest_idx}", {**metadata, "bucket": new_bucket}
+            )
+            splits.append({
+                "class": obj_class,
+                "from_bucket": bucket,
+                "to_bucket": new_bucket,
+                "idx": tallest_idx,
+                "height_m": round(tallest, 2),
+                "next_height_m": round(runner_up, 2),
+                "ratio": round(tallest / runner_up, 2),
+            })
+            self.log_info(
+                f"  {obj_class}::{bucket}: crop_{tallest_idx} is {tallest:.1f} m against "
+                f"{runner_up:.1f} m for the next largest ({tallest / runner_up:.1f}x) — "
+                f"splitting it into {obj_class}::{new_bucket}"
+            )
+        return splits
+
     def _set_bucket(self, context: PipelineContext, idx: int, bucket: int):
         metadata = context.input_object(f"metadata_{idx}") or {}
         context.add_object(f"metadata_{idx}", {**metadata, "bucket": bucket})
@@ -712,7 +849,10 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 merged[i] = keep_ids[int(np.argmax(centroid_matrix @ embedding))]
         return merged
 
-    def _write_debug(self, context: PipelineContext, debug_by_class: dict[str, dict], reassigned: int, rejected: int):
+    def _write_debug(
+        self, context: PipelineContext, debug_by_class: dict[str, dict],
+        reassigned: int, rejected: int, splits: list[dict] | None = None,
+    ):
         if self.output is None:
             return
 
@@ -723,6 +863,9 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 "max_buckets_per_class": self.config.max_buckets_per_class,
                 "min_bucket_size": self.config.min_bucket_size,
                 "low_confidence": {"reassigned_position_only": reassigned, "rejected": rejected},
+                "outsize_split_ratio": self.config.outsize_split_ratio,
+                "outsize_split_min_height_m": self.config.outsize_split_min_height_m,
+                "outsize_splits": splits or [],
                 "classes": debug_by_class,
             }, f, indent=2)
 

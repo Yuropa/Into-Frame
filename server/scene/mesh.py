@@ -52,6 +52,26 @@ class Mesh:
         self.mesh.apply_scale(scale)
         self.mesh.apply_translation(-self.mesh.centroid)
 
+    @property
+    def has_texture(self) -> bool:
+        """True when this mesh carries a real UV-mapped texture image.
+
+        SAM3D bakes one (see ModelGenerator.meshify's with_texture_baking) and it is
+        the whole difference between a boat with windows and lettering on it and a
+        smear of averaged vertex colour -- so callers that are about to run a
+        topology-destroying pass need to be able to ask.
+        """
+        visual = self.mesh.visual
+        if not isinstance(visual, trimesh.visual.TextureVisuals):
+            return False
+        if visual.uv is None or len(visual.uv) != len(self.mesh.vertices):
+            return False
+        material = getattr(visual, "material", None)
+        return (
+            getattr(material, "baseColorTexture", None) is not None
+            or getattr(material, "image", None) is not None
+        )
+
     def _vertex_colors_01(self) -> "np.ndarray | None":
         """(N, 3) per-vertex RGB in [0, 1], baking down TextureVisuals if needed. None if unset."""
         visual = self.mesh.visual
@@ -122,7 +142,8 @@ class Mesh:
         ))
 
     def decimate(self, max_faces: int) -> "Mesh":
-        """Decimate straight to a face budget, keeping per-vertex colour.
+        """Decimate straight to a face budget, keeping per-vertex colour -- or the
+        UV-mapped texture, when there is one.
 
         The counterpart to simplify(): that one searches for the coarsest mesh whose
         95th-percentile surface error stays within a fraction of the bounding box, which
@@ -135,6 +156,14 @@ class Mesh:
         Surface error is a poor proxy for a grass tuft anyway: what reads at a glance is
         the silhouette of the blades, not the accuracy of their surfaces.
 
+        A textured mesh keeps its texture: open3d's quadric decimation carries no UV
+        channel of its own, so the surviving UVs are re-attached by nearest-neighbour
+        lookup against the pre-decimation positions -- the same transfer repair() does
+        for its colours, and sound for the same reason (quadric collapse leaves most
+        vertices at or very near a vertex of the input). Baking a texture down to
+        per-vertex colour instead would throw away every detail finer than the
+        decimated vertex spacing, which on a 4000-vertex riverboat is all of them.
+
         Returns a copy unchanged when already within budget, or when max_faces <= 0.
         """
         if max_faces <= 0 or len(self.mesh.faces) <= max_faces:
@@ -146,7 +175,8 @@ class Mesh:
             vertices=o3d.utility.Vector3dVector(self.mesh.vertices),
             triangles=o3d.utility.Vector3iVector(self.mesh.faces),
         )
-        vertex_colors_01 = self._vertex_colors_01()
+        textured = self.has_texture
+        vertex_colors_01 = None if textured else self._vertex_colors_01()
         if vertex_colors_01 is not None:
             o3d_mesh.vertex_colors = o3d.utility.Vector3dVector(vertex_colors_01)
 
@@ -162,10 +192,30 @@ class Mesh:
             # nothing at all -- the caller has no other asset to fall back to.
             return Mesh(self.mesh.copy())
 
+        vertices = np.asarray(dec.vertices)
+        visual = None
+        if textured:
+            from scipy.spatial import cKDTree
+
+            _, nearest = cKDTree(self.mesh.vertices).query(vertices)
+            visual = trimesh.visual.TextureVisuals(
+                uv=np.asarray(self.mesh.visual.uv)[nearest],
+                material=self.mesh.visual.material,
+            )
+
+        # Handed to the constructor rather than assigned afterwards: Trimesh's
+        # processing merges duplicate vertices on construction, which renumbers them.
+        # A visual attached after the fact would still be indexed by the PRE-merge
+        # numbering and scramble the texture; passed in, trimesh remaps it alongside
+        # the geometry (and knows not to merge across a UV seam in the first place).
         return Mesh(trimesh.Trimesh(
-            vertices=np.asarray(dec.vertices),
+            vertices=vertices,
             faces=faces,
-            vertex_colors=np.asarray(dec.vertex_colors) if dec.has_vertex_colors() else None,
+            visual=visual,
+            vertex_colors=(
+                np.asarray(dec.vertex_colors)
+                if visual is None and dec.has_vertex_colors() else None
+            ),
         ))
 
     def simplify(self, max_error_fraction: float = 0.03, min_faces: int = 50) -> "Mesh":

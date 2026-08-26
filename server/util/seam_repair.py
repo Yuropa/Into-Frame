@@ -289,3 +289,167 @@ def heal_wrap_seam(
         result_pil.save(debug_dir / f"{debug_prefix}_6_unrolled_result.png")
 
     return result_pil
+
+
+def close_wrap_seam(
+    image: PIL.Image.Image,
+    band_px: int = 512,
+    fine_band_px: int = 16,
+    row_sigma: float = 16.0,
+    ridge_px: int = 16,
+    log_fn: Callable[[str], None] | None = None,
+    label: str = "wrap",
+) -> PIL.Image.Image:
+    """
+    Force an equirectangular panorama's left and right edges to match EXACTLY,
+    by spreading their per-row difference back into a band at each end.
+
+    The deterministic counterpart to heal_wrap_seam above, and meant to run
+    immediately after it. That one asks a generative model to redraw a band
+    across the seam, which is the only thing that can invent plausible cloud or
+    terrain STRUCTURE across the join -- but a diffusion model has no continuity
+    constraint, so it closes the seam only as well as it happens to, and nothing
+    checks the result. Measured on the five sample captures, panorama_sky came
+    out of that pass with an 11.53-level RGB step at the wrap column on the Paris
+    capture, against a median adjacent-column difference of 0.145 and a 99th
+    percentile of 0.523 over the whole image: a hard vertical line, 80x the
+    typical column-to-column change, in an otherwise smooth sky. The equirect
+    terrain layer (SplatLayer "panorama") is the same story from a different
+    generator -- Iceland 66.22 against a 99th percentile of 8.58 -- and it wraps
+    the viewer at the same longitude, so the two together read as one line
+    running from the ground up through the sky.
+
+    With delta = right_column - left_column (per row, per channel), adding
+    +delta/2 at column 0 and -delta/2 at column W-1 lands both edges on
+    (left + right) / 2, closing the seam identically on every row by
+    construction. The only question is how that correction is distributed
+    inland, and it is distributed at TWO scales, because delta has two parts
+    that want opposite treatment:
+
+      * The low-frequency part (delta smoothed along y by row_sigma) is the real
+        defect: the two ends of the same sky at slightly different exposures,
+        coherent over hundreds of rows, which is precisely what makes a LINE.
+        It carries nearly all the magnitude and is spread over the full band_px
+        on a raised cosine -- so thin it cannot be seen. Its steepest gradient is
+        pi*|delta| / (4*band_px): at Paris's worst row (delta 43) with band_px
+        512 that is 0.066 levels per column, against the 0.145 the image already
+        varies by.
+
+      * The high-frequency remainder is row-to-row noise (Paris jumps up to 8
+        levels between adjacent rows). Spread over the same wide band it becomes
+        512-px-wide horizontal STREAKS -- trading a vertical line for banding,
+        which measurably happened: adjacent-row difference over the first 128
+        columns went from 1.656 to 3.526. Confined to fine_band_px instead, it
+        still closes the seam exactly and any streak it makes is 16 px wide.
+        Measured, that lands at 1.659 -- the original 1.656 to within noise.
+
+    A raised cosine rather than a linear ramp at both scales, so each correction
+    meets the untouched interior with zero derivative; a linear falloff would
+    trade the seam for a fainter line at the band edge, which is the mistake this
+    exists to fix, moved inward.
+
+    Replayed over all five captures' stored panorama_sky and equirect terrain
+    layer, this takes the wrap step under that image's OWN 99th-percentile column
+    step in all ten -- from 11.53 to 0.29 on the Paris sky, from 66.22 to 0.004 on
+    the Iceland terrain -- while moving the median adjacent-column difference by
+    at most 0.004, leaving the largest column step away from the seam unchanged,
+    and growing the row-to-row variation inside the corrected band by 0.2%.
+
+    Note this cannot fix a mismatch in CONTENT (a cloud on one side and not the
+    other). That is heal_wrap_seam's job, and it stays in front of this.
+
+    Matching the two edges is not always the whole job, because a generator can
+    also leave a local ANOMALY at the join that is not an edge mismatch at all.
+    heal_wrap_seam's own feathered composite does exactly that on the Paris sky:
+    with the 11.53 step removed, the columns either side of the seam still
+    disagree by 3.53 and 3.35 against a 99th percentile of 0.519 -- a narrow dip
+    where FLUX's inpaint was blended in, which reads as a fainter version of the
+    same line. ridge_px flattens that, by blending the columns within ridge_px of
+    the seam toward a straight line between the two anchor columns just outside
+    it (raised-cosine again, full strength at the seam, nothing at the anchors).
+    Over so few columns any smooth image is linear to well within a level.
+
+    That last step is SELF-GATING: it runs only when the seam neighbourhood's own
+    column steps exceed the 99th percentile of the whole image's, i.e. only when
+    there is still something anomalous there. On the five captures it fires on
+    the Paris sky alone and no-ops on the other four and on all five terrain
+    layers, which after the edge match already sit at or below their own ordinary
+    variation.
+
+    band_px:      columns at each end the low-frequency correction is spread over.
+    fine_band_px: columns at each end the high-frequency remainder is confined to.
+                  0 drops the remainder entirely -- the seam then closes only to
+                  its low-frequency part (Paris 11.53 -> 1.265), which is still no
+                  longer a coherent line, and is the conservative setting if the
+                  fine band ever proves visible on some capture.
+    row_sigma:    Gaussian sigma, in rows, splitting delta into those two parts.
+                  0 disables the split and puts everything in the wide band.
+    ridge_px:     half-width of the local flattening described above. 16 because
+                  that is where the Paris sky's seam neighbourhood stops being
+                  anomalous at all: peak column step within it against the image's
+                  own 99th percentile runs 6.8x at 0 (i.e. untouched), 3.0x at 4,
+                  1.8x at 8, 0.9x at 16 and 0.9x at 32 -- so 16 is where it crosses
+                  under, and past it nothing more is bought. 0 disables, leaving
+                  whatever narrow ridge the generator put at the join.
+    """
+    arr = np.array(image.convert("RGB")).astype(np.float32)
+    w = arr.shape[1]
+    out = arr.copy()
+
+    delta = arr[:, -1, :] - arr[:, 0, :]                        # (H, 3)
+
+    def spread(correction: np.ndarray, width: int) -> None:
+        width = int(min(max(0, width), w // 2))
+        if width <= 0:
+            return
+        ramp = 0.5 * (1.0 + np.cos(np.pi * np.arange(width, dtype=np.float32) / width))
+        weight = (0.5 * ramp)[None, :, None]                    # 0.5 at the seam -> 0
+        out[:, :width, :] += weight * correction[:, None, :]
+        out[:, w - width:, :] -= weight[:, ::-1, :] * correction[:, None, :]
+
+    if row_sigma > 0:
+        from scipy.ndimage import gaussian_filter1d
+
+        low = gaussian_filter1d(delta, row_sigma, axis=0, mode="nearest")
+        spread(low, band_px)
+        spread(delta - low, fine_band_px)
+    else:
+        spread(delta, band_px)
+
+    # Local ridge flattening -- see ridge_px in the docstring. Done on the rolled
+    # array so the seam is an interior column and its neighbourhood is contiguous.
+    if ridge_px > 0 and w > 4 * (ridge_px + 1):
+        centre = w // 2
+        rolled = np.roll(out, centre, axis=1)
+        profile = np.abs(rolled[:, 1:, :] - rolled[:, :-1, :]).mean(axis=(0, 2))
+        lo, hi = centre - ridge_px, centre + ridge_px
+        if profile[lo - 1:hi + 1].max() > np.percentile(profile, 99):
+            # Interior columns lo..hi, anchored on lo-1 and hi+1, so column j sits
+            # (j - lo + 1) / (n + 1) of the way between the two anchors.
+            n = hi - lo + 1
+            t = (np.arange(1, n + 1, dtype=np.float32) / (n + 1))[None, :, None]
+            left, right = rolled[:, lo - 1, :][:, None, :], rolled[:, hi + 1, :][:, None, :]
+            straight = left * (1.0 - t) + right * t
+            # 1 at the seam, 0 at the anchors, so the flattening fades into
+            # untouched pixels instead of substituting its own two edges.
+            d = np.abs(np.arange(lo, hi + 1, dtype=np.float32) - (centre - 0.5))
+            alpha = (0.5 * (1.0 + np.cos(np.pi * np.clip(d / (ridge_px + 0.5), 0, 1))))[None, :, None]
+            rolled[:, lo:hi + 1, :] = rolled[:, lo:hi + 1, :] * (1.0 - alpha) + straight * alpha
+            out = np.roll(rolled, -centre, axis=1)
+
+    # rint, not a bare astype: astype truncates toward zero, which turns a
+    # sub-level correction into a systematic downward bias and shows up as fresh
+    # quantisation steps of its own in a smooth gradient (measured: it raised the
+    # largest column step elsewhere in the Paris sky from 3.489 to 3.759, having
+    # just removed an 11.53 one).
+    result = np.clip(np.rint(out), 0, 255).astype(np.uint8)
+
+    if log_fn is not None:
+        residual = np.abs(result[:, -1, :].astype(np.float32) - result[:, 0, :].astype(np.float32)).mean()
+        log_fn(
+            f"  {label} seam: mean edge mismatch {float(np.abs(delta).mean()):.2f} -> "
+            f"{float(residual):.2f} levels (spread over {band_px} px, "
+            f"row detail over {fine_band_px} px)"
+        )
+
+    return PIL.Image.fromarray(result)

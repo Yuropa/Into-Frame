@@ -48,6 +48,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         solve_resolution: int = 512,
+        max_relief_inflation: float = 4.0,
         ridge_min_anchor_distance: float = 0.5,
         ridge_max_slope_angle_deg: float = 38.0,
         ridge_override_min_distance_m: float = 30.0,
@@ -165,6 +166,9 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.solve_resolution = solve_resolution
+        # Ceiling on how far this stage may inflate the measured height span, as a
+        # multiple of it. See the "Relief inflation ceiling" block in run().
+        self.max_relief_inflation = float(max_relief_inflation)
         self.ridge_min_anchor_distance = ridge_min_anchor_distance
         self.ridge_max_slope_angle_deg = ridge_max_slope_angle_deg
         self.ridge_override_min_distance_m = ridge_override_min_distance_m
@@ -786,6 +790,71 @@ class TerrainReconstructionStage(PipelineStage):
                 f"{cfg.despoke_angular_sigma_deg:.0f}deg azimuth), "
                 f"mean |Δ| {float(np.abs(new_hm - spoked).mean()):.2f} m"
             )
+
+        # ── Relief inflation ceiling ──────────────────────────────────────────
+        # Everything above -- ridge anchoring, the slope envelopes, the harmonic
+        # solve -- can only ever ADD relief to the measured surface, and nothing
+        # bounds how much. Measured span of the input height map against this
+        # stage's own output, on the four landscape captures of the 2026-08-18 run:
+        #
+        #     Paris       5.8 m ->  90.2 m   15.55x
+        #     Shark Fin  12.9 m ->  98.3 m    7.62x
+        #     Iceland    23.2 m ->  78.7 m    3.39x
+        #     Rainier    20.0 m ->  57.7 m    2.89x
+        #
+        # Note this is THIS stage, not TerrainNoiseRefinementStage, which was the
+        # obvious suspect and is not the culprit: it lands at 0.93-0.95x on every
+        # one of those captures, i.e. it slightly reduces the span it inherits.
+        #
+        # 4.0 clears Rainier by 39% and Iceland -- the binding constraint -- by 18%,
+        # while capping Shark Fin and Paris. Paris should fall under it on its own
+        # now that RegionMapGenerator's min_terrain_silhouette_frac refuses to
+        # anchor a ridgeline to a city skyline; this is the backstop for the case
+        # that gate passes (Shark Fin's silhouette is 100% terrain) and still
+        # reconstructs a 13 m cove into 98 m of cliff.
+        #
+        # Compresses the SYNTHETIC COMPONENT (new_hm - heightmap) rather than the
+        # surface. That difference is NOT zero on observed cells -- the restore
+        # above is weighted by certainty and excludes ridge-overridden cells, so a
+        # low-certainty real cell can sit tens of metres off its own measurement --
+        # which means scaling it down moves observed cells TOWARD their measured
+        # elevation, never away. Replayed on the two captures this fires on, it
+        # moves 100% of observed cells closer, and their mean error against the
+        # measurement drops from 0.111 m to 0.028 m (Paris) and from 7.227 m to
+        # 3.811 m (Shark Fin). Scaling the surface instead would have no such
+        # property, which is the whole reason for taking the difference.
+        #
+        # Bisected rather than solved because span() is not affine in the scale
+        # factor; 24 iterations is well past float32 resolution on a range of tens
+        # of metres. 0 disables.
+        if cfg.max_relief_inflation > 0.0:
+            measured_span = float(np.nanmax(heightmap) - np.nanmin(heightmap))
+            current_span = float(np.nanmax(new_hm) - np.nanmin(new_hm))
+            limit = cfg.max_relief_inflation * measured_span
+            if measured_span > 1e-6 and current_span > limit:
+                delta = new_hm - heightmap.astype(np.float32)
+                low, high = 0.0, 1.0
+                for _ in range(24):
+                    mid = 0.5 * (low + high)
+                    trial = heightmap.astype(np.float32) + delta * mid
+                    if float(np.nanmax(trial) - np.nanmin(trial)) > limit:
+                        high = mid
+                    else:
+                        low = mid
+                new_hm = (heightmap.astype(np.float32) + delta * low).astype(np.float32)
+                self.log_info(
+                    f"Relief inflation ceiling: {current_span:.1f} m span was "
+                    f"{current_span / measured_span:.2f}x the measured {measured_span:.1f} m "
+                    f"(limit {cfg.max_relief_inflation:.1f}x); synthetic relief scaled "
+                    f"to {low:.3f}, span now "
+                    f"{float(np.nanmax(new_hm) - np.nanmin(new_hm)):.1f} m"
+                )
+            else:
+                self.log_info(
+                    f"Relief inflation: {current_span / max(measured_span, 1e-6):.2f}x "
+                    f"the measured {measured_span:.1f} m span, under the "
+                    f"{cfg.max_relief_inflation:.1f}x ceiling"
+                )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 
