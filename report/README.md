@@ -55,6 +55,30 @@ verified — the matplotlib fallback shares the same coordinates and was rendere
 and inspected — but the TikZ transcription itself is checked only structurally
 (balanced delimiters, every node referenced is defined, every path terminated).
 
+## Slides
+
+`Into-Frame-slides.pptx` is a 21-slide 16:9 deck covering the same material, in
+the same order as the report, closing on a references slide. It is
+**generated**, not hand-edited:
+
+```bash
+python3 make_slides.py       # deps: python-pptx, Pillow, PyMuPDF
+```
+
+Edit `make_slides.py` and re-run; editing the `.pptx` directly means abandoning
+the script. Copy is deliberately terse — the slide carries the claim and the
+number, the speaker carries the sentence. Text lives in `build()`, the look lives in the palette and helpers
+above it, and the pipeline diagram on slide 6 is drawn natively in PowerPoint
+shapes rather than imported from `figures/`. Two figures are derived at build
+time: `paris-terrain.pdf` is rasterised and split into its two panels, and the
+ground-cover mask is cropped to its content.
+
+Helvetica Neue has no arrow or subscript glyphs, so the deck spells arrows out
+and uses baseline-shifted runs for subscripts. Do not reintroduce them.
+
+There was previously a Beamer twin (`slides.tex` / `slides.pdf`); it was removed
+when the deck was rebuilt, so the `.pptx` is now the only deck.
+
 ## Figures
 
 Three are generated from the actual pipeline output in `samples.debug 2` and are
