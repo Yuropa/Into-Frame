@@ -1,0 +1,87 @@
+% =============================================================================
+%  Into Frame -- project report
+%
+%  Build:   latexmk -pdf main.tex
+%  or:      pdflatex main && bibtex main && pdflatex main && pdflatex main
+%
+%  Body text lives in sections/, pulled in by the \input list below -- edit those
+%  files, not this one. This file holds only the preamble, the title block and
+%  the bibliography.
+%
+%  Figures live in figures/ and are included through \figbox (see below), so the
+%  document compiles cleanly before any of them exist.
+% =============================================================================
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[margin=2.4cm]{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{siunitx}
+\usepackage{microtype}
+
+\linespread{0.8}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+\usepackage{cleveref}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,fit,backgrounds}
+
+\graphicspath{{figures/}}
+
+% -----------------------------------------------------------------------------
+% Placeholder handling: \figbox{file}{alt-text}{width} draws a framed placeholder
+% when figures/<file> is missing, so the document always builds. Drop the real
+% image into figures/ and it is picked up automatically.
+% -----------------------------------------------------------------------------
+\newcommand{\figbox}[3]{%
+  \IfFileExists{figures/#1}%
+    {\includegraphics[width=#3\linewidth]{#1}}%
+    {\fbox{\parbox[c][0.26\textheight][c]{#3\linewidth}{\centering\ttfamily\small
+      [figure placeholder]\\[2pt] figures/#1\\[6pt]\normalfont\itshape #2}}}%
+}
+
+\sisetup{detect-weight=true, detect-family=true}
+
+\title{\textbf{Jumping Into the Frame}\\[0.4em]
+\large Reconstructing Interactive, Physically-Grounded 3D Environments\\
+from a Single Image}
+
+\author{Joshua Ford \\
+\textbf{Advisor:} Marie-Paule Cani}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\input{sections/00-abstract}
+
+% -- body ---------------------------------------------------------------------
+% Comment out any line to build a subset while drafting; cross-references into a
+% dropped section will warn but still compile.
+\input{sections/01-introduction}
+\input{sections/02-related-work}
+\input{sections/03-overview}
+\input{sections/04-panorama}
+\input{sections/05-terrain}
+\input{sections/06-texturing}
+\input{sections/07-objects}
+\input{sections/08-populations}
+\input{sections/09-lighting}
+\input{sections/10-results}
+\input{sections/11-conclusions}
+
+% =============================================================================
+{\small
+\bibliographystyle{plain}
+\bibliography{references}}
+% =============================================================================
+
+\end{document}

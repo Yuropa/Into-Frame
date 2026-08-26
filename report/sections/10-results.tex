@@ -1,0 +1,251 @@
+% =============================================================================
+\section{Results and Discussion}
+\label{sec:results}
+% =============================================================================
+
+\subsection{Evaluation Setup}
+
+We evaluate on three captures chosen to stress different assumptions:
+\textbf{Mount Rainier} (alpine meadow, dense vegetation, snow),
+\textbf{Paris} (flat urban river scene, architecture), and
+\textbf{Shark Fin Cove} (coastal cliffs, open water, sea stacks).
+
+Ground truth 3D does not exist for any of them, so evaluation is necessarily
+diagnostic: we instrument the pipeline, measure intermediate quantities against
+what the scene demonstrably contains, and localize defects to specific stages.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.5\linewidth}
+    \centering
+    \figbox{rainier-scene.png}{Mount Rainier: reconstructed scene.}{1.0}
+    \caption{Mount Rainier}
+  \end{subfigure}
+
+  \vspace{0.9em}
+  \begin{subfigure}{0.5\linewidth}
+    \centering
+    \figbox{paris-scene.png}{Paris: reconstructed scene.}{1.0}
+    \caption{Paris}
+  \end{subfigure}
+
+  \vspace{0.9em}
+  \begin{subfigure}{0.5\linewidth}
+    \centering
+    \figbox{sharkfin-scene.png}{Shark Fin Cove: reconstructed scene.}{1.0}
+    \caption{Shark Fin Cove}
+  \end{subfigure}
+  \caption{Reconstructed environments viewed from near the capture point.}
+  \label{fig:scenes}
+\end{figure}
+
+\Cref{fig:scenes} shows three reconstructed environments viewed from near the
+capture point.
+
+\subsection{Quantitative Summary}
+
+\Cref{tab:results} summarizes scene composition. The mesh/card/billboard split
+indicates how far object reconstruction got on each capture, with the caveat that
+the card column is dominated by ground cover rather than by object fallbacks.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Scene composition per capture. \emph{Relief added} is the elevation range
+introduced by terrain reconstruction beyond what the height field measured.}
+\label{tab:results}
+\begin{tabular}{@{}lrrrrl@{}}
+\toprule
+\textbf{Capture} & \textbf{Meshes} & \textbf{Cards} & \textbf{Billboards} &
+\textbf{Relief added} & \textbf{Dominant limitation} \\
+\midrule
+Mount Rainier   & 128 & 9\,303 & 33 & \SI{35}{\meter} & Conifer reconstruction \\
+Paris           & 27  & 4      & 56 & \SI{78}{\meter} & Skyline read as landform \\
+Shark Fin Cove  & 0   & 1      & 42 & \SI{81}{\meter} & Detections are rock fragments \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{What the Measurements Support}
+
+Two behaviors are worth stating separately from the corrective measures, which
+\cref{tab:fixes} quantifies in full.
+
+\paragraph{Terrain geometry on landform scenes.}
+Where the horizon genuinely is terrain, reconstruction behaves as intended:
+measured cells are preserved exactly by construction, the harmonic solve produces a
+continuous surface, and erosion supplies drainage-consistent relief. Mount
+Rainier's \SI{35}{\meter} of added relief lies beyond depth range, where the
+silhouette is the only evidence available and $98\%$ of it types as terrain.
+
+\paragraph{Ground-cover masking.}
+Color vetoing excludes snowfields, which type identically to meadow under the
+semantic label set. With the veto ordered after morphological closing, zero grass
+instances remain on cells it rejected.
+
+\subsection{Failure Modes and Their Causes}
+
+The more instructive result is where the system fails, because in every case we
+localized the failure to an \emph{assumption} rather than a model. A defect can
+also surface far from its cause: object size compression originates in depth
+calibration (\cref{sec:panorama}) and manifests at placement, eight stages later.
+\Cref{sec:remediation} reports what each corrective measure achieved.
+
+\begin{figure}[t]
+  \centering
+  \figbox{paris-terrain.pdf}{Paris height field before and after reconstruction.}{0.92}
+  \caption{The Paris failure. \textbf{Left:} the measured height field, spanning
+  \SI{-6.0}{\meter} to \SI{-0.2}{\meter}: correctly flat, and near-featureless
+  under a shared shading scale. \textbf{Right:} after ridge-anchored reconstruction,
+  spanning \SI{-13.1}{\meter} to \SI{+70.9}{\meter}. Hill \textsf{A}
+  (\SI{5966}{\meter\squared}) is the right-bank treeline; hill \textsf{B}
+  (\SI{2674}{\meter\squared}) is the cathedral. Both panels share one shading
+  scale, so the left panel's flatness is the measurement, not a rendering choice.}
+  \label{fig:paris-terrain}
+\end{figure}
+
+\paragraph{Skyline read as landform.}
+Ridge anchoring assumes the sky boundary is the crest of ground. In Paris it is a
+roofline \SI{40}{\meter} away. The measured height field spans
+\SI{-6.0}{\meter} to \SI{-0.2}{\meter} (flat, correctly), and reconstruction
+produced \SI{-13.1}{\meter} to \SI{+70.9}{\meter}: a \SI{5966}{\meter\squared}
+hill on the right-bank treeline and a \SI{2674}{\meter\squared} hill on the
+cathedral (\cref{fig:paris-terrain}). The discriminator is what the silhouette is \emph{made of}: the fraction
+of silhouette columns typing terrain is $0\%$ for Paris against $98\%$ for Rainier
+and $100\%$ for Shark Fin. Paris is not merely lowest; not one column of its
+horizon is a landform.
+
+\paragraph{Confident misclassification on texture.}
+Shark Fin Cove produced 49 detections at median confidence $0.95$; the two
+plausibility vetoes of \cref{tab:fixes} later remove 28 of them, and every instance
+that survived failed the reconstruction shape gates. The captions are diagnostic: a rock typed
+\emph{person} is captioned ``a piece of pizza with bacon on it''; another typed
+\emph{aircraft} is ``a giraffe that is flying in the sky''. On captures with weak
+image signal the class is derived from the caption ($59\%$ of Shark Fin crops and
+$91\%$ of Rainier's), and the captioner describes unparseable texture fluently
+and wrongly. These pass label verification, because a tight cutout fills its own
+box and an open-vocabulary detector will localize almost any label inside it.
+
+The consequence for reconstruction is direct: SAM~3D given a flat rock fragment
+returns a flat sheet (normalized extents $[1.00, 0.049, 0.425]$), the shape gates
+correctly reject it, and every instance falls back to a billboard. Shark Fin's zero
+meshes are the gates behaving as intended on inputs that are not objects.
+
+The signal that separates them is the region map, because it is the only opinion in
+the chain that does not look at the crop. A per-crop plausibility veto, a class
+that cannot occupy the region its box sits in, removes $43\%$ of Shark Fin's
+detections with no false positives across the other captures.
+
+\paragraph{Thin vegetation reconstruction.}
+Conifers fail single-view reconstruction. Given a good $120\times326$ crop, SAM~3D
+returns a mesh with aspect $3.50{:}1$ against detections at $0.12{:}1$, a
+$28\times$ disagreement, so 70 of 75 instances fall back to crossed cards. A thin
+conifer offers almost no volume cue from one view. Species-aware
+approaches~\cite{lee2024tree} are the natural remedy.
+
+\paragraph{Water surface following terrain.}
+Water inherited the terrain height under each of its cells, which is correct only
+if the ground under a lake is flat. On Shark Fin one \SI{11872}{\meter\squared}
+body of sea spanned \SI{73.5}{\meter} in elevation, with $21.7\%$ of its vertices
+more than a meter above the median: the ocean draped up the cliffs.
+
+\paragraph{Far-field texture resolution.}
+Even with folds repaired, $67.8\%$ of Shark Fin's terrain area exceeds
+\SI{0.5}{\meter} per texel against $20.9\%$ for Rainier, because a clifftop camera
+places most of its surface near the horizon where equirectangular compression is
+worst. The degradation is entirely a far-field effect: within \SI{25}{\meter} the
+two captures are indistinguishable at $0.02$--\SI{0.07}{\meter} per texel, but by
+the $50$--\SI{100}{\meter} ring Shark Fin reaches \SI{1.42}{\meter} per texel
+against Rainier's \SI{0.17}{\meter}.
+
+\subsection{Corrective Measures and Their Measured Effect}
+\label{sec:remediation}
+
+Each failure above was addressed by making its implicit premise testable from
+evidence already computed elsewhere in the pipeline, rather than by tuning a
+threshold or replacing a model. \Cref{tab:fixes} reports the measured effect of
+each, evaluated by replaying the modified stage over saved pipeline state from all
+three captures. We report effects on \emph{every} capture, not only the one that
+motivated the change, because the risk being managed is regression on scenes that
+were already correct.
+
+\begin{table}[t]
+\centering
+\small
+\caption{Corrective measures, the premise each makes testable, and measured effect
+across captures. ``FP'' denotes false positives: correct content wrongly removed.}
+\label{tab:fixes}
+\begin{tabular}{@{}p{3.3cm}p{4.5cm}p{6.2cm}@{}}
+\toprule
+\textbf{Measure} & \textbf{Premise made testable} & \textbf{Measured effect} \\
+\midrule
+Silhouette composition gate &
+``The sky boundary is the crest of ground'' &
+Terrain-typed silhouette fraction: Paris $0\%$; Rainier $98\%$;
+Shark Fin $100\%$. Ridge anchoring suppressed on Paris only; other captures
+bit-identical. \\
+\addlinespace
+Per-crop region plausibility &
+``This class can occupy the region its box sits in'' &
+Removes 9/109 (Paris), 4/237 (Rainier), 12/49 (Shark Fin). 0 FP;
+Rainier's four are phantom aircraft inside the snowfield. \\
+\addlinespace
+Caption--scene plausibility &
+``The caption describes something this scene can contain'' &
+Removes a further 16 (Shark Fin), 9 (Rainier), 2 (Paris). 0 FP.
+Requires four conjunctive conditions; each weaker variant deletes real content
+(see text). \\
+\addlinespace
+Water surface levelling &
+``The ground beneath water is flat'' &
+Shark Fin elevation spread \SI{73.5}{\meter} $\rightarrow$ \SI{0.00}{\meter};
+resulting shoreline discontinuity \SI{0.14}{\meter}. Paris (already near-level)
+\SI{1.67}{\meter} $\rightarrow$ \SI{0.55}{\meter} across 12 bodies. \\
+\addlinespace
+Projected-size LOD &
+``Distance predicts resolvability'' &
+Rainier meshed instances $545 \rightarrow 296$; triangles
+\SI{4.47}{M} $\rightarrow$ \SI{2.48}{M}; per-class override table eliminated. \\
+\addlinespace
+Resolution-based asset selection &
+``The best-scoring crop is the best reconstruction input'' &
+Source crop area increased $1.0$--$9.2\times$ per group; \num{205} of \num{471}
+instances had been rejected as degenerate reconstructions. \\
+\addlinespace
+Geometric UV-fold repair &
+``Adjacent grid cells observed adjacent panorama rows'' &
+Collapses \num{5624} triangles (Rainier, $7.0\%$), \num{2169} (Shark Fin),
+\num{1479} (Paris). Converges in two passes; face count unchanged. \\
+\addlinespace
+Occluder-footprint inpainting &
+``What foreground removal left behind is ground'' &
+Below-horizon pixels showing fabricated fill: $23.9\% \rightarrow 17.1\%$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Two of these deserve comment because the obvious version of each is measurably
+wrong.
+
+\paragraph{Caption plausibility requires conjunction.}
+Rejecting a detection because its caption mentions something implausible is
+appealing and unsafe. On Mount Rainier, 21 flower detections carry captions such as
+``a close up of a flower in a vase'', and \num{19} of those \num{21} are real,
+placed flowers. The captioner identifies the \emph{subject} correctly and
+confabulates the \emph{setting}. Conversely, rejecting on scene-tag support alone
+is also unsafe: Rainier's tags name no tree, and it has \num{67} real ones. Only
+the conjunction of four conditions (no scene-tag support, implausible caption
+vocabulary, caption not naming the class, and class not vegetation) produced
+zero false positives. Notably, the caption--class agreement test is unusable as a
+veto (its synonym gaps delete real objects) but safe as an \emph{exemption}, because
+a gap then merely retains a spurious detection rather than removing a real one.
+
+\paragraph{Robust estimation must respect sampling density.}
+Water levelling initially estimated each body's surface from its mesh vertices.
+Because the mesh is Poisson-disc sampled with a near-camera density bias,
+\num{4309} of Shark Fin's \num{11366} water vertices lie within \SI{20}{\meter} of
+the camera, and the resulting estimate described the cove at the viewer's feet
+rather than the sea: \SI{-4.54}{\meter} against a shoreline at
+\SI{-0.99}{\meter}. Estimating over the uniform grid instead gives
+\SI{-1.13}{\meter} and a \SI{0.14}{\meter} shoreline step. The estimator was
+correct; the sample weighting was not.

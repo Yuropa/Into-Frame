@@ -1,0 +1,77 @@
+% =============================================================================
+\section{Population Synthesis}
+\label{sec:distribution}
+% =============================================================================
+
+A detector finds tens of flowers in a meadow that contains thousands. Placing only
+what was detected leaves a scene correct everywhere it was measured and empty
+everywhere it was not, which reads worse than either extreme: the eye sees the
+sampling pattern rather than the meadow.
+
+Two mechanisms fill that gap, and they are deliberately separate because they
+answer different questions. Population synthesis asks \emph{where else would
+instances of this class be, given where these ones are}. Ground cover asks
+\emph{what is the ground made of}, a question with no discrete instances to
+generalize from at all.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/synthesis-tree.png}
+    \caption{Synthesized tree population.}
+    \label{fig:pop-synth}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.42\linewidth}
+    \includegraphics[width=\linewidth]{rainier/grass-area.png}
+    \caption{Ground-cover mask.}
+    \label{fig:pop-grass}
+  \end{subfigure}
+  \caption{The two mechanisms on the Rainier capture, both top-down over the
+  \SI{200}{\meter} grid. Population synthesis (a) extends the observed tree
+  detections outward across the region where that class is admissible, matching
+  their measured spatial statistics rather than repeating a fixed density. Ground
+  cover (b) is a mask, not a set of instances: it marks where the scattered tuft
+  geometry is admissible. The mask is small relative to the grid because it is
+  derived from the region typing of the \emph{original} panorama, which only sees
+  meadow in the near field the photograph actually observed.}
+  \label{fig:rainier-populations}
+\end{figure}
+
+\subsection{Synthesis from Observed Statistics}
+
+For each (class, region-type) pair with enough real detections to constitute
+evidence, we measure the spatial statistics of those detections as a
+pair-correlation histogram, and synthesize additional instances matching them over
+the rest of the matching region. This is a point-process
+formulation~\cite{9cfc5dfd-c17c-3458-81d1-9c27d3a321e8}, closely related to
+appearance-guided element arrangement~\cite{10.1145/1572614.1572623} and in the
+spirit of example-based world synthesis~\cite{10.1145/2766975}.
+
+\subsection{Ground Cover}
+
+Grass is not synthesized from detections, because a detector does not usefully
+enumerate blades of grass. It is scattered by density over a mask, and the
+interesting part is how that mask is derived.
+
+The mask comes from the region typing of the \emph{original} panorama, for the
+reason given in \cref{sec:panorama}: the object-removed panorama has had the
+meadow erased along with the objects standing in it. But region type alone is too
+blunt in a way that matters here. The semantic label set folds \texttt{grass},
+\texttt{earth} and \texttt{field} together with \texttt{sand}, \texttt{snow} and
+\texttt{ice} into one ground class, so a snowfield and a meadow are
+indistinguishable by type, and an alpine meadow is typically ringed by melting
+snowpack that types identically to the wildflowers beside it.
+
+Color settles it. Each candidate cell is tested against the excess-green of the
+panorama pixel it was observed through, available directly, because that pixel
+is the one retained in \cref{sec:uv-retention}. The threshold is deliberately a low
+bar rather than a test for lushness: dry grass sits near zero on this scale while
+sand runs about $-0.12$ and snow lower still, so it removes only surfaces that are
+definitively not vegetation. The same measurement is then reused as a
+\emph{weight} rather than a veto, so density tracks how green the ground actually
+is instead of being uniform over whatever survives the threshold.
+
+Tufts are placed as fixed-orientation crossed cards rather than camera-facing
+billboards. A billboard is a single quad that turns to face the viewer, which
+works for an upright subject at eye level and collapses to a line, then swings
+through the ground plane, for ground cover underfoot.

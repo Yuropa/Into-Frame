@@ -1,0 +1,76 @@
+digraph pipeline {
+  rankdir=LR;
+  graph [fontname="Helvetica", nodesep=0.28, ranksep=0.55, bgcolor="white"];
+  node  [fontname="Helvetica", fontsize=10, shape=box, style="rounded,filled",
+         color="#9a9a95", penwidth=0.8, height=0.42, margin="0.14,0.08"];
+  edge  [fontname="Helvetica", fontsize=8, color="#6b6b66", penwidth=0.8,
+         arrowsize=0.6];
+
+  photo [label="Single\nphotograph", fillcolor="#eceae4", penwidth=1.4];
+
+  subgraph cluster_pano {
+    label="Three panorama variants"; fontsize=10; color="#9a9a95"; style=rounded;
+    p_orig [label="Original\npanorama",       fillcolor="#f4f2ec"];
+    p_terr [label="Object-removed\npanorama", fillcolor="#f4f2ec"];
+    p_sky  [label="Sky-inpainted\npanorama",  fillcolor="#f4f2ec"];
+  }
+
+  subgraph cluster_terrain {
+    label="Terrain"; fontsize=10; color="#c3d4e8"; style=rounded;
+    t1 [label="Height field",             fillcolor="#e8f0f9"];
+    t2 [label="Constrained\nreconstruction", fillcolor="#e8f0f9"];
+    t3 [label="Mesh + texture",           fillcolor="#e8f0f9"];
+    t1 -> t2 -> t3;
+  }
+  subgraph cluster_objects {
+    label="Objects"; fontsize=10; color="#f0cdb8"; style=rounded;
+    o1 [label="Detection\n+ typing",      fillcolor="#fbeade"];
+    o2 [label="Appearance\nclustering",   fillcolor="#fbeade"];
+    o3 [label="3D assets",                fillcolor="#fbeade"];
+    o1 -> o2 -> o3;
+  }
+  subgraph cluster_cover {
+    label="Ground cover"; fontsize=10; color="#bfe0d0"; style=rounded;
+    g1 [label="Spatial\nstatistics",      fillcolor="#e4f3ec"];
+    g2 [label="Population\nsynthesis",    fillcolor="#e4f3ec"];
+    g1 -> g2;
+  }
+  subgraph cluster_water {
+    label="Water"; fontsize=10; color="#c9c3e4"; style=rounded;
+    w1 [label="Region\nextraction",       fillcolor="#eae7f6"];
+    w2 [label="Levelled\nsurface",        fillcolor="#eae7f6"];
+    w1 -> w2;
+  }
+  subgraph cluster_sky {
+    label="Sky"; fontsize=10; color="#eddfae"; style=rounded;
+    s1 [label="Lighting\nestimation",     fillcolor="#f8f0d8"];
+    s2 [label="Skybox",                   fillcolor="#f8f0d8"];
+    s1 -> s2;
+  }
+  subgraph cluster_motion {
+    label="Motion"; fontsize=10; color="#d8d6d0"; style=rounded;
+    m1 [label="Video\ngeneration",        fillcolor="#f0efeb"];
+    m2 [label="Motion\nextraction",       fillcolor="#f0efeb"];
+    m3 [label="Rigging",                  fillcolor="#f0efeb"];
+    m1 -> m2 -> m3;
+  }
+
+  assembly [label="Scene\nassembly", fillcolor="#eceae4"];
+  out      [label="Explorable 3D\nenvironment", fillcolor="#dfdcd3", penwidth=1.6];
+
+  photo -> p_orig; photo -> p_terr; photo -> p_sky;
+
+  // geometry (solid)
+  p_terr -> t1; p_terr -> w1;
+  p_orig -> o1; p_orig -> m1;
+  p_sky  -> s1;
+  t3 -> assembly; o3 -> assembly; g2 -> assembly;
+  w2 -> assembly; s2 -> assembly; m3 -> assembly;
+  assembly -> out;
+
+  // semantics (dashed)
+  edge [style=dashed];
+  p_orig -> g1  [label="region types"];
+  o2     -> g1  [label="exemplars"];
+  p_orig -> t2  [label="silhouette"];
+}

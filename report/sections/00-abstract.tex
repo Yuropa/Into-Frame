@@ -1,0 +1,28 @@
+\begin{abstract}
+\noindent
+Single-image 3D scene generation has advanced rapidly, but most systems stop at a
+viewable, inert result: a panorama, a layered mesh, or a radiance field that
+supports novel-view synthesis but has no motion and nothing to interact with.
+We present \textbf{Into Frame}, a system that turns one photograph into an
+\emph{inhabitable} environment, in which discrete objects exist as individual
+simulated assets, ground cover and vegetation respond to contact and wind, and
+the scene is lit by a physically based estimate of the original illumination, all
+at real-time VR frame rates.
+Our central design commitment is to reconstruct each part of the scene by a
+method suited to its physical role, rather than extracting everything from one
+representation: terrain, objects, ground cover, water and sky are handled
+separately and by different means.
+We outline the pipeline built on this principle and focus on four contributions:
+a projection from calibrated panoramic depth to a top-down height field that
+preserves each cell's observed panorama pixel; a terrain reconstruction that
+keeps visual similarity with the original image while applying fluvial erosion to
+give plausible relief where nothing was observed; a pattern-texturing scheme that
+avoids the projective smearing an equirectangular photograph produces on the
+ground; and a point-process population synthesis that scatters vegetation and
+objects to match the spatial statistics of the real detections.
+We evaluate the system on several real-world images and report both what it does
+well and a set of failure modes we were able to measure precisely. We argue that
+the most transferable result is methodological: at this scale, most defects are
+not model failures but \emph{assumption} failures, where a step valid for one
+scene category is silently applied to another.
+\end{abstract}

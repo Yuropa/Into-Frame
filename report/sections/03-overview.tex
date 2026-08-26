@@ -1,0 +1,165 @@
+% =============================================================================
+\section{Overview}
+\label{sec:overview}
+% =============================================================================
+
+\subsection{Design Principle: Role-Specialized Decomposition}
+
+The organizing commitment of Into Frame is that a scene is not one thing. Ground,
+discrete objects, ground cover, water and sky differ in how they must be
+reconstructed, how they are represented, how they are textured, and how they
+behave at runtime. Forcing them through a single representation means either
+accepting the limitations of that representation or developing a more general one,
+and the latter was outside the scope of this project.
+
+\begin{figure}[htbp]
+  \centering
+  % Wider than the text block: the diagram bleeds 1.4cm into each margin (which
+  % are 2.4cm) so the stage labels stay legible. Change the 19cm to \linewidth
+  % to keep it strictly inside the text block.
+  \makebox[\linewidth][c]{\resizebox{19cm}{!}{\input{figures/pipeline-overview}}}
+  \caption{The pipeline decomposes a single image into six tracks with different
+  physical roles. Solid arrows carry geometry, dashed arrows carry semantics.
+  The three panorama variants at the left are maintained deliberately: geometry is
+  derived from the object-removed panorama, semantics from the original.}
+  \label{fig:pipeline}
+\end{figure}
+
+\Cref{fig:pipeline} shows the resulting structure. The pipeline begins by building
+three panoramic representations of the scene, each of which serves a different
+consumer downstream:
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Original Panorama.] A synthetic equirectangular panorama generated from the
+  input photograph by WorldGen~\cite{worldgen2025ziyangxie}, with
+  FLUX~\cite{esser2024scalingrectifiedflowtransformers} outpainting,
+  CubeDiff~\cite{kalischek2025cubediffrepurposingdiffusionbasedimage} and
+  DreamCube~\cite{dreamcube} available as alternative backends. This is the
+  baseline scene representation, and the one every semantic stage reads from,
+  because it is the only variant in which the real objects are still present.
+  \item[Object-Removed Panorama.] The original panorama processed with
+  ObjectClear~\cite{zhao2026objectclear} to remove foreground objects, followed by
+  a FLUX LoRA correction pass that restores equirectangular consistency at the
+  seams. This gives an unobstructed view of the environment, better suited to
+  terrain reconstruction, where occluders would otherwise punch holes in the ground.
+  \item[Sky-Inpainted Panorama.] The region above the horizon, completed with
+  FLUX~\cite{esser2024scalingrectifiedflowtransformers} inpainting where objects
+  were removed, producing a seamless sky used as both skybox and image-based
+  lighting source.
+\end{description}
+
+These three panoramas are then taken in concert to generate the rest of the scene:
+
+\begin{description}[leftmargin=1.2em,style=nextline]
+  \item[Terrain.] A single continuous height field, meshed with variable density,
+  carrying collision. Reconstructed from calibrated panoramic depth and completed
+  by a terrain constraint solver.
+  \item[Water.] Regions typed as water, extracted as a separate leveled surface
+  with an animated shader.
+  \item[Objects.] Discrete entities detected, classified, clustered by visual
+  similarity, and reconstructed across the scene.
+  \item[Ground cover.] Populations too numerous to place individually as
+  reconstructions, scattered by density over a mask derived from the semantics and
+  color of the panorama.
+  \item[Motion.] Per-object animation, guided by a generated video of the scene and
+  used to decide which categories are rigid bodies and which need rigging.
+  \item[Sky.] The panorama above the horizon, used as both skybox and image-based
+  lighting source.
+\end{description}
+
+\subsection{Stage Sequence}
+
+The pipeline defines 42 stages, of which 38 are active in the default
+configuration. \Cref{tab:stages} groups them by track and
+\cref{tab:stagemodels} gives the model behind each stage that uses one. Stage
+numbers follow configuration order throughout. The gap at 36--37 in
+\cref{tab:stages} is two stages that are defined but disabled by default, and so
+belong to no track.
+
+The panorama stages build a $360^\circ$ representation; semantics identifies the
+objects in it; cleanup produces a second panorama with those objects removed, from
+which the geometry stages recover depth and metric scale. Terrain is meshed and
+eroded, objects are detected and their spatial distributions learned, and the scene
+is assembled from those statistics. Finally a video generation model guides
+per-object animation and decides which objects are rigid bodies.
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Pipeline stages grouped by reconstruction track.}
+\label{tab:stages}
+\begin{tabular}{@{}llp{7.4cm}@{}}
+\toprule
+\textbf{Track} & \textbf{Stages} & \textbf{Purpose} \\
+\midrule
+Panorama    & 1--4   & Caption, Perspective Depth, $360^\circ$ Outpainting, Super-Resolution \\
+Semantics   & 5--8   & Panoramic Depth, Object Segmentation, Classification, Typing \\
+Cleanup     & 9--11  & Foreground Removal, Equirectangular LoRA Correction \\
+Regions     & 12--15 & Semantic Region Typing (original and object-removed), Lighting Estimation, Sky Inpainting \\
+Geometry    & 16--19 & Panoramic Depth, Metric Calibration, Height Field, Region Map \\
+Terrain     & 20--25 & Constrained Reconstruction, Erosion Refinement, Meshing, Texturing \\
+Objects     & 26--30 & Recognition, Detection, Instance Refinement, Correlation, Clustering \\
+Population  & 31--33 & Spatial Statistics, Population Synthesis, Ground Cover \\
+Assembly    & 34--35 & Asset Generation, Scene Assembly and Placement \\
+Animation   & 38--42 & Video Generation, Motion Extraction, Rigging, Animation \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[htbp]
+\centering
+\small
+\caption{Model behind each pipeline stage that depends on one, in configuration
+order. Stages that use no model are omitted, so the numbering is not contiguous;
+\cref{tab:stages} gives the full sequence. When a stage supports several
+backends, the default is listed first. Stages marked $\dagger$ are defined but
+disabled in the default configuration.}
+\label{tab:stagemodels}
+\begin{tabular}{@{}r l >{\raggedright\arraybackslash}p{8.1cm}@{}}
+\toprule
+\textbf{\#} & \textbf{Stage} & \textbf{Model} \\
+\midrule
+1  & Captioning                     & BLIP~\cite{li2022blipbootstrappinglanguageimagepretraining}; or Florence-2~\cite{xiao2024florence2} \\
+2  & Depth Generation               & Depth Anything~3~\cite{lin2025depth3recoveringvisual} \\
+3  & Panorama                       & WorldGen~\cite{worldgen2025ziyangxie}; or FLUX~\cite{esser2024scalingrectifiedflowtransformers}, CubeDiff~\cite{kalischek2025cubediffrepurposingdiffusionbasedimage}, DreamCube~\cite{dreamcube} \\
+4  & Panorama Supersampling         & Swin2SR~\cite{conde2022swin2srswinv2transformercompressed} \\
+5  & Panorama Object Depth          & Depth Any Panoramas~\cite{lin2025dap} \\
+6  & Object Segmentation            & SAM~2~\cite{ravi2024sam2segmentimages}, with BiRefNet~\cite{zheng2024birefnet} matting \\
+7  & Object Classification          & BLIP~\cite{li2022blipbootstrappinglanguageimagepretraining} captioning with keyword matching \\
+8  & Object Typing                  & CLIP~\cite{radford2021learningtransferablevisual}, with Grounding DINO~\cite{liu2024groundingdino} label verification \\
+9  & Panorama Inpainting$\dagger$   & FLUX~\cite{esser2024scalingrectifiedflowtransformers}; or LaMa~\cite{suvorov2021resolution} \\
+10 & Panorama Foreground Inpainting & ObjectClear~\cite{zhao2026objectclear} \\
+11 & Panorama LoRA Correction       & FLUX~\cite{esser2024scalingrectifiedflowtransformers} with an equirectangular LoRA \\
+12 & Panorama Regions               & SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} \\
+13 & Panorama Regions (Terrain)     & SegFormer~\cite{DBLP:journals/corr/abs-2105-15203} \\
+14 & Panorama Lighting              & LuxDiT~\cite{liang2025luxdit}, with IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion} albedo/shading separation \\
+15 & Skybox Inpainting              & FLUX~\cite{esser2024scalingrectifiedflowtransformers} \\
+16 & Panorama Depth                 & Depth Any Panoramas~\cite{lin2025dap} \\
+22 & Terrain Noise Refinement       & Landlab~\cite{barnhart2020landlab,hobley2017creative,Hutton_landlab_2020} fluvial incision \\
+25 & Terrain Texture Generation     & Pattern-based texturing~\cite{neyret:inria-00537511}, with LaMa~\cite{suvorov2021resolution} completion; or FLUX~\cite{esser2024scalingrectifiedflowtransformers} with Florence-2~\cite{xiao2024florence2} material captioning \\
+26 & Object Recognition             & RAM++~\cite{huang2023open} \\
+27 & Object Detection               & Grounding DINO~\cite{liu2024groundingdino} \\
+28 & Object Instance Refinement     & SAM~2~\cite{ravi2024sam2segmentimages} \\
+29 & Object Correlation             & SAM~2~\cite{ravi2024sam2segmentimages} \\
+30 & Object Category Clustering     & DINOv2~\cite{oquab2024dinov2}, with CLIP~\cite{radford2021learningtransferablevisual} corroboration \\
+33 & Grass Cover                    & SAM~3D~\cite{sam3dteam2025sam3d3dfyimages} for the tuft mesh \\
+34 & Panorama Asset Generation      & SAM~3D~\cite{sam3dteam2025sam3d3dfyimages}; or SPAR3D~\cite{huang2025spar3dstablepointawarereconstruction}, TRELLIS~\cite{xiang2025trellis2} \\
+36 & Foreground Inpainting$\dagger$ & LaMa~\cite{suvorov2021resolution} \\
+38 & Video Generation               & LTX-2~\cite{lightricks2026ltx2} \\
+39 & Video Object Extraction        & SAM~2~\cite{ravi2024sam2segmentimages} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{System Architecture}
+
+The system splits into a Python generation server and a rendering client. The
+server runs the pipeline and exposes the result as a \texttt{.frame} archive over a
+WebSocket control channel and an HTTP asset channel, so the client streams assets
+as they become available rather than waiting for the whole scene. A Unity client
+(C\#, URP) targets desktop VR and carries the runtime shading: a terrain splat
+shader blending the layered material of \cref{sec:texture}, an animated water
+surface, and wind-driven foliage sway on one global wind field. It also runs the
+scene's physics: the terrain mesh carries a collision surface, so placed objects
+rest on the ground rather than floating above it, and the rigid bodies of
+\cref{sec:lighting} resolve against the terrain and against each other.

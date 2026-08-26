@@ -1,0 +1,85 @@
+% =============================================================================
+\section{Conclusions and Future Work}
+\label{sec:conclusions}
+% =============================================================================
+
+\subsection{The Case for a Hybrid Pipeline}
+
+The result we most want to draw out is the shape of the system rather than any
+single stage. Into Frame mixes learned models and classical graphics roughly
+two-to-one by stage count, and neither part would produce this output alone.
+
+Generative models make the problem tractable at all. Five sixths of the sphere and
+the ground behind every object are never observed, and no classical reasoning
+recovers content absent from the input. Outpainting, foreground removal,
+single-view reconstruction and video generation supply it.
+
+What they do not supply is structure. A generative system asked for a scene returns
+something viewable: a panorama, a mesh, a radiance field. It does not return a
+collidable surface, a population whose density can be sampled, a water plane
+animated separately from its bed, or a mesh with a skeleton in it. Every property
+that makes the output walkable rather than watchable comes from the classical side:
+a harmonic solve that provably never modifies measured ground, fluvial incision,
+point-process synthesis fitted to observed statistics, pattern texturing, and a
+three-bone rig driven by a shared wind field. Of the 38 active stages, 12 use no
+learned model at all, and those are disproportionately the ones producing physical
+behavior.
+
+The division of labor is the point. Learned components answer \emph{what is there},
+including where nothing was observed; classical components decide \emph{how it
+behaves}, under constraints a generative model cannot honor: measured terrain must
+survive completion unchanged, water must sit below its bed, a meadow of thousands
+of plants must remain one instanced draw. Treating those as requirements rather
+than as things to be learned is what turns a picture of a place into a place.
+
+It also explains our failures. As \cref{sec:results} sets out, the surviving defects
+are mostly not model failures but assumption failures, where a step correct for one
+scene category is applied silently to another. That is the more tractable problem:
+an assumption can be identified, measured, and gated.
+
+\subsection{Future Work}
+
+\paragraph{Explicit scene classification.} A first-class scene-type estimate
+(natural landform, urban, coastal, interior) consumed by every stage that
+currently embeds an implicit assumption would address the largest class of failure
+we observed. The system is biased toward outdoor natural scenes, and several
+assumptions do not hold outside them: that the sky boundary is the crest of ground,
+that a large uniform region is terrain, that vegetation is the dominant content.
+
+\paragraph{Confidence propagation.} Stages produce point estimates. Propagating
+uncertainty would let downstream stages weigh evidence rather than accept it, and
+would let the system report where it is guessing.
+
+\paragraph{Better single-view reconstruction for thin structures.} Vegetation is
+the dominant content of natural scenes and the weakest part of our object track;
+species-aware priors~\cite{lee2024tree} are the obvious direction.
+
+\paragraph{Joint refinement.} The pipeline is strictly feed-forward. A closing
+optimization that adjusted depth, geometry and placement jointly against
+photometric consistency could correct compounded error that no single stage can
+see.
+
+\paragraph{Perceptual evaluation.} Our evaluation is diagnostic: it measures where
+the system is wrong, not how the result feels to be inside. A user study of
+presence, scale perception and navigation comfort would test what the system is
+actually for, and is the clearest gap in our rigor.
+
+\paragraph{Audio and interaction.} The scene is something to move through rather
+than to act on. Spatialized audio generated jointly with the
+scene~\cite{jin2026sonoworld}, and ways for the user to disturb the environment
+rather than only observe it, would extend interactivity in the direction this
+framing implies.
+
+\subsection{Closing Remarks}
+
+Into Frame demonstrates that a single photograph can become an interactive
+environment, with terrain, objects, ground cover, water and lighting reconstructed
+as distinct physical components rather than as one representation serving every
+purpose. That decomposition buys the depth of the result: each component is
+reconstructed by a method suited to its role and then behaves according to it.
+
+The remaining failures are mostly not failures of any model, but assumptions that
+held for outdoor natural landscapes and did not extrapolate beyond them. That is an
+encouraging place to stop: the boundaries are legible and measurable, and addressing
+them means making implicit commitments explicit rather than waiting for better
+models.

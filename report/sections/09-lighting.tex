@@ -1,0 +1,124 @@
+% =============================================================================
+\section{Lighting and Animation}
+\label{sec:lighting}
+% =============================================================================
+
+\subsection{Illumination and De-lighting}
+
+Scene illumination is estimated from the panorama with
+LuxDiT~\cite{liang2025luxdit}, which recovers an HDR environment and a dominant
+light direction. The client uses both: the environment as an image-based lighting
+source, and the direction as a directional light casting the scene's shadows.
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}{0.46\linewidth}
+    \includegraphics[width=\linewidth]{rainier/lighting-ldr.png}
+    \caption{Tone-mapped.}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.46\linewidth}
+    \includegraphics[width=\linewidth]{rainier/lighting-log.png}
+    \caption{Log scale.}
+  \end{subfigure}
+  \caption{Estimated HDR environment for the Rainier capture. The tone-mapped view
+  shows what the eye would see; the log view exposes the dynamic range the client
+  actually samples, with the sun as a compact high-intensity lobe well above the
+  surrounding sky. The dominant direction extracted from this lobe drives the
+  scene's directional light.}
+  \label{fig:rainier-lighting}
+\end{figure}
+
+Every asset is cut from a photograph, so it already carries the illumination of the
+moment it was taken: shadows, directional shading, and the color of the light.
+Rendering that under a second, freshly estimated light doubles the illumination and
+reads as flat and over-exposed. Object crops are therefore de-lit with
+IntrinsicDiffusion~\cite{Luo2024IntrinsicDiffusion}, so what the client relights is
+material color rather than a photograph. This is also what makes assets portable:
+population synthesis places instances anywhere the class is admissible, so an
+instance rarely sits in the orientation its shading was baked under, and one
+carrying its original shading would be lit from a different direction than the
+terrain beneath it.
+
+\subsection{Motion}
+
+A short video is generated from the panorama with
+LTX-2~\cite{lightricks2026ltx2}, and each detected object is tracked through it
+with SAM~2~\cite{ravi2024sam2segmentimages}. The camera is held locked off during
+generation, which is what makes the resulting tracks usable: any drift in an
+object's image-space centroid is the object moving, not the camera.
+
+\begin{figure}[htbp]
+  \centering
+  % Source: Video Object Extraction/build/object_video_306/object.mp4, cropped to
+  % the union of the object's own mask across the clip. Frames 26/54/82/120 were
+  % selected by maximising summed pairwise silhouette dissimilarity (1 - IoU)
+  % subject to a minimum spacing of ~1.2s, so the four span the clip while showing
+  % the widest range of motion in it; an evenly spaced set scores 1.28 against
+  % 2.13 here. Panel times are relative to the first frame shown, not clip start.
+  % Note for future edits: object 306 comes from an earlier pipeline run than the
+  % rest of the Rainier figures (2026-07-28 vs 2026-08-18). It was chosen because
+  % it shows the sway most clearly; the mechanism it illustrates is unchanged.
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-26.jpg}
+    \caption{\SI{0}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-54.jpg}
+    \caption{\SI{1.2}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-82.jpg}
+    \caption{\SI{2.3}{\second}}
+  \end{subfigure}\hfill
+  \begin{subfigure}{0.19\linewidth}
+    \includegraphics[width=\linewidth]{rainier/motion-120.jpg}
+    \caption{\SI{3.9}{\second}}
+  \end{subfigure}
+  \caption{A single tracked object through the generated video: one paintbrush
+  flower in the Rainier meadow, cropped to the union of its own mask over the whole
+  clip. SAM~2 supplies the per-frame mask, so everything outside the object is
+  removed and what remains is the silhouette the classifier actually measures. The
+  head tilts and recovers between frames while staying in place, which is the
+  signal that decides its type: the centroid oscillates about a stationary mean
+  rather than translating away from it. This flower is therefore typed as anchored
+  and given a sway amplitude and frequency, not a trajectory.}
+  \label{fig:rainier-motion}
+\end{figure}
+
+The classification itself is a single measurement. An object whose centroid drifts
+less than \SI{60}{\percent} of its own bounding-box diagonal over the whole clip is
+treated as \emph{stationary}: it is oscillating in place, anchored to the scene, as
+a flower or a tree is. Anything that drifts further is a \emph{moving} body.
+
+Stationary objects contribute an amplitude and a frequency read from their own
+centroid signal, and are rigged rather than animated directly. Each shared bucket
+mesh gets a three-bone vertical skeleton with joints at its base and at one and two
+thirds of its height. The top joint sits at two thirds deliberately: a joint bends
+what is above it, so one at the very top has no geometry to move and degenerates
+into a dead bone, hinging the upper half about a point instead of curving. With
+joints at thirds the bottom stays rigid on the ground and each joint inherits the
+bend below it plus its own. Timing is per instance while the skeleton stays part of
+the shared mesh, so a meadow of thousands of plants remains one instanced draw.
+
+Moving objects are rigid bodies. Their track is unprojected into world space,
+holding depth fixed at the reference frame's estimate since no per-frame depth
+exists, and fitted with a smoothed curve to recover linear velocity and
+acceleration. Those are the initial conditions handed to the physics engine, which
+resolves the object against terrain and other objects. Angular velocity is out of
+scope: it is not reliably recoverable from a monocular silhouette, and a wrong spin
+is more noticeable than none.
+
+\subsection{A Shared Wind Field}
+\label{sec:wind}
+
+Foliage sway, grass motion and the water surface are driven by one scene-global
+wind field, an ambient base strength plus discrete gust events, rather than by
+independent per-object oscillators. That is what gives the scene its connectedness:
+a gust crosses the meadow and everything in its path responds in turn. Independent
+oscillators are cheaper and read as obviously synthetic, because nothing in a real
+landscape moves without its neighbors moving too.
+
+The field is authored rather than derived. The per-object amplitudes above set how
+strongly each instance responds, but the gust schedule does not yet come from the
+generated video. Deriving it from the observed correlated motion is left as future
+work.
