@@ -33,7 +33,26 @@ _SUN_PERCENTILE = 99.9
 # clamped three only give a lower bound (share >= 0.1), so this is an interim value
 # -- sun() now logs the raw share and the pre-clamp intensity so one more run
 # calibrates it exactly rather than by inference.
-_SUN_INTENSITY_SCALE = 15.0
+#
+# 6.0 since PanoramaLightingStage started feeding LuxDiT the photograph instead of a
+# panorama strip (estimate_from_photo). Measured HDR shares on the five samples with
+# that input: Rainier 0.250, Iceland 0.173, Shark Fin 0.077, Irises 0.018, Paris
+# 0.012. At 6.0 the two clear alpine days land at 1.5 and 1.04, the sunset at 0.46,
+# and the two whose maps are mostly haze near zero -- see _SUN_INTENSITY_FLOOR for
+# how those still get a key light when the map has an identifiable peak.
+_SUN_INTENSITY_SCALE = 6.0
+
+# When the merged radiance has a genuinely concentrated peak (peak/mean above this)
+# the scene has a sun even if its irradiance share is small -- Paris's map is a
+# washed-out blue sky with one bright spot at 46x the mean, and the share formula
+# alone would give it 0.07 of a directional light, i.e. none. Floor the intensity
+# at _SUN_INTENSITY_FLOOR in that case; below the ratio the map really is diffuse.
+_SUN_PEAK_RATIO_FOR_FLOOR = 40.0
+_SUN_INTENSITY_FLOOR = 0.5
+
+# Ceiling. 3.0 on a URP directional light blows out every albedo texture in the
+# scene; 2.0 is already a harsh noon.
+_SUN_INTENSITY_MAX = 2.0
 
 # Extra gain applied to `intensity` ONLY when the HDR merge didn't run and the
 # estimate came from tonemapped LDR pixels instead (see _radiance).
@@ -320,6 +339,9 @@ class SceneLighting:
             sun_share * _SUN_INTENSITY_SCALE
             * (1.0 if is_hdr else _LDR_FALLBACK_SUN_SCALE)
         )
+        peak_ratio = float(luminance.max()) / max(float(luminance.mean()), 1e-9)
+        if is_hdr and peak_ratio >= _SUN_PEAK_RATIO_FOR_FLOOR:
+            unclamped_intensity = max(unclamped_intensity, _SUN_INTENSITY_FLOOR)
         return {
             "direction": (
                 list(measured[0]) if measured
@@ -331,7 +353,8 @@ class SceneLighting:
             # Where direction/colour came from, so a scene that silently fell back
             # to the estimate is distinguishable from one that didn't.
             "direction_source": "panorama" if measured else "envmap",
-            "intensity": round(float(np.clip(unclamped_intensity, 0.0, 3.0)), 3),
+            "intensity": round(float(np.clip(unclamped_intensity, 0.0, _SUN_INTENSITY_MAX)), 3),
+            "peak_ratio": round(peak_ratio, 1),
             # The two numbers _SUN_INTENSITY_SCALE has to be calibrated against, and
             # neither was recoverable from a run before this: `intensity` above is
             # clamped, so a scene at the ceiling reports 3.0 whether its true value is

@@ -27,6 +27,14 @@ public class PanoramaSkybox : MonoBehaviour
     private Material skyboxMaterial;
     private Texture2D currentTexture;
 
+    // Load bookkeeping for EnvironmentLighting, which renders the ambient probe from
+    // this skybox and has to wait for the panorama that was just requested rather
+    // than the one from a previous scene. PendingGeneration counts requests,
+    // AppliedGeneration the ones that reached ApplySkybox (a failed download is
+    // counted as applied so a waiter never hangs on it).
+    public int PendingGeneration { get; private set; }
+    public int AppliedGeneration { get; private set; }
+
     // Axis the sky turns about, in world space. Set to the direction of the sun by
     // SetSpinAxis; rotating about it leaves the sun itself stationary while everything
     // else wheels around it, so the directional light extracted from this same panorama
@@ -53,6 +61,7 @@ public class PanoramaSkybox : MonoBehaviour
 
     public void LoadFromName(string name)
     {
+        PendingGeneration++;
         if (gameObject.activeInHierarchy)
             StartCoroutine(LoadAndApplySkybox(name));
         else
@@ -85,11 +94,13 @@ public class PanoramaSkybox : MonoBehaviour
             if (request.result != UnityWebRequest.Result.Success)
             {
                 Debug.LogError($"[Skybox] Failed to load: {request.error}");
+                AppliedGeneration = PendingGeneration;
                 yield break;
             }
 
             Texture2D texture = DownloadHandlerTexture.GetContent(request);
             ApplySkybox(texture);
+            AppliedGeneration = PendingGeneration;
         }
     }
 

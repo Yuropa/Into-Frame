@@ -37,6 +37,10 @@ public class TerrainMaterialManager : MonoBehaviour
     public float[]     LayerSmoothness { get; private set; } = Array.Empty<float>();
     public Texture2D[] BlendMaps       { get; private set; } = Array.Empty<Texture2D>();
     public int         EquirectMask    { get; private set; }
+    public int         StochasticMask  { get; private set; }
+    public Texture2D   MacroMap        { get; private set; }
+    public float       MacroStrength   { get; private set; }
+    public Vector4     MacroMean       { get; private set; } = new Vector4(0.5f, 0.5f, 0.5f, 1f);
     public bool        IsReady         { get; private set; }
 
     // ── Shader property IDs ────────────────────────────────────────────────
@@ -83,8 +87,12 @@ public class TerrainMaterialManager : MonoBehaviour
         Shader.PropertyToID("_Layer7Smoothness"),
     };
 
-    static readonly int _equirectLayersId = Shader.PropertyToID("_EquirectLayers");
-    static readonly int _terrainExtentId  = Shader.PropertyToID("_TerrainExtent");
+    static readonly int _equirectLayersId   = Shader.PropertyToID("_EquirectLayers");
+    static readonly int _stochasticLayersId = Shader.PropertyToID("_StochasticLayers");
+    static readonly int _macroMapId         = Shader.PropertyToID("_MacroMap");
+    static readonly int _macroStrengthId    = Shader.PropertyToID("_MacroStrength");
+    static readonly int _macroMeanId        = Shader.PropertyToID("_MacroMean");
+    static readonly int _terrainExtentId    = Shader.PropertyToID("_TerrainExtent");
 
     // Deferred: terrain may arrive before or after the splat data
     private readonly List<Renderer> _pendingRenderers = new();
@@ -108,6 +116,7 @@ public class TerrainMaterialManager : MonoBehaviour
         LayerFactors    = new float[data.layers.Length];
         LayerSmoothness = new float[data.layers.Length];
         EquirectMask    = 0;
+        StochasticMask  = 0;
 
         for (int i = 0; i < data.layers.Length; i++)
         {
@@ -125,6 +134,25 @@ public class TerrainMaterialManager : MonoBehaviour
             LayerSmoothness[i] = data.layers[i].smoothness;
             if (data.layers[i].equirect)
                 EquirectMask |= (1 << i);
+            if (data.layers[i].stochastic)
+                StochasticMask |= (1 << i);
+        }
+
+        // Macro colour map (see SplatMaterialData.macro). sRGB like the tiles; the
+        // mean is sent in sRGB too, so it is converted to linear here to match what
+        // the shader reads back from the texture.
+        MacroMap = null;
+        MacroStrength = 0f;
+        if (!string.IsNullOrEmpty(data.macro))
+        {
+            MacroMap = DecodeTexture(data.macro, "macro", linear: false);
+            MacroMap.wrapMode = TextureWrapMode.Clamp;
+            MacroStrength = Mathf.Clamp01(data.macro_strength);
+            if (data.macro_mean != null && data.macro_mean.Length >= 3)
+                MacroMean = new Vector4(
+                    Mathf.GammaToLinearSpace(data.macro_mean[0]),
+                    Mathf.GammaToLinearSpace(data.macro_mean[1]),
+                    Mathf.GammaToLinearSpace(data.macro_mean[2]), 1f);
         }
 
         int blendCount = data.blend_maps?.Length ?? 0;
@@ -135,7 +163,8 @@ public class TerrainMaterialManager : MonoBehaviour
         IsReady = true;
 
         Debug.Log($"[TerrainMaterialManager] Ready — {LayerTiles.Length} layer(s), " +
-                  $"{BlendMaps.Length} blend map(s), equirect mask 0x{EquirectMask:X}. " +
+                  $"{BlendMaps.Length} blend map(s), equirect mask 0x{EquirectMask:X}, " +
+                  $"stochastic mask 0x{StochasticMask:X}, macro {(MacroMap != null ? $"on ({MacroStrength:0.00})" : "off")}. " +
                   $"Layers: {string.Join(", ", LayerNames)}");
 
         foreach (var r in _pendingRenderers)
@@ -219,6 +248,11 @@ public class TerrainMaterialManager : MonoBehaviour
         }
 
         mpb.SetInt(_equirectLayersId, EquirectMask);
+        mpb.SetInt(_stochasticLayersId, StochasticMask);
+        mpb.SetFloat(_macroStrengthId, MacroMap != null ? MacroStrength : 0f);
+        mpb.SetVector(_macroMeanId, MacroMean);
+        if (MacroMap != null)
+            mpb.SetTexture(_macroMapId, MacroMap);
 
         // Object-space XZ extent, so the shader can derive the top-down grid UV the
         // blend maps and planar layers are authored against instead of trusting

@@ -263,6 +263,20 @@ public class PhysicsData
     public Vec3   colliderSize;  // box: full extents; capsule: (width, height, depth) -- see PhysicsHandoff
 }
 
+// One runtime level of detail of a mesh instance (server Object3D.lods). Either a
+// GLB (`mesh`) or a camera-facing billboard (`texture`), with its transform LOCAL
+// to the placed object; `screenHeight` is the LODGroup screenRelativeTransitionHeight
+// below which the next level takes over (the last entry's value is the cull height).
+[Serializable]
+public class LodEntry
+{
+    public string mesh;
+    public string texture;
+    public Vec3   scale;
+    public Vec3   position;
+    public float  screenHeight;
+}
+
 [Serializable]
 public class SceneObject
 {
@@ -290,6 +304,9 @@ public class SceneObject
     // handoff (moving objects, billboard or mesh) -- at most one of these is set.
     public SwayData    sway;
     public PhysicsData physics;
+
+    // Runtime LOD levels, nearest first. Null/empty -> render `mesh` alone.
+    public LodEntry[]  lods;
 }
 
 [Serializable]
@@ -361,6 +378,7 @@ public class SplatLayerData
     public float  tile_factor; // UV repeat count across terrain (0 treated as 1.0)
     public bool   equirect;    // true → sample with equirectangular world-position UV
     public float  smoothness;  // PBR smoothness [0,1]: 0 = matte, ~0.88 = water
+    public bool   stochastic;  // true → hex-grid stochastic sampling (no visible repeat)
 }
 
 [Serializable]
@@ -371,6 +389,13 @@ public class SplatMaterialData
     public string[]         blend_maps;   // base64-encoded RGBA PNGs (up to 2)
                                           // blend_maps[0] RGBA → layers[0..3]
                                           // blend_maps[1] RGBA → layers[4..7]
+    // Macro colour: the photograph's large-scale ground colour over the terrain
+    // grid (same UV as the blend maps). The shader multiplies the TILED layers by
+    // macro / macro_mean so the tiles carry detail and the photo carries colour.
+    // Empty/null → no macro modulation.
+    public string           macro;
+    public float            macro_strength;
+    public float[]          macro_mean;   // sRGB mean of the macro map, 3 floats
 }
 
 [Serializable]

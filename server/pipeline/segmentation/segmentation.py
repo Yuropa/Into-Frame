@@ -9,6 +9,7 @@ from pipeline.segmentation.segmentation_result import SegmentationResult
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.mask_inpainting import MaskInPainting
 from pipeline.segmentation.hires_crops import build_hires_crops, CAPTURED_FOV_RESTRICTED_KEY
+from pipeline.segmentation.photo_detection import detection_photo, store_photo_masks
 from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -68,8 +69,22 @@ class SegmentationConfiguration(PipelineStageConfiguration):
         # upscaled 2x, so its real information content is the pre-SR width. Used
         # only to decide whether the re-cut is worth doing. 1.0 if that stage is off.
         panorama_sr_factor: float = 2.0,
+        # Inside the captured cone, detect on the PHOTOGRAPH (at native resolution,
+        # optionally super-resolved) instead of on the panorama's downsampled copy of
+        # it, and store each detection in both spaces -- see
+        # pipeline/segmentation/photo_detection.py. Panorama detections that fall
+        # inside the cone are then dropped as duplicates of the photo pass; the
+        # panorama still supplies the out-of-cone detections foreground removal
+        # needs. Requires a cone (intrinsics + input photo).
+        detect_on_photo: bool = True,
+        # Swin2SR factor applied to the photo before detecting on it (1 = none,
+        # 2 or 4). Small blooms that are 20 px tall in a 1200 px photo clear SAM2's
+        # mask-area floor at 2x; 4x costs four passes of SAM2 for little more.
+        photo_detect_sr_factor: float = 2.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.detect_on_photo = bool(detect_on_photo)
+        self.photo_detect_sr_factor = float(photo_detect_sr_factor)
         self.min_area_fraction = min_area_fraction
         self.max_area_fraction = max_area_fraction
         self.restrict_to_captured_fov = bool(restrict_to_captured_fov)
@@ -183,9 +198,11 @@ class SegmentationStage(PipelineStage):
         # (index, panorama box) of every stored crop that lies in the cone, for
         # the hi-res re-cut after the loop.
         in_cone: list[tuple[int, list[float]]] = []
+        photo_pass = cone is not None and cfg.detect_on_photo
+        skipped_inside = 0
 
         def store_segmentation_result(result: SegmentationResult):
-            nonlocal total_crops
+            nonlocal total_crops, skipped_inside
 
             # Cropping
             cropping_task = self.create_progress(result.length, "Cropping…")
@@ -208,6 +225,12 @@ class SegmentationStage(PipelineStage):
                 inside = cone.contains_box(crop.box, cfg.captured_fov_margin_deg) if cone is not None else None
                 if inside is False:
                     filtered_fov += 1
+                elif inside and photo_pass:
+                    # The photo pass already covered this ground at full resolution;
+                    # the panorama's copy of the same object is a duplicate.
+                    skipped_inside += 1
+                    self.advance_progress(cropping_task)
+                    continue
 
                 # Indices must stay contiguous (no holes for filtered-out crops) --
                 # downstream stages iterate range(OBJECT_COUNT) and assume every
@@ -280,6 +303,33 @@ class SegmentationStage(PipelineStage):
             self._seg = ImageSeg(self.preferred_device)
         self.advance_progress(segmenting_task)
 
+        if photo_pass:
+            photo_img, factor = detection_photo(
+                context, self.preferred_device, cfg.photo_detect_sr_factor, self.temp, self.log_info,
+            )
+            if photo_img is None:
+                photo_pass = False
+                self.log_warning("detect_on_photo is on but there is no input photo; detecting on the panorama only")
+            else:
+                photo_task = self.create_progress(1, "Segmenting the photograph…")
+                photo_result = self._seg.segment(
+                    photo_img, self.temp, on_progress=self.make_progress_callback(photo_task),
+                )
+                native_area = min(cone.photo_w * cone.photo_h, _TILE_SIZE * _TILE_SIZE)
+                written, filtered_photo = store_photo_masks(
+                    context, cone, photo_img.rgba(), factor,
+                    photo_result.masks, photo_result.scores, total_crops,
+                    min_area=cfg.min_area_fraction * native_area,
+                    max_area=cfg.max_area_fraction * native_area,
+                    source="sam2_photo", log=self.log_info,
+                )
+                total_crops += written
+                self.finish_progress(photo_task)
+                self.log_info(
+                    f"Photo pass: {written} detection(s) from the photograph at {factor:.0f}x"
+                    f" ({filtered_photo} outside size bounds)"
+                )
+
         # The remote SAM2 call already reports real per-tile progress on
         # panorama-scale input (image_segmentation_imp.py's tiled path can be
         # a dozen+ full SAM2 passes) -- without on_progress here, that signal
@@ -289,6 +339,10 @@ class SegmentationStage(PipelineStage):
             input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task),
         )
         store_segmentation_result(result)
+        if skipped_inside:
+            self.log_info(
+                f"  {skipped_inside} panorama detection(s) inside the cone dropped as duplicates of the photo pass"
+            )
 
         self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)

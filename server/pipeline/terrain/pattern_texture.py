@@ -511,3 +511,77 @@ def synthesize_region_layer(
 
     out = (canvas.clip(0.0, 1.0) * 255.0).astype(np.uint8)
     return PIL.Image.fromarray(out, "RGB")
+
+
+def make_tileable(image: PIL.Image.Image, feather_frac: float = 0.3) -> PIL.Image.Image:
+    """Make a square photo patch wrap at its borders.
+
+    Classic offset-and-feather: the patch rolled by half its size has the
+    original's borders meeting at a cross through the centre and the original's
+    seamless centre at its own borders. Blending the ORIGINAL in along that
+    central cross (where it is continuous) and the ROLLED copy toward the
+    borders (where it is continuous) yields a tile whose edges match. The blend
+    bands are soft, which is why the client samples these tiles stochastically
+    (SplatLayer.stochastic): a hex grid of random offsets hides both the bands
+    and the repeat.
+    """
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+    h, w = arr.shape[:2]
+    rolled = np.roll(np.roll(arr, h // 2, axis=0), w // 2, axis=1)
+    ys, xs = np.mgrid[0:h, 0:w].astype(np.float32)
+    dist = np.minimum(np.abs(xs - w / 2.0), np.abs(ys - h / 2.0))
+    band = max(1.0, feather_frac * min(h, w) / 2.0)
+    t = np.clip(dist / band, 0.0, 1.0)
+    keep_original = 1.0 - t * t * (3.0 - 2.0 * t)   # 1 on the cross, 0 past the band
+    out = rolled * (1.0 - keep_original[..., None]) + arr * keep_original[..., None]
+    return PIL.Image.fromarray(out.clip(0, 255).astype(np.uint8), "RGB")
+
+
+def bake_macro_colour(
+    panorama_rgb: np.ndarray,
+    type_map: np.ndarray,
+    depth: "np.ndarray | None",
+    height_map: np.ndarray,
+    half: float,
+    canvas_size: int,
+    angular_sigma_deg: float = 2.0,
+    world_blur_texels: float = 1.5,
+    near_vegetation_m: float = 8.0,
+    work_width: int = 1024,
+) -> np.ndarray:
+    """The photograph's large-scale GROUND colour over the terrain grid.
+
+    A top-down bake of the panorama is a starburst wherever the panorama holds
+    something upright: a conifer on the horizon becomes a dark spoke metres long,
+    and no amount of blur in WORLD space removes it, because the spoke is the same
+    pixel repeated along one ray. The smear is removable in the panorama's own
+    angular domain instead, where a tree is a few columns wide: blur there, then
+    bake. Pixels that are not ground at all -- sky, built structures, canopy
+    beyond the near meadow -- are first replaced by their nearest ground colour so
+    the blur has nothing but ground to average.
+
+    Returns (canvas_size, canvas_size, 3) float32 in [0, 1], row 0 at Z = -half.
+    """
+    from scipy.ndimage import distance_transform_edt, zoom as _zoom
+    H, W = type_map.shape
+    scale = min(1.0, work_width / float(W))
+    sw, sh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
+    rgb = np.asarray(PIL.Image.fromarray(panorama_rgb).resize((sw, sh), PIL.Image.BILINEAR), dtype=np.float32) / 255.0
+    types = np.rint(_zoom(type_map.astype(np.float32), (sh / H, sw / W), order=0)).astype(np.int32)
+    valid = np.isin(types, [int(RegionType.TERRAIN), int(RegionType.GROUND), int(RegionType.ROAD),
+                            int(RegionType.TRAIL), int(RegionType.WATER)])
+    if depth is not None and depth.shape == (H, W):
+        d = _zoom(depth.astype(np.float32), (sh / H, sw / W), order=1)
+        valid |= (types == int(RegionType.VEGETATION)) & np.isfinite(d) & (d <= near_vegetation_m)
+    else:
+        valid |= (types == int(RegionType.VEGETATION)) & (np.arange(sh)[:, None] > sh // 2)
+    if valid.any() and not valid.all():
+        _, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
+        rgb = rgb[iy, ix]
+    sigma = max(0.5, angular_sigma_deg / 360.0 * sw)
+    rgb = np.stack([gaussian_filter(rgb[..., c], sigma=sigma, mode=("nearest", "wrap")) for c in range(3)], axis=-1)
+    small = Panorama((rgb.clip(0, 1) * 255.0 + 0.5).astype(np.uint8))
+    canvas = bake_real_layer(small, height_map, half, half, half, canvas_size)
+    if world_blur_texels > 0:
+        canvas = np.stack([gaussian_filter(canvas[..., c], sigma=world_blur_texels) for c in range(3)], axis=-1)
+    return canvas.astype(np.float32)

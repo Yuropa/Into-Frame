@@ -24,6 +24,7 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     paintable_region_types,
 )
 from pipeline.object_typing.categories import VEGETATION_CATEGORIES
+from pipeline.object_distribution.object_distribution_result import TypeDistribution
 from pipeline.grass_cover.grass_area import cell_greenness
 
 _HERE = Path(__file__).resolve().parent
@@ -242,8 +243,23 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         synthesize_cli_path: str | None = None,
         max_workers: int | None = None,
         cli_timeout_s: float = 120.0,
+        pool_across_regions: bool = True,
+        exclude_types: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # When any (type, region) group of an object type is under min_exemplars,
+        # every group of that type is merged into ONE pooled distribution painted
+        # across the union of their paintable regions. The per-region split is the
+        # right model when each region holds a population of its own; with
+        # exemplars restricted to the photographed cone it mostly holds fragments
+        # of one population (Rainier: tree [terrain] 6, tree [vegetation] 7, tree
+        # [ground] 56), and painting the fragments that clear the bar while
+        # dropping the rest leaves the treeline empty. Merging rather than painting
+        # both avoids painting the same population twice.
+        self.pool_across_regions = bool(pool_across_regions)
+        # Object types never painted as a scattered population ("forest": a clump
+        # of canopy is not an instance to repeat; the treeline backdrop stands for it).
+        self.exclude_types = frozenset(exclude_types or [])
         self.min_blob_area_cells = min_blob_area_cells
         self.max_candidates_per_tile = max_candidates_per_tile
         self.max_iters = max_iters
@@ -542,21 +558,27 @@ class DistributionSynthesisStage(PipelineStage):
             context.add_object(_RAN_MARKER, True)
             return context
 
-        groups = []
+        # (region label, object type, distribution, paintable region indices).
+        groups: list[tuple[str, str, TypeDistribution, list[int]]] = []
+
+        def _paintable(region_type: str) -> "list[int] | None":
+            try:
+                rt = RegionType.from_label(region_type)
+            except KeyError:
+                return None
+            return [int(x) for x in paintable_region_types(rt)]
+
+        # Both rejections below are logged rather than filtered silently: "this group
+        # painted nothing" and "this group was never eligible" look identical in the
+        # output otherwise, and the first is a bug while the second is this working.
+        # See min_exemplars, pool_across_regions and paint_vegetation_in_water.
+        by_obj_type: dict[str, list[tuple[str, TypeDistribution]]] = {}
         for region_type, by_type in distribution.distributions.items():
             for obj_type, dist in by_type.items():
                 if dist.n_points < 2 or len(dist.points) < 2:
                     continue
-                # Both rejections are logged rather than filtered silently: "this group
-                # painted nothing" and "this group was never eligible" look identical in
-                # the output otherwise, and the first is a bug while the second is this
-                # working. See min_exemplars and paint_vegetation_in_water.
-                if len(dist.points) < cfg.min_exemplars:
-                    self.log_info(
-                        f"  {obj_type} [{region_type}]: {len(dist.points)} exemplar(s), "
-                        f"under min_exemplars={cfg.min_exemplars} — not enough evidence "
-                        f"to paint a population, skipping"
-                    )
+                if obj_type in cfg.exclude_types:
+                    self.log_info(f"  {obj_type} [{region_type}]: excluded type, not painted")
                     continue
                 if (
                     not cfg.paint_vegetation_in_water
@@ -568,7 +590,46 @@ class DistributionSynthesisStage(PipelineStage):
                         f"water, skipping"
                     )
                     continue
-                groups.append((region_type, obj_type, dist))
+                if _paintable(region_type) is None:
+                    self.log_info(f"  {obj_type} [{region_type}]: unknown region type, skipping")
+                    continue
+                by_obj_type.setdefault(obj_type, []).append((region_type, dist))
+
+        for obj_type, members in by_obj_type.items():
+            short = [(r, d) for r, d in members if len(d.points) < cfg.min_exemplars]
+            if short and cfg.pool_across_regions and len(members) > 1:
+                points = [p for _, d in members for p in d.points]
+                sizes = [sz for _, d in members for sz in d.sizes]
+                buckets = [b for _, d in members for b in (d.buckets or [0] * len(d.points))]
+                label = "+".join(r for r, _ in members)
+                if len(points) < cfg.min_exemplars:
+                    self.log_info(
+                        f"  {obj_type} [{label}]: {len(points)} exemplar(s) pooled across "
+                        f"{len(members)} region type(s), still under min_exemplars="
+                        f"{cfg.min_exemplars} — skipping"
+                    )
+                    continue
+                pooled = TypeDistribution(
+                    object_type=obj_type, region_type=label, n_points=len(points),
+                    bin_count=members[0][1].bin_count, hist=[], pair_count=0,
+                    points=points, sizes=sizes, buckets=buckets,
+                )
+                paintable = sorted({idx for r, _ in members for idx in _paintable(r)})
+                self.log_info(
+                    f"  {obj_type}: pooled {' + '.join(f'{r} {len(d.points)}' for r, d in members)} "
+                    f"-> {len(points)} exemplar(s) painted across {label}"
+                )
+                groups.append((label, obj_type, pooled, paintable))
+                continue
+            for region_type, dist in members:
+                if len(dist.points) < cfg.min_exemplars:
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: {len(dist.points)} exemplar(s), "
+                        f"under min_exemplars={cfg.min_exemplars} — not enough evidence "
+                        f"to paint a population, skipping"
+                    )
+                    continue
+                groups.append((region_type, obj_type, dist, _paintable(region_type)))
         if not groups:
             self.log_info("No non-singleton distributions to paint")
             # Mark complete even though nothing was painted: has_expected_output()
@@ -594,12 +655,7 @@ class DistributionSynthesisStage(PipelineStage):
         # and the RNG draws for size/jitter — hence the final output for a given seed —
         # are unaffected by parallelizing.
         jobs: list[dict] = []
-        for group_idx, (region_type, obj_type, dist) in enumerate(groups):
-            try:
-                region_type_idx = int(RegionType.from_label(region_type))
-            except KeyError:
-                self.log_info(f"  {obj_type} [{region_type}]: unknown region type, skipping")
-                continue
+        for group_idx, (region_type, obj_type, dist, paintable_idxs) in enumerate(groups):
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
             # See min_exemplar_spacing_m -- this floor is what stops a foreground
@@ -747,7 +803,6 @@ class DistributionSynthesisStage(PipelineStage):
             tile_side_m = tile_res * spacing
             tile_side_px = max(1, int(round(tile_side_m / cell_m)))
 
-            paintable_idxs = [int(rt) for rt in paintable_region_types(RegionType(region_type_idx))]
             mask = np.isin(region_map, paintable_idxs)
             labels, n_components = ndimage.label(mask, structure=np.ones((3, 3), dtype=np.int32))
 
@@ -1011,7 +1066,7 @@ class DistributionSynthesisStage(PipelineStage):
 
             self.finish_progress(task)
 
-        for group_idx, (region_type, obj_type, dist) in enumerate(groups):
+        for group_idx, (region_type, obj_type, dist, _paintable_idxs) in enumerate(groups):
             placed = group_placed[group_idx]
             # Ceiling on the population, applied after synthesis so the thinned
             # result still spans the whole region (see max_instances_per_group).
