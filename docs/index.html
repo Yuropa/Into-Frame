@@ -12,7 +12,7 @@
   <meta property="og:title"       content="Into Frame" />
   <meta property="og:description" content="One photograph in, an inhabitable 3D environment out: terrain, objects, ground cover, water, sky and motion, each reconstructed by a method suited to its role." />
   <meta property="og:type"        content="website" />
-  <!-- <meta property="og:image" content="assets/images/og-image.jpg" /> -->
+  <meta property="og:image" content="images/panorama.jpg" />
 
   <!-- Fonts -->
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -37,6 +37,7 @@
           <ul class="nav__links" role="list">
             <li><a href="#about"        class="nav__link">About</a></li>
             <li><a href="#how"          class="nav__link">How it works</a></li>
+            <li><a href="#gallery"      class="nav__link">Gallery</a></li>
             <li><a href="#architecture" class="nav__link">Architecture</a></li>
             <li><a href="#team"         class="nav__link">Team</a></li>
             <li><a href="#papers"       class="nav__link">Papers</a></li>
@@ -61,6 +62,7 @@
   <section class="hero">
 
     <div class="hero__bg" aria-hidden="true"></div>
+    <img class="hero__canvas hero__image" src="images/panorama.jpg" alt="" aria-hidden="true" />
 
     <div class="container">
       <div class="hero__content stagger">
@@ -155,6 +157,7 @@
             <h3 class="how-step__title">Scene understanding</h3>
             <p class="how-step__desc">A vision-language model captions the photograph, <strong>Depth Anything&nbsp;3</strong> estimates metric depth and camera intrinsics, and RAM++ tags what the scene contains. The tags become the vocabulary every later detector is prompted with, so a meadow is never asked whether it contains a bus.</p>
           </div>
+          <figure class="how-step__figure"><img src="images/input.jpg" alt="Input photograph of Mount Rainier" loading="lazy" /></figure>
         </div>
         <div class="how-step" data-animate>
           <span class="how-step__number"></span>
@@ -162,6 +165,7 @@
             <h3 class="how-step__title">360° panorama</h3>
             <p class="how-step__desc">The photograph is embedded at its true field of view and the rest of the sphere is outpainted by <strong>WorldGen</strong>. Objects that would stand in the terrain are removed from a copy of the panorama, the sky is completed with the sun placed where the estimated key light is, and a second depth model (Depth Any Panorama) is calibrated against the photo's metric depth.</p>
           </div>
+          <figure class="how-step__figure"><img src="images/panorama.jpg" alt="Outpainted 360° panorama" loading="lazy" /></figure>
         </div>
         <div class="how-step" data-animate>
           <span class="how-step__number"></span>
@@ -169,6 +173,7 @@
             <h3 class="how-step__title">Objects</h3>
             <p class="how-step__desc">SAM2 segments the photograph at twice its resolution; <strong>Grounding DINO</strong>, prompted with the scene tags, labels each blob by containment. Blobs are clustered into visual variants, their spatial pattern is learned as a pair-correlation function and painted across the matching ground, grass is laid as cards, and each variant is reconstructed with SAM3D from a delit, super-resolved crop.</p>
           </div>
+          <figure class="how-step__figure"><img src="images/detections.jpg" alt="Detected and labelled objects" loading="lazy" /></figure>
         </div>
         <div class="how-step" data-animate>
           <span class="how-step__number"></span>
@@ -176,6 +181,7 @@
             <h3 class="how-step__title">Terrain in two domains</h3>
             <p class="how-step__desc">Ground pixels become a top-down height map that keeps each cell's observed panorama pixel; the unobserved remainder is reconstructed by a harmonic solve with fluvial erosion. The mesh is textured with the photo near the viewer, with real material tiles modulated by the photo's large-scale colour further out. Everything past the depth models' saturation — the distant mountain — is stood up as a separate <strong>far-field backdrop</strong> shell behind the grid.</p>
           </div>
+          <figure class="how-step__figure"><img src="images/heightmap-reconstructed.jpg" alt="Reconstructed terrain height map" loading="lazy" /></figure>
         </div>
         <div class="how-step" data-animate>
           <span class="how-step__number"></span>
@@ -183,6 +189,7 @@
             <h3 class="how-step__title">Scene, light and motion</h3>
             <p class="how-step__desc">Every instance carries its reconstruction, a crossed card and a billboard as runtime LODs. Lighting is estimated from the photograph with LuxDiT and the skybox lights the scene. An <strong>LTX-2</strong> video generated from the panorama is tracked per object to classify motion, rig sway skeletons into the vegetation and hand moving objects to Unity's physics.</p>
           </div>
+          <figure class="how-step__figure"><img src="images/rainier-scene.jpg" alt="The finished scene in Unity" loading="lazy" /></figure>
         </div>
       </div>
 
@@ -190,6 +197,32 @@
         <a href="pipeline-diagram.svg"><img src="pipeline-diagram.svg" alt="Into Frame pipeline overview: 38 stages in five phases" style="width:100%; height:auto; border-radius: 8px;" /></a>
         <figcaption style="font-size: var(--text-sm); color: var(--color-text-muted); margin-top: var(--space-2);">The full stage graph. Click to open.</figcaption>
       </figure>
+
+    </div>
+  </section>
+
+
+  <!-- ======================================================
+       Gallery
+  ======================================================= -->
+  <section id="gallery" class="section">
+    <div class="container">
+
+      <div class="section-heading" data-animate>
+        <p class="label section-heading__label">Results</p>
+        <h2 class="section-heading__title">Gallery</h2>
+        <p class="section-heading__sub">
+          Scenes generated from single photographs, and some of the intermediate representations along the way.
+        </p>
+      </div>
+
+      <div class="gallery" data-animate>
+        <figure class="gallery__item gallery__item--wide"><img src="images/rainier-scene.jpg" alt="Mount Rainier scene in Unity" loading="lazy" /><figcaption>Mount Rainier, in Unity</figcaption></figure>
+        <figure class="gallery__item"><img src="images/paris-scene.jpg" alt="Paris scene in Unity" loading="lazy" /><figcaption>Paris</figcaption></figure>
+        <figure class="gallery__item"><img src="images/sharkfin-scene.jpg" alt="Shark Fin scene in Unity" loading="lazy" /><figcaption>Shark Fin</figcaption></figure>
+        <figure class="gallery__item"><img src="images/depth-calibrated.jpg" alt="Calibrated panorama depth" loading="lazy" /><figcaption>Calibrated panorama depth</figcaption></figure>
+        <figure class="gallery__item"><img src="images/regions.jpg" alt="Region segmentation" loading="lazy" /><figcaption>Region segmentation</figcaption></figure>
+      </div>
 
     </div>
   </section>
@@ -316,12 +349,12 @@
 
       <div class="grid grid-auto" data-animate>
         <div class="card card--person">
-          <div class="card__avatar"></div>
+          <div class="card__avatar"><img src="images/joshua-ford.jpg" alt="Joshua Ford" /></div>
           <p class="card__name">Joshua Ford</p>
           <p class="card__role">Author · École Polytechnique</p>
         </div>
         <div class="card card--person">
-          <div class="card__avatar"></div>
+          <div class="card__avatar"><img src="images/marie-paule-cani.jpg" alt="Marie-Paule Cani" /></div>
           <p class="card__name">Marie-Paule Cani</p>
           <p class="card__role">Advisor · École Polytechnique</p>
         </div>
@@ -398,6 +431,7 @@
         <nav aria-label="Footer links">
           <ul class="footer__links" role="list">
             <li><a href="#about"        class="footer__link">About</a></li>
+            <li><a href="#gallery"      class="footer__link">Gallery</a></li>
             <li><a href="#architecture" class="footer__link">Architecture</a></li>
             <li><a href="#papers"       class="footer__link">Papers</a></li>
             <li><a href="#contact"      class="footer__link">Contact</a></li>
