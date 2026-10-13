@@ -420,6 +420,7 @@ stages:
     # the 2026-10-13 Rainier run it lit a midday meadow with a raking 13-degree sun
     # from 91 degrees outside anything the camera saw.
     measured_sun_must_be_photographed: true
+    num_samples: 3              # LuxDiT draws; the sharpest-peaked map is kept (one draw is a lottery)
     crop_fov_deg: 90.0          # only used when estimate_from_photo is false
 
   - name: Skybox Inpainting
@@ -632,6 +633,8 @@ stages:
                                  # noise should mostly have cancelled; a bigger deviation is
                                  # required before one is flagged than a single-ray cell needs.
     despike_dense_min_real_support: 0.6 # minimum fraction (0-1) of real (non-interpolated)
+    pinnacle_threshold_m: 1.0   # measured features narrower than pinnacle_window cells and taller than
+    pinnacle_window: 31         # this are lowered to their surroundings (tree bases pinned as rock at 10-20 m)
                                  # cells required in a dense_mask/any_forward_mask cell's own
                                  # despike_window before it can be flagged at all — protects a
                                  # real, sparsely-surrounded sample (e.g. an isolated distant
@@ -655,6 +658,7 @@ stages:
 
   - name: Region Map
     stage: RegionMapStage
+    unphotographed_water_min_distance_m: 15.0  # outpainted water this close, outside the cone, is retyped
     # Look each grid cell up in the panorama along the ray to its REAL reconstructed
     # elevation (HEIGHT_MAP, computed by the previous stage) instead of assuming a
     # flat plane camera_height_meters below the camera.
@@ -794,6 +798,8 @@ stages:
                                     # artifacts right around the user.
     ridge_override_feather_m: 15.0  # width (m) of the linear ramp-in beyond ridge_override_min_distance_m
     ridge_max_metric_depth_m: 0     # a ridge whose UNCOMPRESSED depth (Panorama Depth Calibration's
+    meadow_restore_factor: 0.25     # meadow cells keep only a quarter of the raw-depth restoration (plant tops, not ground)
+    restore_blur_m: 1.0             # measured heights are low-passed to this scale before restoration (shape, not noise)
                                     # metric map) is beyond this is not raised in the grid; the Far
                                     # Field Backdrop stands it up at its own scale. 0 = grid half-size.
                                     # before the envelope reaches full strength -- avoids a hard step
@@ -801,7 +807,7 @@ stages:
                                     # radius (30-45m here); full override still applies past that band.
     river_valley_depth: 0.5         # metres to lower river nodes below observed terrain
     river_drop_per_segment: 0.05    # additional metres drop per ordered river segment
-    lake_y_range_threshold: 0.3     # Y-range threshold (m) to distinguish flat lakes from sloped water
+    lake_y_range_threshold: 2.0     # Y-range (m) under which a water chain is one flat lake (shore depths carry ~1 m of noise at scene scale)
     # Cliff mask: combines (a) measured slope on directly-observed terrain (gated on
     # HEIGHT_MAP_OBSERVED_MASK, not certainty) — real ground truth, strongest close to
     # the camera — with (b) distant ridge-chain silhouette jaggedness, the only
@@ -921,6 +927,7 @@ stages:
     water_gradient_threshold: 0.04  # m/m slope; flatter than this is eligible for WATER
     terrain_gradient_threshold: 0.15 # m/m slope; steeper than this → TERRAIN
     terrain_reclassify_observed_only: true # ...but only on cells with a measured height.
+    terrain_reclassify_min_height_m: 3.0   # ...or steep cells this far above the camera (the ridge ring's flanks)
                                     # The reconstructed ring and every interpolated slope
                                     # are steep by construction: without this 57% of the
                                     # Rainier grid (9.5 M cells) became rock and the meadow's
@@ -1134,7 +1141,7 @@ stages:
     # position and would otherwise sample whatever real content happens to sit there.
     use_panorama_layer: true
     panorama_blend_power: 1.0   # exponent on the latitude ramp; higher sharpens the fades
-    nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
+    nadir_cutoff_deg: -55.0     # steeper than this is the outpainted nadir (WorldGen's rings under the camera) -> tiles only
     nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
     horizon_fade_deg: 1.5       # ramp width below the horizon
     # Ground covered by one panorama pixel, above which the panorama layer hands the
@@ -1964,6 +1971,7 @@ stages:
     # delit, reconstructed or put on a card -- up to max_sr_passes doublings. The
     # Rainier scene's 388 flower instances came from a 47x125 px cutout.
     min_source_px: 384
+    refine_alpha: true          # BiRefNet matte replaces the loose detection mask on card/billboard sources
     max_sr_passes: 2
     delight_blur_fraction: 0.02  # low-pass radius of the shading estimate delighting
                                  # divides out, as a fraction of the crop's longer side
@@ -2219,7 +2227,7 @@ stages:
     # The bake-time min_mesh_angular_px choice above still picks what the object
     # IS for clients without LOD support.
     runtime_lods: true
-    lod_mesh_screen_fraction: 0.12
+    lod_mesh_screen_fraction: 0.06
     lod_card_screen_fraction: 0.025
     lod_billboard_screen_fraction: 0.003
     lod_exempt_classes:

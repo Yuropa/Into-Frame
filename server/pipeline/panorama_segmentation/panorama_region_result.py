@@ -45,6 +45,14 @@ class RegionType(IntEnum):
         )
 
     @property
+    def height_valid(self) -> bool:
+        """ground_valid minus WATER: a depth model reads a water surface through its
+        reflections, so a lake's interior comes back as a pit or a hill (the tarn's
+        bed on Rainier spanned 1.5 m). Its SHORE is ground and anchors the lake's
+        level through the water chains instead."""
+        return self.ground_valid and self is not RegionType.WATER
+
+    @property
     def label(self) -> str:
         """Lowercase string name, used in serialisation and display."""
         return self.name.lower()

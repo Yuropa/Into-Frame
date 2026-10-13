@@ -46,6 +46,8 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         despike_reference_distance_m: float = 10.0,
         despike_dense_threshold_scale: float = 2.5,
         despike_dense_min_real_support: float = 0.6,
+        pinnacle_threshold_m: float = 1.0,
+        pinnacle_window: int = 31,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
@@ -165,6 +167,10 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # fabricated local median and wrongly flattened. See
         # HeightMapGenerator._despike_cells.
         self.despike_dense_min_real_support = despike_dense_min_real_support
+        # Tall narrow measured features (a tree base at 15 m) are opened away -- see
+        # HeightMapGenerator._flatten_pinnacles. 0 disables.
+        self.pinnacle_threshold_m = float(pinnacle_threshold_m)
+        self.pinnacle_window = int(pinnacle_window)
         # Binary closing iterations applied to the ground-valid classification
         # before it gates which pixels count as ground (see
         # HeightMapGenerator._ground_valid_mask). Per-pixel semantic segmentation
@@ -327,6 +333,8 @@ class HeightMapStage(PipelineStage):
             despike_reference_distance_m=cfg.despike_reference_distance_m,
             despike_dense_threshold_scale=cfg.despike_dense_threshold_scale,
             despike_dense_min_real_support=cfg.despike_dense_min_real_support,
+            pinnacle_threshold_m=cfg.pinnacle_threshold_m,
+            pinnacle_window=cfg.pinnacle_window,
             region_closing_iterations=cfg.region_closing_iterations,
             single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,

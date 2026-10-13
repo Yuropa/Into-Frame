@@ -67,6 +67,7 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         water_gradient_threshold: float = 0.04,
         terrain_gradient_threshold: float = 0.15,
         terrain_reclassify_observed_only: bool = True,
+        terrain_reclassify_min_height_m: float = 3.0,
         paint_width: int = 2,
         water_connected_only: bool = True,
         min_water_area_m2: float = 12.0,
@@ -97,6 +98,7 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         # stage's min_region_fraction, and tiled the whole far field with the rock
         # material. A slope the reconstruction invented is not evidence of rock.
         self.terrain_reclassify_observed_only = bool(terrain_reclassify_observed_only)
+        self.terrain_reclassify_min_height_m = float(terrain_reclassify_min_height_m)
         self.paint_width = paint_width
         # Pass 2 may only grow water OUT of water that is already known: a
         # low-certainty cell in the elevation band becomes WATER only if it is
@@ -301,7 +303,11 @@ class RegionMapRefinementStage(PipelineStage):
                         observed = _zoom(
                             observed.astype(np.float32), (H / observed.shape[0], W / observed.shape[1]), order=0,
                         ) > 0.5
-                    reclassify_terrain &= observed
+                    # ... or, when they stand well above the camera, the flanks of
+                    # the ridge envelope: those are the mountains, and a meadow fill
+                    # type on them textured one of them as grass.
+                    tall = height_map > cfg.terrain_reclassify_min_height_m if cfg.terrain_reclassify_min_height_m > 0 else False
+                    reclassify_terrain &= observed | tall
                 else:
                     self.log_warning(
                         "terrain_reclassify_observed_only is on but there is no "

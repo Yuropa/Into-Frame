@@ -624,6 +624,10 @@ def bake_projected_colour(
     # near_vegetation_m the meadow's pixels are not a sound projection either
     # and the meadow colour comes from the near meadow via the fill.
     valid &= ~((shown == int(RegionType.VEGETATION)) & (d > near_vegetation_m))
+    # Straight down is WorldGen's outpainted nadir, concentric rings of blur
+    # that the projection lays out as a bullseye under the viewer.
+    elev = np.degrees(np.arctan2(Y, np.hypot(X, Z)))
+    valid &= elev > -55.0
     # (b) the panorama's depth agrees with the texel's distance
     if depth is not None:
         dh, dw = depth.shape

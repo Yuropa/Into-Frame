@@ -55,6 +55,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         lod_card_screen_fraction: float = 0.025,
         lod_billboard_screen_fraction: float = 0.003,
         lod_exempt_classes: list[str] | None = None,
+        water_allowed_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Runtime LODs. The mesh-vs-card choice (min_mesh_angular_px) is made ONCE,
@@ -74,6 +75,12 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # two extra children per tuft is cost without a visible gain.
         self.lod_exempt_classes = frozenset(
             lod_exempt_classes if lod_exempt_classes is not None else [GRASS_TUFT_CATEGORY]
+        )
+        # Classes that may stand on the water surface; everything else that snaps
+        # onto the water mesh is dropped (see ground_y_at / dropped_in_water).
+        self.water_allowed_classes = frozenset(
+            water_allowed_classes if water_allowed_classes is not None
+            else ["boat", "animal", "person", "rock", "bird"]
         )
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
@@ -620,7 +627,8 @@ class SceneGenerationStage(PipelineStage):
         # shallow water came out exactly that depression depth underground. Water only
         # ever wins the max() where that carve happened, since WATER_MESH has no faces
         # anywhere else.
-        ground_meshes = [terrain_mesh, context.input_mesh(ContextKey.WATER_MESH)]
+        water_mesh = context.input_mesh(ContextKey.WATER_MESH)
+        ground_meshes = [terrain_mesh, water_mesh]
         for formation in context.input_object(ContextKey.TERRAIN_FORMATIONS) or []:
             ground_meshes.append(context.input_mesh(formation["mesh_key"]))
         ground_meshes = [m for m in ground_meshes if m is not None]
@@ -648,6 +656,8 @@ class SceneGenerationStage(PipelineStage):
         # failure looked identical to a scene that simply had no terrain, and read in
         # the client as objects floating above or buried under the ground.
         snap_counts = {"mesh": 0, "height_map": 0, "unsnapped": 0}
+        last_hit = {"water": False}
+        dropped_in_water: dict[str, int] = {}
         unsnapped_examples: list[str] = []
 
         # Category meshes refused for an instance by mesh_instance_scale, per mesh key.
@@ -670,11 +680,16 @@ class SceneGenerationStage(PipelineStage):
             local_x, local_z = terrain_local_xz(
                 world_x, world_z, yaw_degrees, camera_x=camera_xz[0], camera_z=camera_xz[1]
             )
-            hits = [mesh_y_at(local_x, local_z, m) for m in ground_meshes]
-            hits = [y for y in hits if y is not None]
+            hits = [(mesh_y_at(local_x, local_z, m), m is water_mesh) for m in ground_meshes]
+            hits = [(y, w) for y, w in hits if y is not None]
             if hits:
                 snap_counts["mesh"] += 1
-                return max(hits)
+                best_y, on_water = max(hits, key=lambda h: h[0])
+                # Remembered for the caller: a snap that landed ON the water surface
+                # is a plant standing in the lake unless the class belongs there.
+                last_hit["water"] = bool(on_water)
+                return best_y
+            last_hit["water"] = False
             if height_map is not None:
                 sampled = height_map_y_at(local_x, local_z, height_map, height_map_grid_m)
                 if sampled is not None:
@@ -1105,6 +1120,14 @@ class SceneGenerationStage(PipelineStage):
                 # ground_y_at handles that, and takes the highest of the base terrain
                 # and every formation standing on it.
                 terrain_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
+                if (
+                    terrain_y is not None and last_hit["water"]
+                    and cls not in self.config.water_allowed_classes
+                ):
+                    # The grass, flowers and trees the region map or the scatter put
+                    # on cells the lake now covers: nothing grows on a water surface.
+                    dropped_in_water[cls] = dropped_in_water.get(cls, 0) + 1
+                    continue
 
                 if terrain_y is None and len(unsnapped_examples) < 5:
                     unsnapped_examples.append(
@@ -1429,6 +1452,11 @@ class SceneGenerationStage(PipelineStage):
                     level(f"    no ground under object {example}")
             elif snapped:
                 self.log_info(f"Terrain snap: all {snapped} placed object(s) hit a ground mesh")
+        if dropped_in_water:
+            self.log_info(
+                "Dropped on the water surface: "
+                + ", ".join(f"{n} {c}" for c, n in sorted(dropped_in_water.items(), key=lambda kv: -kv[1]))
+            )
 
             if background_skipped:
                 self.log_info(

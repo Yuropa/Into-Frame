@@ -36,6 +36,7 @@ class LuxDiT(RemoteClient):
         # Downloaded via download_weights.py in setup.sh, not a HF snapshot
         return []
 
-    def estimate(self, input: PILImage.Image, temp_path: Path, on_progress=None) -> LightingResult:
-        result = self.send(action="estimate", input=input, temp_path=temp_path, on_progress=on_progress)
+    def estimate(self, input: PILImage.Image, temp_path: Path, on_progress=None, seed: int | None = None) -> LightingResult:
+        payload = {"image": input, "seed": int(seed)} if seed is not None else input
+        result = self.send(action="estimate", input=payload, temp_path=temp_path, on_progress=on_progress)
         return LightingResult(result)

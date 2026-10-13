@@ -1354,9 +1354,14 @@ class TerrainTextureGenerationStage(PipelineStage):
             # not. Penalising it here would strip the real photo off exactly the
             # distant terrain that snap exists to keep -- an error in this estimate,
             # not a defect in the texture.
+            # The meadow counts as upright too: its pixels are flowers and grass
+            # standing 0.3-0.5 m tall, which the projection smears along the ray
+            # (plant height x distance / camera height), and the scene places those
+            # plants as instances anyway. The photograph is kept for surfaces
+            # (ground, snow, rock, trail, water), where it is sharp.
             upright = np.isin(
                 np.rint(sampled).astype(np.int32),
-                [int(RegionType.FOREST), int(RegionType.BUILT)],
+                [int(RegionType.FOREST), int(RegionType.BUILT), int(RegionType.VEGETATION), int(RegionType.SKY)],
             ).astype(np.float32)
 
             # Distance-weighted, because the artifact is: the panorama layer is a
@@ -1375,6 +1380,15 @@ class TerrainTextureGenerationStage(PipelineStage):
                 strength = np.clip(1.0 - t, 0.0, 1.0).astype(np.float32)
             else:
                 strength = (r_xz <= upright_full_radius_m).astype(np.float32)
+            # The distance falloff reasons about FLAT ground, where a smear is
+            # foreshortened from the origin. A steep face (the ridge ring, a cliff)
+            # shows its texture broadside, and the forest band or sky stretched up
+            # it is the "blue streaked dome": gate at full strength wherever the
+            # surface is steep, however far.
+            texel_m = 2.0 * half / blend_map_size
+            gy, gx = np.gradient(Y, texel_m)
+            steep = (np.hypot(gx, gy) > 0.35).astype(np.float32)
+            strength = np.maximum(strength, steep)
 
             sigma = max(1.0, upright_feather_frac * blend_map_size)
             keep = np.clip(gaussian_filter(1.0 - upright, sigma=sigma), 0.0, 1.0)

@@ -34,6 +34,7 @@ from scipy.sparse.linalg import spsolve
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from util.depth_utils import Depth
 from util.terrain_noise_utils import ridge_chain_jaggedness_map
 
@@ -54,6 +55,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         ridge_override_min_distance_m: float = 30.0,
         ridge_override_feather_m: float = 15.0,
         ridge_max_metric_depth_m: float = 0.0,
+        meadow_restore_factor: float = 0.25,
+        restore_blur_m: float = 1.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         lake_y_range_threshold: float = 0.3,
@@ -183,6 +186,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         # Panorama Depth Calibration measured (FAR_FIELD_START_M), falling back to
         # the grid's half-size.
         self.ridge_max_metric_depth_m = float(ridge_max_metric_depth_m)
+        self.meadow_restore_factor = float(meadow_restore_factor)
+        self.restore_blur_m = float(restore_blur_m)
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.lake_y_range_threshold = lake_y_range_threshold
@@ -801,11 +806,40 @@ class TerrainReconstructionStage(PipelineStage):
         # unconditionally overwritten by its own noise.
         restore_mask = true_observed & ~observed_override_native
         if restore_mask.any():
+            # A meadow's measured heights are the tops of its plants, each a bump
+            # of 0.3-0.5 m beside the next, so there the smoothed solve is closer to
+            # the ground than the measurement is: restore it only by
+            # meadow_restore_factor. Surfaces (rock, bare ground, snow) keep full weight.
+            restore_certainty = certainty
+            if cfg.meadow_restore_factor < 1.0:
+                region_depth = context.input_depth(ContextKey.REGION_MAP)
+                if region_depth is not None:
+                    region = region_depth.depth
+                    if region.shape != (H, W):
+                        region = nd_zoom(region.astype(np.float32), (H / region.shape[0], W / region.shape[1]), order=0)
+                    meadow = np.isin(np.rint(region).astype(np.int32), [int(RegionType.VEGETATION), int(RegionType.FOREST)])
+                    restore_certainty = np.where(meadow, certainty * cfg.meadow_restore_factor, certainty).astype(np.float32)
+                    self.log_info(
+                        f"Observed-data restoration: meadow cells ({meadow[restore_mask].mean():.0%} of the "
+                        f"restorable area) restored at x{cfg.meadow_restore_factor:.2f}"
+                    )
             restore_weight = gaussian_filter(
-                restore_mask.astype(np.float32) * certainty, sigma=1.0
+                restore_mask.astype(np.float32) * restore_certainty, sigma=1.0
             ).astype(np.float32)
+            # Restore the measured SHAPE, not the measured noise: the depth model's
+            # per-cell error and every plant top is a bump narrower than
+            # restore_blur_m, so the measurement is low-passed (over observed cells
+            # only) before it is spliced back. Terrain itself varies over metres and
+            # survives the blur.
+            measured = heightmap.astype(np.float32)
+            if cfg.restore_blur_m > 0:
+                sigma = max(0.5, cfg.restore_blur_m / (grid_size / max(H, W)))
+                w = restore_mask.astype(np.float32)
+                num = gaussian_filter(np.where(restore_mask, measured, 0.0), sigma=sigma)
+                den = gaussian_filter(w, sigma=sigma)
+                measured = np.where(den > 1e-4, num / np.maximum(den, 1e-4), measured).astype(np.float32)
             new_hm = (
-                new_hm * (1.0 - restore_weight) + heightmap.astype(np.float32) * restore_weight
+                new_hm * (1.0 - restore_weight) + measured * restore_weight
             ).astype(np.float32)
             self.log_info(
                 f"Observed-data restoration: {int(restore_mask.sum())} px eligible "

@@ -32,6 +32,7 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         grid_resolution: int = 4096,
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
+        unphotographed_water_min_distance_m: float = 15.0,
         use_height_map_elevation: bool = True,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
@@ -50,6 +51,12 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.grid_resolution = grid_resolution
         self.ground_y_max = ground_y_max
         self.camera_height_meters = camera_height_meters
+        # Water the panorama shows OUTSIDE the photographed cone and closer than this
+        # is the outpainter's invention (on Rainier it painted the ground beside the
+        # camera as a pond), and a pond carved into the meadow 3 m from the viewer is
+        # the worst thing a wrong type can do. Such pixels take their nearest
+        # non-water type. 0 disables. Distant outpainted water (a lake 50 m out) is kept.
+        self.unphotographed_water_min_distance_m = float(unphotographed_water_min_distance_m)
         # Look each grid cell up in the panorama along the ray to its REAL
         # reconstructed elevation (HEIGHT_MAP) rather than to a flat plane
         # camera_height_meters below the camera. False restores the flat-plane
@@ -145,6 +152,39 @@ class RegionMapStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.REGION_MAP,
         })
 
+    def _veto_unphotographed_near_water(self, context, type_idx_map, panorama_depth, cfg):
+        """WATER pixels outside the photographed cone and nearer than
+        unphotographed_water_min_distance_m become their nearest non-water type."""
+        from scipy.ndimage import distance_transform_edt, zoom as _zoom
+        from util.captured_cone import captured_cone_from_context
+        H, W = type_idx_map.shape
+        cone = captured_cone_from_context(context, W, H)
+        if cone is None:
+            return type_idx_map
+        water = type_idx_map == int(RegionType.WATER)
+        if not water.any():
+            return type_idx_map
+        depth = panorama_depth.depth.astype(np.float32)
+        if depth.shape != (H, W):
+            depth = _zoom(depth, (H / depth.shape[0], W / depth.shape[1]), order=1)
+        az = ((np.arange(W) + 0.5) / W - 0.5) * 360.0
+        outside = np.abs(az) > cone.hfov_deg / 2.0 + 5.0
+        veto = water & outside[None, :] & np.isfinite(depth) & (depth < cfg.unphotographed_water_min_distance_m)
+        if not veto.any():
+            return type_idx_map
+        keep = ~water
+        if not keep.any():
+            return type_idx_map
+        _, (iy, ix) = distance_transform_edt(~keep, return_indices=True)
+        out = type_idx_map.copy()
+        out[veto] = type_idx_map[iy[veto], ix[veto]]
+        self.log_info(
+            f"Unphotographed near water: {int(veto.sum())} px of water outside the {cone.hfov_deg:.0f}° cone "
+            f"and under {cfg.unphotographed_water_min_distance_m:.0f} m retyped to their nearest surface "
+            f"({veto.sum() / max(water.sum(), 1):.0%} of the panorama's water)"
+        )
+        return out
+
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
@@ -207,6 +247,8 @@ class RegionMapStage(PipelineStage):
             return context
 
         type_idx_map = type_idx_depth.depth.astype(np.uint8)
+        if cfg.unphotographed_water_min_distance_m > 0:
+            type_idx_map = self._veto_unphotographed_near_water(context, type_idx_map, panorama_depth, cfg)
 
         cell_elevation = None
         if cfg.use_height_map_elevation:

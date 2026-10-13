@@ -151,6 +151,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         card_categories: list[str] | None = None,
         card_planes: int = 3,
         min_source_px: int = 384,
+        refine_alpha: bool = True,
         max_sr_passes: int = 2,
         delight_blur_fraction: float = 0.02,
     ):
@@ -184,6 +185,8 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # refuse). Swin2SR is 2x per pass; max_sr_passes bounds the cost (and the
         # amount of invented detail) at 4x. 0 disables.
         self.min_source_px = int(min_source_px)
+        # BiRefNet matte in place of the detection mask on every card/billboard source.
+        self.refine_alpha = bool(refine_alpha)
         self.max_sr_passes = int(max_sr_passes)
         # Low-pass radius of the shading estimate delighting divides out, as a
         # fraction of the crop's longer side -- see util.delight.
@@ -394,6 +397,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # Swin2SR client for _source_crop's super-resolution; opened on first use,
         # closed before SAM3D takes the GPU and again in clean_up.
         self._samp = None
+        self._matter = None
 
     def run(self, context: PipelineContext) -> PipelineContext:
         object_count = context.input_object(ContextKey.OBJECT_COUNT)
@@ -652,14 +656,58 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 break
             pil = up
             passes += 1
-        if passes == 0:
+        if passes:
+            self.log_info(
+                f"  crop_{idx}: super-resolved {original[0]}x{original[1]} -> "
+                f"{pil.width}x{pil.height} px ({passes} pass{'es' if passes > 1 else ''})"
+            )
+        refined = self._refine_alpha(pil) if self.config.refine_alpha else None
+        if refined is not None:
+            pil = refined
+        elif passes == 0:
             return crop
-        self.log_info(
-            f"  crop_{idx}: super-resolved {original[0]}x{original[1]} -> "
-            f"{pil.width}x{pil.height} px ({passes} pass{'es' if passes > 1 else ''})"
-        )
         context.add_image(_SR_KEY.format(idx=idx), pil)
         return context.image(_SR_KEY.format(idx=idx))
+
+    def _refine_alpha(self, pil: "PILImage.Image") -> "PILImage.Image | None":
+        """Replace the crop's detection-mask alpha with a BiRefNet matte of the
+        same crop, confined to a dilated band of the original mask. SAM's mask at
+        panorama resolution is a few pixels loose around every leaf and stem, and
+        on a card or billboard that loose border is a halo of background. The
+        matte is cut at the crop's own resolution, so edges are tight; the band
+        keeps it from picking up a neighbour the mask never included."""
+        from PIL import ImageFilter
+        from pipeline.segmentation.foreground_segmentation import ForegroundSeg
+        rgba = np.asarray(pil.convert("RGBA"), dtype=np.float32)
+        alpha = rgba[..., 3] / 255.0
+        if alpha.max() <= 0.0 or min(pil.size) < 48:
+            return None
+        if self._matter is None:
+            self._matter = ForegroundSeg(self.preferred_device)
+        # Composite onto the cutout's mean colour so the matte sees an object on a
+        # plain ground rather than on black.
+        opaque = alpha > 0.5
+        mean = rgba[opaque][:, :3].mean(axis=0) if opaque.any() else np.full(3, 128.0)
+        rgb = rgba[..., :3] * alpha[..., None] + mean * (1.0 - alpha[..., None])
+        seg = self._matter.segment(UtilImage(PILImage.fromarray(rgb.clip(0, 255).astype(np.uint8), "RGB")))
+        if seg.is_empty():
+            return None
+        matte = np.asarray(seg.masks[0], dtype=bool)
+        band_px = max(2, int(0.03 * max(pil.size)))
+        band = np.asarray(
+            PILImage.fromarray(opaque.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(2 * band_px + 1))
+        ) > 127
+        new_alpha = matte & band
+        if new_alpha.sum() < 0.5 * opaque.sum():
+            return None                                    # the matte lost the object: keep the mask
+        out = rgba.copy()
+        out[..., 3] = new_alpha.astype(np.float32) * 255.0
+        return PILImage.fromarray(out.clip(0, 255).astype(np.uint8), "RGBA")
+
+    def _close_matter(self) -> None:
+        if self._matter is not None:
+            self._matter.unload()
+            self._matter = None
 
     def _supersample_rgba(self, pil: "PILImage.Image") -> "PILImage.Image | None":
         """One Swin2SR 2x pass over an RGBA cutout. The model sees RGB only, so the
@@ -690,6 +738,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         if self._samp is not None:
             self._samp.close()
             self._samp = None
+        self._close_matter()
 
     def _delight_crops(self, context: PipelineContext, indices: "set[int]") -> int:
         """Write crop_delit_{i} for every crop that will be rendered.

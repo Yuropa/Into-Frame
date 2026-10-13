@@ -18,7 +18,7 @@ from pipeline.panorama_segmentation.panorama_region_result import RegionType
 
 # Integer indices of region types that produce reliable ground-plane depth.
 _VALID_REGION_INDICES = np.array(
-    [rt for rt in RegionType if rt.ground_valid], dtype=np.int32
+    [rt for rt in RegionType if rt.height_valid], dtype=np.int32
 )
 
 
@@ -55,6 +55,8 @@ class HeightMapGenerator:
         despike_reference_distance_m: float = 10.0,
         despike_dense_threshold_scale: float = 2.5,
         despike_dense_min_real_support: float = 0.6,
+        pinnacle_threshold_m: float = 1.0,
+        pinnacle_window: int = 31,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
@@ -448,6 +450,22 @@ class HeightMapGenerator:
                 if spike_mask.any():
                     cell_relief[spike_mask] = 0.0
                     cell_slope_deg[spike_mask] = 0.0
+
+            if pinnacle_threshold_m > 0 and pinnacle_window > 1:
+                # Tall narrow features are not terrain. The despike above catches
+                # single-cell outliers; a tree trunk and its lower canopy at 10-20 m
+                # land as a cluster of cells 2-3 m above the meadow and a metre
+                # across, which a 5-cell median accepts as a coherent step and the
+                # solve then pins as a rock pinnacle. A grey-scale opening with a
+                # pinnacle_window-wide footprint removes anything narrower than the
+                # window; where it lowers a cell by more than pinnacle_threshold_m,
+                # the opened (ground) height replaces the measurement.
+                height_map, pinnacle_mask = HeightMapGenerator._flatten_pinnacles(
+                    height_map, pinnacle_threshold_m, pinnacle_window,
+                )
+                if pinnacle_mask.any():
+                    cell_relief[pinnacle_mask] = 0.0
+                    cell_slope_deg[pinnacle_mask] = 0.0
                     if debug_dir is not None:
                         PIL.Image.fromarray((spike_mask * 255).astype(np.uint8), "L").save(
                             debug_dir / "heightmap_despiked_cells.png"
@@ -1117,6 +1135,25 @@ class HeightMapGenerator:
         slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
 
         return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask
+
+    @staticmethod
+    def _flatten_pinnacles(height_map: np.ndarray, threshold_m: float, window: int) -> tuple[np.ndarray, np.ndarray]:
+        """Grey-scale opening of the measured heights (NaN-aware): features narrower
+        than `window` cells and taller than threshold_m over their surroundings are
+        lowered to the opened surface. Returns (height_map, changed mask)."""
+        from scipy.ndimage import minimum_filter, maximum_filter
+        finite = np.isfinite(height_map)
+        if not finite.any():
+            return height_map, np.zeros_like(finite)
+        filled = np.where(finite, height_map, np.inf).astype(np.float32)
+        eroded = minimum_filter(filled, size=window, mode="nearest")
+        # Cells whose whole window was empty stay +inf: no opinion there.
+        eroded_f = np.where(np.isfinite(eroded), eroded, -np.inf)
+        opened = maximum_filter(eroded_f, size=window, mode="nearest")
+        changed = finite & np.isfinite(opened) & ((height_map - opened) > threshold_m)
+        out = height_map.copy()
+        out[changed] = opened[changed]
+        return out, changed
 
     @staticmethod
     def _despike_cells(

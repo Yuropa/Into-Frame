@@ -205,6 +205,15 @@ class LuxDiTServer(RemoteServer):
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "estimate":
+            if isinstance(input, dict):
+                seed = input.get("seed")
+                if seed is not None:
+                    # LuxDiT is a diffusion model: unseeded, two runs on the same
+                    # photo differ wildly (HDR peak 3 vs 80 on Rainier). Seeded, the
+                    # stage can draw several samples and pick deliberately.
+                    torch.manual_seed(int(seed))
+                    np.random.seed(int(seed) % (2 ** 32))
+                return self.estimate(input["image"])
             return self.estimate(input)
         raise ValueError(f"Unknown action: {action}")
 

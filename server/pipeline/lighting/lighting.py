@@ -23,6 +23,7 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         crop_fov_deg: float = 90.0,
         estimate_from_photo: bool = True,
         measured_sun_must_be_photographed: bool = True,
+        num_samples: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.crop_fov_deg = float(crop_fov_deg)
@@ -36,6 +37,11 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         # camera) at el 7 behind-right. The photo sits at the panorama's centre
         # with no yaw, so the env map's frame IS the panorama's frame.
         self.estimate_from_photo = bool(estimate_from_photo)
+        # LuxDiT samples to draw (seeded seed+i). One sample's HDR is a lottery:
+        # the same Rainier photo gave a peak of 80 (sun 0.5x) on one run and 3.2
+        # (sun 0.07x, a dull scene) on the next. The sample whose map has the
+        # sharpest peak is the one that resolved the sun, so it is kept.
+        self.num_samples = max(1, int(num_samples))
         # Only trust a solar disc found in the panorama if it lies inside the
         # photographed cone. Outside it the disc is WorldGen's or FLUX's invention
         # and the key light it yields is unrelated to the shading baked into every
@@ -177,11 +183,23 @@ class PanoramaLightingStage(PipelineStage):
         else:
             input_image = panorama.rgb()
 
-        result = self._lux_dit.estimate(
-            input_image,
-            self.temp,
-            on_progress=self.make_progress_callback(task),
-        )
+        samples = []
+        for i in range(self.config.num_samples):
+            sample = self._lux_dit.estimate(
+                input_image,
+                self.temp,
+                on_progress=self.make_progress_callback(task),
+                seed=self.seed + i,
+            )
+            probe = SceneLighting(ldr=sample.ldr, log=sample.log, hdr=sample.hdr).sun() or {}
+            samples.append((probe.get("peak_ratio", 0.0), probe.get("sun_share", 0.0), sample))
+            if probe:
+                az, el = self._az_el(np.asarray(probe["direction"], dtype=np.float64))
+                self.log_info(
+                    f"  LuxDiT sample {i + 1}/{self.config.num_samples}: peak ratio {probe['peak_ratio']:.1f}, "
+                    f"sun share {probe['sun_share']:.4f}, az {az:.0f}° el {el:.0f}°"
+                )
+        result = max(samples, key=lambda s: (s[0], s[1]))[2]
 
         # Where the sun actually is, read off the panorama rather than off the
         # estimate. PanoramaRegionStage runs before this one, so its typing of the
