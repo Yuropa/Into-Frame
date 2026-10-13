@@ -203,6 +203,12 @@ class SceneLighting:
         # map for its probe, which is all it needs, and a float EXR would dwarf
         # the rest of the scene payload.
         self.hdr = hdr
+        # The sun as computed when the HDR radiance was still in memory, restored by
+        # load()/decode() so a RESUMED run ships the same key light as the run that
+        # estimated it. Without this every resumed run fell to the LDR fallback:
+        # the 2026-10-13 Rainier run estimated intensity 1.60 from the merged HDR,
+        # crashed two stages later, and the resumed Scene Generation shipped 0.27.
+        self._persisted_sun: Optional[dict] = None
 
     def _radiance(self) -> "tuple[np.ndarray, bool]":
         """(H, W, 3) linear radiance and whether it is genuinely HDR.
@@ -245,6 +251,8 @@ class SceneLighting:
         skyboxRotation to it exactly as it does to the skybox, or the light and
         the sky it came from will disagree.
         """
+        if self.hdr is None and self._persisted_sun is not None:
+            return dict(self._persisted_sun)
         rgb, is_hdr = self._radiance()
         luminance = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
         height, width = luminance.shape
@@ -405,9 +413,10 @@ class SceneLighting:
         def _from_b64(b64: str) -> PILImage.Image:
             return PILImage.open(io.BytesIO(base64.b64decode(b64))).copy()
 
-        return cls(
-            _from_b64(data["ldr"]), _from_b64(data["log"]), measured_sun=measured_sun,
-        )
+        lighting = cls(_from_b64(data["ldr"]), _from_b64(data["log"]), measured_sun=measured_sun)
+        if sun.get("direction") and "intensity" in sun:
+            lighting._persisted_sun = dict(sun)
+        return lighting
 
     # The panorama-measured sun has to survive the context cache. PanoramaLightingStage
     # is cached like every other stage, so on any resumed run this pair -- not run() --
@@ -423,9 +432,15 @@ class SceneLighting:
         self.ldr.save(path / "ldr.png")
         self.log.save(path / "log.png")
         sun_path = path / self._SUN_FILE
+        payload = {}
         if self.measured_sun is not None:
             direction, color = self.measured_sun
-            sun_path.write_text(json.dumps({"direction": list(direction), "color": color}))
+            payload.update({"direction": list(direction), "color": color})
+        computed = self.sun()
+        if computed is not None:
+            payload["sun"] = computed
+        if payload:
+            sun_path.write_text(json.dumps(payload))
         elif sun_path.exists():
             # A rerun that found no disc must clear a stale one rather than
             # inheriting the previous run's answer.
@@ -436,14 +451,19 @@ class SceneLighting:
         ldr = PILImage.open(path / "ldr.png").copy()
         log = PILImage.open(path / "log.png").copy()
         measured_sun = None
+        persisted = None
         sun_path = path / cls._SUN_FILE
         if sun_path.exists():
             try:
                 data = json.loads(sun_path.read_text())
-                measured_sun = (data["direction"], data["color"])
+                if "direction" in data and "color" in data:
+                    measured_sun = (data["direction"], data["color"])
+                persisted = data.get("sun")
             except (ValueError, KeyError, OSError):
                 measured_sun = None
-        # hdr is deliberately not persisted (a float EXR would dwarf the cache, and
-        # the intensity it feeds is already baked into what the scene shipped), so a
-        # loaded SceneLighting reports is_hdr False and takes the LDR fallback path.
-        return cls(ldr, log, measured_sun=measured_sun)
+        # hdr is deliberately not persisted (a float EXR would dwarf the cache), so
+        # the sun computed from it is persisted instead -- see _persisted_sun.
+        lighting = cls(ldr, log, measured_sun=measured_sun)
+        if isinstance(persisted, dict) and persisted.get("direction") and "intensity" in persisted:
+            lighting._persisted_sun = persisted
+        return lighting
