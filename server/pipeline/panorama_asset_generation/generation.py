@@ -180,7 +180,6 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # Low-pass radius of the shading estimate delighting divides out, as a
         # fraction of the crop's longer side -- see util.delight.
         self.delight_blur_fraction = float(delight_blur_fraction)
-        self._samp = None
         # Face budget per category mesh. SAM3D returns its reconstruction undecimated
         # and nothing here used to touch it, which is affordable for a hero object and
         # is not what these are: a category mesh is shared by every instance of its
@@ -384,6 +383,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
     def __init__(self, config: PanoramaAssetGenerationConfiguration) -> None:
         super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
+        # Swin2SR client for _source_crop's super-resolution; opened on first use,
+        # closed before SAM3D takes the GPU and again in clean_up.
+        self._samp = None
 
     def run(self, context: PipelineContext) -> PipelineContext:
         object_count = context.input_object(ContextKey.OBJECT_COUNT)

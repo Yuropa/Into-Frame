@@ -127,7 +127,13 @@ class PanoramaLightingStage(PipelineStage):
         azimuth = math.degrees(math.atan2(x, z))
         elevation = math.degrees(math.asin(max(-1.0, min(1.0, y))))
         outside_by = abs(azimuth) - fov / 2.0
-        if outside_by > 0:
+        if outside_by > 0 and sun.get("direction_source") == "envmap":
+            self.log_info(
+                f"Sun at az {azimuth:.1f}° el {elevation:.1f}° is {outside_by:.1f}° outside "
+                f"the captured {fov:.1f}° FOV — estimated from the photograph's own shading "
+                f"(the disc itself was not photographed)"
+            )
+        elif outside_by > 0:
             self.log_warning(
                 f"Sun at az {azimuth:.1f}° el {elevation:.1f}° is {outside_by:.1f}° outside "
                 f"the captured {fov:.1f}° FOV — the key light comes from generated sky, "
