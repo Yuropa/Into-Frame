@@ -170,10 +170,13 @@ def create_parser():
         type=str,
         action="append",
         metavar="STAGE[,STAGE...]",
+        nargs="?",
+        const="*",
         help=(
             "Purge cached output for the given stage(s) so they are treated as dirty "
             "and re-run (along with all downstream stages). Accepts a comma-separated "
-            "list of stage names or output paths. May be repeated."
+            "list of stage names or output paths. May be repeated. Given with no "
+            "value (or as '*' / 'all'), every stage re-runs from scratch."
         ),
     )
 
@@ -220,10 +223,13 @@ def create_parser():
         type=str,
         action="append",
         metavar="STAGE[,STAGE...]",
+        nargs="?",
+        const="*",
         help=(
             "Purge cached output for the given stage(s) so they are treated as dirty "
             "and re-run (along with all downstream stages). Accepts a comma-separated "
-            "list of stage names or output paths. May be repeated."
+            "list of stage names or output paths. May be repeated. Given with no "
+            "value (or as '*' / 'all'), every stage re-runs from scratch."
         ),
     )
 
@@ -294,19 +300,26 @@ def _parse_seeds(seed_args: list[str] | None):
 
 
 def _parse_rerun(rerun_args: list[str] | None) -> set[str]:
+    """Stage names to force. A bare --rerun arrives as "*" (argparse const) and
+    frame.sh sends the same; "all" is accepted too. Either collapses the set to
+    {"*"}, which Pipeline reads as "every stage"."""
+    from pipeline.pipeline import FORCE_ALL_STAGES
     if not rerun_args:
         return set()
     result = set()
     for arg in rerun_args:
         for part in arg.split(","):
             name = part.strip()
-            if name:
-                result.add(name)
+            if not name:
+                continue
+            if name in ("*", "all", "ALL"):
+                return {FORCE_ALL_STAGES}
+            result.add(name)
     return result
 
 
 def _create_pipeline_config(args):
-    from pipeline.pipeline import PipelineConfiguration
+    from pipeline.pipeline import PipelineConfiguration, FORCE_ALL_STAGES  # noqa: F401
     config = PipelineConfiguration(
         output=args.output,
         seeds=_parse_seeds(getattr(args, "seed", None)),

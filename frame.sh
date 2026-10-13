@@ -77,7 +77,9 @@ run options:
   --debug-archive        Also write a .debug.frame archive with build/ files (default: on)
   --no-debug-archive     Disable .debug.frame generation
   --config PATH          Pipeline config YAML      (default: server/config.yaml)
-  --rerun STAGE[,...]    Purge cached output for stage(s) so they re-run; repeatable
+  --rerun [STAGE[,...]]  Purge cached output for stage(s) so they re-run; repeatable.
+                         Bare --rerun (no stage) re-runs the WHOLE pipeline from
+                         scratch. Put it after the input path, or give it a stage.
 
 server options:
   --host HOST            Bind host                 (default: ${HOST})
@@ -86,6 +88,7 @@ server options:
   -o, --output DIR       Output directory          (default: ${OUTPUT})
   -d, --debug BOOL       Save intermediate files   (default: false)
   --debug-archive        Also write a .debug.frame archive with build/ files (default: off)
+  --rerun [STAGE[,...]]  As for run: force stage(s) (or, bare, everything) to re-run
   --config PATH          Pipeline config YAML      (default: server/config.yaml)
 
 download options:
@@ -112,9 +115,10 @@ remote options (SSH + port forwarding, then starts server on the remote):
   -i, --input PATH   Image to generate from, RELATIVE TO --dir unless absolute
                      (default: samples/Mount Rainier.jpg)          [server only]
   -d, --debug BOOL   Save intermediate files on remote   [server only]
-  --rerun STAGE[,...] Force stage(s) to re-run on the remote, with everything
-                     downstream. Repeatable. Required after a config.yaml edit --
-                     stage caching never looks at the config.     [server only]
+  --rerun [STAGE[,...]] Force stage(s) to re-run on the remote, with everything
+                     downstream; bare --rerun re-runs everything. Repeatable.
+                     Required after a config.yaml edit -- stage caching never
+                     looks at the config.                        [server only]
   --config PATH      Remote pipeline config YAML         [server only]
   -o, --output DIR   Output directory to clear           [clear only]
 
@@ -131,6 +135,7 @@ Examples:
   $(basename "$0") run samples/Paris.jpg --output ./out --debug true
   $(basename "$0") run samples/Paris.jpg --rerun "Region Map"
   $(basename "$0") run samples/Paris.jpg --rerun "Region Map,Terrain"
+  $(basename "$0") run samples/Paris.jpg --rerun            # everything from scratch
   $(basename "$0") local ./output/Paris.frame
   $(basename "$0") local ./output/Paris.frame --port 9090
   $(basename "$0") server --port 9090
@@ -220,7 +225,10 @@ if [[ "$SUBCOMMAND" == "run" ]]; then
       -o|--output)  OUTPUT="$2"; shift 2 ;;
       -d|--debug)   DEBUG="$2";  shift 2 ;;
       --config)     CONFIG="$2"; shift 2 ;;
-      --rerun)      RERUN_ARGS+=("$2"); shift 2 ;;
+      --rerun)
+        # Bare --rerun (next token missing or another flag) means every stage.
+        if [[ $# -ge 2 && "$2" != -* ]]; then RERUN_ARGS+=("$2"); shift 2
+        else RERUN_ARGS+=("*"); shift; fi ;;
       -h|--help)    usage; exit 0 ;;
       *) echo "Unknown run option: $1" >&2; exit 1 ;;
     esac
@@ -259,6 +267,9 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
       -i|--input)   INPUT="$2";      shift 2 ;;
       -d|--debug)   DEBUG="$2";      shift 2 ;;
       --config)     CONFIG="$2";     shift 2 ;;
+      --rerun)
+        if [[ $# -ge 2 && "$2" != -* ]]; then RERUN_ARGS+=("$2"); shift 2
+        else RERUN_ARGS+=("*"); shift; fi ;;
       -h|--help)    usage; exit 0 ;;
       *) echo "Unknown server option: $1" >&2; exit 1 ;;
     esac
@@ -283,6 +294,7 @@ elif [[ "$SUBCOMMAND" == "server" ]]; then
   [[ -n "$INPUT"  ]] && ARGS+=(--input "$INPUT")
   [[ -n "$DEBUG"  ]] && ARGS+=(--debug "$DEBUG")
   [[ -n "$CONFIG" ]] && ARGS+=(--config "$CONFIG")
+  for r in "${RERUN_ARGS[@]+"${RERUN_ARGS[@]}"}"; do ARGS+=(--rerun "$r"); done
 
   exec python3 main.py "${ARGS[@]}"
 

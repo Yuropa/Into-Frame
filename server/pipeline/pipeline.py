@@ -174,6 +174,11 @@ class SeedConfiguration:
         return str(self.global_seed)
 
 
+# Sentinel in PipelineConfiguration.force_stages meaning "re-run every stage"
+# (a bare --rerun). Not a valid stage name, so it can never collide with one.
+FORCE_ALL_STAGES = "*"
+
+
 def check_conda_env(expected: str = "frame"):
     active = os.environ.get("CONDA_DEFAULT_ENV")
     if active != expected:
@@ -712,14 +717,17 @@ class Pipeline:
                 with live_ctx:
                     task = progress.add_task("Processing…", total=len(self.stages))
                     dirty = False
+                    force_all = FORCE_ALL_STAGES in self.config.force_stages
+                    if force_all:
+                        self.log_info("--rerun with no stage: re-running every stage from scratch")
                     for stage in self.stages:
                         cached_seed = cached_stage_seeds.get(stage.name, cached_global_seed)
                         current_seed = self.config.seeds.seed_for(stage.name)
                         seed_changed = cached_global_seed is not None and cached_seed != current_seed
-                        stage_forced = self._resolve_stage_name(stage.name) in self.config.force_stages
+                        stage_forced = force_all or self._resolve_stage_name(stage.name) in self.config.force_stages
                         if seed_changed and not dirty:
                             self.log_info(f"Seed changed for '{stage.name}' ({cached_seed} → {current_seed}), forcing rerun")
-                        if stage_forced and not dirty:
+                        if stage_forced and not dirty and not force_all:
                             self.log_info(f"Stage '{stage.name}' marked for rerun via --rerun")
                         ran = self._run_stage(
                             stage=stage,

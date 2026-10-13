@@ -49,7 +49,7 @@ server options:
   --config      Remote pipeline config     (default: config.yaml)
   --seed        Random seed (repeatable)   VALUE or STAGE:VALUE (default: none)
   --rerun       Force stage(s) to re-run, with everything downstream of them.
-                Repeatable, comma-separated. Needed after editing config.yaml:
+                Repeatable, comma-separated; bare --rerun re-runs everything. Needed after editing config.yaml:
                 nothing hashes a stage's parameters, so a warm cache is reused
                 whatever the config now says. e.g. --rerun "Panorama Lighting"
 
@@ -91,7 +91,9 @@ while [[ $# -gt 0 ]]; do
     -d|--debug)    DEBUG="$2";        shift 2 ;;
     --config)      CONFIG="$2";       shift 2 ;;
     --seed)        SEEDS+=("$2");     shift 2 ;;
-    --rerun)       RERUNS+=("$2");    shift 2 ;;
+    --rerun)
+      if [[ $# -ge 2 && "$2" != -* ]]; then RERUNS+=("$2"); shift 2
+      else RERUNS+=("*"); shift; fi ;;
     -o|--output)   OUTPUT="$2";       shift 2 ;;
     -i|--input)    INPUT="$2";        shift 2 ;;
     -v|--verbose)  LOG_MODE="verbose"; shift ;;
