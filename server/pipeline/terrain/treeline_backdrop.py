@@ -111,7 +111,13 @@ class TreelineBackdropStage(PipelineStage):
         self.advance_progress(task)
 
         # ── Per column: the tallest upright run of far vegetation ──────────────
-        far = vegetation & np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= cfg.max_distance_m)
+        # Canopy in the far field (beyond where the depth models saturate) is the
+        # Far Field Backdrop's; this ribbon is the near treeline only.
+        max_distance = cfg.max_distance_m
+        far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
+        if far_start:
+            max_distance = min(max_distance, float(far_start))
+        far = vegetation & np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= max_distance)
         row_angle = math.pi / H
         top = np.full(W, -1, dtype=np.int32)
         bottom = np.full(W, -1, dtype=np.int32)

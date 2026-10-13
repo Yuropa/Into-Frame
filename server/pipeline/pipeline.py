@@ -54,6 +54,7 @@ from pipeline.region_map.region_map_refinement import RegionMapRefinementStage, 
 from pipeline.terrain.terrain import TerrainMeshStage, TerrainMeshConfiguration
 from pipeline.terrain.terrain_texture_generation import TerrainTextureGenerationStage, TerrainTextureGenerationConfiguration
 from pipeline.terrain.treeline_backdrop import TreelineBackdropStage
+from pipeline.terrain.far_field_backdrop import FarFieldBackdropStage
 from pipeline.object_labeling.labeling import ObjectLabelingStage
 from pipeline.linear_structures.linear_structures import LinearStructureStage, LinearStructureConfiguration
 from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, TerrainReconstructionConfiguration
@@ -350,6 +351,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "TerrainMeshStage": TerrainMeshStage,
     "TerrainTextureGenerationStage": TerrainTextureGenerationStage,
     "TreelineBackdropStage": TreelineBackdropStage,
+    "FarFieldBackdropStage": FarFieldBackdropStage,
     "ObjectLabelingStage": ObjectLabelingStage,
     "SegmentationStage": SegmentationStage,
     "SupersamplingStage": SupersamplingStage,

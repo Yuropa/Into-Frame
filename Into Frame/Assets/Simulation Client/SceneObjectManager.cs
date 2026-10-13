@@ -382,7 +382,7 @@ public class SceneObjectManager : MonoBehaviour
     private static bool IsEnvironmentMesh(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
-        return name == "terrain" || name == "water" || name == "treeline" || name.StartsWith("formation_");
+        return name == "terrain" || name == "water" || name == "treeline" || name == "backdrop" || name.StartsWith("formation_");
     }
 
     private void SpawnMeshImmediate(SceneObject data)
@@ -611,6 +611,22 @@ public class SceneObjectManager : MonoBehaviour
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
         waterMaterialManager?.RegisterMeshLoaded(container, container.name);
+        if (container.name.EndsWith("(backdrop)"))
+            MakeUnlit(container);
+    }
+
+    // The far-field backdrop is a photograph of distant scenery with its own light
+    // in it, standing in front of a skybox that is rendered unlit; lighting it again
+    // with the scene's sun makes the two disagree. URP Lit and Unlit share the
+    // _BaseMap/_AlphaClip/_Cutoff property names, so swapping the shader keeps the
+    // texture and the cutout.
+    private static void MakeUnlit(GameObject root)
+    {
+        var unlit = Shader.Find("Universal Render Pipeline/Unlit");
+        if (unlit == null) return;
+        foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            foreach (var m in r.materials)
+                if (m != null) m.shader = unlit;
     }
 
     // Loads a geometry-only GLB (e.g. the terrain's TERRAIN_PHYSICS_MESH) and

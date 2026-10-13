@@ -727,6 +727,9 @@ class SceneGenerationStage(PipelineStage):
             # Half-diagonal from the camera at the grid centre to a corner, with
             # headroom for the mountain ring that stands above the corners.
             far_clip = max(far_clip, height_map_grid_m * math.sqrt(0.5) * 1.5)
+        far_field = context.input_object("far_field_backdrop_summary") or {}
+        if far_field.get("radius_max"):
+            far_clip = max(far_clip, float(far_field["radius_max"]) * 1.3)
         scene.far_clip_plane = max(50.0, min(far_clip, 2000.0))
 
         if panorama is not None:
@@ -1552,6 +1555,17 @@ class SceneGenerationStage(PipelineStage):
             treeline.set_rotation(*ground_rotation)
             treeline.name = "treeline"
             scene.add_object(treeline)
+
+        # The far field (FarFieldBackdropStage): the panorama beyond the terrain
+        # grid as a relief shell, in the same frame as the terrain. Named
+        # "backdrop" so the client renders it unlit like the skybox it fronts.
+        backdrop_mesh = context.input_mesh(ContextKey.FAR_FIELD_BACKDROP)
+        if backdrop_mesh is not None:
+            self.log_info("Adding far-field backdrop to scene")
+            backdrop = Object3D.mesh(ContextKey.FAR_FIELD_BACKDROP, x=0.0, y=0.0, z=0.0)
+            backdrop.set_rotation(*ground_rotation)
+            backdrop.name = "backdrop"
+            scene.add_object(backdrop)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:
