@@ -37,6 +37,43 @@ are mostly not model failures but assumption failures, where a step correct for 
 scene category is applied silently to another. That is the more tractable problem:
 an assumption can be identified, measured, and gated.
 
+\subsection{Limitations}
+\label{sec:limitations}
+
+\paragraph{Non-photographic input.} The pipeline assumes the input is a photograph
+of a real place, and nothing checks that assumption. Run on a painting instead
+(Van Gogh's \emph{Irises}, kept in our sample set specifically as this
+out-of-domain case), the panoramic depth estimator finds no real depth cue in
+painted brushwork and returns a near-constant, shallow value across the whole
+sphere. That failure is silent rather than loud: it looks exactly like a scene
+with almost nothing measurable, so nearly every detection is rejected by the same
+unmeasured-depth gate that correctly discards a sky-silhouetted box, and the
+result is a syntactically valid but essentially empty scene rather than an error.
+Detecting that the input itself is out of domain, not just that a particular
+measurement inside it failed, is unaddressed.
+
+\paragraph{Depth-derived size trusts a single sample.} Every placed object's size
+comes from one instance's own depth patch (\cref{sec:placement}), and the only
+correction available today is the external height priors described there, which
+cover a handful of tightly-distributed manufactured and anatomical classes and
+deliberately exclude vegetation. An object whose own depth sample is degenerate
+(occluded, sparse, or landing on the wrong surface) is therefore sized and placed
+on that bad sample with nothing to check it against. Using each class's own
+better-measured instances within the same scene as an internal size prior,
+covered under Future Work below, is the natural fix and has not been built.
+
+\paragraph{Thin vegetation loses its stem.} Segmentation operates on pixels, and a
+flower's stem is often only a few pixels wide in the panorama, thin enough that
+SAM~2 does not reliably include it in the mask at all; the surviving crop, and
+everything reconstructed from it, is a picture of the bloom alone. The
+metric-height override of \cref{sec:placement} corrects how tall that bloom is
+placed but not what it is a picture of, so a flower in the scene today is
+frequently a bloom with no stem beneath it rather than a whole plant. Nothing here
+is measured from the image, because nothing of the stem survives in the image to
+measure: it calls for a category-level prior instead, the same move ground cover
+already makes for grass (\cref{sec:distribution}) at a scale no detector can
+enumerate, applied here to complete an object a detector only partially found.
+
 \subsection{Future Work}
 
 \paragraph{Explicit scene classification.} A first-class scene-type estimate
@@ -58,6 +95,24 @@ species-aware priors~\cite{lee2024tree} are the obvious direction.
 optimization that adjusted depth, geometry and placement jointly against
 photometric consistency could correct compounded error that no single stage can
 see.
+
+\paragraph{Same-class size consistency as a depth cross-check.} The scale
+correction of \cref{sec:placement} only trusts classes with a tight external
+real-world height prior (person, car, and similarly regular manufactured or
+anatomical categories), and deliberately excludes vegetation, which is most of a
+natural landscape and also where the depth model is most likely to miss: a
+distant tree seen through gaps in nearer foliage, or a flower whose crop lands
+mostly on an occluder, can return a depth patch with too few valid samples to
+trust, or a plainly wrong one. This still needs to be done: instead of an external
+prior, use each class's own well-measured instances within the same scene as the
+reference, and size or reposition the instances whose own depth reading is
+degenerate against that internal consistency rather than against whatever a bad
+sample happens to imply. It is a strictly weaker assumption than the one already
+in production, since a class like \emph{tree} clusters far less tightly than
+\emph{person}, so it would need its own per-class weight reflecting how honestly
+that class can stand in for its own outliers, tuned with the same care that kept
+the existing correction from doing more harm than good on vegetation the first
+time it was tried.
 
 \paragraph{Perceptual evaluation.} Our evaluation is diagnostic: it measures where
 the system is wrong, not how the result feels to be inside. A user study of

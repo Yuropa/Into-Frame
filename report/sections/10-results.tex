@@ -14,6 +14,17 @@ Ground truth 3D does not exist for any of them, so evaluation is necessarily
 diagnostic: we instrument the pipeline, measure intermediate quantities against
 what the scene demonstrably contains, and localize defects to specific stages.
 
+\paragraph{Comparison Against Prior Systems.} We have not yet evaluated against the
+single-image scene generators named in \cref{sec:related} (WorldGen,
+SphericalDreamer, SonoWorld, 360Anything). That comparison still needs to be done.
+The diagnostic results below show that specific assumptions failed and were
+measurably corrected; they do not show that the resulting scene is better than
+what one of those systems would produce from the same photograph, and a metric
+both approaches would accept still has to be worked out, since most of them
+optimize for visual fidelity from viewpoints near the original camera while ours
+optimizes for typed, collidable geometry. Running our captures through at least
+one public baseline and reporting where the two disagree is left for future work.
+
 \begin{figure}[htbp]
   \centering
   \begin{subfigure}{0.5\linewidth}
@@ -88,7 +99,8 @@ instances remain on cells it rejected.
 The more instructive result is where the system fails, because in every case we
 localized the failure to an \emph{assumption} rather than a model. A defect can
 also surface far from its cause: object size compression originates in depth
-calibration (\cref{sec:panorama}) and manifests at placement, eight stages later.
+calibration (\cref{sec:panorama}) and manifests at placement, eight stages later
+(\cref{sec:placement}).
 \Cref{sec:remediation} reports what each corrective measure achieved.
 
 \begin{figure}[t]
