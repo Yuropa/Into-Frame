@@ -1,12 +1,53 @@
-import torch
+"""
+Tree Mesh Refinement: volumetric reconstructions for the tree-like category
+meshes.
+
+Panorama Asset Generation reconstructs one mesh per (class, visual-variant)
+group with SAM3D. For compact, mostly convex things -- a rock, a boat, a bench
+-- a single-view reconstructor does well. For a tree it does not: there is no
+closed surface to recover, and on every 2026-10-13 run the tree and bush groups
+came back as a textured sheet a few centimetres thick, which the scene's shape
+gates then refused, so every tree in the scene was a card.
+
+Tree-D Fusion (Lee et al., ECCV 2024) is a reconstructor built for exactly this
+input: Magic123's SDS optimisation of a NeRF, with a Zero123 fine-tuned on
+trees as the novel-view prior, so the unseen sides are filled with canopy rather
+than extruded from the silhouette. It is slow (minutes per tree, not seconds),
+so it is not the default generator; it runs here, after Asset Generation, for
+the few groups where it matters, and publishes its mesh under the SAME
+category_mesh_{class}_{bucket} key. Later stages read the context newest-first,
+so Scene Generation and Category Mesh Rigging pick up the volumetric mesh and
+SAM3D's sheet stays as the fallback when this stage fails or is disabled.
+
+Its picture of the tree is the best one the pipeline has: the delit, completed
+(ObjectCompletionStage) and super-resolved crop Asset Generation itself built
+from, in that order of preference.
+
+Reads:  "mesh_sources" (Panorama Asset Generation: which crop each category mesh
+        was reconstructed from), the crop images for those indices
+Writes: category_mesh_{class}_{bucket} for every refined group,
+        "tree_mesh_refinement_summary"
+"""
+from __future__ import annotations
+
+import math
+import tempfile
 from logging import Logger
+from pathlib import Path
 from typing import Any
 
+import torch
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
-from pipeline.pipeline_context import PipelineContext, ContextKey
-from pipeline.object_typing.categories import CategoryFilter, VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY
+from pipeline.pipeline_context import PipelineContext
+from pipeline.object_typing.categories import CategoryFilter, normalize_category
+from pipeline.panorama_asset_generation.generation import MESH_SOURCES_KEY, _delit_key, _SR_KEY, _COMPLETE_KEY
+from pipeline.segmentation.hires_crops import prefer_hires
 from pipeline.tree_generation.model_generation_treed import ModelGeneratorTreeD
 from util.device_utils import DeviceStrategy, preferred_device
+from util.image_utils import Image
+
+REFINEMENT_SUMMARY_KEY = "tree_mesh_refinement_summary"
 
 
 class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
@@ -20,30 +61,33 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
+        max_meshes: int = 6,
+        iterations: int = 2000,
+        train_resolution: int = 64,
+        mcubes_resolution: int = 128,
+        max_mesh_faces: int = 8000,
+        repair_meshes: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
-        # Default to vegetation only when no filter is specified. GRASS_TUFT_CATEGORY
-        # is in VEGETATION_CATEGORIES for the sway/scatter machinery, but it is ground
-        # cover with no trunk or branch structure for Tree-D Fusion to reconstruct --
-        # GrassCoverStage builds its assets itself.
+        # Which classes to refine. The Zero123 prior was fine-tuned on trees, so by
+        # default only the groups with a trunk-and-canopy structure go through it;
+        # flowers, plants and everything manufactured keep SAM3D.
         if include_categories is None and exclude_categories is None:
-            include_categories = sorted(VEGETATION_CATEGORIES - {GRASS_TUFT_CATEGORY})
+            include_categories = ["tree", "bush"]
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
+        # Cap on reconstructions per run, nearest groups first -- each one is a full
+        # SDS optimisation (Magic123, ~2000 iterations).
+        self.max_meshes = int(max_meshes)
+        self.iterations = int(iterations)
+        # NeRF training render size and marching-cubes grid, Tree-D Fusion's own recipe.
+        self.train_resolution = int(train_resolution)
+        self.mcubes_resolution = int(mcubes_resolution)
+        # Same post-processing as Panorama Asset Generation applies to its meshes.
+        self.max_mesh_faces = int(max_mesh_faces)
+        self.repair_meshes = bool(repair_meshes)
 
 
 class TreeMeshGenerationStage(PipelineStage):
-    """
-    Generates 3D meshes for vegetation objects (trees, plants, etc.) using
-    Tree-D Fusion (TreeDFusion_ECCV24). Crops from SegmentationStage are already
-    RGBA-masked, so no additional segmentation is needed.
-
-    By default processes only vegetation categories (tree, forest, bush, flower, plant).
-    Override include_categories or exclude_categories in config to change the filter.
-
-    Reads:  ContextKey.OBJECT_COUNT, crop_{i}, metadata_{i}
-    Writes: mesh_{i} for each object that passes the category filter
-    """
-
     @classmethod
     def config_class(cls):
         return TreeMeshGenerationConfiguration
@@ -51,71 +95,115 @@ class TreeMeshGenerationStage(PipelineStage):
     def __init__(self, config: TreeMeshGenerationConfiguration) -> None:
         super().__init__(config)
         self.preferred_device, _ = preferred_device(DeviceStrategy.MEMORY)
+        self._gen: ModelGeneratorTreeD | None = None
+
+    @staticmethod
+    def _source(context: PipelineContext, idx: int):
+        """The best picture of crop `idx`: delit (made from the completed or
+        super-resolved crop when one exists), else those, else the hi-res cut,
+        else the panorama crop."""
+        for key in (_delit_key(idx), _SR_KEY.format(idx=idx), _COMPLETE_KEY.format(idx=idx)):
+            image = context.input_image(key)
+            if image is not None:
+                return image, key
+        image = prefer_hires(context, idx)
+        if image is not None:
+            return image, "hires"
+        return context.input_image(f"crop_{idx}"), f"crop_{idx}"
 
     def run(self, context: PipelineContext) -> PipelineContext:
-        count = context.input_object(ContextKey.OBJECT_COUNT)
-        if not count:
-            self.log_info("No objects to process, skipping")
-            return context
-
-        to_generate = []
-        for idx in range(count):
-            metadata = context.input_object(f"metadata_{idx}") or {}
-            obj_class = metadata.get("class", "")
-            if not self.config.category_filter.allows(obj_class):
-                self.log_info(f"  crop_{idx}: '{obj_class}' — excluded by category filter")
+        cfg: TreeMeshGenerationConfiguration = self.config
+        sources = context.input_object(MESH_SOURCES_KEY) or {}
+        jobs = []
+        for mesh_key, src in sources.items():
+            obj_class = normalize_category(src.get("class"))
+            if not obj_class or not cfg.category_filter.allows(obj_class):
                 continue
-            if context.input_mesh(f"mesh_{idx}") is not None:
-                self.log_info(f"  crop_{idx}: mesh already cached")
-                continue
-            to_generate.append((idx, obj_class))
-
-        if not to_generate:
-            self.log_info("No matching objects to meshify")
+            depth = src.get("depth")
+            jobs.append((depth if depth is not None else math.inf, mesh_key, int(src["idx"]), obj_class))
+        jobs.sort()
+        skipped = max(0, len(jobs) - cfg.max_meshes)
+        jobs = jobs[: cfg.max_meshes]
+        if not jobs:
+            self.log_info("Tree mesh refinement: no tree-like category meshes to refine")
+            context.add_object(REFINEMENT_SUMMARY_KEY, {"refined": 0})
             return context
+        self.log_info(
+            f"Tree mesh refinement: {len(jobs)} group(s) → Tree-D Fusion"
+            + (f", {skipped} farther group(s) over max_meshes={cfg.max_meshes} keep their SAM3D mesh" if skipped else "")
+        )
 
-        gen_task = self.create_progress(len(to_generate), "Meshifying trees…")
+        task = self.create_progress(len(jobs), "Refining tree meshes…")
         super().clean_up()
-        gen = ModelGeneratorTreeD(self.preferred_device)
-
+        self._gen = ModelGeneratorTreeD(self.preferred_device)
+        refined, failed = [], []
+        scratch = None
         try:
-            for idx, obj_class in to_generate:
-                crop = context.input_image(f"crop_{idx}")
-                temp_path = self.temp / f"crop_{idx}" if self.temp is not None else None
-                self.log_info(f"  crop_{idx}: '{obj_class}' → Tree-D Fusion")
-                if temp_path is not None:
-                    temp_path.mkdir(parents=True, exist_ok=True)
-                    self.log_info(f"  crop_{idx}: Magic123 log → {temp_path / 'magic123.log'}")
+            for depth, mesh_key, idx, obj_class in jobs:
+                image, source_key = self._source(context, idx)
+                if image is None:
+                    self.log_info(f"  {mesh_key}: no image for crop_{idx}, keeping the existing mesh")
+                    self.advance_progress(task)
+                    continue
+                pil = image.image.convert("RGBA")
+                if self.temp is not None:
+                    temp_path = self.temp / mesh_key
+                else:
+                    scratch = scratch or tempfile.TemporaryDirectory(prefix="treed-")
+                    temp_path = Path(scratch.name) / mesh_key
+                temp_path.mkdir(parents=True, exist_ok=True)
+                self.log_info(
+                    f"  {mesh_key}: {depth:.1f} m, {pil.width}x{pil.height} px from {source_key} "
+                    f"→ Tree-D Fusion ({cfg.iterations} it, log {temp_path / 'magic123.log'})"
+                )
                 super().clean_up()
-                mesh = gen.meshify(crop, temp_path, seed=self.seed, species=obj_class)
-                mesh = mesh.repair()
-                context.add_mesh(f"mesh_{idx}", mesh)
-                self.log_info(f"  crop_{idx}: {mesh.vertex_count}v {mesh.face_count}f")
-                self.advance_progress(gen_task)
+                try:
+                    mesh = self._gen.meshify(
+                        Image(pil), temp_path, seed=self.seed, species=obj_class,
+                        iterations=cfg.iterations, train_resolution=cfg.train_resolution,
+                        mcubes_resolution=cfg.mcubes_resolution,
+                    )
+                    if cfg.repair_meshes or not mesh.has_texture:
+                        mesh = mesh.repair()
+                    raw_faces = mesh.face_count
+                    mesh = mesh.decimate(cfg.max_mesh_faces)
+                    if not mesh.has_texture:
+                        # The client ignores vertex colours; give it a texture.
+                        mesh = mesh.bake_vertex_colours()
+                    mesh.fit_to_box(1.0, 1.0)
+                except Exception as exc:
+                    self.log_warning(f"  {mesh_key}: Tree-D Fusion failed ({exc}); keeping the existing mesh")
+                    failed.append(mesh_key)
+                    self.advance_progress(task)
+                    continue
+                context.add_mesh(mesh_key, mesh)
+                refined.append(mesh_key)
+                ext = mesh.extents
+                self.log_info(
+                    f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f"
+                    + (f" (decimated from {raw_faces}f)" if mesh.face_count < raw_faces else "")
+                    + (" textured" if mesh.has_texture else " vertex-colour only")
+                    + f", extents {ext[0]:.2f} x {ext[1]:.2f} x {ext[2]:.2f}"
+                )
+                self.advance_progress(task)
         finally:
-            gen.close()
-
-        self.finish_progress(gen_task)
+            self._gen.close()
+            self._gen = None
+            if scratch is not None:
+                scratch.cleanup()
+        self.finish_progress(task)
+        context.add_object(REFINEMENT_SUMMARY_KEY, {"refined": len(refined), "failed": failed, "keys": refined})
+        self.log_info(f"Tree mesh refinement: {len(refined)} mesh(es) replaced, {len(failed)} failed")
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:
-        count = context.input_object(ContextKey.OBJECT_COUNT)
-        if count is None:
-            # No OBJECT_COUNT anywhere upstream means Object Segmentation is
-            # disabled (permanent, not "pending") -- nothing to generate tree
-            # meshes for and never will be; see the identical reasoning in
-            # PanoramaObjectClassificationStage.has_expected_output.
-            return True
-        for idx in range(count):
-            metadata = context.object(f"metadata_{idx}")
-            if metadata is None:
-                continue
-            obj_class = metadata.get("class", "")
-            if not self.config.category_filter.allows(obj_class):
-                continue
-            if context.mesh(f"mesh_{idx}") is None:
-                return False
-        return True
+        return context.object(REFINEMENT_SUMMARY_KEY) is not None
+
+    def model_names(self) -> list[str]:
+        return []
 
     def clean_up(self):
+        if self._gen is not None:
+            self._gen.close()
+            self._gen = None
         super().clean_up()

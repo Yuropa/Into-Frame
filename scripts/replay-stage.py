@@ -52,6 +52,9 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=ROOT / "server" / "config.yaml")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a stage config value")
     parser.add_argument("--save", action="store_true", help="write the resulting context back into run_dir")
+    parser.add_argument("--after", metavar="STAGE", default=None,
+                        help="resolve the stage's inputs as if it ran right after STAGE instead of at its "
+                             "config position (e.g. to replay against a cache whose later stages predate a change)")
     parser.add_argument("--list", action="store_true", help="list the stages in config.yaml and exit")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
@@ -102,11 +105,15 @@ def main() -> int:
 
     # Walk the earlier stages so the context's "previous stage" is the one just
     # before the target, exactly as in a run.
+    if args.after is not None and args.after not in enabled:
+        raise SystemExit(f"--after {args.after!r} is not an enabled stage")
     for name in enabled:
-        if name == args.stage:
+        if name == args.stage and args.after is None:
             break
         context.push_stage(name)
         context.pop_stage()
+        if name == args.after:
+            break
 
     log = config.log
     log.info("Replaying %r against %s -> %s", args.stage, run_dir, out)

@@ -257,6 +257,81 @@ class Mesh:
 
         return Mesh(self.mesh.copy())
 
+    def bake_vertex_colours(self, resolution: int = 1024, min_cell_px: int = 6) -> "Mesh":
+        """Return a copy whose per-vertex colours are baked into a UV texture.
+
+        The client lights meshes with URP Lit, which samples a base-colour texture
+        and ignores COLOR_0, so a vertex-coloured mesh -- Tree-D Fusion's export,
+        SAM3D's out-of-memory fallback -- arrives as flat grey. Nothing in the
+        environment unwraps UVs (no xatlas), so this builds a per-face atlas: a
+        square grid with one cell per face, the face's three vertices mapped to the
+        cell's lower-right triangle (inset one pixel), and the whole cell filled
+        with the Gouraud-interpolated vertex colours, extended past the triangle's
+        edges by clamping the barycentrics so bilinear filtering and mip levels
+        never read a neighbouring face. Vertices are unshared afterwards (three per
+        face), so call it after decimation, not before.
+
+        Returns the mesh unchanged (a copy) when it carries no colour at all.
+        """
+        from PIL import Image as PILImage
+        from trimesh.visual import TextureVisuals
+        from trimesh.visual.material import PBRMaterial
+
+        colors = self._vertex_colors_01()
+        if colors is None or self.has_texture:
+            return Mesh(self.mesh.copy())
+        faces = np.asarray(self.mesh.faces)
+        count = len(faces)
+        if count == 0:
+            return Mesh(self.mesh.copy())
+        grid = int(np.ceil(np.sqrt(count)))
+        cell = max(int(resolution) // grid, int(min_cell_px))
+        size = grid * cell
+        inset = 1.0
+        span = max(cell - 2.0 * inset, 1.0)
+
+        # Barycentrics of every pixel centre in a cell relative to the canonical
+        # triangle v0=(inset, inset), v1=(cell-inset, inset), v2=(inset, cell-inset)
+        # in (column, row) pixel coordinates; clamped and renormalised so pixels
+        # outside the triangle take the nearest edge's colour.
+        px = np.arange(cell, dtype=np.float32) + 0.5
+        l1 = np.clip((px[None, :] - inset) / span, 0.0, 1.0)      # varies with column
+        l2 = np.clip((px[:, None] - inset) / span, 0.0, 1.0)      # varies with row
+        l1 = np.broadcast_to(l1, (cell, cell)); l2 = np.broadcast_to(l2, (cell, cell))
+        l0 = np.clip(1.0 - l1 - l2, 0.0, 1.0)
+        total = np.maximum(l0 + l1 + l2, 1e-6)
+        bary = np.stack([l0, l1, l2], axis=-1) / total[..., None]    # (cell, cell, 3)
+
+        face_colors = colors[faces].astype(np.float32)               # (F, 3 verts, 3 rgb)
+        tiles = np.einsum("rcv,fvk->frck", bary, face_colors)       # (F, cell, cell, 3)
+        atlas = np.zeros((grid, cell, grid, cell, 3), dtype=np.float32)
+        idx = np.arange(count)
+        gy, gx = idx // grid, idx % grid
+        atlas[gy, :, gx] = tiles
+        image = PILImage.fromarray(
+            (np.clip(atlas.reshape(size, size, 3), 0.0, 1.0) * 255.0 + 0.5).astype(np.uint8), "RGB"
+        )
+
+        # Per-face UVs: image coordinates (x right, y down) -> glTF/trimesh UV with
+        # v measured from the bottom.
+        x0 = (gx * cell).astype(np.float32); y0 = (gy * cell).astype(np.float32)
+        corners = np.stack([
+            np.stack([x0 + inset, y0 + inset], axis=-1),
+            np.stack([x0 + cell - inset, y0 + inset], axis=-1),
+            np.stack([x0 + inset, y0 + cell - inset], axis=-1),
+        ], axis=1)                                                   # (F, 3, 2)
+        uv = corners.reshape(-1, 2) / float(size)
+        uv[:, 1] = 1.0 - uv[:, 1]
+
+        vertices = np.asarray(self.mesh.vertices)[faces].reshape(-1, 3)
+        new_faces = np.arange(count * 3).reshape(count, 3)
+        material = PBRMaterial(baseColorTexture=image)
+        baked = trimesh.Trimesh(
+            vertices=vertices, faces=new_faces,
+            visual=TextureVisuals(uv=uv, material=material), process=False,
+        )
+        return Mesh(baked)
+
     def apply_crop_texture(self, image: "PILImage.Image") -> None:
         """Apply image as texture via orthographic projection onto the front face.
 

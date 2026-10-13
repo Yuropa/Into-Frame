@@ -86,9 +86,17 @@ from util.image_utils import Image as UtilImage
 from pipeline.segmentation.hires_crops import prefer_hires, is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 from pipeline.supersampling.image_supersampling import ImageSupersampling
 
+# Written by ObjectCompletionStage (pipeline/object_completion/completion.py), which
+# imports this module's curation helpers -- so the key is spelled here rather than
+# imported from there.
+_COMPLETE_KEY = "crop_complete_{idx}"
+
 # Super-resolved source crop, written by _source_crop the first time any consumer
 # (delighting, meshing, cards) asks for a crop that is smaller than min_source_px.
 _SR_KEY = "crop_sr_{idx}"
+# {category_mesh_{class}_{bucket}: {"idx", "class", "bucket", "depth"}} for every
+# group this stage chose a mesh representative for (see run()).
+MESH_SOURCES_KEY = "mesh_sources"
 
 # Widest a detection box may be relative to its height and still be believed as a
 # picture of this class. A card or a reconstruction is a picture of the SUBJECT, and
@@ -412,6 +420,17 @@ class PanoramaAssetGenerationStage(PipelineStage):
         )
 
         context.add_object("billboard_pools", billboard_pools)
+        # Which crop each category mesh is (or would be) reconstructed from, so a
+        # later stage can re-reconstruct a group with a different generator and
+        # shadow this stage's mesh under the same key (TreeMeshGenerationStage does
+        # this for the tree-like groups, whose single-view SAM3D result is a sheet).
+        context.add_object(MESH_SOURCES_KEY, {
+            f"category_mesh_{obj_class}_{bucket}": {
+                "idx": int(idx), "class": obj_class, "bucket": int(bucket),
+                "depth": float(depth) if depth is not None else None,
+            }
+            for (obj_class, bucket), (idx, depth, _score) in group_best.items()
+        })
         # Detections this stage judged to be BACKGROUND rather than objects, handed
         # forward so SceneGenerationStage can decline to place them.
         #
@@ -520,6 +539,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
                         mesh = mesh.repair()
                     raw_faces = mesh.face_count
                     mesh = mesh.decimate(self.config.max_mesh_faces)
+                    if not mesh.has_texture:
+                        # Colour-only reconstruction (SAM3D's out-of-memory fallback):
+                        # the client ignores COLOR_0, so bake it into a texture.
+                        mesh = mesh.bake_vertex_colours()
                     mesh.fit_to_box(1.0, 1.0)
                 except Exception as e:
                     # A single degenerate crop (e.g. a near-empty mask the
@@ -610,6 +633,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
         cached = context.image(_SR_KEY.format(idx=idx))
         if cached is not None:
             return cached
+        # A completed picture of the object (ObjectCompletionStage: occluded parts
+        # painted in, cut out on white, at canvas resolution) beats any crop of it.
+        completed = context.input_image(_COMPLETE_KEY.format(idx=idx))
+        if completed is not None:
+            return completed
         crop = prefer_hires(context, idx)
         if crop is None:
             return None

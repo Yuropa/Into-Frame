@@ -16,10 +16,17 @@ class ModelGeneratorTreeD(RemoteClient):
             script_path=script_path,
         )
 
-    def meshify(self, image: Image, temp_path: Path, seed: int = 0, species: str = "") -> Mesh:
+    def meshify(
+        self, image: Image, temp_path: Path, seed: int = 0, species: str = "",
+        iterations: int = 2000, train_resolution: int = 64, mcubes_resolution: int = 128,
+    ) -> Mesh:
         response = self.send(
             action="meshify",
-            input={"image": image.image, "seed": seed, "species": species},
+            input={
+                "image": image.image, "seed": seed, "species": species,
+                "iterations": iterations, "train_resolution": train_resolution,
+                "mcubes_resolution": mcubes_resolution,
+            },
             temp_path=temp_path,
         )
         glb_path = Path(response)

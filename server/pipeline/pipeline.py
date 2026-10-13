@@ -56,6 +56,7 @@ from pipeline.terrain.terrain_texture_generation import TerrainTextureGeneration
 from pipeline.terrain.treeline_backdrop import TreelineBackdropStage
 from pipeline.terrain.far_field_backdrop import FarFieldBackdropStage
 from pipeline.object_labeling.labeling import ObjectLabelingStage
+from pipeline.object_completion.completion import ObjectCompletionStage
 from pipeline.linear_structures.linear_structures import LinearStructureStage, LinearStructureConfiguration
 from pipeline.terrain.terrain_reconstruction import TerrainReconstructionStage, TerrainReconstructionConfiguration
 from pipeline.terrain.terrain_noise_refinement import TerrainNoiseRefinementStage
@@ -353,6 +354,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "TreelineBackdropStage": TreelineBackdropStage,
     "FarFieldBackdropStage": FarFieldBackdropStage,
     "ObjectLabelingStage": ObjectLabelingStage,
+    "ObjectCompletionStage": ObjectCompletionStage,
     "SegmentationStage": SegmentationStage,
     "SupersamplingStage": SupersamplingStage,
     "SceneGenerationStage": SceneGenerationStage,

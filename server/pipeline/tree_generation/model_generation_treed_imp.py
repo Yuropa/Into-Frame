@@ -32,9 +32,17 @@ class TreeDGenerator(RemoteServer):
 
         image = input["image"] if isinstance(input, dict) else input
         species = input.get("species", "") if isinstance(input, dict) else ""
+        params = input if isinstance(input, dict) else {}
+        iterations = int(params.get("iterations", 2000))
+        train_res = int(params.get("train_resolution", 64))
+        mcubes_res = int(params.get("mcubes_resolution", 128))
+        seed = int(params.get("seed", 0))
 
+        # Magic123 reads an RGBA file: alpha > 0.5 is the object mask and the
+        # colour is composited onto white. A crop's padding must therefore be
+        # transparent, never black.
         rgba_path = (temp_path / "rgba.png").resolve()
-        image.save(str(rgba_path))
+        image.convert("RGBA").save(str(rgba_path))
 
         ckpt_dir = _CHECKPOINTS / "treed"
         ckpt_files = list(ckpt_dir.glob("*.ckpt"))
@@ -53,10 +61,11 @@ class TreeDGenerator(RemoteServer):
             "--image", str(rgba_path),
             "--workspace", str(workspace),
             "--optim", "adam",
-            "--iters", "2000",
-            "--h", "64",
-            "--w", "64",
-            "--mcubes_resolution", "128",
+            "--iters", str(iterations),
+            "--h", str(train_res),
+            "--w", str(train_res),
+            "--mcubes_resolution", str(mcubes_res),
+            "--seed", str(seed),
             "--guidance", "SD", "zero123",
             "--lambda_guidance", "1.0", "8.0",
             "--guidance_scale", "20.0", "5.0",

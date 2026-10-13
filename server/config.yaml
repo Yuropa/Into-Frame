@@ -125,7 +125,12 @@ stages:
   - name: Object Labeling
     stage: ObjectLabelingStage
     min_coverage: 0.6            # fraction of a blob's mask inside a labelled box to take its label
-    confident_score: 0.45        # detector score that trusts the label's identity (not low_confidence)
+    confident_score: 0.30        # detector score that trusts the label's identity (not low_confidence).
+                                 # Grounding DINO returns nothing under its own box threshold, so a
+                                 # returned box IS the evidence; its scores for small blooms inside a
+                                 # clump box sit at 0.37-0.43, and at the old 0.45 every photo-pass
+                                 # flower on the 2026-10-13 run was low_confidence and Clustering,
+                                 # finding no confident anchor, demoted all 49 to indeterminate.
     default_vocabulary: [tree, bush, flower, plant, rock]   # always prompted; everything
                                  # else (people, vehicles, animals, buildings) only from the scene tags
     add_unmatched_boxes: true    # labelled boxes no blob covers become detections of their own
@@ -1739,6 +1744,25 @@ stages:
                                # Turn back on only if SAM3D's raw surface renders worse than
                                # the blob did.
 
+  # A complete picture of each object before it is reconstructed: the bucket
+  # representative's photo cutout on a white canvas, with the parts hidden behind
+  # nearer detections (and beyond the frame edge) inpainted by FLUX Fill, then cut
+  # out again with BiRefNet. Asset Generation prefers crop_complete_{i}. See
+  # pipeline/object_completion/completion.py.
+  - name: Object Completion
+    stage: ObjectCompletionStage
+    max_crops: 40               # FLUX calls per run, ~15 s each
+    canvas_px: 1024
+    object_fraction: 0.6        # visible object fills this much of the canvas; the rest is room to grow
+    occluder_depth_margin: 0.10 # same "who is in front" margin as Asset Generation's occlusion score
+    occluder_dilate_px: 8
+    min_occluded_fraction: 0.02 # under this, nothing is hidden: leave the crop to super-resolution
+    border_extend_fraction: 0.3
+    num_inference_steps: 28
+    guidance_scale: 30.0
+    refine_strength: 0.0        # >0: a second full-canvas img2img pass for detail on the visible part
+    min_kept_visible_fraction: 0.5
+
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
     use_intrinsic_delighting: true
@@ -1906,6 +1930,21 @@ stages:
     max_sr_passes: 2
     delight_blur_fraction: 0.02  # low-pass radius of the shading estimate delighting
                                  # divides out, as a fraction of the crop's longer side
+
+  - name: Tree Mesh Refinement
+    stage: TreeMeshGenerationStage
+    # Re-reconstructs the tree-like category meshes with Tree-D Fusion (Magic123 +
+    # a Zero123 fine-tuned on trees) from the same delit/completed crop Asset
+    # Generation used, and publishes the result under the same
+    # category_mesh_{class}_{bucket} key, so Scene Generation and Rigging pick it
+    # up and SAM3D's sheet remains the fallback. Minutes per tree: nearest groups
+    # first, up to max_meshes. See pipeline/tree_generation/tree_generation.py.
+    include_categories: [tree, bush]
+    max_meshes: 6
+    iterations: 2000            # Magic123 SDS iterations (Tree-D Fusion's recipe)
+    train_resolution: 64        # NeRF render size during optimisation
+    mcubes_resolution: 128      # marching-cubes grid for the exported mesh
+    max_mesh_faces: 8000        # same face budget as Panorama Asset Generation
 
   - name: Scene Generation
     stage: SceneGenerationStage

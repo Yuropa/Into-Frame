@@ -66,7 +66,7 @@ class ObjectLabelingConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         min_coverage: float = 0.6,
-        confident_score: float = 0.45,
+        confident_score: float = 0.30,
         default_vocabulary: list[str] | None = None,
         add_unmatched_boxes: bool = True,
         represented_fraction: float = 0.4,
