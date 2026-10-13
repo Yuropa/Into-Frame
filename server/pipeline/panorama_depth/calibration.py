@@ -6,6 +6,7 @@ import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
+from pipeline.panorama.placement import placement_fov_deg
 from util.depth_utils import Depth
 
 
@@ -400,12 +401,12 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         fit_source = panorama_object_depth if panorama_object_depth is not None else panorama_depth
         dap_pred_raw_fit = fit_source.depth.astype(np.float64) / 100.0
 
-        # server/pipeline/panorama/panorama.py sends `intrinsics.fov * 2.0` to WorldGen when
-        # placing the hero photo into the panorama — reproduce that exact value here so the
-        # correspondence matches the real placement, whatever the doubling's own justification.
+        # The photo is placed into the panorama at PLACEMENT_FOV_SCALE x its measured
+        # FOV (see pipeline/panorama/placement.py) -- the correspondence here has to
+        # use the same width or the overlap compares the wrong pixels.
         curve = _fit_panorama_depth_curve(
             da3_depth.depth,
-            intrinsics.fov * 2.0,
+            placement_fov_deg(intrinsics.fov),
             dap_pred_raw_fit,
             sky_mask,
             num_bins=cfg.num_bins,

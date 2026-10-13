@@ -122,7 +122,11 @@ class RemoteClient():
 
         ready_line = self._readline_json(self.json_pipe)
         if not ready_line:
-            raise RuntimeError(f"Subprocess exited during setup:\n{self._get_stderr()}")
+            try:
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise self._exit_error("exited during setup (model load)")
 
         ready_status = Status.decode(ready_line)
         if ready_status.status != "ready":
@@ -142,19 +146,52 @@ class RemoteClient():
         with self._stderr_lock:
             return "".join(self._stderr_lines)
 
+    def _tail_stderr(self, lines: int = 40) -> str:
+        """The last few lines the child wrote to stderr -- what a crashed worker
+        actually said, for attaching to the error that reports its death."""
+        tail = self._get_stderr().splitlines()[-lines:]
+        return "\n".join(line for line in tail if line.strip())
+
     def dump_logs(self):
+        """Emit what the child has written since the last call, then forget it.
+
+        Both buffers are drained here rather than kept: the previous version
+        re-logged the entire history on every send(), which at DEBUG was O(n^2)
+        noise and at INFO (the default) was nothing at all."""
         tag = f"[{self.conda_env}]"
-        for line in self._get_stdout().splitlines():
+        with self._stdout_lock:
+            stdout_lines, self._stdout_lines = self._stdout_lines, []
+        with self._stderr_lock:
+            stderr_lines, self._stderr_lines = self._stderr_lines, []
+        for line in "".join(stdout_lines).splitlines():
             if line.strip():
                 _log.debug("%s[stdout] %s", tag, line)
-        for line in self._get_stderr().splitlines():
+        # stderr is where a model's warnings, OOM retries and tracebacks go. At
+        # INFO it is the only trace a slow-but-alive worker leaves in the run log.
+        for line in "".join(stderr_lines).splitlines():
             if line.strip():
-                _log.debug("%s[stderr] %s", tag, line)
+                _log.info("%s[stderr] %s", tag, line)
+
+    def _exit_error(self, what: str) -> RuntimeError:
+        """A RuntimeError describing the child's death, with its own last words.
+
+        Everything the child printed before dying is in the stderr buffer, and
+        before this it was logged only at DEBUG -- so a CUDA OOM that escaped the
+        remote server's per-request handler, or a worker the kernel OOM-killed,
+        surfaced as "Subprocess closed connection unexpectedly" and nothing else.
+        """
+        code = self.process.poll() if self.process is not None else None
+        tail = self._tail_stderr()
+        if tail:
+            _log.error("%s %s (exit code %s); last stderr:\n%s", self.script_path.name, what, code, tail)
+        return RuntimeError(
+            f"{self.script_path.name} ({self.conda_env}) {what} (exit code {code})"
+            + (f":\n{tail}" if tail else "")
+        )
 
     def _check_for_errors(self):
         if self.process.poll() is not None:
-            self.dump_logs()
-            raise RuntimeError(f"subprocess exited before running:\n{self._get_stderr()}")
+            raise self._exit_error("exited before the request could be sent")
 
     def _send(self, obj: RemoteObject, temp_path: Optional[Path] = None):
         encoded = obj.encode(temp_path=temp_path)
@@ -181,7 +218,15 @@ class RemoteClient():
         while True:
             response_line = self._readline_json(self.json_pipe)
             if response_line is None:
-                raise RuntimeError("Subprocess closed connection unexpectedly")
+                # The socket closed with no reply: the child died mid-request.
+                # Give it a moment to finish flushing stderr so the traceback is
+                # in the buffer before we quote it.
+                try:
+                    self.process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                time.sleep(0.2)
+                raise self._exit_error(f"died while handling '{action}'")
 
             raw = parse_json(response_line)
             if isinstance(raw, dict) and raw.get("type") == "progress":

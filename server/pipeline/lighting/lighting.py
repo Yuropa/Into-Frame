@@ -82,6 +82,10 @@ class PanoramaLightingStage(PipelineStage):
         fov = float(getattr(intrinsics, "fov", 0.0) or 0.0) if intrinsics is not None else 0.0
         if fov <= 0.0:
             return
+        # The sun is measured in panorama space, where the photo occupies
+        # placement_fov_deg(fov), not fov -- see pipeline/panorama/placement.py.
+        from pipeline.panorama.placement import placement_fov_deg
+        fov = placement_fov_deg(fov)
 
         x, y, z = (float(v) for v in sun["direction"])
         azimuth = math.degrees(math.atan2(x, z))

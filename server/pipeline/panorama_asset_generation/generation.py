@@ -81,6 +81,7 @@ def _delit_key(idx: int) -> str:
     return f"crop_delit_{idx}"
 from util.device_utils import DeviceStrategy, preferred_device
 from util.crop_scoring import composite_score, occlusion_score, mask_fill_ratio
+from pipeline.segmentation.hires_crops import prefer_hires, is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 
 
 class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
@@ -445,7 +446,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 # client then lights again -- the same double-lighting the
                 # billboard path has, but permanent. Falls back to the raw crop
                 # when delighting is off or failed for this one image.
-                crop = context.image(_delit_key(idx)) or context.input_image(f"crop_{idx}")
+                # ... and prefer the native-resolution cut from the photograph over the
+                # panorama's downsampled copy when one exists (see hires_crops.py).
+                # The delit variant is itself made from the hi-res crop when there
+                # is one, so this order keeps both preferences.
+                crop = context.image(_delit_key(idx)) or prefer_hires(context, idx)
 
                 fill_ratio = mask_fill_ratio(crop)
                 if fill_ratio is not None and fill_ratio <= 0.0:
@@ -525,7 +530,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # Falls back to the pool's top crop only if this group produced no
             # measurable box at all -- prior behaviour, and never worse than it.
             source = card_sources.get(pool_key, pool[0])
-            crop = context.image(_delit_key(source)) or context.input_image(f"crop_{source}")
+            crop = context.image(_delit_key(source)) or prefer_hires(context, source)
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
@@ -572,7 +577,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
         written = 0
         try:
             for idx in sorted(indices):
-                crop = context.input_image(f"crop_{idx}")
+                # The hi-res photo cut when there is one: everything rendered
+                # from crop_delit_{i} (meshes, cards, billboards) then gets the
+                # photograph's pixels rather than the panorama's.
+                crop = prefer_hires(context, idx)
                 if crop is None:
                     self.advance_progress(task)
                     continue
@@ -706,9 +714,17 @@ class PanoramaAssetGenerationStage(PipelineStage):
             float(np.nanmax(panorama_depth.depth)) if panorama_depth is not None else None
         )
 
+        fov_restricted = bool(get_metadata(CAPTURED_FOV_RESTRICTED_KEY) or False)
         for idx in range(object_count):
             metadata = get_metadata(f"metadata_{idx}")
             if metadata is None:
+                continue
+
+            # Out-of-cone detections get no mesh and no place in a billboard pool:
+            # nothing downstream will place them, and a pool of generated crops
+            # would otherwise be what a synthetic instance ends up wearing.
+            if not is_photographed(metadata, fov_restricted):
+                skipped_debug.append({"idx": idx, "class": metadata.get("class"), "reason": "outside_captured_fov"})
                 continue
 
             box = metadata.get("box")

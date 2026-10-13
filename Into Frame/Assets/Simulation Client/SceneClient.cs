@@ -162,6 +162,23 @@ public class SceneClient : MonoBehaviour
                 progressController.ReportServerProgress(progress.step, progress.percent);
                 break;
 
+            // Both of these used to fall through to "Unknown message type" below, so
+            // a failed run left the headset showing a progress bar frozen at
+            // whatever stage last reported, forever. The server now also refuses
+            // to restart a failed run on a plain reconnect; the user asks for a
+            // retry explicitly (see RequestRetry / ProgressController).
+            case "PIPELINE_ERROR":
+                var error = JsonUtility.FromJson<PipelineErrorPayload>(ExtractPayload(fullJson));
+                Debug.LogError($"[SceneClient] Pipeline error: {error.message}");
+                progressController.ReportPipelineError(error.message, error.retryable, RequestRetry);
+                break;
+
+            case "PIPELINE_CANCELLED":
+                var cancelled = JsonUtility.FromJson<PipelineErrorPayload>(ExtractPayload(fullJson));
+                Debug.LogWarning($"[SceneClient] Pipeline cancelled: {cancelled.message}");
+                progressController.ReportPipelineError(cancelled.message ?? "Pipeline cancelled", true, RequestRetry);
+                break;
+
             default:
                 Debug.LogWarning($"[SceneClient] Unknown message type: {type}");
                 break;
@@ -175,6 +192,14 @@ public class SceneClient : MonoBehaviour
         if (_ws?.State != WebSocketState.Open) return;
         string json = JsonUtility.ToJson(data); // or use Newtonsoft for complex types
         await _ws.SendText(json);
+    }
+
+    /// <summary>Ask the server to run the pipeline again after a reported failure.</summary>
+    public void RequestRetry()
+    {
+        Debug.Log("[SceneClient] Requesting pipeline retry");
+        progressController.ReportServerProgress("Retrying…", 0f);
+        Send(new TypeOnlyMessage("RETRY"));
     }
 
     /// <summary>Report an in-game event back to the server.</summary>
@@ -215,6 +240,7 @@ public class SceneClient : MonoBehaviour
 [Serializable] public class ObjectDestroyPayload { public string id; }
 
 [Serializable] public class SceneProgressPayload { public string step; public string detail; public float percent; }
+[Serializable] public class PipelineErrorPayload { public string message; public bool retryable; }
 
 [Serializable]
 public class Vec3 { public float x, y, z; }

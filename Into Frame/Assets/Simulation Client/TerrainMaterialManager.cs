@@ -112,7 +112,15 @@ public class TerrainMaterialManager : MonoBehaviour
         for (int i = 0; i < data.layers.Length; i++)
         {
             LayerNames[i]      = data.layers[i].name;
-            LayerTiles[i]      = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: true);
+            // sRGB, not linear. The project renders in linear colour space
+            // (ProjectSettings m_ActiveColorSpace = 1) and the tiles are ordinary
+            // sRGB PNGs of photographs and generated textures. Flagging them linear
+            // skipped the sRGB->linear decode on sample, so the terrain rendered with
+            // its midtones lifted and its contrast flattened relative to the skybox
+            // and the billboards, which arrive through DownloadHandlerTexture as
+            // sRGB. That gamma mismatch was most of "the ground doesn't match".
+            // Blend maps below stay linear: they are weights, not colour.
+            LayerTiles[i]      = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: false);
             LayerFactors[i]    = data.layers[i].tile_factor > 0f ? data.layers[i].tile_factor : 1.0f;
             LayerSmoothness[i] = data.layers[i].smoothness;
             if (data.layers[i].equirect)

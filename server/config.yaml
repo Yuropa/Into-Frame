@@ -70,6 +70,34 @@ stages:
     # burning BLIP/CLIP/DINOv2 passes on obvious slivers before that. 0.0015
     # (~1570px² per tile) roughly halves the raw crop count on that capture.
     min_area_fraction: 0.0015
+    # Only detections inside the photographed cone are kept. Outside it the
+    # panorama is WorldGen's outpaint, which repeats the hero content around the
+    # sphere (Shark Fin's sea stack three times, Iceland's ridge twice), and
+    # measured across the five sample captures 65-85% of detections were of
+    # those generated pixels. Distribution Synthesis populates the rest of the
+    # scene from the real exemplars' statistics; it must not learn from
+    # duplicates. The cone is placement_fov_deg(intrinsics.fov) wide -- see
+    # pipeline/panorama/placement.py for the 2x that is baked into every
+    # panorama. false restores detection over the whole sphere; the
+    # in_captured_fov flag is written to metadata either way.
+    # Detections outside the cone are still made (Panorama Foreground
+    # Inpainting needs them as occluders to remove from the terrain plate) and
+    # flagged in_captured_fov: false; Scene Generation, Object Distribution and
+    # Panorama Asset Generation then neither place them, learn from them, nor
+    # build assets for them. Measured inside the 2x placement cone on the cached
+    # runs: Rainier 138/402 detections, Paris 26/91, Shark Fin 65/154.
+    restrict_to_captured_fov: true
+    captured_fov_margin_deg: 3.0
+    # Re-cut each in-cone crop from the ORIGINAL photograph at native resolution
+    # (crop_hires_{i}). Inside the cone the panorama is a 2x-downsampled copy of
+    # the photo run back up through Swin2SR, so every reconstruction and card
+    # texture was being built from a copy worse than the original that sat in
+    # the context the whole time. The photo is 1.3-3x the panorama's resolution
+    # there depending on capture (1.84x Rainier, 2.98x Paris, 1.26x Shark Fin,
+    # measured against the panorama's pre-super-resolution width). See
+    # pipeline/segmentation/hires_crops.py.
+    hires_crops_from_input: true
+    panorama_sr_factor: 2.0   # Panorama Supersampling is Swin2SR x2; 1.0 if disabled
 
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
@@ -182,6 +210,15 @@ stages:
   - name: Panorama Foreground Inpainting
     stage: PanoramaForegroundInpaintingStage
     enabled: true
+    # The near-field depth sweep is OFF: it removed everything within 5 m, which
+    # in a ground-level capture is the ground itself -- 48.5% of the Rainier
+    # panorama, the whole wildflower meadow, came back as bare gravel, and the
+    # Irises painting lost every pixel. Only the classified occluder crops (trees,
+    # buildings, towers...) are removed now; ground cover is texture, not an
+    # occluder, and stays in the terrain plate so Terrain Texture Generation and
+    # Grass Cover read real ground instead of fabricated fill. true restores the
+    # sweep, controlled by foreground_distance_m below.
+    remove_near_field: false
     foreground_distance_m: 5.0  # mask built directly from depth: pixel is foreground if closer than this (metres)
     min_region_area_px: 200     # drop connected components smaller than this (denoise depth-model glitches)
     closing_radius_px: 12       # morphological closing to bridge small real gaps into one solid region
@@ -782,6 +819,19 @@ stages:
     water_gradient_threshold: 0.04  # m/m slope; flatter than this is eligible for WATER
     terrain_gradient_threshold: 0.15 # m/m slope; steeper than this → TERRAIN
     paint_width: 2                  # grid-cell half-width to dilate painted polylines
+    # Pass 2 may only grow WATER out of known water, and every body it leaves
+    # must be at least min_water_area_m2. Without the first, Paris -- whose
+    # reconstructed terrain is flat by construction, so every low-certainty cell
+    # sits in the 0.5 m band -- came back as salt-and-pepper water across the
+    # whole 200 m grid. Replayed on the cached runs: Paris had 5,801,246
+    # candidate cells (of 16.8 M) and every one was reclassified; with the gate,
+    # none are. Rainier -- an alpine meadow with no lake -- had 16,051 cells
+    # grown into 82 phantom ponds; now none. Shark Fin keeps 145 cells that
+    # really do continue its shoreline. The second knob is the same filter
+    # Terrain Mesh already applies, moved up so Object Distribution and
+    # Distribution Synthesis see the same water the mesh will.
+    water_connected_only: true
+    min_water_area_m2: 12.0
 
   - name: Terrain Mesh
     stage: TerrainMeshStage
@@ -1080,6 +1130,11 @@ stages:
     stage: ObjectDetectionStage
     keys:
       input: panorama
+    # Same cone restriction and hi-res re-cut as Object Segmentation above.
+    restrict_to_captured_fov: true
+    captured_fov_margin_deg: 3.0
+    hires_crops_from_input: true
+    panorama_sr_factor: 2.0
 
   - name: Object Instance Refinement
     stage: ObjectInstanceRefinementStage

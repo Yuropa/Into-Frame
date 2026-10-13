@@ -1,0 +1,34 @@
+"""
+How the hero photograph is placed into the generated panorama.
+
+PLACEMENT_FOV_SCALE multiplies the camera's measured horizontal FOV
+(CameraIntrinsics.fov, from Depth Anything 3) before it is handed to WorldGen as
+the photo's angular width. It has been 2.0 since the "Increase pano size" change,
+so a photo shot at 57 degrees is embedded across 114 degrees of the panorama.
+
+Measured on the five cached captures by correlating the photo, rendered into
+equirect space at candidate widths, against the panorama: the best-fit embedded
+width is 1.99x the intrinsics FOV on every one (NCC 0.87-0.97), so this is the
+real geometry of every panorama the pipeline has produced.
+
+Everything that maps between the photo and the panorama must use the SAME value:
+depth calibration (hero depth vs. panorama depth overlap), the captured-cone
+helper that decides which detections were actually photographed and which pixels
+of the photo they correspond to, and the lighting stage's "was the sun
+photographed" check. They import it from here so the factor exists in one place.
+
+Note what the factor costs. The panorama is self-consistent, but every
+photographed object subtends twice its true angle, and object size is angle x
+metric depth -- so anything measured inside the cone is built about 2x too large
+relative to the metric depth it is placed at. Setting this to 1.0 restores true
+angular size and shrinks the photographed region to its real share of the sphere;
+it also changes the look of every scene and invalidates thresholds tuned under
+2.0, so it is a deliberate project decision rather than a drive-by edit.
+"""
+
+PLACEMENT_FOV_SCALE = 2.0
+
+
+def placement_fov_deg(intrinsics_fov_deg: float) -> float:
+    """The horizontal FOV the photo actually occupies in the panorama."""
+    return float(intrinsics_fov_deg) * PLACEMENT_FOV_SCALE

@@ -100,6 +100,22 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
         *args,
+        # Whether the depth test below contributes to the removal mask at all.
+        #
+        # OFF by default now. The depth test removes everything closer than
+        # foreground_distance_m, and in a ground-level capture that is the
+        # ground: on the Rainier capture it covered 48.5% of the panorama and
+        # replaced the wildflower meadow -- the subject of the photograph -- with
+        # bare gravel; on the Irises painting it replaced every pixel with sand
+        # and the terrain pass typed the whole map as OTHER. Grass Cover and
+        # Distribution Synthesis then existed largely to put back what this stage
+        # had taken out, from a panorama that no longer showed it.
+        #
+        # Ground cover is texture, not an occluder. The classified occluder crops
+        # (_FOREGROUND_VEGETATION_CATEGORIES / _FOREGROUND_STRUCTURE_CATEGORIES)
+        # are what actually stand between the camera and the terrain, and they are
+        # still removed. Set True to restore the old near-field sweep.
+        remove_near_field: bool = False,
         foreground_distance_m: float = 5.0,
         min_region_area_px: int = 200,
         closing_radius_px: int = 12,
@@ -110,6 +126,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.remove_near_field = bool(remove_near_field)
         self.foreground_distance_m = foreground_distance_m
         self.min_region_area_px = min_region_area_px
         self.closing_radius_px = closing_radius_px
@@ -171,37 +188,48 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         remove_task = self.create_progress(1, "Removing foreground occluders…")
 
         depth = context.input_depth(depth_key) or context.input_depth(ContextKey.PANORAMA_DEPTH)
-        if depth is None:
-            self.log_warning("No depth in context, skipping removal")
+        if depth is None and self.config.remove_near_field:
+            self.log_warning("No depth in context; the near-field sweep is unavailable, removing classified occluders only")
+
+        if depth is None and not self.config.remove_near_field and self._extracted_object_mask(context, h, w) is None:
+            self.log_info("No occluder crops to remove, keeping the panorama as the terrain plate")
             terrain_pil = original_pil
         else:
-            depth_arr = depth.depth
-            if depth_arr.shape != (h, w):
-                depth_arr = np.array(
-                    PILImage.fromarray(depth_arr, mode="F").resize((w, h), PILImage.NEAREST)
-                )
+            near_mask = np.zeros((h, w), dtype=bool)
+            if self.config.remove_near_field and depth is not None:
+                depth_arr = depth.depth
+                if depth_arr.shape != (h, w):
+                    depth_arr = np.array(
+                        PILImage.fromarray(depth_arr, mode="F").resize((w, h), PILImage.NEAREST)
+                    )
 
-            near_mask = np.isfinite(depth_arr) & (depth_arr < self.config.foreground_distance_m)
+                near_mask = np.isfinite(depth_arr) & (depth_arr < self.config.foreground_distance_m)
 
-            # Denoise the depth-threshold mask alone: drop connected components too
-            # small to be a real occluder (stray depth-model glitches). Classified
-            # vegetation/structure crops below are unioned in afterward, since
-            # they've already been validated by SAM2 + CLIP and don't need this
-            # filter.
-            if near_mask.any():
-                labeled, num_labels = label(near_mask)
-                if num_labels > 0:
-                    counts = np.bincount(labeled.ravel())
-                    small_labels = np.flatnonzero(counts < self.config.min_region_area_px)
-                    if small_labels.size:
-                        near_mask &= ~np.isin(labeled, small_labels)
+                # Denoise the depth-threshold mask alone: drop connected components too
+                # small to be a real occluder (stray depth-model glitches). Classified
+                # vegetation/structure crops below are unioned in afterward, since
+                # they've already been validated by SAM2 + CLIP and don't need this
+                # filter.
+                if near_mask.any():
+                    labeled, num_labels = label(near_mask)
+                    if num_labels > 0:
+                        counts = np.bincount(labeled.ravel())
+                        small_labels = np.flatnonzero(counts < self.config.min_region_area_px)
+                        if small_labels.size:
+                            near_mask &= ~np.isin(labeled, small_labels)
 
             extracted_mask = self._extracted_object_mask(context, h, w)
             if extracted_mask is not None:
                 near_mask = near_mask | extracted_mask
 
+            removed_fraction = float(near_mask.mean()) if near_mask.size else 0.0
+            self.log_info(
+                f"Removal mask covers {removed_fraction * 100:.1f}% of the panorama "
+                f"({'near-field sweep + ' if self.config.remove_near_field else ''}classified occluders)"
+            )
+
             if not near_mask.any():
-                self.log_info("Nothing within foreground distance, skipping removal")
+                self.log_info("Nothing to remove, keeping the panorama as the terrain plate")
                 terrain_pil = original_pil
             else:
                 # Close small real gaps (a thin bare patch between two close bushes)

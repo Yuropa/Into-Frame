@@ -1,4 +1,5 @@
 import json
+import math
 from typing import Any
 from logging import Logger
 
@@ -18,6 +19,7 @@ from pipeline.scene_generation.projection import (
     unproject_bbox_equirect,
 )
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
+from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 from util.lod_metrics import angular_height_px
 from scene.scene import Scene
 from scene.object import Object3D
@@ -685,11 +687,22 @@ class SceneGenerationStage(PipelineStage):
             + ("" if height_map is not None else " — no height map available as a snap fallback")
         )
 
+        # Far clip. The old rule was p99 of the HERO PHOTO's depth x 1.5, floored at
+        # 10 m -- derived from the one image in the scene whose depth says nothing
+        # about how far the scene extends. On a close-up (the Irises painting) that
+        # shipped farClipPlane = 10.0, and the client clipped the 200 m terrain and
+        # every tuft beyond ten metres. The terrain grid is the thing being viewed,
+        # so its diagonal is the floor; the photo depth only ever raises it.
+        far_clip = 100.0
         if depth is not None:
             valid = depth.depth[np.isfinite(depth.depth) & (depth.depth > 0)]
             if len(valid) > 0:
-                scene.far_clip_plane = float(np.percentile(valid, 99)) * 1.5
-                scene.far_clip_plane = max(10.0, min(scene.far_clip_plane, 1000.0))
+                far_clip = float(np.percentile(valid, 99)) * 1.5
+        if height_map_grid_m > 0.0:
+            # Half-diagonal from the camera at the grid centre to a corner, with
+            # headroom for the mountain ring that stands above the corners.
+            far_clip = max(far_clip, height_map_grid_m * math.sqrt(0.5) * 1.5)
+        scene.far_clip_plane = max(50.0, min(far_clip, 2000.0))
 
         if panorama is not None:
             scene.skybox = panorama_key
@@ -705,6 +718,9 @@ class SceneGenerationStage(PipelineStage):
             # case nothing is skipped and this behaves exactly as it used to.
             background_rejected: set[int] = set(context.input_object("background_rejected") or [])
             background_skipped = 0
+            # Cone policy from the detection stages (see hires_crops.is_photographed).
+            fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
+            unphotographed_skipped = 0
 
             # Which visual variants each class actually has, taken from the pool
             # keys Panorama Asset Generation just wrote ("{class}::{bucket}").
@@ -856,6 +872,14 @@ class SceneGenerationStage(PipelineStage):
                     # trustworthy enough to render from its own crop -- only its
                     # position feeds ObjectDistributionStage's spatial pattern for
                     # `cls`. Never placed, meshed, or video-tracked.
+                    self.advance_progress(generation_task)
+                    continue
+
+                if not is_photographed(metadata, fov_restricted):
+                    # Detected in the outpainted part of the panorama: a guess
+                    # about a guess, and usually a duplicate of something real.
+                    # Synthesis fills that ground from the photographed exemplars.
+                    unphotographed_skipped += 1
                     self.advance_progress(generation_task)
                     continue
 
@@ -1329,6 +1353,11 @@ class SceneGenerationStage(PipelineStage):
                     f"Background rejection: skipped {background_skipped} detection(s) "
                     f"Panorama Asset Generation measured as sky/unmeasured-depth rather "
                     f"than objects"
+                )
+            if unphotographed_skipped:
+                self.log_info(
+                    f"Captured-cone policy: skipped {unphotographed_skipped} detection(s) "
+                    f"from the outpainted part of the panorama"
                 )
 
             if rejected_overlap:
