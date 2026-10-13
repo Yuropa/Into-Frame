@@ -40,6 +40,14 @@ stages:
   # mid-ground vegetation. Object Recognition/Detection/Correlation/
   # Distribution/Panorama Asset Generation still run in their original later
   # position and simply see crop_{i}/metadata_{i} as already populated.
+  # Runs BEFORE segmentation now: its scene tags feed Object Typing's scene-
+  # constrained vocabulary (see scene_constrained_vocabulary) as well as Object
+  # Detection's prompts. It only needs the panorama.
+  - name: Object Recognition
+    stage: RecognizeAnythingStage
+    keys:
+      input: panorama
+
   - name: Object Segmentation
     stage: SegmentationStage
     enabled: true
@@ -98,12 +106,38 @@ stages:
     # pipeline/segmentation/hires_crops.py.
     hires_crops_from_input: true
     panorama_sr_factor: 2.0   # Panorama Supersampling is Swin2SR x2; 1.0 if disabled
+    # Detect on the PHOTOGRAPH inside the cone (SAM2 at native resolution, 2x
+    # super-resolved), storing each detection in both photo and panorama space;
+    # the panorama's own in-cone detections are dropped as duplicates. Inside the
+    # cone the panorama is a downsampled copy of the photo and a 20 px lupine does
+    # not survive SAM2's tiling there -- the 2026-10-13 run boxed 27 flowers in a
+    # meadow of hundreds and no lupine at all. See segmentation/photo_detection.py.
+    detect_on_photo: true
+    photo_detect_sr_factor: 2.0
+
+  # One grounding model decides what every blob is -- see
+  # pipeline/object_labeling/labeling.py. Replaces Object Classification (BLIP),
+  # Object Typing (CLIP + fallbacks + verification) and Object Detection
+  # (a second Grounding DINO pass), which are left below, disabled, until a run
+  # confirms this path; set `enabled` the other way round to compare.
+  - name: Object Labeling
+    stage: ObjectLabelingStage
+    min_coverage: 0.6            # fraction of a blob's mask inside a labelled box to take its label
+    confident_score: 0.45        # detector score that trusts the label's identity (not low_confidence)
+    default_vocabulary: [tree, bush, flower, plant, rock]   # always prompted; everything
+                                 # else (people, vehicles, animals, buildings) only from the scene tags
+    add_unmatched_boxes: true    # labelled boxes no blob covers become detections of their own
+    represented_fraction: 0.4
+    photo_detect_sr_factor: 2.0  # the same detection photo Object Segmentation used
+    size_veto_ratio: 3.0         # metric-height prior veto (person 1.7 m, car 1.5 m, ...)
 
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
+    enabled: false               # superseded by Object Labeling
 
   - name: Object Typing
     stage: ObjectTypingStage
+    enabled: false               # superseded by Object Labeling
     # Tune both against typing_debug.json's per-crop top_candidates/object_margin.
     # Units are ImageClipClassifier._pairwise_certainty's: a softmax probability at
     # CLIP's own temperature, rescaled so 0 = a perfect tie and 1 = one-sided. It
@@ -185,6 +219,16 @@ stages:
                                        # paired with the coverage test below rather than
                                        # standing alone.
     verify_min_box_fraction: 0.1       # the box must also cover this fraction of the crop.
+    # Classes that need the scene to admit them (people, vehicles, animals, aircraft,
+    # boats, built environment, street clutter, landmarks) are excluded from CLIP's
+    # vocabulary unless a RAM++ scene tag or the caption names them. On the Rainier
+    # run CLIP typed ten crops of conifers as person, eight as animal and three of
+    # the summit as aircraft in a scene tagged field/flower/grass/mountain/wildflower.
+    scene_constrained_vocabulary: true
+    # A crop typed with a metric height prior (person 1.7 m, car 1.5 m, ...) whose
+    # measured height is over this many times the prior, or under the prior divided
+    # by it, is demoted to indeterminate. 0 disables.
+    size_veto_ratio: 3.0
                                        # The crop is already tight around one segmented
                                        # instance, so a real match fills much of it; a small
                                        # high-scoring box usually means the label was found
@@ -336,6 +380,18 @@ stages:
 
   - name: Panorama Lighting
     stage: PanoramaLightingStage
+    # LuxDiT runs on the PHOTOGRAPH (a perspective image, which is what it is trained
+    # on), not on a 90-degree strip of the equirectangular panorama. On every sample
+    # capture the strip gave a dusk-looking map whose sun sat 80-130 degrees from
+    # anything the photo's own shading supports; on the photo the estimate is sane
+    # (Rainier: az -165 el 40, high and behind the camera for a front-lit noon).
+    estimate_from_photo: true
+    # A solar disc found in the panorama's sky is only trusted as the key light when
+    # it lies inside the photographed cone. Outside it the disc is generated, and on
+    # the 2026-10-13 Rainier run it lit a midday meadow with a raking 13-degree sun
+    # from 91 degrees outside anything the camera saw.
+    measured_sun_must_be_photographed: true
+    crop_fov_deg: 90.0          # only used when estimate_from_photo is false
 
   - name: Skybox Inpainting
     stage: SkyboxInpaintingStage
@@ -818,6 +874,11 @@ stages:
     water_elevation_tolerance: 0.5  # metres; cells within this band of known water surface → WATER
     water_gradient_threshold: 0.04  # m/m slope; flatter than this is eligible for WATER
     terrain_gradient_threshold: 0.15 # m/m slope; steeper than this → TERRAIN
+    terrain_reclassify_observed_only: true # ...but only on cells with a measured height.
+                                    # The reconstructed ring and every interpolated slope
+                                    # are steep by construction: without this 57% of the
+                                    # Rainier grid (9.5 M cells) became rock and the meadow's
+                                    # GROUND region vanished from the texture stage.
     paint_width: 2                  # grid-cell half-width to dilate painted polylines
     # Pass 2 may only grow WATER out of known water, and every body it leaves
     # must be at least min_water_area_m2. Without the first, Paris -- whose
@@ -988,7 +1049,10 @@ stages:
     # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
     # overcast, no directional shadows" prompt.
     use_intrinsic_delighting: true
-    intrinsic_delight_strength: 0.6 # blend toward the predicted albedo (1.0 = fully delit) --
+    intrinsic_delight_strength: 0.6 # fraction of the estimated low-frequency SHADING divided
+                                 # out (see util/delight.py); hue and chroma are always the
+                                 # photograph's own. Was a linear blend toward the predicted
+                                 # albedo, which desaturated every patch --
                                  # full strength looked unnaturally flat/washed out
     intrinsic_resolution: 768   # working resolution for the delighting pass
     intrinsic_agg_num: 2        # samples averaged per delit patch (lower = faster, guidance seed only)
@@ -1027,6 +1091,44 @@ stages:
     nadir_cutoff_deg: -85.0     # steeper than this (near-straight-down) → synthetic only
     nadir_fade_deg: 4.0         # ramp width above the nadir cutoff
     horizon_fade_deg: 1.5       # ramp width below the horizon
+    # Ground covered by one panorama pixel, above which the panorama layer hands the
+    # texel to the tiled material (ramps from full weight at half this to zero).
+    # Distance x pixel angle / sin(grazing angle against the height map's surface):
+    # flat ground at 30 m from a 1.8 m eye is ~0.8 m per pixel (the pinwheel); a
+    # 45-degree mountain face at 100 m is ~0.2 m and keeps its photographed snow.
+    panorama_max_texel_m: 0.6
+    # Delight the panorama layer the same way the object crops and reference patches
+    # are delit (shading only, colour kept), so the surface the viewer walks on is not
+    # the one thing still carrying the photographed sun under the client's own sun.
+    delight_panorama_layer: true
+    # Reference patches (the real material every synthetic tile is built from) are
+    # cut only within this distance of the camera, where a panorama pixel still
+    # covers centimetres of ground. Every patch on the 2026-10-13 run was cut from
+    # the far field and was a radial smear, so the tiles were smears too. Falls back
+    # to the whole region when a type has no pixels this close (rock on a far ridge).
+    reference_max_distance_m: 8.0
+    # Detail tiles for SURFACE regions (patch_tile_types: ground, terrain, road,
+    # trail) come from the photograph: the region's largest near-field patch,
+    # flattened onto its own plane, delit, supersampled and made tileable by
+    # cross-fading its half-rolled copy. FLUX is the fallback when a region has no
+    # near-field pixels. Vegetation always keeps the FLUX overhead-material tile:
+    # a meadow seen from eye level is upright plants, and flattening those onto the
+    # ground is the starburst. "flux" restores generated tiles for every region.
+    tile_source: patch
+    patch_tile_types: [ground, terrain, road, trail]
+    # Sample tiled layers stochastically in the shader (hex grid of random offsets)
+    # so a 4 m tile never visibly repeats and the cross-fade bands disappear.
+    stochastic_tiling: true
+    # Macro colour: a 512 px top-down bake of the panorama over the grid, blurred
+    # 1.5 texels (~0.4 m per texel over 200 m, so no projection smear survives),
+    # multiplied into the tiled layers as macro / mean. The tiles carry the
+    # detail, the photograph carries the snow patches, dirt and meadow colour.
+    macro_map_size: 512
+    macro_blur_texels: 1.5
+    macro_strength: 1.0
+    macro_angular_sigma_deg: 2.0   # low-pass in the panorama's angular domain first: a
+                                   # tree is a few columns there and a spoke metres long
+                                   # on the ground, so that is where the smear averages out
 
     # Withhold the panorama layer from ground texels whose own panorama pixel is
     # UPRIGHT vegetation rather than ground. Projecting an equirect onto a horizontal
@@ -1095,7 +1197,11 @@ stages:
     # directly. FLUX generation above is the explicit last-resort fallback when this
     # returns nothing (no usable real reference for that region type, or the terrain
     # mesh isn't available yet).
-    use_pattern_texture: true
+    use_pattern_texture: false        # off: its layer is a 2048 px world-space bake of the
+                                      # projected panorama (10 cm texels over 200 m) and it
+                                      # inherits every smear in the reference patches; the
+                                      # FLUX tile path below gives real seamless tiles at
+                                      # synthetic_tile_factor instead
     pattern_certainty_threshold: 0.5  # panorama-layer weight below this -> needs synthesis
     pattern_reference_patch_size: 512 # library samples are small triangular crops, not a
                                        # whole tile's guidance seed -- smaller than tile_size
@@ -1121,13 +1227,27 @@ stages:
   # section above) — Recognition/Detection/Instance Refinement/Correlation pick up their
   # crop_{i}/metadata_{i} output from there, unchanged.
 
-  - name: Object Recognition
-    stage: RecognizeAnythingStage
-    keys:
-      input: panorama
+  - name: Treeline Backdrop
+    stage: TreelineBackdropStage
+    # The photographed forest band, stood up as a ribbon of vertical quads at its
+    # measured depth and textured with the panorama's own pixels (canopy silhouette
+    # as alpha). A "forest" is a band of unresolved canopy, not a set of trees, so
+    # it is not scattered as instances (Distribution Synthesis exclude_types) and
+    # this is what represents it instead. See pipeline/terrain/treeline_backdrop.py.
+    min_distance_m: 6.0         # nearer canopy is placed as individual tree instances
+    max_distance_m: 400.0
+    min_height_m: 1.0           # a run of vegetation must stand this tall to be canopy. In
+                                # SCENE metres: the calibrated panorama depth puts the
+                                # Rainier treeline at 10-12 m, so its trees stand 1-3 m
+    max_depth_spread: 1.6       # p90/p10 depth within a run: a wall, not a floor
+    bin_px: 16                  # panorama columns per quad
+    min_bin_fill: 0.5
+    min_bins: 4
+    feather_px: 2.0
 
   - name: Object Detection
     stage: ObjectDetectionStage
+    enabled: false               # superseded by Object Labeling
     keys:
       input: panorama
     # Same cone restriction and hi-res re-cut as Object Segmentation above.
@@ -1135,6 +1255,8 @@ stages:
     captured_fov_margin_deg: 3.0
     hires_crops_from_input: true
     panorama_sr_factor: 2.0
+    detect_on_photo: true          # Grounding DINO on the photograph for the cone
+    photo_detect_sr_factor: 2.0
 
   - name: Object Instance Refinement
     stage: ObjectInstanceRefinementStage
@@ -1216,7 +1338,8 @@ stages:
     # Measured: removes 16 Shark Fin, 16 Iceland, 9 Rainier and 2 Paris detections,
     # all junk. Rainier's nine include "a bird flying by a cake" typed aircraft and
     # "a man sitting on a couch with a remote" typed bench. false disables.
-    caption_veto: true
+    caption_veto: false              # no captions any more (Object Labeling); the region
+                                     # veto below is the one physical test that remains here
     cluster_distance_threshold: 0.3   # cosine-distance cut; lower = more, finer buckets
     # The distance cut alone has no notion of how many buckets it produces. On a
     # full-panorama detection set it produced one bucket per instance -- measured on
@@ -1399,7 +1522,16 @@ stages:
     # they happen to form, and that ratio then fills a whole region. Above every
     # pathological group on the Rainier capture and below every healthy one (flower
     # 45, tree 56, plant 39). 0 disables.
-    min_exemplars: 8
+    min_exemplars: 4                 # was 8: with exemplars restricted to the photographed
+                                     # cone, 8 of 9 Rainier groups had 3-7 and nothing but
+                                     # grass and flowers was painted
+    pool_across_regions: true        # a type with too few exemplars in one region type
+                                     # borrows its siblings' (tree [terrain] 6 + tree
+                                     # [vegetation] 7 -> one pooled tree distribution
+                                     # painted across both regions' paintable ground)
+    exclude_types:                   # never painted as a scattered population
+      - forest                       # a "forest" crop is a clump of canopy, not a thing
+                                     # to scatter; the Treeline Backdrop stage represents it
     # Vegetation is never painted into RegionType.WATER. The region map types the tarn
     # in that capture correctly; the pattern learned from the shoreline flowers was
     # then painted straight across it (337 flowers, 65 plants, 12 trees on the water).
@@ -1742,6 +1874,13 @@ stages:
     # Defaults to vegetation minus grass_tuft (Grass Cover builds its own cards). Set
     # card_categories: [] to turn cards off and go back to billboards.
     card_planes: 3
+    # Source crops under this (longer side, px) are Swin2SR-upscaled before they are
+    # delit, reconstructed or put on a card -- up to max_sr_passes doublings. The
+    # Rainier scene's 388 flower instances came from a 47x125 px cutout.
+    min_source_px: 384
+    max_sr_passes: 2
+    delight_blur_fraction: 0.02  # low-pass radius of the shading estimate delighting
+                                 # divides out, as a fraction of the crop's longer side
 
   - name: Scene Generation
     stage: SceneGenerationStage
@@ -1970,6 +2109,20 @@ stages:
       bush: 0.8
       tree: 0.8
       forest: 0.8
+
+    # Runtime LODs: every placed instance also carries its reconstruction, crossed
+    # card and camera-facing billboard as Object3D.lods, and the client builds a
+    # LODGroup that swaps by projected screen height (Unity's
+    # screenRelativeTransitionHeight -- a level shows while the instance fills at
+    # least this fraction of the screen; the last value is the cull threshold).
+    # The bake-time min_mesh_angular_px choice above still picks what the object
+    # IS for clients without LOD support.
+    runtime_lods: true
+    lod_mesh_screen_fraction: 0.12
+    lod_card_screen_fraction: 0.025
+    lod_billboard_screen_fraction: 0.003
+    lod_exempt_classes:
+      - grass_tuft                    # thousands of instances on one card: no LODGroup
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting

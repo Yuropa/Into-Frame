@@ -20,10 +20,12 @@ from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.terrain.pattern_texture import (
     bake_real_layer, bake_real_layer_from_mesh, synthesize_region_layer, vegetation_bleed_mask,
+    make_tileable, bake_macro_colour,
 )
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
+from util.delight import delight_preserving_chroma
 from util.device_utils import DeviceStrategy, preferred_device
 from util.panorama_utils import Panorama
 from util.seam_repair import close_wrap_seam
@@ -303,8 +305,77 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # bake, tile_factor=1.0 -- not tiled like the FLUX layers, so this alone
         # sets its on-terrain texel density).
         pattern_canvas_size: int = 2048,
+        # Reference patches for a region's material are cut only from panorama
+        # pixels within this many metres of the camera (0 disables). The ground
+        # texture is built from these patches, and a patch cut from 30 m out is a
+        # radial smear: at 1.8 m eye height a panorama row covers centimetres of
+        # ground at 5 m and metres of it at 30 m, so every "reference" on the
+        # Rainier run (build/texture_generation/*_reference_patch_*.png) was a
+        # starburst and the synthesised tiles were starbursts of starbursts. Inside
+        # ~3x the eye height the projection is sound. Falls back to the unrestricted
+        # search when a region has no pixels this close (rock on the far ridge).
+        reference_max_distance_m: float = 8.0,
+        # Withhold the panorama layer from texels where one panorama pixel would
+        # cover more than this much ground (0 disables). Computed from distance and
+        # the view ray's grazing angle against the height map's own surface, so a
+        # steep mountain face at 100 m keeps its photographed snow (a pixel spans
+        # ~0.2 m there) while flat ground beyond ~25 m, where a pixel spans a metre
+        # or more and the equirect compresses the whole far field into a few rows,
+        # hands over to the tiled material. Ramps from full weight at half this
+        # value to zero at it.
+        panorama_max_texel_m: float = 0.6,
+        # Delight the panorama layer with the same shading-only operation the object
+        # crops and reference patches get (use_intrinsic_delighting /
+        # intrinsic_delight_strength), so the one surface that is lit by the client
+        # with a photograph of the sun already in it stops being the odd one out.
+        delight_panorama_layer: bool = True,
+        # Where a region's detail tile comes from. "patch": the largest near-field
+        # reference patch itself (delit, supersampled, made tileable by a
+        # cross-fade with its own half-rolled copy) -- real material, no
+        # hallucination; falls back to FLUX when the region has no near-field
+        # pixels. "flux": the two-pass FLUX generation as before.
+        tile_source: str = "patch",
+        # Sample every tiled layer stochastically in the shader (hex grid of random
+        # offsets, blended), so a tile never visibly repeats and a cross-faded patch
+        # reads as continuous material.
+        stochastic_tiling: bool = True,
+        # Macro colour map: a top-down bake of the panorama over the terrain grid
+        # at this resolution, blurred by macro_blur_texels, multiplied into the
+        # tiled layers in the shader (tile / macro_mean). The projection smear is
+        # high-frequency; at ~0.4 m per texel and a texel of blur only the
+        # photograph's large-scale colour is left -- snow patches, bare dirt, the
+        # green and brown of the meadow -- which is exactly what a repeating tile
+        # cannot know. 0 disables.
+        macro_map_size: int = 512,
+        macro_blur_texels: float = 1.5,
+        macro_strength: float = 1.0,
+        # Low-pass applied in the panorama's ANGULAR domain before the macro bake
+        # (see pattern_texture.bake_macro_colour): a conifer is a few columns wide
+        # there and a spoke metres long on the ground, so this is where the smear
+        # can be averaged away.
+        macro_angular_sigma_deg: float = 2.0,
+        # Region types whose detail tile may be cut from a near-field photo patch
+        # (tile_source "patch"). Surfaces only: dirt, rock, road are flat and a
+        # patch flattened onto its own plane is a texture of them. Vegetation is
+        # not -- a meadow photographed from eye level is upright plants, and
+        # flattening it onto the ground plane is the starburst this stage exists
+        # to avoid -- so it keeps the FLUX overhead-material tile, colour-matched
+        # by the macro map like every other tiled layer.
+        patch_tile_types: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.tile_source = str(tile_source).lower()
+        self.macro_angular_sigma_deg = float(macro_angular_sigma_deg)
+        self.patch_tile_types = frozenset(
+            patch_tile_types if patch_tile_types is not None else ["ground", "terrain", "road", "trail"]
+        )
+        self.stochastic_tiling = bool(stochastic_tiling)
+        self.macro_map_size = int(macro_map_size)
+        self.macro_blur_texels = float(macro_blur_texels)
+        self.macro_strength = float(macro_strength)
+        self.reference_max_distance_m = float(reference_max_distance_m)
+        self.panorama_max_texel_m = float(panorama_max_texel_m)
+        self.delight_panorama_layer = bool(delight_panorama_layer)
         self.tile_size = tile_size
         self.blend_map_size = blend_map_size
         self.blend_sigma = blend_sigma
@@ -562,6 +633,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                         num_patches=cfg.pattern_num_reference_patches,
                         depth=depth_arr if cfg.use_point_cloud_unwarp else None,
                         exclude_mask=exclude_mask,
+                        max_distance_m=cfg.reference_max_distance_m,
                     )
                     if ref_patches:
                         pattern_layer = self._synthesize_pattern_layer(
@@ -575,6 +647,21 @@ class TerrainTextureGenerationStage(PipelineStage):
                     self.advance_progress(task)
                     self.advance_progress(task)
                     continue
+
+                if cfg.tile_source == "patch" and reference is not None and rt.label in cfg.patch_tile_types:
+                    panorama, type_map, depth_arr, exclude_mask = reference
+                    patch_tile = self._patch_tile(
+                        panorama, type_map, int(rt),
+                        depth_arr if cfg.use_point_cloud_unwarp else None, exclude_mask, cfg, rt.label,
+                    )
+                    if patch_tile is not None:
+                        tiles[rt.label] = patch_tile
+                        tile_factors[rt.label] = cfg.synthetic_tile_factor
+                        self.log_info(f"Generated {rt.label} tile from a near-field photo patch ({cfg.tile_size}px)")
+                        self.advance_progress(task)
+                        self.advance_progress(task)
+                        continue
+                    self.log_info(f"{rt.label}: no near-field patch to build a tile from; falling back to FLUX")
 
                 # Last-resort fallback: no usable real reference for this region type
                 # (or pattern texturing disabled / mesh not yet available) -- today's
@@ -796,6 +883,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 panorama_terrain, cfg.panorama_layer_max_resolution,
                 band_px=cfg.wrap_seam_band_px, log_fn=self.log_info,
             )
+            pano_tile = self._delight_panorama_tile(pano_tile, cfg)
             # The ORIGINAL-photo typing, not the terrain-scoped one, because this has
             # to describe the pixels this layer actually paints. _ground_colour_panorama
             # above puts the original photograph's pixels back wherever foreground
@@ -826,6 +914,8 @@ class TerrainTextureGenerationStage(PipelineStage):
                 upright_feather_frac=cfg.panorama_upright_feather_frac,
                 upright_full_radius_m=cfg.panorama_upright_full_radius_m,
                 upright_falloff_radius_m=cfg.panorama_upright_falloff_radius_m,
+                max_texel_m=cfg.panorama_max_texel_m,
+                pano_rows=panorama_terrain.height,
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -845,9 +935,12 @@ class TerrainTextureGenerationStage(PipelineStage):
                     tile=tiles[rt.label],
                     tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
+                    # A world-space bake (tile_factor 1) must not be re-offset.
+                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, cfg.synthetic_tile_factor) > 1.0,
                 )
                 for rt in present_types if rt.label in tiles
             ]
+            macro, macro_mean = self._macro_map(panorama_terrain, height_map_depth.depth, half, cfg, context)
         else:
             weight_maps = synth_weight_maps
             layers = [
@@ -856,15 +949,55 @@ class TerrainTextureGenerationStage(PipelineStage):
                     tile=tiles[rt.label],
                     tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
+                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, cfg.synthetic_tile_factor) > 1.0,
                 )
                 for rt in present_types if rt.label in tiles
             ]
+            macro, macro_mean = None, None
 
         if not layers:
             label, tile = next(iter(tiles.items()))
             return SplatMaterial.from_single_layer(label, tile, cfg.blend_map_size)
 
-        return SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
+        material = SplatMaterial.from_weight_maps(layers=layers, weight_maps=weight_maps)
+        if macro is not None:
+            material.macro = macro
+            material.macro_mean = macro_mean
+            material.macro_strength = cfg.macro_strength
+        return material
+
+    def _macro_map(
+        self, panorama, height_map: np.ndarray, half: float,
+        cfg: "TerrainTextureGenerationConfiguration", context: PipelineContext,
+    ) -> "tuple[Optional[PIL.Image.Image], Optional[tuple[float, float, float]]]":
+        """The photograph's large-scale ground colour over the terrain grid -- see
+        macro_map_size. Same grid convention as the blend maps (row 0 at Z = -half)."""
+        if cfg.macro_map_size <= 0 or cfg.macro_strength <= 0.0:
+            return None, None
+        type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
+        if type_depth is None:
+            return None, None
+        type_map = type_depth.depth
+        if type_map.shape != (panorama.height, panorama.width):
+            type_map = np.array(PIL.Image.fromarray(type_map.astype(np.uint8)).resize(
+                (panorama.width, panorama.height), PIL.Image.NEAREST,
+            ))
+        depth_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
+        depth = depth_depth.depth if depth_depth is not None else None
+        canvas = bake_macro_colour(
+            np.asarray(panorama.rgb(), dtype=np.uint8), type_map, depth, height_map, half,
+            cfg.macro_map_size, angular_sigma_deg=cfg.macro_angular_sigma_deg,
+            world_blur_texels=cfg.macro_blur_texels,
+        )
+        mean = tuple(float(v) for v in canvas.reshape(-1, 3).mean(axis=0))
+        macro = PIL.Image.fromarray((canvas.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+        self.log_info(
+            f"Macro colour map: {cfg.macro_map_size}px over the grid, blur {cfg.macro_blur_texels:.1f} texel(s), "
+            f"mean rgb ({mean[0]:.2f}, {mean[1]:.2f}, {mean[2]:.2f}), strength {cfg.macro_strength:.2f}"
+        )
+        if self.temp is not None:
+            macro.save(self.temp / "macro_map.png")
+        return macro, mean
 
     def _ground_colour_panorama(self, context: PipelineContext, panorama_terrain):
         """PANORAMA_TERRAIN with real ground colour restored from the original photo.
@@ -1048,6 +1181,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         upright_feather_frac: float = 0.01,
         upright_full_radius_m: float = 6.0,
         upright_falloff_radius_m: float = 25.0,
+        max_texel_m: float = 0.0,
+        pano_rows: int = 2048,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
@@ -1138,6 +1273,28 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_fade_deg=nadir_fade_deg,
             horizon_fade_deg=horizon_fade_deg,
         ).reshape(blend_map_size, blend_map_size)
+
+        if max_texel_m > 0.0:
+            # Ground covered by ONE panorama pixel at this texel: distance times the
+            # pixel's angular height, divided by the sine of the view ray's grazing
+            # angle against the local surface. This is the size of the smear the
+            # equirect projection paints here -- the pinwheel is nothing but this
+            # number growing past what a texture can hide. Flat ground at 30 m from
+            # a 1.8 m eye reads ~0.8 m per pixel; a 45-degree mountain face at 100 m
+            # reads ~0.2 m, so the face keeps its photograph and the flat far field
+            # hands over to the tiled material.
+            cell = (2.0 * half) / max(blend_map_size - 1, 1)
+            dY_dz, dY_dx = np.gradient(Y, cell)
+            normal = np.stack([-dY_dx, np.ones_like(Y), -dY_dz], axis=-1)
+            normal /= np.linalg.norm(normal, axis=-1, keepdims=True).clip(1e-6)
+            ray = np.stack([X, Y, Z], axis=-1)
+            dist = np.linalg.norm(ray, axis=-1).clip(1e-3)
+            ray /= dist[..., None]
+            grazing = np.abs((ray * normal).sum(axis=-1)).clip(0.02, 1.0)
+            footprint = dist * (np.pi / max(pano_rows, 1)) / grazing
+            f1, f0 = max_texel_m, max_texel_m * 0.5
+            texel_gate = np.clip((f1 - footprint) / max(f1 - f0, 1e-6), 0.0, 1.0)
+            weight = weight * texel_gate.astype(np.float32)
 
         if region_type_map is not None:
             # Same projection HeightMapGenerator._panorama_uv_from_height and
@@ -1318,6 +1475,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_cutoff_deg=cfg.nadir_cutoff_deg,
             nadir_fade_deg=cfg.nadir_fade_deg,
             horizon_fade_deg=cfg.horizon_fade_deg,
+            max_texel_m=cfg.panorama_max_texel_m,
         )
         row_c = ((centroids[:, 2] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
         col_c = ((centroids[:, 0] + half) / (2.0 * half) * (cfg.blend_map_size - 1)).clip(0, cfg.blend_map_size - 1)
@@ -1465,17 +1623,50 @@ class TerrainTextureGenerationStage(PipelineStage):
             self.log_info(f"IntrinsicDiffusion delighting failed, using raw patch: {exc}")
             return patch
 
-        strength = cfg.intrinsic_delight_strength
-        if strength < 1.0:
-            albedo_rgb = np.asarray(albedo.convert("RGB"), dtype=np.float32)
-            original_rgb = np.asarray(patch.convert("RGB"), dtype=np.float32)
-            blended = albedo_rgb * strength + original_rgb * (1.0 - strength)
-            albedo = PIL.Image.fromarray(blended.clip(0, 255).astype(np.uint8), "RGB")
+        # Shading only; the patch keeps its own colour (see util.delight). The old
+        # linear blend toward the model's albedo desaturated every reference patch
+        # and, through them, every synthesised ground tile.
+        opaque = np.asarray(patch.split()[-1]) > 8 if patch.mode == "RGBA" else None
+        return delight_preserving_chroma(
+            patch, albedo, strength=cfg.intrinsic_delight_strength, mask=opaque,
+        )
 
-        if patch.mode == "RGBA":
-            albedo = albedo.convert("RGBA")
-            albedo.putalpha(patch.split()[-1])
-        return albedo
+    def _delight_panorama_tile(
+        self, tile: PIL.Image.Image, cfg: "TerrainTextureGenerationConfiguration",
+    ) -> PIL.Image.Image:
+        """The panorama layer with its low-frequency shading divided out, so the
+        client's own sun and sky light it the way they light every delit object
+        beside it. The model runs on a downscaled copy; the correction it yields is
+        a smooth gain field, so the tile's own resolution is untouched."""
+        if not (cfg.delight_panorama_layer and cfg.use_intrinsic_delighting):
+            return tile
+        work_w = min(tile.width, 1536)
+        work = tile.convert("RGB").resize((work_w, max(1, int(tile.height * work_w / tile.width))), PIL.Image.LANCZOS)
+        self._init_intrinsics()
+        try:
+            result = self._intrinsics.intrinsic_images(
+                Image(work), temp_path=self.temp,
+                resolution=cfg.intrinsic_resolution, agg_num=cfg.intrinsic_agg_num,
+            )
+            albedo = result.albedo_image()
+        except Exception as exc:
+            self.log_info(f"Panorama layer delighting failed, keeping the lit panorama: {exc}")
+            return tile
+        finally:
+            self._close_intrinsics()
+        # Exposure reference from the ground half only: the sky is not something
+        # this layer textures, and its brightness must not set the gain.
+        ground = np.zeros((tile.height, tile.width), dtype=bool)
+        ground[tile.height // 2:, :] = True
+        delit = delight_preserving_chroma(
+            tile, albedo, strength=cfg.intrinsic_delight_strength, blur_fraction=0.01,
+            mask=ground,
+        )
+        self.log_info(
+            f"Panorama layer delit at strength {cfg.intrinsic_delight_strength:.2f} "
+            "(shading only, colour preserved)"
+        )
+        return delit
 
     def _supersample_patch(
         self,
@@ -1505,6 +1696,41 @@ class TerrainTextureGenerationStage(PipelineStage):
             result = result.convert("RGBA")
             result.putalpha(patch.split()[-1])
         return result
+
+    def _patch_tile(
+        self, panorama, type_map, region_val: int, depth, exclude_mask,
+        cfg: "TerrainTextureGenerationConfiguration", debug_label: str,
+    ) -> Optional[PIL.Image.Image]:
+        """A detail tile cut from the photograph: the region's largest near-field
+        patch, delit and supersampled, with its own half-rolled copy cross-faded in
+        so its borders meet. Returns None when the region has no near-field pixels
+        (see reference_max_distance_m) -- the caller falls back to FLUX."""
+        patches = self._extract_reference_patches(
+            panorama, type_map, region_val, patch_size=cfg.tile_size, num_patches=1,
+            depth=depth, exclude_mask=exclude_mask,
+            max_distance_m=cfg.reference_max_distance_m, require_near=True,
+        )
+        if not patches:
+            return None
+        patch = patches[0]
+        self._save_debug_step(cfg, debug_label, "p1_near_patch", patch)
+        if cfg.use_intrinsic_delighting:
+            patch = self._delight_patch(patch, cfg)
+            self._close_intrinsics()
+        if cfg.use_patch_supersampling:
+            patch = self._supersample_patch(patch)
+            self._close_supersampler()
+        rgba = np.asarray(patch.convert("RGBA"), dtype=np.float32)
+        rgb, alpha = rgba[..., :3], rgba[..., 3] / 255.0
+        opaque = alpha > 0.5
+        if opaque.any() and not opaque.all():
+            # Outside the region mask the patch holds a neighbouring material;
+            # fill it with the region's own mean so it cannot tile into stripes.
+            mean = rgb[opaque].mean(axis=0)
+            rgb = rgb * alpha[..., None] + mean * (1.0 - alpha[..., None])
+        tile = make_tileable(PIL.Image.fromarray(rgb.clip(0, 255).astype(np.uint8), "RGB"))
+        self._save_debug_step(cfg, debug_label, "p2_tileable", tile)
+        return self._pack_local_height_channel(tile)
 
     def _generate_tileable_tile(
         self,
@@ -1605,6 +1831,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             num_patches=n,
             depth=depth,
             exclude_mask=exclude_mask,
+            max_distance_m=cfg.reference_max_distance_m,
         )
         if not patches:
             return self._generate_tileable_tile(prompt, cfg, seed_offset, inpainter=pass2_inpainter, debug_label=debug_label)
@@ -1985,6 +2212,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         num_patches: int = 1,
         depth: Optional[np.ndarray] = None,
         exclude_mask: Optional[np.ndarray] = None,
+        max_distance_m: float = 0.0,
+        require_near: bool = False,
     ) -> list[PIL.Image.Image]:
         """
         Crop up to num_patches squares directly from the most solid, mutually
@@ -2067,6 +2296,26 @@ class TerrainTextureGenerationStage(PipelineStage):
         remaining = region_mask > 0.5
         if exclude_mask is not None:
             remaining &= ~exclude_mask
+        # Near field only (see reference_max_distance_m): a patch is a texture
+        # sample, and the projection is only a texture sample within a few metres
+        # of the camera. Falls back to the whole region when nothing of this type
+        # is that close -- a far-only material still needs SOME reference.
+        if max_distance_m > 0.0 and depth is not None and depth.shape == (H, W):
+            near = np.isfinite(depth) & (depth > 1e-3) & (depth <= max_distance_m)
+            near_remaining = remaining & near
+            if distance_transform_edt(near_remaining).max() >= 4.0:
+                remaining = near_remaining
+                self.log_info(
+                    f"  reference patches for region {region_val}: restricted to "
+                    f"{int(near_remaining.sum()):,} px within {max_distance_m:.0f} m"
+                )
+            elif require_near:
+                return []
+            else:
+                self.log_info(
+                    f"  reference patches for region {region_val}: nothing solid within "
+                    f"{max_distance_m:.0f} m, searching the whole region (expect projection smear)"
+                )
         patches: list[PIL.Image.Image] = []
 
         for _ in range(max(1, num_patches)):

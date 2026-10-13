@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 /// <summary>
@@ -24,6 +25,11 @@ public class WindSway : MonoBehaviour
     // joints ABOVE the root are for.
     private static readonly float[] AmplitudeFalloff = { 0.0f, 0.5f, 1.0f };
 
+    // One bone chain per rigged child. A runtime LOD set (see SceneObjectManager.
+    // SpawnLodLevels) parents several rigged meshes under one object, each with its
+    // own SwayBone_0..2; every chain has to swing or the level the viewer actually
+    // sees stands still while a hidden one animates.
+    private List<Transform[]> _boneSets;
     private Transform[] _bones;
     private SwayData _data;
 
@@ -39,7 +45,7 @@ public class WindSway : MonoBehaviour
     public static float DebugAmplitudeScale = 1f;
 
     /// <summary>True once the SwayBone_* chain has been located in the instantiated GLB.</summary>
-    public bool BonesFound => _bones != null;
+    public bool BonesFound => _boneSets != null && _boneSets.Count > 0;
 
     /// <summary>True once server sway params have been applied.</summary>
     public bool HasData => _data != null;
@@ -68,13 +74,21 @@ public class WindSway : MonoBehaviour
         // mesh (SceneObjectManager adds this component before that completes, so
         // the mesh can start swaying the instant it appears) -- keep looking each
         // frame until found rather than giving up on an early miss.
-        if (_bones == null)
+        if (_boneSets == null)
         {
-            var found = new Transform[BoneNames.Length];
-            for (int i = 0; i < BoneNames.Length; i++)
-                found[i] = FindRecursive(transform, BoneNames[i]);
-            if (found[0] == null) return;
-            _bones = found;
+            var roots = new List<Transform>();
+            FindAllRecursive(transform, BoneNames[0], roots);
+            if (roots.Count == 0) return;
+            _boneSets = new List<Transform[]>();
+            foreach (var root in roots)
+            {
+                var found = new Transform[BoneNames.Length];
+                found[0] = root;
+                for (int i = 1; i < BoneNames.Length; i++)
+                    found[i] = FindRecursive(root, BoneNames[i]);
+                _boneSets.Add(found);
+            }
+            _bones = _boneSets[0];
         }
 
         // The per-instance frequency/phase (server-jittered, see SceneAnimationStage)
@@ -98,12 +112,22 @@ public class WindSway : MonoBehaviour
         PeakSwing = Mathf.Max(PeakSwing, Mathf.Abs(swing));
         Vector3 axis = Quaternion.Euler(0f, _data.axisDegrees, 0f) * Vector3.right;
 
-        for (int i = 0; i < _bones.Length; i++)
+        foreach (var bones in _boneSets)
         {
-            if (_bones[i] == null) continue;
-            Vector3 localAxis = _bones[i].InverseTransformDirection(axis);
-            _bones[i].localRotation = Quaternion.AngleAxis(swing * AmplitudeFalloff[i], localAxis);
+            for (int i = 0; i < bones.Length; i++)
+            {
+                if (bones[i] == null) continue;
+                Vector3 localAxis = bones[i].InverseTransformDirection(axis);
+                bones[i].localRotation = Quaternion.AngleAxis(swing * AmplitudeFalloff[i], localAxis);
+            }
         }
+    }
+
+    private static void FindAllRecursive(Transform root, string name, List<Transform> into)
+    {
+        if (root.name == name) { into.Add(root); return; }
+        foreach (Transform child in root)
+            FindAllRecursive(child, name, into);
     }
 
     private static Transform FindRecursive(Transform root, string name)

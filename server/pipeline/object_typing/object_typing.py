@@ -4,7 +4,30 @@ from typing import Any
 import torch
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
-from pipeline.object_typing.categories import OBJECT_CATEGORIES
+import math
+import re
+
+import numpy as np
+
+from pipeline.object_typing.categories import (
+    OBJECT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, STATIC_CLUTTER_CATEGORIES,
+    UNIQUE_CATEGORIES, normalize_category,
+)
+from pipeline.scene_generation.object_scale import OBJECT_HEIGHT_PRIORS
+
+# Object classes that need the SCENE to admit them before a crop may be typed as
+# one. A paintbrush bloom seen through CLIP at 40 px is "a giraffe walking through
+# the water" and "a polar bear"; a row of conifers on the Rainier run came back as
+# ten people and eight animals, and three crops of the summit as aircraft. None of
+# those is in a scene whose tags are field, flower, grass, mountain, wildflower.
+# Vegetation and rock are never gated: they belong in any landscape and the
+# scene tags cannot be relied on to list them.
+_SCENE_DEPENDENT_CATEGORIES = frozenset(
+    (BUILT_ENVIRONMENT_CATEGORIES | STATIC_CLUTTER_CATEGORIES | UNIQUE_CATEGORIES | {
+        "person", "animal", "aircraft", "ship", "boat", "car", "truck", "bus",
+        "motorcycle", "bicycle", "train",
+    }) & frozenset(OBJECT_CATEGORIES)
+)
 from pipeline.object_detection.grounding_dino import GroundingDino
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.image_utils import flatten_alpha_with_mean_fill
@@ -42,8 +65,20 @@ class ObjectTypingConfiguration(PipelineStageConfiguration):
         verify_labels: bool = True,
         verify_threshold: float = 0.25,
         verify_min_box_fraction: float = 0.1,
+        scene_constrained_vocabulary: bool = True,
+        size_veto_ratio: float = 3.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Exclude _SCENE_DEPENDENT_CATEGORIES that neither the scene tags (Object
+        # Recognition, RAM++) nor the photo caption support. See
+        # _scene_excluded_classes.
+        self.scene_constrained_vocabulary = bool(scene_constrained_vocabulary)
+        # A crop typed as a class with a metric height prior (OBJECT_HEIGHT_PRIORS)
+        # whose measured height -- angular box height times the panorama depth at
+        # its centre -- is more than this many times the prior, or less than the
+        # prior divided by it, cannot be that class: a 6 m "person" on a cliff face
+        # is the cliff. Demoted to indeterminate. 0 disables.
+        self.size_veto_ratio = float(size_veto_ratio)
         self.confidence_threshold = confidence_threshold
         self.object_margin_threshold = object_margin_threshold
         self.min_confident_area_fraction = min_confident_area_fraction
@@ -151,6 +186,8 @@ class ObjectTypingStage(PipelineStage):
             if (cls := (context.input_object(f"metadata_{idx}") or {}).get("class")) not in (None, "indeterminate")
         )
 
+        excluded = self._scene_excluded_classes(context)
+
         debug_entries = []
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
@@ -169,6 +206,7 @@ class ObjectTypingStage(PipelineStage):
                 box=box,
                 area_fraction=area_fraction,
                 scene_category_prior=scene_category_prior,
+                excluded=excluded,
             )
             # What the crop pixels alone said, before any fallback overwrites it. Kept
             # because the fallback paths below replace `criteria` wholesale with the
@@ -184,12 +222,15 @@ class ObjectTypingStage(PipelineStage):
                     caption,
                     area_fraction=area_fraction,
                     scene_category_prior=scene_category_prior,
+                    excluded=excluded,
                 )
                 caption_fallback = True
 
             # Don't clobber a valid prior classification with indeterminate — keep
             # the existing class as a fallback so correlation has something to work with.
             prior_class = metadata.get("class", "indeterminate")
+            if prior_class in excluded:
+                prior_class = "indeterminate"
             prior_fallback = False
             if obj_type == "indeterminate" and prior_class != "indeterminate":
                 obj_type = prior_class
@@ -227,9 +268,100 @@ class ObjectTypingStage(PipelineStage):
             self.advance_progress(typing_task)
 
         self.finish_progress(typing_task)
+        self._size_veto(context, debug_entries)
         self._verify_labels(context, debug_entries)
         self._write_debug(debug_entries)
         return context
+
+    def _scene_excluded_classes(self, context: PipelineContext) -> frozenset:
+        """Object classes this capture cannot contain: every _SCENE_DEPENDENT_CATEGORIES
+        member that neither a RAM++ scene tag nor the photo caption names.
+
+        A tag supports a class when it normalises to it (normalize_category) or
+        when the class name, or any word of its own prompts, appears in the tag
+        or caption text. With no tags at all nothing is excluded -- a blind veto
+        is worse than none."""
+        if not self.config.scene_constrained_vocabulary:
+            return frozenset()
+        tags_str = context.input_object(ContextKey.RECOGNIZE_TAGS) or ""
+        caption = str(context.input_object(ContextKey.INPUT_CAPTION) or "")
+        tags = [t.strip() for t in str(tags_str).split("|") if t.strip()]
+        if not tags and not caption:
+            self.log_info("Scene vocabulary: no scene tags or caption — every class allowed")
+            return frozenset()
+        stop = {"a", "an", "the", "of", "photo", "in", "on", "or", "and", "with", "to",
+                "at", "is", "there", "close", "up", "outdoors", "parked", "walking"}
+        text_words = {
+            w.rstrip("s") for w in re.findall(r"[a-z]+", (" ".join(tags) + " " + caption).lower())
+        }
+        supported = {normalize_category(t) for t in tags}
+        supported.discard(None)
+
+        def vocabulary(cls: str) -> set:
+            vocab = {cls, cls.rstrip("s")} | set(cls.split("_"))
+            for prompt in OBJECT_CATEGORIES.get(cls, []):
+                for w in re.findall(r"[a-z]+", prompt.lower()):
+                    if w not in stop and len(w) > 2:
+                        vocab.add(w.rstrip("s"))
+            return {w.rstrip("s") for w in vocab}
+
+        excluded = set()
+        for cls in sorted(_SCENE_DEPENDENT_CATEGORIES):
+            if cls in supported or vocabulary(cls) & text_words:
+                continue
+            excluded.add(cls)
+        allowed = sorted(_SCENE_DEPENDENT_CATEGORIES - excluded)
+        self.log_info(
+            f"Scene vocabulary from {len(tags)} tag(s): {len(excluded)} scene-dependent class(es) "
+            f"excluded; admitted: {', '.join(allowed) if allowed else 'none'}"
+        )
+        return frozenset(excluded)
+
+    def _size_veto(self, context: PipelineContext, debug_entries: list) -> None:
+        """Demote crops whose measured height contradicts their class's metric prior."""
+        ratio = self.config.size_veto_ratio
+        if ratio <= 1.0:
+            return
+        depth_value = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
+        panorama = context.input_panorama(ContextKey.PANORAMA)
+        if depth_value is None or panorama is None:
+            return
+        depth = depth_value.depth
+        dh, dw = depth.shape[:2]
+        sx, sy = dw / float(panorama.width), dh / float(panorama.height)
+        vetoed = 0
+        examples = []
+        for entry in debug_entries:
+            cls = entry["class"]
+            if cls not in OBJECT_HEIGHT_PRIORS:
+                continue
+            metadata = context.object(f"metadata_{entry['idx']}") or {}
+            box = metadata.get("box")
+            if not box:
+                continue
+            x, y, w, h = box
+            cx, cy = int(round((x + w / 2.0) * sx)), int(round((y + h / 2.0) * sy))
+            r = 4
+            patch = depth[max(0, cy - r):cy + r + 1, max(0, cx - r):cx + r + 1]
+            valid = patch[np.isfinite(patch) & (patch > 0)]
+            if valid.size == 0:
+                continue
+            d = float(np.median(valid))
+            height_m = 2.0 * d * math.tan(0.5 * (h / float(panorama.height)) * math.pi)
+            prior = OBJECT_HEIGHT_PRIORS[cls][0]
+            if height_m > prior * ratio or height_m < prior / ratio:
+                reason = f"{height_m:.1f} m tall at {d:.0f} m, prior {prior:.1f} m"
+                context.add_object(f"metadata_{entry['idx']}", {
+                    **metadata, "class": "indeterminate", "vetoed_class": cls,
+                    "veto_reason": f"size: {reason}", "low_confidence": True,
+                })
+                entry["class"] = "indeterminate"
+                entry["size_veto"] = reason
+                vetoed += 1
+                if len(examples) < 6:
+                    examples.append(f"crop_{entry['idx']} ({cls}): {reason}")
+        if vetoed:
+            self.log_info(f"Size veto: {vetoed} crop(s) demoted to indeterminate — " + "; ".join(examples))
 
     def _verify_labels(self, context: PipelineContext, debug_entries: list) -> None:
         """Settle `low_confidence` by asking an independent model to find each label.

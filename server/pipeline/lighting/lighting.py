@@ -21,9 +21,27 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         crop_fov_deg: float = 90.0,
+        estimate_from_photo: bool = True,
+        measured_sun_must_be_photographed: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.crop_fov_deg = float(crop_fov_deg)
+        # Feed LuxDiT the hero photograph (a perspective image, which is what the
+        # model is trained on) instead of a 90-degree strip of the equirectangular
+        # panorama. The strip is distorted, runs pole to pole, and on every sample
+        # capture produced a dusk-looking map whose sun sat 80-130 degrees from
+        # anything the photo's own shading supports. On the photo the estimate is
+        # sane: Rainier (front-lit alpine noon) comes back at az -165 el 40, i.e.
+        # high and behind the camera; Shark Fin (sunset, cliffs lit from behind the
+        # camera) at el 7 behind-right. The photo sits at the panorama's centre
+        # with no yaw, so the env map's frame IS the panorama's frame.
+        self.estimate_from_photo = bool(estimate_from_photo)
+        # Only trust a solar disc found in the panorama if it lies inside the
+        # photographed cone. Outside it the disc is WorldGen's or FLUX's invention
+        # and the key light it yields is unrelated to the shading baked into every
+        # real pixel (on the previous Rainier run: az 148 el 13.6, 91 degrees outside
+        # the cone, lighting a midday meadow with a raking evening sun).
+        self.measured_sun_must_be_photographed = bool(measured_sun_must_be_photographed)
 
 
 class PanoramaLightingStage(PipelineStage):
@@ -55,6 +73,24 @@ class PanoramaLightingStage(PipelineStage):
             SemanticKey.INPUT: ContextKey.PANORAMA,
             SemanticKey.OUTPUT: ContextKey.LIGHTING,
         })
+
+    def _captured_half_fov(self, context: PipelineContext) -> float:
+        """Half the horizontal angle the photo occupies in the panorama, in degrees,
+        or 0.0 when there are no intrinsics to know it from."""
+        intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+        fov = float(getattr(intrinsics, "fov", 0.0) or 0.0) if intrinsics is not None else 0.0
+        if fov <= 0.0:
+            return 0.0
+        from pipeline.panorama.placement import placement_fov_deg
+        return placement_fov_deg(fov) / 2.0
+
+    @staticmethod
+    def _az_el(direction) -> tuple[float, float]:
+        x, y, z = (float(v) for v in direction)
+        return (
+            math.degrees(math.atan2(x, z)),
+            math.degrees(math.asin(max(-1.0, min(1.0, y)))),
+        )
 
     def _report_sun_provenance(self, context: PipelineContext, sun, panorama) -> None:
         """Say whether the sun this scene is lit by was ever photographed.
@@ -118,8 +154,14 @@ class PanoramaLightingStage(PipelineStage):
             self.finish_progress(task)
             return context
 
+        photo = context.input_image(ContextKey.INPUT) if self.config.estimate_from_photo else None
         crop_fov = self.config.crop_fov_deg
-        if crop_fov > 0:
+        if photo is not None:
+            input_image = photo.rgb()
+            self.log_info(
+                f"Lighting: estimating from the photograph ({input_image.width}×{input_image.height}px)"
+            )
+        elif crop_fov > 0:
             img  = panorama.rgb()
             w, h = img.size
             crop_w = max(1, int(w * crop_fov / 360.0))
@@ -157,6 +199,21 @@ class PanoramaLightingStage(PipelineStage):
                 "No solar disc in the panorama sky (overcast, or no sky) — "
                 "keeping the environment map's own direction estimate"
             )
+        elif self.config.measured_sun_must_be_photographed:
+            half_fov = self._captured_half_fov(context)
+            az, el = self._az_el(measured_sun[0])
+            if half_fov > 0.0 and abs(az) > half_fov:
+                self.log_info(
+                    f"Solar disc in the panorama at az {az:.1f}° el {el:.1f}° lies "
+                    f"{abs(az) - half_fov:.1f}° outside the photographed cone — it was "
+                    "generated, not photographed, so the environment map's own estimate "
+                    "is used instead"
+                )
+                measured_sun = None
+            elif half_fov > 0.0:
+                self.log_info(
+                    f"Solar disc photographed at az {az:.1f}° el {el:.1f}° — using it"
+                )
 
         lighting = SceneLighting(
             ldr=result.ldr, log=result.log, hdr=result.hdr, measured_sun=measured_sun,
@@ -174,11 +231,11 @@ class PanoramaLightingStage(PipelineStage):
             + (f", sun {sun['intensity']:.2f}x @ {sun['color']}"
                f" (direction from {sun['direction_source']})" if sun else ", no directional sun")
         )
-        if sun and sun.get("intensity_unclamped", 0) > 3.0:
+        if sun and sun.get("intensity_unclamped", 0) > sun.get("intensity", 0) + 1e-3:
             # The clamp hiding a value means _SUN_INTENSITY_SCALE is mis-calibrated for
-            # this kind of scene, not that the scene is genuinely 3x nominal daylight.
+            # this kind of scene, not that the scene is genuinely that far over nominal.
             self.log_warning(
-                f"Sun intensity clamped: {sun['intensity_unclamped']:.2f} -> 3.00 "
+                f"Sun intensity clamped: {sun['intensity_unclamped']:.2f} -> {sun['intensity']:.2f} "
                 f"(irradiance share {sun['sun_share']:.4f}) — recalibrate "
                 f"_SUN_INTENSITY_SCALE against this"
             )
@@ -220,7 +277,7 @@ class PanoramaLightingStage(PipelineStage):
             stage_name=self.name,
             title="Environment Lighting Estimation",
             body=(
-                "Environment lighting was estimated from the panorama using LuxDiT, a "
+                "Environment lighting was estimated from the photograph using LuxDiT, a "
                 "diffusion-based illumination estimation model. The model produces an LDR "
                 "environment map and a log-domain map that together encode the full "
                 "spherical lighting of the scene. Both maps are embedded in the scene "

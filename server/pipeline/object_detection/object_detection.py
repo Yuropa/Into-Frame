@@ -9,6 +9,7 @@ from pipeline.object_detection.grounding_dino import GroundingDino
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from pipeline.segmentation.hires_crops import build_hires_crops, CAPTURED_FOV_RESTRICTED_KEY
+from pipeline.segmentation.photo_detection import detection_photo, store_photo_masks
 from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -35,8 +36,15 @@ class ObjectDetectionConfiguration(PipelineStageConfiguration):
         captured_fov_margin_deg: float = 3.0,
         hires_crops_from_input: bool = True,
         panorama_sr_factor: float = 2.0,
+        # Same as SegmentationConfiguration: Grounding DINO is prompted with the
+        # scene tags on the photograph for the cone, and on the panorama only for
+        # what lies outside it.
+        detect_on_photo: bool = True,
+        photo_detect_sr_factor: float = 2.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.detect_on_photo = bool(detect_on_photo)
+        self.photo_detect_sr_factor = float(photo_detect_sr_factor)
         self.min_area_fraction = min_area_fraction
         self.max_area_fraction = max_area_fraction
         self.restrict_to_captured_fov = bool(restrict_to_captured_fov)
@@ -121,11 +129,61 @@ class ObjectDetectionStage(PipelineStage):
         cone = None
         if context.input_panorama(self._input_key()) is not None:
             cone = captured_cone_from_context(context, input_image.width, input_image.height)
+        cfg: ObjectDetectionConfiguration = self.config
+        photo_pass = cone is not None and cfg.detect_on_photo
 
         task = self.create_progress(3, "Detecting objects…")
         if self._detector is None:
             self._detector = GroundingDino(self.device)
         self.advance_progress(task)
+
+        next_idx = existing_count
+        photo_added = 0
+        if photo_pass:
+            photo_img, factor = detection_photo(
+                context, self.preferred_device, cfg.photo_detect_sr_factor, self.temp, self.log_info,
+            )
+            if photo_img is None:
+                photo_pass = False
+            else:
+                photo_task = self.create_progress(2, "Detecting on the photograph…")
+                photo_dets = self._detector.detect(
+                    photo_img.rgb(), tags, self.temp or self.output,
+                    on_progress=self.make_progress_callback(photo_task),
+                )
+                self.advance_progress(photo_task)
+                pw_, ph_ = photo_img.size
+                kept, boxes = [], []
+                for det in photo_dets:
+                    x, y, w, h = det["box"]
+                    x1, y1 = max(0, int(x)), max(0, int(y))
+                    x2, y2 = min(pw_, int(x + w)), min(ph_, int(y + h))
+                    if x2 > x1 and y2 > y1:
+                        kept.append(det)
+                        boxes.append([x1, y1, x2 - x1, y2 - y1])
+                if boxes:
+                    if self._seg is None:
+                        self._seg = ImageSeg(self.preferred_device)
+                    photo_masks = self._seg.segment_boxes(
+                        photo_img, boxes, self.temp, on_progress=self.make_progress_callback(photo_task),
+                    )
+                    native_area = cone.photo_w * cone.photo_h
+                    photo_added, filtered_photo = store_photo_masks(
+                        context, cone, photo_img.rgba(), factor, photo_masks,
+                        [d["score"] for d in kept], next_idx,
+                        min_area=cfg.min_area_fraction * native_area,
+                        max_area=cfg.max_area_fraction * native_area,
+                        source="grounding_dino_photo",
+                        labels=[d["label"] for d in kept],
+                        extra=[{"low_confidence": float(d["score"]) < cfg.confident_score} for d in kept],
+                        log=self.log_info,
+                    )
+                    next_idx += photo_added
+                    self.log_info(
+                        f"Photo pass: {photo_added} tagged detection(s) from the photograph at {factor:.0f}x"
+                        f" ({filtered_photo} outside size bounds)"
+                    )
+                self.finish_progress(photo_task)
 
         detections = self._detector.detect(
             input_image.rgb(),
@@ -165,13 +223,12 @@ class ObjectDetectionStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
 
-        next_idx = existing_count
         debug_entries = []
         filtered = 0
         filtered_fov = 0
+        skipped_inside = 0
         in_cone: list[tuple[int, list[float]]] = []
 
-        cfg: ObjectDetectionConfiguration = self.config
         img_area = img_w * img_h
         min_area = cfg.min_area_fraction * img_area
         max_area = cfg.max_area_fraction * img_area
@@ -192,6 +249,9 @@ class ObjectDetectionStage(PipelineStage):
                 inside = cone.contains_box(crop.box, cfg.captured_fov_margin_deg) if cone is not None else None
                 if inside is False:
                     filtered_fov += 1
+                elif inside and photo_pass:
+                    skipped_inside += 1
+                    continue
 
                 metadata = {
                     "box": [float(x), float(y), float(w), float(h)],
@@ -253,7 +313,9 @@ class ObjectDetectionStage(PipelineStage):
             self.log_info(f"  Filtered {filtered} detection(s) outside size bounds")
         if filtered_fov:
             self.log_info(f"  {filtered_fov} detection(s) lie outside the photographed cone ({len(in_cone)} inside)")
-        self.log_info(f"Added {added} detections (SAM2: {existing_count}, total: {next_idx})")
+        if skipped_inside:
+            self.log_info(f"  {skipped_inside} panorama detection(s) inside the cone dropped as duplicates of the photo pass")
+        self.log_info(f"Added {added} detections ({photo_added} from the photograph; before: {existing_count}, total: {next_idx})")
         return context
 
     def has_expected_output(self, context: PipelineContext) -> bool:

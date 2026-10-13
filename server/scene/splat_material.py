@@ -35,6 +35,11 @@ class SplatLayer:
     # 0 = perfectly rough/matte (soil, grass); 1 = perfectly mirror-smooth.
     # Water sits at ~0.88; concrete ~0.25; rock/trail/vegetation < 0.1.
     smoothness: float = 0.1
+    # When True the shader samples this tile stochastically (a hex grid of
+    # randomly offset lookups, blended), so the tile never visibly repeats and a
+    # tile that is not perfectly seamless still reads as one continuous material.
+    # Meaningless for an equirect layer.
+    stochastic: bool = False
 
 
 class SplatMaterial:
@@ -74,6 +79,9 @@ class SplatMaterial:
         layers: list[SplatLayer],
         blend_maps: list[PILImage.Image],
         tile_size: int,
+        macro: "PILImage.Image | None" = None,
+        macro_strength: float = 0.0,
+        macro_mean: "tuple[float, float, float] | None" = None,
     ) -> None:
         if len(layers) > MAX_LAYERS:
             raise ValueError(f"SplatMaterial supports at most {MAX_LAYERS} layers, got {len(layers)}")
@@ -82,6 +90,14 @@ class SplatMaterial:
         self.layers = layers
         self.blend_maps = blend_maps
         self.tile_size = tile_size
+        # Macro colour map: the photograph's large-scale ground colour (snow patches,
+        # bare dirt, the green-to-brown of the meadow) baked top-down over the same
+        # grid the blend maps use, low-passed so no projection smear survives. The
+        # shader multiplies the TILED layers by macro / macro_mean, so the tiles carry
+        # the detail and the photo carries the colour. None -> tiles are flat.
+        self.macro = macro
+        self.macro_strength = float(macro_strength)
+        self.macro_mean = tuple(float(v) for v in macro_mean) if macro_mean else None
 
     @property
     def layer_count(self) -> int:
@@ -211,7 +227,7 @@ class SplatMaterial:
             img.save(buf, format="PNG")
             return base64.b64encode(buf.getvalue()).decode("ascii")
 
-        return {
+        data = {
             "tile_size": self.tile_size,
             "layers": [
                 {
@@ -219,12 +235,18 @@ class SplatMaterial:
                     "tile_factor": layer.tile_factor,
                     "equirect": layer.equirect,
                     "smoothness": layer.smoothness,
+                    "stochastic": layer.stochastic,
                     "tile": _b64(layer.tile),
                 }
                 for layer in self.layers
             ],
             "blend_maps": [_b64(bm) for bm in self.blend_maps],
         }
+        if self.macro is not None:
+            data["macro"] = _b64(self.macro)
+            data["macro_strength"] = self.macro_strength
+            data["macro_mean"] = list(self.macro_mean or (0.5, 0.5, 0.5))
+        return data
 
     @classmethod
     def decode(cls, data: dict) -> Self:
@@ -238,11 +260,17 @@ class SplatMaterial:
                 tile_factor=entry.get("tile_factor", 1.0),
                 equirect=entry.get("equirect", False),
                 smoothness=entry.get("smoothness", 0.1),
+                stochastic=entry.get("stochastic", False),
             )
             for entry in data["layers"]
         ]
         blend_maps = [_from_b64(bm) for bm in data["blend_maps"]]
-        return cls(layers=layers, blend_maps=blend_maps, tile_size=data["tile_size"])
+        macro = _from_b64(data["macro"]) if data.get("macro") else None
+        return cls(
+            layers=layers, blend_maps=blend_maps, tile_size=data["tile_size"],
+            macro=macro, macro_strength=data.get("macro_strength", 0.0),
+            macro_mean=tuple(data["macro_mean"]) if data.get("macro_mean") else None,
+        )
 
     # ── Save / load ───────────────────────────────────────────────────────────
 
@@ -251,10 +279,17 @@ class SplatMaterial:
         manifest = {
             "tile_size": self.tile_size,
             "layers": [
-                {"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect, "smoothness": layer.smoothness}
+                {"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect,
+                 "smoothness": layer.smoothness, "stochastic": layer.stochastic}
                 for layer in self.layers
             ],
         }
+        if self.macro is not None:
+            manifest["macro_strength"] = self.macro_strength
+            manifest["macro_mean"] = list(self.macro_mean or (0.5, 0.5, 0.5))
+            self.macro.save(path / "macro.png")
+        elif (path / "macro.png").exists():
+            (path / "macro.png").unlink()
         (path / "splat_material.json").write_text(json.dumps(manifest, indent=2))
         for i, bm in enumerate(self.blend_maps):
             bm.save(path / f"blend_map_{i}.png")
@@ -272,6 +307,7 @@ class SplatMaterial:
                 tile_factor=entry.get("tile_factor", 1.0),
                 equirect=entry.get("equirect", False),
                 smoothness=entry.get("smoothness", 0.1),
+                stochastic=entry.get("stochastic", False),
             )
             for entry in manifest["layers"]
         ]
@@ -280,4 +316,9 @@ class SplatMaterial:
             p = path / f"blend_map_{i}.png"
             if p.exists():
                 blend_maps.append(PILImage.open(p).copy())
-        return cls(layers=layers, blend_maps=blend_maps, tile_size=tile_size)
+        macro = PILImage.open(path / "macro.png").copy() if (path / "macro.png").exists() else None
+        return cls(
+            layers=layers, blend_maps=blend_maps, tile_size=tile_size,
+            macro=macro, macro_strength=manifest.get("macro_strength", 0.0),
+            macro_mean=tuple(manifest["macro_mean"]) if manifest.get("macro_mean") else None,
+        )

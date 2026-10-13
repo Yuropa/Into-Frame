@@ -241,6 +241,9 @@ class SimulationServer():
             add(obj.physics_mesh)
             add(obj.video_color)
             add(obj.video_alpha)
+            for lod in obj.lods:
+                add(lod.get("mesh"))
+                add(lod.get("texture"))
         return keys
 
     async def _send_scene(self):

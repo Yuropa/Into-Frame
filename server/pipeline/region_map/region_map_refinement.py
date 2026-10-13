@@ -66,6 +66,7 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         water_elevation_tolerance: float = 0.5,
         water_gradient_threshold: float = 0.04,
         terrain_gradient_threshold: float = 0.15,
+        terrain_reclassify_observed_only: bool = True,
         paint_width: int = 2,
         water_connected_only: bool = True,
         min_water_area_m2: float = 12.0,
@@ -88,6 +89,14 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         self.water_elevation_tolerance = water_elevation_tolerance
         self.water_gradient_threshold = water_gradient_threshold
         self.terrain_gradient_threshold = terrain_gradient_threshold
+        # Only cells with a real height measurement (HEIGHT_MAP_OBSERVED_MASK) may be
+        # flipped to TERRAIN for being steep. The synthetic mountain ring and every
+        # interpolated slope between measured points are steep by construction, so
+        # without this the rule relabelled 57% of the Rainier grid (9.5 M of 16.7 M
+        # cells) as rock, dropped the meadow's GROUND region below the texture
+        # stage's min_region_fraction, and tiled the whole far field with the rock
+        # material. A slope the reconstruction invented is not evidence of rock.
+        self.terrain_reclassify_observed_only = bool(terrain_reclassify_observed_only)
         self.paint_width = paint_width
         # Pass 2 may only grow water OUT of water that is already known: a
         # low-certainty cell in the elevation band becomes WATER only if it is
@@ -282,9 +291,27 @@ class RegionMapRefinementStage(PipelineStage):
                 & (region_map != int(RegionType.WATER))
                 & (region_map != int(RegionType.SKY))
             )
+            steep_candidates = int(reclassify_terrain.sum())
+            if cfg.terrain_reclassify_observed_only:
+                observed_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
+                if observed_depth is not None:
+                    observed = observed_depth.depth > 0.5
+                    if observed.shape != (H, W):
+                        from scipy.ndimage import zoom as _zoom
+                        observed = _zoom(
+                            observed.astype(np.float32), (H / observed.shape[0], W / observed.shape[1]), order=0,
+                        ) > 0.5
+                    reclassify_terrain &= observed
+                else:
+                    self.log_warning(
+                        "terrain_reclassify_observed_only is on but there is no "
+                        "HEIGHT_MAP_OBSERVED_MASK — steep-cell reclassification applies to every cell"
+                    )
             region_map[reclassify_terrain] = int(RegionType.TERRAIN)
             self.log_info(
-                f"Reclassified {reclassify_terrain.sum()} steep cells as TERRAIN"
+                f"Reclassified {int(reclassify_terrain.sum())} of {steep_candidates} steep "
+                f"low-certainty cells as TERRAIN"
+                + (" (measured cells only)" if cfg.terrain_reclassify_observed_only else "")
             )
 
         self.advance_progress(task)

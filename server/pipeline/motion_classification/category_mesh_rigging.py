@@ -88,6 +88,12 @@ class CategoryMeshRiggingStage(PipelineStage):
             metadata = context.input_object(f"metadata_{obj.source_index}") or {}
             if metadata.get("class") in self.config.rig_categories and metadata.get("stationary"):
                 mesh_keys_to_rig.add(obj.mesh)
+                # Every runtime LOD of the instance sways too, or the card the
+                # viewer sees from ten metres away stands still while the mesh
+                # it replaced was animated.
+                for lod in obj.lods:
+                    if lod.get("mesh"):
+                        mesh_keys_to_rig.add(lod["mesh"])
 
         if not mesh_keys_to_rig:
             self.log_info("No stationary vegetation instances to rig")

@@ -179,8 +179,13 @@ class ImageClipClassifier:
         top_n: int = 5,
         area_fraction: float | None = None,
         scene_category_prior: frozenset[str] | None = None,
+        excluded: frozenset[str] | None = None,
     ) -> tuple[str, float, list[tuple[str, float]], dict]:
         """Returns (label, confidence, top_candidates, criteria).
+
+        excluded       — object labels this scene cannot contain (see
+                         ObjectTypingStage._scene_excluded_classes); they never win
+                         and never act as the margin rival.
 
         label          — winning category or 'indeterminate'
         confidence     — see _pairwise_certainty: 0 = perfectly tied between the
@@ -216,7 +221,7 @@ class ImageClipClassifier:
             image_features = image_features / image_features.norm(dim=-1, keepdim=True)
 
         sims = (image_features @ self._text_features.T).squeeze(0)
-        return self._sims_to_result(sims, top_n, area_fraction, scene_category_prior)
+        return self._sims_to_result(sims, top_n, area_fraction, scene_category_prior, excluded)
 
     def classify_from_caption(
         self,
@@ -224,6 +229,7 @@ class ImageClipClassifier:
         top_n: int = 5,
         area_fraction: float | None = None,
         scene_category_prior: frozenset[str] | None = None,
+        excluded: frozenset[str] | None = None,
     ) -> tuple[str, float, list[tuple[str, float]], dict]:
         """Classify using a text caption instead of an image.
 
@@ -238,7 +244,7 @@ class ImageClipClassifier:
             caption_features = caption_features / caption_features.norm(dim=-1, keepdim=True)
 
         sims = (caption_features @ self._text_features.T).squeeze(0)
-        return self._sims_to_result(sims, top_n, area_fraction, scene_category_prior)
+        return self._sims_to_result(sims, top_n, area_fraction, scene_category_prior, excluded)
 
     def _sims_to_result(
         self,
@@ -246,12 +252,16 @@ class ImageClipClassifier:
         top_n: int,
         area_fraction: float | None = None,
         scene_category_prior: "frozenset[str] | None" = None,
+        excluded: "frozenset[str] | None" = None,
     ) -> tuple[str, float, list[tuple[str, float]], dict]:
+        excluded = excluded or frozenset()
         best_obj_label, best_obj_score = None, -float("inf")
         second_obj_label, second_obj_score = None, -float("inf")
         best_env_label, best_env_score = None, -float("inf")
         per_label: list[tuple[str, float]] = []
         for label, start, end in self._category_slices:
+            if label in excluded:
+                continue
             score = sims[start:end].max().item()
             per_label.append((label, score))
             if label in _OBJECT_LABELS:

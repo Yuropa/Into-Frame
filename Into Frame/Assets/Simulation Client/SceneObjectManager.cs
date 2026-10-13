@@ -382,7 +382,7 @@ public class SceneObjectManager : MonoBehaviour
     private static bool IsEnvironmentMesh(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
-        return name == "terrain" || name == "water" || name.StartsWith("formation_");
+        return name == "terrain" || name == "water" || name == "treeline" || name.StartsWith("formation_");
     }
 
     private void SpawnMeshImmediate(SceneObject data)
@@ -410,7 +410,10 @@ public class SceneObjectManager : MonoBehaviour
         var capturedContainer = container;
         var capturedMesh = data.mesh;
         var capturedGeneration = _queueGeneration;
-        EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
+        if (data.lods != null && data.lods.Length > 0)
+            SpawnLodLevels(container, data, capturedGeneration);
+        else
+            EnqueueTask(() => LoadGlbInto(capturedContainer, capturedMesh, capturedGeneration));
 
         if (!string.IsNullOrEmpty(data.physicsMesh))
         {
@@ -438,6 +441,85 @@ public class SceneObjectManager : MonoBehaviour
                 container.AddComponent<PhysicsHandoff>().Apply(data.physics);
             }
         }
+    }
+
+    // ── Runtime LODs ──────────────────────────────────────────────────────
+    //
+    // The server's bake-time mesh-vs-card choice is made once, from the start
+    // position; with Object3D.lods every representation the instance has arrives
+    // together and a LODGroup swaps between them by projected screen height, so a
+    // card becomes the reconstruction when you walk up to it and a mesh drops to
+    // a card and then a billboard as you walk away. Each level is a child with the
+    // LOCAL transform the server computed (scale and base offset differ between a
+    // reconstruction, a crossed card and a centred quad), loaded through the same
+    // queue as everything else; the group is assembled by a task enqueued after
+    // the loads, so it runs once every level that is going to exist does.
+
+    private void SpawnLodLevels(GameObject container, SceneObject data, int generation)
+    {
+        var levels = new List<GameObject>();
+        for (int i = 0; i < data.lods.Length; i++)
+        {
+            var lod = data.lods[i];
+            bool isBillboard = string.IsNullOrEmpty(lod.mesh);
+            var child = new GameObject($"[lod{i}] {(isBillboard ? "billboard" : lod.mesh)}");
+            child.transform.SetParent(container.transform, worldPositionStays: false);
+            child.transform.localPosition = ToVec3(lod.position);
+            child.transform.localRotation = Quaternion.identity;
+            child.transform.localScale    = lod.scale != null ? ToVec3(lod.scale) : Vector3.one;
+            levels.Add(child);
+
+            if (!isBillboard)
+            {
+                var capturedChild = child;
+                var capturedMesh = lod.mesh;
+                EnqueueTask(() => LoadGlbInto(capturedChild, capturedMesh, generation));
+            }
+            else if (!string.IsNullOrEmpty(lod.texture) && billboardPrefab != null)
+            {
+                var quad = Instantiate(billboardPrefab, child.transform);
+                quad.name = "[billboard]";
+                quad.transform.localPosition = Vector3.zero;
+                quad.transform.localScale    = Vector3.one;
+                StartCoroutine(ApplyTexture(quad, lod.texture));
+            }
+        }
+        var capturedLevels = levels;
+        var capturedData = data;
+        EnqueueTask(() => AssembleLodGroup(container, capturedLevels, capturedData, generation));
+    }
+
+    private IEnumerator AssembleLodGroup(GameObject container, List<GameObject> levels, SceneObject data, int generation)
+    {
+        if (container == null || generation != _queueGeneration) yield break;
+
+        var lods = new List<LOD>();
+        float previous = float.MaxValue;
+        for (int i = 0; i < levels.Count; i++)
+        {
+            if (levels[i] == null) continue;
+            var renderers = levels[i].GetComponentsInChildren<Renderer>(true);
+            if (renderers.Length == 0)
+            {
+                // That level's asset failed to load (already reported by LoadGlbInto);
+                // the group simply skips it rather than showing nothing in its range.
+                Destroy(levels[i]);
+                continue;
+            }
+            // Unity requires strictly decreasing transition heights.
+            float height = Mathf.Clamp01(data.lods[i].screenHeight);
+            if (height >= previous) height = Mathf.Max(0f, previous * 0.5f);
+            previous = height;
+            lods.Add(new LOD(height, renderers));
+        }
+        if (lods.Count == 0) yield break;
+
+        var group = container.GetComponent<LODGroup>();
+        if (group == null) group = container.AddComponent<LODGroup>();
+        group.fadeMode = LODFadeMode.CrossFade;
+        group.animateCrossFading = true;
+        group.SetLODs(lods.ToArray());
+        group.RecalculateBounds();
     }
 
     private IEnumerator ReloadMesh(TrackedObject tracked, string meshId)

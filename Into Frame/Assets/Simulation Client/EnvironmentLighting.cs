@@ -4,8 +4,17 @@ using UnityEngine;
 using UnityEngine.Rendering;
 
 /// <summary>
-/// Decodes a base64 equirectangular LDR environment map (from SceneLightingData)
-/// and re-renders a ReflectionProbe from it.
+/// Builds the scene's ambient lighting (ambient SH + reflection probe) from the
+/// skybox the viewer actually sees.
+///
+/// One sky. The panorama skybox (PanoramaSkybox), the solar disc the server measured
+/// the key light from, and the environment the probe is rendered from are all the
+/// same image. Before this the probe was rendered from LuxDiT's own LDR estimate --
+/// a different, often dusk-looking map whose sun sat on the opposite side from the
+/// directional light -- so the ground bounce, the sky overhead and the key light
+/// never agreed with each other. That estimate is still delivered in
+/// SceneLightingData (the server derives the sun intensity from its HDR merge) and
+/// can be switched back on with useEstimatedEnvironmentMap for comparison.
 ///
 /// Attach to the same persistent GameObject as SceneClient.
 /// In the Inspector, set the ReflectionProbe to Realtime / Via Scripting.
@@ -15,25 +24,66 @@ public class EnvironmentLighting : MonoBehaviour
     [Header("Reflection")]
     public ReflectionProbe reflectionProbe;
 
+    [Header("Source")]
+    [Tooltip("Render the probe from LuxDiT's estimated environment map instead of the " +
+             "visible panorama skybox. Off: the skybox the viewer sees is also what " +
+             "lights the scene.")]
+    public bool useEstimatedEnvironmentMap = false;
+
+    [Tooltip("Seconds to wait for the panorama skybox to load before giving up and " +
+             "rendering the probe from whatever skybox is set.")]
+    public float skyboxLoadTimeoutSeconds = 30f;
+
     private Material  _envMaterial;
     private Texture2D _envTexture;
 
-    public void Apply(SceneLightingData data)
+    public void Apply(SceneLightingData data, PanoramaSkybox panorama = null)
     {
-        if (data == null || string.IsNullOrEmpty(data.ldr))
-        {
-            Debug.LogWarning("[EnvironmentLighting] No lighting data from server (data null or ldr empty) — ambient probe left at its current/baked value");
-            return;
-        }
         if (!gameObject.activeInHierarchy)
         {
             Debug.LogWarning("[EnvironmentLighting] GameObject inactive — skipping ambient probe update");
             return;
         }
-        StartCoroutine(ApplyCoroutine(data));
+        if (useEstimatedEnvironmentMap)
+        {
+            if (data == null || string.IsNullOrEmpty(data.ldr))
+            {
+                Debug.LogWarning("[EnvironmentLighting] No estimated environment map from server — falling back to the skybox");
+                StartCoroutine(ApplyFromSkybox(panorama));
+                return;
+            }
+            StartCoroutine(ApplyFromEstimate(data));
+            return;
+        }
+        StartCoroutine(ApplyFromSkybox(panorama));
     }
 
-    private IEnumerator ApplyCoroutine(SceneLightingData data)
+    private IEnumerator ApplyFromSkybox(PanoramaSkybox panorama)
+    {
+        if (panorama != null)
+        {
+            float deadline = Time.realtimeSinceStartup + skyboxLoadTimeoutSeconds;
+            // PanoramaSkybox bumps LoadGeneration every time a new panorama is applied,
+            // so wait for the one that was just requested, not a previous scene's.
+            int wanted = panorama.PendingGeneration;
+            while (panorama.AppliedGeneration < wanted && Time.realtimeSinceStartup < deadline)
+                yield return null;
+            if (panorama.AppliedGeneration < wanted)
+                Debug.LogWarning("[EnvironmentLighting] Skybox did not load in time — rendering the probe from the current skybox");
+        }
+
+        // PanoramaSkybox.ApplySkybox already called DynamicGI.UpdateEnvironment() for
+        // the ambient SH; the reflection probe still has to be rendered explicitly.
+        DynamicGI.UpdateEnvironment();
+        if (reflectionProbe != null)
+        {
+            int id = reflectionProbe.RenderProbe();
+            yield return new WaitUntil(() => reflectionProbe.IsFinishedRendering(id));
+        }
+        Debug.Log("[EnvironmentLighting] Ambient probe rendered from the panorama skybox");
+    }
+
+    private IEnumerator ApplyFromEstimate(SceneLightingData data)
     {
         byte[]    bytes = Convert.FromBase64String(data.ldr);
         Texture2D tex   = new Texture2D(2, 2, TextureFormat.RGBA32, false);

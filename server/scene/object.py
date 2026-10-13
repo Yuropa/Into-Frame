@@ -75,6 +75,17 @@ class Object3D():
         # then on. None when not applicable.
         self.physics: Optional[dict] = None
 
+        # Runtime level-of-detail alternatives for a mesh instance, nearest first:
+        # [{"mesh": key or "", "texture": key or "", "scale": vec3, "position": vec3,
+        #   "screenHeight": float}, ...]. `scale`/`position` are LOCAL to this
+        # object's own transform (the client parents every level under it);
+        # `screenHeight` is the fraction of the screen the instance must fill for
+        # this level to be shown (Unity's screenRelativeTransitionHeight). An entry
+        # with a mesh is a GLB; one with only a texture is a camera-facing
+        # billboard. Empty -> no LODGroup, the client renders `mesh` alone as before.
+        # Set by SceneGenerationStage; see its lod_* options.
+        self.lods: list[dict] = []
+
     def set_position(self, x: float, y: float, z: float):
         self.position = vec3(x, y, z)
 
@@ -111,6 +122,8 @@ class Object3D():
             data["physics"] = self.physics
         if self.physics_mesh:
             data["physicsMesh"] = self.physics_mesh
+        if self.lods:
+            data["lods"] = self.lods
         return data
 
     @classmethod
@@ -152,4 +165,5 @@ class Object3D():
         obj.sway = data.get("sway")
         obj.physics = data.get("physics")
         obj.physics_mesh = data.get("physicsMesh", "")
+        obj.lods = list(data.get("lods") or [])
         return obj

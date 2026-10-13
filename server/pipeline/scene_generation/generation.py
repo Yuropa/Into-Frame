@@ -50,8 +50,31 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         overlap_min_separation: float = 0.35,
         overlap_min_separation_overrides: dict[str, float] | None = None,
         overlap_exempt_classes: list[str] | None = None,
+        runtime_lods: bool = True,
+        lod_mesh_screen_fraction: float = 0.12,
+        lod_card_screen_fraction: float = 0.025,
+        lod_billboard_screen_fraction: float = 0.003,
+        lod_exempt_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Runtime LODs. The mesh-vs-card choice (min_mesh_angular_px) is made ONCE,
+        # from the start position; walk up to a card and it stays a card, walk away
+        # from a mesh and it stays an 8,000-triangle mesh. With this on, every
+        # placed instance also carries its other representations (reconstruction,
+        # crossed card, camera-facing billboard) as Object3D.lods, and the client
+        # builds a LODGroup that swaps between them by projected screen height. The
+        # fractions are Unity's screenRelativeTransitionHeight: the level is shown
+        # while the instance fills at least that fraction of the screen height, and
+        # the last one's value is the cull threshold (0 = never culled).
+        self.runtime_lods = bool(runtime_lods)
+        self.lod_mesh_screen_fraction = float(lod_mesh_screen_fraction)
+        self.lod_card_screen_fraction = float(lod_card_screen_fraction)
+        self.lod_billboard_screen_fraction = float(lod_billboard_screen_fraction)
+        # Ground cover is thousands of instances sharing one card; a LODGroup and
+        # two extra children per tuft is cost without a visible gain.
+        self.lod_exempt_classes = frozenset(
+            lod_exempt_classes if lod_exempt_classes is not None else [GRASS_TUFT_CATEGORY]
+        )
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
@@ -632,6 +655,8 @@ class SceneGenerationStage(PipelineStage):
         # instance and a bad bucket mesh is shared by all of them -- the count is the
         # signal that a whole reconstruction is wrong, not just one placement.
         mesh_rejections: dict[str, int] = {}
+        # How many instances got a runtime LOD set, by level count.
+        lod_counts: dict[int, int] = {}
 
         # Per category mesh: its own normalised shape, and what every instance that
         # used it actually renders at. A bucket mesh is shared, so one bad
@@ -849,6 +874,75 @@ class SceneGenerationStage(PipelineStage):
                 return (1 if m.get("synthetic") else 0, -float(m.get("score") or 0.0), i)
 
             placement_order = sorted(range(object_count), key=_placement_rank)
+
+            def billboard_texture_key(idx: int, cls: str, pool_key: str, metadata: dict) -> "tuple[str, int] | None":
+                """(texture key, crop index) for a camera-facing billboard of this
+                instance, drawn from its bucket's curated pool (any pool of the
+                class for a synthetic point whose own bucket has none), preferring
+                the delit crop. None when the class has no crop to show."""
+                crop_pool = billboard_pools.get(pool_key) or ([] if metadata.get("synthetic") else [idx])
+                if not crop_pool and metadata.get("synthetic"):
+                    crop_pool = [
+                        i
+                        for key, pool in billboard_pools.items()
+                        if key.split("::", 1)[0] == cls
+                        for i in pool
+                    ]
+                if not crop_pool:
+                    return None
+                chosen_idx = int(rng.choice(crop_pool))
+                texture_key = f"crop_delit_{chosen_idx}"
+                if context.input_image(texture_key) is None:
+                    texture_key = f"crop_{chosen_idx}"
+                return texture_key, chosen_idx
+
+            def runtime_lods(
+                cls: str, idx: int, pool_key: str, metadata: dict,
+                width: float, height: float, terrain_y: "float | None",
+                container_y: float, container_scale: tuple,
+                recon_mesh, recon_key: str, card_mesh, card_key: str,
+            ) -> list[dict]:
+                """Every representation this instance has, nearest first, as LOCAL
+                transforms under the placed object. See Object3D.lods."""
+                if not self.config.runtime_lods or cls in self.config.lod_exempt_classes:
+                    return []
+                if terrain_y is None:
+                    return []
+                levels: list[tuple[str, str, tuple, float, float]] = []  # kind, key, world scale, world origin y, screen
+                if recon_mesh is not None:
+                    extents = recon_mesh.mesh.bounds[1] - recon_mesh.mesh.bounds[0]
+                    scale, rejection, _gate = mesh_instance_scale(
+                        extents, width, height, min_height_fraction=self.config.min_mesh_height_fraction,
+                    )
+                    if rejection is None:
+                        origin_y = terrain_y - float(recon_mesh.mesh.bounds[0][1]) * scale
+                        levels.append(("mesh", recon_key, (scale, scale, scale), origin_y,
+                                       self.config.lod_mesh_screen_fraction))
+                if card_mesh is not None:
+                    ext = card_mesh.mesh.bounds[1] - card_mesh.mesh.bounds[0]
+                    sx = float(width) / (float(ext[0]) or 1.0)
+                    sy = float(height) / (float(ext[1]) or 1.0)
+                    origin_y = terrain_y - float(card_mesh.mesh.bounds[0][1]) * sy
+                    levels.append(("mesh", card_key, (sx, sy, sx), origin_y,
+                                   self.config.lod_card_screen_fraction))
+                chosen = billboard_texture_key(idx, cls, pool_key, metadata)
+                if chosen is not None:
+                    levels.append(("texture", chosen[0], (float(width), float(height), 1.0),
+                                   terrain_y + float(height) / 2.0,
+                                   self.config.lod_billboard_screen_fraction))
+                if len(levels) < 2:
+                    return []
+                csx, csy, csz = (float(v) or 1.0 for v in container_scale)
+                lods = []
+                for kind, key, (wx, wy, wz), origin_y, screen in levels:
+                    lods.append({
+                        "mesh": key if kind == "mesh" else "",
+                        "texture": key if kind == "texture" else "",
+                        "scale": {"x": wx / csx, "y": wy / csy, "z": wz / csz},
+                        "position": {"x": 0.0, "y": (origin_y - container_y) / csy, "z": 0.0},
+                        "screenHeight": float(screen),
+                    })
+                return lods
 
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in placement_order:
@@ -1100,6 +1194,11 @@ class SceneGenerationStage(PipelineStage):
                 mesh_key = f"category_mesh_{cls}_{bucket}"
                 pool_key = f"{cls}::{bucket}"
                 category_mesh = context.input_mesh(mesh_key)
+                # The reconstruction as such, before the card substitutions below
+                # overwrite category_mesh/mesh_key -- the runtime LOD set needs
+                # every representation the instance has, not just the one chosen
+                # for the start position.
+                recon_mesh, recon_key = category_mesh, mesh_key
 
                 # Optional far-LOD mesh for classes a camera-facing billboard
                 # can't represent. Ground cover is the case this exists for: a
@@ -1258,50 +1357,30 @@ class SceneGenerationStage(PipelineStage):
                     mesh_obj.set_scale(scale_x, scale_y, scale_z)
                     mesh_obj.name = mesh_key
                     mesh_obj.source_index = idx
+                    mesh_obj.lods = runtime_lods(
+                        cls, idx, pool_key, metadata, width, height, terrain_y,
+                        mesh_place_y, (scale_x, scale_y, scale_z),
+                        recon_mesh, recon_key, card_mesh, card_mesh_key,
+                    )
+                    if mesh_obj.lods:
+                        lod_counts[len(mesh_obj.lods)] = lod_counts.get(len(mesh_obj.lods), 0) + 1
                     scene.add_object(mesh_obj)
                 else:
                     # Pick a random billboard crop from this bucket's curated pool.
                     # Synthetic points have no crop of their own, so they must draw
                     # from a real detection's pool; if none exists there's nothing
                     # to render.
-                    crop_pool = billboard_pools.get(pool_key) or ([] if metadata.get("synthetic") else [idx])
-                    if not crop_pool and metadata.get("synthetic"):
-                        # This painted instance inherited its bucket from a real
-                        # exemplar (DistributionSynthesisStage samples size and bucket
-                        # together), but not every bucket ends up with a curated pool --
-                        # PanoramaAssetGenerationStage disqualifies crops on quality and
-                        # occlusion, so a thinly-populated variant can lose all of its
-                        # candidates. Falling back to any pool for the same class keeps
-                        # the instance in the scene as a sibling variant instead of
-                        # silently deleting it, which is the better failure for a
-                        # population whose whole purpose is filling the environment.
-                        fallback = [
-                            i
-                            for key, pool in billboard_pools.items()
-                            if key.split("::", 1)[0] == cls
-                            for i in pool
-                        ]
-                        if fallback:
-                            self.log_info(
-                                f"No pool for {pool_key}; synthetic object {idx} "
-                                f"falling back to another {cls} variant"
-                            )
-                            crop_pool = fallback
-                    if not crop_pool:
+                    # A painted instance whose own bucket lost its curated pool falls
+                    # back to any pool of the class (see billboard_texture_key): a
+                    # sibling variant beats silently deleting an instance whose whole
+                    # purpose is filling the environment. Prefers the delit crop so
+                    # the billboard carries albedo like everything beside it.
+                    chosen = billboard_texture_key(idx, cls, pool_key, metadata)
+                    if chosen is None:
                         self.log_warning(f"No billboard crop available for synthetic object {idx} ({cls}), skipping")
                         self.advance_progress(generation_task)
                         continue
-                    chosen_idx = int(rng.choice(crop_pool))
-                    # Prefer the delit crop PanoramaAssetGenerationStage wrote, so
-                    # this billboard carries albedo like the terrain texture beside
-                    # it rather than a photograph with the sun already in it (the
-                    # object-vs-ground colour mismatch -- see that stage's
-                    # use_intrinsic_delighting). The client resolves Object3D.texture
-                    # by name, so pointing at the other asset is the whole change.
-                    # Falls back per-crop, so one failed delight costs one billboard.
-                    texture_key = f"crop_delit_{chosen_idx}"
-                    if context.input_image(texture_key) is None:
-                        texture_key = f"crop_{chosen_idx}"
+                    texture_key, chosen_idx = chosen
                     self.log_info(f"Creating billboard for {idx} ({cls}, bucket {bucket}, {camera_distance:.1f}m) using {texture_key}")
                     billboard = Object3D.billboard(
                         texture_key,
@@ -1377,6 +1456,11 @@ class SceneGenerationStage(PipelineStage):
                 for example in rejected_examples:
                     self.log_info(f"    rejected object {example}")
 
+            if lod_counts:
+                self.log_info(
+                    "Runtime LODs: "
+                    + ", ".join(f"{n} instance(s) with {k} level(s)" for k, n in sorted(lod_counts.items()))
+                )
             if mesh_rejections:
                 self.log_warning(
                     f"Category mesh rejection: {sum(mesh_rejections.values())} instance(s) "
@@ -1457,6 +1541,17 @@ class SceneGenerationStage(PipelineStage):
             if physics_mesh_key and context.input_mesh(physics_mesh_key) is not None:
                 formation_obj.physics_mesh = physics_mesh_key
             scene.add_object(formation_obj)
+
+        # The photographed forest band at its measured depth (TreelineBackdropStage).
+        # Same frame and yaw as the terrain: its vertices were unprojected from the
+        # panorama with the camera at the origin.
+        treeline_mesh = context.input_mesh(ContextKey.TREELINE_BACKDROP)
+        if treeline_mesh is not None:
+            self.log_info("Adding treeline backdrop to scene")
+            treeline = Object3D.mesh(ContextKey.TREELINE_BACKDROP, x=0.0, y=0.0, z=0.0)
+            treeline.set_rotation(*ground_rotation)
+            treeline.name = "treeline"
+            scene.add_object(treeline)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)
         if lighting is not None:

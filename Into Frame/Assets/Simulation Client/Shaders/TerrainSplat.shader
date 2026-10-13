@@ -75,6 +75,20 @@ Shader "IntoFrame/TerrainSplat"
         // 0 = disabled (identical to the old plain-weighted blend); higher = crisper,
         // more height-driven transitions.
         _HeightBlendSharpness ("Height Blend Sharpness", Range(0, 16)) = 4.0
+        // Macro colour map (server SplatMaterial.macro): the photograph's large-scale
+        // ground colour over the grid, sampled at the same top-down UV as the blend
+        // maps. Every TILED (non-equirect) layer is multiplied by macro / _MacroMean,
+        // so the tile supplies detail and the photo supplies colour -- snow patches,
+        // dirt, the meadow's green-to-brown -- which a repeating tile cannot know.
+        _MacroMap ("Macro Colour", 2D) = "white" {}
+        _MacroStrength ("Macro Strength", Range(0, 1)) = 0.0
+        _MacroMean ("Macro Mean (linear)", Vector) = (0.5, 0.5, 0.5, 1)
+        // Bitmask: bit i set means layer i is sampled stochastically -- a hex grid
+        // of three randomly offset lookups blended by barycentric weight (after
+        // Heitz & Neyret 2018 / Deliot & Heitz 2019, without the histogram
+        // transform). Kills the visible repeat of a 4 m tile and hides the soft
+        // bands of a photo patch made tileable by cross-fading.
+        _StochasticLayers ("Stochastic Layers Bitmask", Int) = 0
     }
 
     SubShader
@@ -123,6 +137,7 @@ Shader "IntoFrame/TerrainSplat"
             TEXTURE2D(_Layer5Tile); SAMPLER(sampler_Layer5Tile);
             TEXTURE2D(_Layer6Tile); SAMPLER(sampler_Layer6Tile);
             TEXTURE2D(_Layer7Tile); SAMPLER(sampler_Layer7Tile);
+            TEXTURE2D(_MacroMap);   SAMPLER(sampler_MacroMap);
 
             // ── Material CBUFFER ───────────────────────────────────────────
             CBUFFER_START(UnityPerMaterial)
@@ -153,9 +168,55 @@ Shader "IntoFrame/TerrainSplat"
                 float  _Layer6Smoothness;
                 float  _Layer7Smoothness;
                 int    _EquirectLayers;
+                int    _StochasticLayers;
+                float  _MacroStrength;
+                float4 _MacroMean;
                 float  _HeightBlendSharpness;
                 float4 _TerrainExtent;
             CBUFFER_END
+
+            // ── Stochastic tiling ──────────────────────────────────────────
+            float2 StochasticHash(float2 p)
+            {
+                return frac(sin(float2(dot(p, float2(127.1, 311.7)), dot(p, float2(269.5, 183.3)))) * 43758.5453);
+            }
+
+            void StochasticTriangleGrid(float2 uv, out float3 w, out float2 v1, out float2 v2, out float2 v3)
+            {
+                float2 skewed = mul(float2x2(1.0, 0.0, -0.57735027, 1.15470054), uv * 3.4641016);
+                float2 baseId = floor(skewed);
+                float3 temp = float3(frac(skewed), 0.0);
+                temp.z = 1.0 - temp.x - temp.y;
+                if (temp.z > 0.0)
+                {
+                    w = float3(temp.z, temp.y, temp.x);
+                    v1 = baseId; v2 = baseId + float2(0, 1); v3 = baseId + float2(1, 0);
+                }
+                else
+                {
+                    w = float3(-temp.z, 1.0 - temp.y, 1.0 - temp.x);
+                    v1 = baseId + float2(1, 1); v2 = baseId + float2(1, 0); v3 = baseId + float2(0, 1);
+                }
+            }
+
+            half4 SampleStochastic(TEXTURE2D_PARAM(tex, samp), float2 uv)
+            {
+                float3 w; float2 v1, v2, v3;
+                StochasticTriangleGrid(uv, w, v1, v2, v3);
+                float2 dx = ddx(uv), dy = ddy(uv);
+                half4 c1 = SAMPLE_TEXTURE2D_GRAD(tex, samp, uv + StochasticHash(v1), dx, dy);
+                half4 c2 = SAMPLE_TEXTURE2D_GRAD(tex, samp, uv + StochasticHash(v2), dx, dy);
+                half4 c3 = SAMPLE_TEXTURE2D_GRAD(tex, samp, uv + StochasticHash(v3), dx, dy);
+                // Sharpened weights: a plain barycentric blend of three samples is
+                // visibly soft; raising them keeps one sample dominant per cell.
+                w = pow(w, 4.0);
+                w /= max(w.x + w.y + w.z, 1e-4);
+                return c1 * w.x + c2 * w.y + c3 * w.z;
+            }
+
+            #define SAMPLE_LAYER(tex, samp, uv, bit) \
+                (((_StochasticLayers & (bit)) != 0) ? SampleStochastic(TEXTURE2D_ARGS(tex, samp), (uv)) \
+                                                    : SAMPLE_TEXTURE2D(tex, samp, (uv)))
 
             // ── Structs ────────────────────────────────────────────────────
             struct Attributes
@@ -268,14 +329,14 @@ Shader "IntoFrame/TerrainSplat"
 
                 // Layer tiles — alpha carries a local micro-height map (server-baked from
                 // the tile's own high-frequency detail) used for height-biased blending below.
-                half4 tex0 = SAMPLE_TEXTURE2D(_Layer0Tile, sampler_Layer0Tile, uv0);
-                half4 tex1 = SAMPLE_TEXTURE2D(_Layer1Tile, sampler_Layer1Tile, uv1);
-                half4 tex2 = SAMPLE_TEXTURE2D(_Layer2Tile, sampler_Layer2Tile, uv2);
-                half4 tex3 = SAMPLE_TEXTURE2D(_Layer3Tile, sampler_Layer3Tile, uv3);
-                half4 tex4 = SAMPLE_TEXTURE2D(_Layer4Tile, sampler_Layer4Tile, uv4);
-                half4 tex5 = SAMPLE_TEXTURE2D(_Layer5Tile, sampler_Layer5Tile, uv5);
-                half4 tex6 = SAMPLE_TEXTURE2D(_Layer6Tile, sampler_Layer6Tile, uv6);
-                half4 tex7 = SAMPLE_TEXTURE2D(_Layer7Tile, sampler_Layer7Tile, uv7);
+                half4 tex0 = SAMPLE_LAYER(_Layer0Tile, sampler_Layer0Tile, uv0, 1);
+                half4 tex1 = SAMPLE_LAYER(_Layer1Tile, sampler_Layer1Tile, uv1, 2);
+                half4 tex2 = SAMPLE_LAYER(_Layer2Tile, sampler_Layer2Tile, uv2, 4);
+                half4 tex3 = SAMPLE_LAYER(_Layer3Tile, sampler_Layer3Tile, uv3, 8);
+                half4 tex4 = SAMPLE_LAYER(_Layer4Tile, sampler_Layer4Tile, uv4, 16);
+                half4 tex5 = SAMPLE_LAYER(_Layer5Tile, sampler_Layer5Tile, uv5, 32);
+                half4 tex6 = SAMPLE_LAYER(_Layer6Tile, sampler_Layer6Tile, uv6, 64);
+                half4 tex7 = SAMPLE_LAYER(_Layer7Tile, sampler_Layer7Tile, uv7, 128);
 
                 // Height-biased blend weights: each layer's server-normalised blend-map
                 // weight is biased by its own local micro-height before renormalising, so
@@ -298,9 +359,23 @@ Shader "IntoFrame/TerrainSplat"
                 w0 *= invWSum; w1 *= invWSum; w2 *= invWSum; w3 *= invWSum;
                 w4 *= invWSum; w5 *= invWSum; w6 *= invWSum; w7 *= invWSum;
 
-                half3 albedo =
-                    tex0.rgb * w0 + tex1.rgb * w1 + tex2.rgb * w2 + tex3.rgb * w3 +
-                    tex4.rgb * w4 + tex5.rgb * w5 + tex6.rgb * w6 + tex7.rgb * w7;
+                // Equirect layers carry the photograph's own colour; tiled layers are
+                // detail only and take their large-scale colour from the macro map.
+                half3 macroMod = half3(1.0h, 1.0h, 1.0h);
+                if (_MacroStrength > 0.0)
+                {
+                    half3 macro = SAMPLE_TEXTURE2D(_MacroMap, sampler_MacroMap, uv).rgb;
+                    macroMod = lerp(half3(1.0h, 1.0h, 1.0h), macro / max(_MacroMean.rgb, 0.02), _MacroStrength);
+                }
+                half3 albedoEq = half3(0, 0, 0);
+                half3 albedoTiled = half3(0, 0, 0);
+                #define ACCUMULATE_LAYER(i, tex, w) \
+                    { if (((_EquirectLayers >> (i)) & 1) != 0) albedoEq += tex.rgb * (w); else albedoTiled += tex.rgb * (w); }
+                ACCUMULATE_LAYER(0, tex0, w0) ACCUMULATE_LAYER(1, tex1, w1)
+                ACCUMULATE_LAYER(2, tex2, w2) ACCUMULATE_LAYER(3, tex3, w3)
+                ACCUMULATE_LAYER(4, tex4, w4) ACCUMULATE_LAYER(5, tex5, w5)
+                ACCUMULATE_LAYER(6, tex6, w6) ACCUMULATE_LAYER(7, tex7, w7)
+                half3 albedo = albedoEq + albedoTiled * macroMod;
 
                 // Blend per-layer smoothness with the same height-biased weights
                 half smoothness =

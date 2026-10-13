@@ -81,7 +81,32 @@ def _delit_key(idx: int) -> str:
     return f"crop_delit_{idx}"
 from util.device_utils import DeviceStrategy, preferred_device
 from util.crop_scoring import composite_score, occlusion_score, mask_fill_ratio
+from util.delight import delight_preserving_chroma
+from util.image_utils import Image as UtilImage
 from pipeline.segmentation.hires_crops import prefer_hires, is_photographed, CAPTURED_FOV_RESTRICTED_KEY
+from pipeline.supersampling.image_supersampling import ImageSupersampling
+
+# Super-resolved source crop, written by _source_crop the first time any consumer
+# (delighting, meshing, cards) asks for a crop that is smaller than min_source_px.
+_SR_KEY = "crop_sr_{idx}"
+
+# Widest a detection box may be relative to its height and still be believed as a
+# picture of this class. A card or a reconstruction is a picture of the SUBJECT, and
+# a 215x48 px box labelled "tree" (crop_29 on the Rainier run -- a strip of road the
+# classifier's caption fallback called a tree) is not one: stretched over a 5 m
+# conifer card it rendered as a grey smear on every tree_4 instance. Classes not
+# listed have no useful prior (a bush, a rock or a boat can be any shape).
+_MAX_WIDTH_OVER_HEIGHT: dict[str, float] = {
+    "tree": 1.6, "plant": 1.6, "flower": 1.6, "person": 1.0, "tower": 0.8,
+    "skyscraper": 1.0, "forest": 20.0,
+}
+
+
+def _plausible_shape(obj_class: "str | None", box) -> bool:
+    limit = _MAX_WIDTH_OVER_HEIGHT.get(obj_class or "")
+    if limit is None or not box or box[3] <= 0:
+        return True
+    return (box[2] / box[3]) <= limit
 
 
 class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
@@ -117,6 +142,9 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         repair_meshes: bool = False,
         card_categories: list[str] | None = None,
         card_planes: int = 3,
+        min_source_px: int = 384,
+        max_sr_passes: int = 2,
+        delight_blur_fraction: float = 0.02,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Classes that get a crossed-card LOD alongside (or instead of) their
@@ -140,6 +168,19 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
             else (VEGETATION_CATEGORIES - {GRASS_TUFT_CATEGORY})
         )
         self.card_planes = int(card_planes)
+        # Super-resolve any source crop whose longer side is under this before it is
+        # delit, reconstructed or put on a card. The crops the scene is built from
+        # are small: on the Rainier run the flower that fills 388 instances came from
+        # a 47x125 px cutout and the plant card from 21x128 px, and SAM3D given that
+        # few pixels returns a different object (a pancake the shape gates then
+        # refuse). Swin2SR is 2x per pass; max_sr_passes bounds the cost (and the
+        # amount of invented detail) at 4x. 0 disables.
+        self.min_source_px = int(min_source_px)
+        self.max_sr_passes = int(max_sr_passes)
+        # Low-pass radius of the shading estimate delighting divides out, as a
+        # fraction of the crop's longer side -- see util.delight.
+        self.delight_blur_fraction = float(delight_blur_fraction)
+        self._samp = None
         # Face budget per category mesh. SAM3D returns its reconstruction undecimated
         # and nothing here used to touch it, which is affordable for a hero object and
         # is not what these are: a category mesh is shared by every instance of its
@@ -423,9 +464,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         if not group_best:
             self.log_info("No objects within 3D generation distance")
+            self._close_supersampler()
             return context
 
         # Second pass: generate one mesh per qualifying (class, bucket) group.
+        # Every source crop a mesh needs was already super-resolved by the delight
+        # pass above (it runs over the same set), so Swin2SR can go before SAM3D
+        # takes the GPU.
+        self._close_supersampler()
         asset_task = self.create_progress(len(group_best), "Generating 3D assets…")
         super().clean_up()
         gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
@@ -450,7 +496,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 # panorama's downsampled copy when one exists (see hires_crops.py).
                 # The delit variant is itself made from the hi-res crop when there
                 # is one, so this order keeps both preferences.
-                crop = context.image(_delit_key(idx)) or prefer_hires(context, idx)
+                crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
 
                 fill_ratio = mask_fill_ratio(crop)
                 if fill_ratio is not None and fill_ratio <= 0.0:
@@ -527,10 +573,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if context.mesh(key) is not None:
                 continue
 
-            # Falls back to the pool's top crop only if this group produced no
-            # measurable box at all -- prior behaviour, and never worse than it.
-            source = card_sources.get(pool_key, pool[0])
-            crop = context.image(_delit_key(source)) or prefer_hires(context, source)
+            # No plausibly-shaped crop in this group (see _plausible_shape): no card.
+            # The group keeps its billboard pool.
+            source = card_sources.get(pool_key)
+            if source is None:
+                self.log_info(f"  {key}: no plausibly-shaped crop to texture a card with, skipping")
+                continue
+            crop = context.image(_delit_key(source)) or self._source_crop(context, source)
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
@@ -550,6 +599,67 @@ class PanoramaAssetGenerationStage(PipelineStage):
             )
             built += 1
         return built
+
+    def _source_crop(self, context: PipelineContext, idx: int):
+        """The best pixels available for crop `idx`: the hi-res cut from the photo
+        when there is one, super-resolved up to min_source_px (see that option).
+        Cached in the context as crop_sr_{idx} so delighting, meshing and the card
+        all share one upscale."""
+        cached = context.image(_SR_KEY.format(idx=idx))
+        if cached is not None:
+            return cached
+        crop = prefer_hires(context, idx)
+        if crop is None:
+            return None
+        if self.config.max_sr_passes <= 0 or self.config.min_source_px <= 0:
+            return crop
+        pil = crop.rgba() if hasattr(crop, "rgba") else crop.convert("RGBA")
+        original = pil.size
+        passes = 0
+        while passes < self.config.max_sr_passes and max(pil.size) < self.config.min_source_px:
+            up = self._supersample_rgba(pil)
+            if up is None:
+                break
+            pil = up
+            passes += 1
+        if passes == 0:
+            return crop
+        self.log_info(
+            f"  crop_{idx}: super-resolved {original[0]}x{original[1]} -> "
+            f"{pil.width}x{pil.height} px ({passes} pass{'es' if passes > 1 else ''})"
+        )
+        context.add_image(_SR_KEY.format(idx=idx), pil)
+        return context.image(_SR_KEY.format(idx=idx))
+
+    def _supersample_rgba(self, pil: "PILImage.Image") -> "PILImage.Image | None":
+        """One Swin2SR 2x pass over an RGBA cutout. The model sees RGB only, so the
+        transparent padding is first filled with the cutout's own mean colour (a
+        black fringe would otherwise be sharpened into a dark halo along every
+        silhouette); alpha is upscaled separately and reattached."""
+        if self._samp is None:
+            self._samp = ImageSupersampling(self.preferred_device)
+        rgba = np.asarray(pil.convert("RGBA"), dtype=np.float32)
+        alpha = rgba[..., 3] / 255.0
+        opaque = alpha > 0.03
+        rgb = rgba[..., :3]
+        if opaque.any() and not opaque.all():
+            mean = rgb[opaque].mean(axis=0)
+            rgb = rgb * alpha[..., None] + mean * (1.0 - alpha[..., None])
+        try:
+            hq = self._samp.supersample(
+                UtilImage(PILImage.fromarray(rgb.clip(0, 255).astype(np.uint8), "RGB")), self.temp,
+            ).image
+        except Exception as exc:
+            self.log_info(f"  super-resolution failed ({exc}); using the crop as is")
+            return None
+        out = hq.convert("RGBA")
+        out.putalpha(pil.split()[-1].resize(hq.size, PILImage.BICUBIC))
+        return out
+
+    def _close_supersampler(self) -> None:
+        if self._samp is not None:
+            self._samp.close()
+            self._samp = None
 
     def _delight_crops(self, context: PipelineContext, indices: "set[int]") -> int:
         """Write crop_delit_{i} for every crop that will be rendered.
@@ -580,7 +690,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 # The hi-res photo cut when there is one: everything rendered
                 # from crop_delit_{i} (meshes, cards, billboards) then gets the
                 # photograph's pixels rather than the panorama's.
-                crop = prefer_hires(context, idx)
+                crop = self._source_crop(context, idx)
                 if crop is None:
                     self.advance_progress(task)
                     continue
@@ -602,21 +712,22 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     self.advance_progress(task)
                     continue
 
-                strength = self.config.intrinsic_delight_strength
-                if strength < 1.0:
-                    blended = (
-                        np.asarray(albedo.convert("RGB"), dtype=np.float32) * strength
-                        + np.asarray(pil.convert("RGB"), dtype=np.float32) * (1.0 - strength)
-                    )
-                    albedo = PILImage.fromarray(blended.clip(0, 255).astype(np.uint8), "RGB")
-                # The alpha channel is the segmentation cutout; without it a
-                # billboard renders as an opaque rectangle of sky around its
-                # subject.
-                if pil.mode == "RGBA":
-                    albedo = albedo.convert("RGBA")
-                    albedo.putalpha(pil.split()[-1])
+                # Shading only, colour untouched -- see util.delight for why the
+                # previous linear blend toward the albedo washed every crop out. The
+                # cutout's alpha is kept (a billboard without it is an opaque
+                # rectangle of sky around its subject) and also tells the helper
+                # which pixels set the exposure reference.
+                opaque = (
+                    np.asarray(pil.split()[-1]) > 8 if pil.mode == "RGBA" else None
+                )
+                delit = delight_preserving_chroma(
+                    pil, albedo,
+                    strength=self.config.intrinsic_delight_strength,
+                    blur_fraction=self.config.delight_blur_fraction,
+                    mask=opaque,
+                )
 
-                context.add_image(_delit_key(idx), albedo)
+                context.add_image(_delit_key(idx), delit)
                 written += 1
                 self.advance_progress(task)
         finally:
@@ -878,7 +989,16 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # crop_268 (38x128, "a yellow flower that is on a stick"). Across every
             # carded group on that capture this changes only flower::4.
             undisqualified = [s for s in scored if not s["disqualified"]] or scored
-            card_source = _largest_consistent(undisqualified, scored)
+            # A crop whose box cannot be a picture of this class (see
+            # _MAX_WIDTH_OVER_HEIGHT) is never the card texture; a group with no
+            # plausibly-shaped crop gets no card at all and stays on billboards.
+            plausible = [s for s in undisqualified if _plausible_shape(obj_class, s.get("box"))]
+            if len(plausible) < len(undisqualified):
+                skipped_debug.append({
+                    "class": obj_class, "bucket": bucket, "reason": "implausible_shape",
+                    "indices": [s["idx"] for s in undisqualified if s not in plausible],
+                })
+            card_source = _largest_consistent(plausible, scored) if plausible else None
             if card_source is not None:
                 card_sources[pool_key] = card_source["idx"]
 
@@ -981,6 +1101,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # choice among crops already judged usable. The aspect guard's reference
             # is the group's whole candidate set rather than `eligible`, which can be
             # a single entry whose own median means nothing.
+            eligible = [s for s in eligible if _plausible_shape(obj_class, s.get("box"))]
+            if not eligible:
+                continue  # nothing with a believable shape to reconstruct from
             winner = _largest_consistent(eligible, scored) or max(eligible, key=lambda s: s["score"])
 
             group_best[(obj_class, bucket)] = (winner["idx"], winner["depth"], winner["score"])
@@ -1161,4 +1284,5 @@ class PanoramaAssetGenerationStage(PipelineStage):
         )
 
     def clean_up(self):
+        self._close_supersampler()
         super().clean_up()

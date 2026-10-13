@@ -52,6 +52,7 @@ class ContextKey:
     TERRAIN_PHYSICS_MESH = "terrain_physics_mesh"
     WATER_MESH = "water_mesh"
     TERRAIN_FORMATIONS = "terrain_formations"
+    TREELINE_BACKDROP = "treeline_backdrop"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
     OBJECT_CORRELATION = "object_correlation"

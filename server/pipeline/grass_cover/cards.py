@@ -148,6 +148,7 @@ def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:
     vertices: list[np.ndarray] = []
     faces: list[tuple[int, int, int]] = []
     uvs: list[tuple[float, float]] = []
+    normals: list[np.ndarray] = []
 
     for plane in range(plane_count):
         yaw = np.pi * plane / plane_count
@@ -161,6 +162,20 @@ def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:
             np.array([+dx, 1.0, +dz]),
             np.array([-dx, 1.0, -dz]),
         ])
+        # Bent normals, authored rather than derived. Each plane carries both
+        # windings below, so a derived per-vertex normal is the sum of two opposite
+        # face normals: exactly zero. That is what every card shipped with (the
+        # exported GLBs carry a NORMAL accessor of zeros), so the client's Lit
+        # shader got no diffuse term at all and a card rendered as its ambient
+        # colour only -- flat, dark and the same from every angle. Foliage cards
+        # are conventionally shaded with normals pointing up and slightly outward
+        # from the card's own axis, so the sun lights the whole fan evenly instead
+        # of one plane bright and its neighbour dark.
+        outward = np.array([-dx, 0.0, -dz]), np.array([+dx, 0.0, +dz])
+        up = np.array([0.0, 1.0, 0.0])
+        for corner in (outward[0], outward[1], outward[1], outward[0]):
+            n = up + 0.5 * corner / max(float(np.linalg.norm(corner)), 1e-6)
+            normals.append(n / np.linalg.norm(n))
         # trimesh's glTF export flips V, so author V with 0 at the image bottom
         # to land the texture upright on the blade -- the same convention
         # Panorama.mesh_uvs applies for its own exported meshes.
@@ -186,6 +201,7 @@ def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:
     mesh = trimesh.Trimesh(
         vertices=np.asarray(vertices, dtype=np.float64),
         faces=np.asarray(faces, dtype=np.int64),
+        vertex_normals=np.asarray(normals, dtype=np.float64),
         visual=trimesh.visual.TextureVisuals(
             uv=np.asarray(uvs, dtype=np.float64), material=material,
         ),

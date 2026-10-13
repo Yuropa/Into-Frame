@@ -31,13 +31,11 @@ public class SceneParamManager : MonoBehaviour
     public void ApplyParams(SceneParams p)
     {
         if (p == null) return;
-        Debug.Log($"[SceneParamManager] Received ambientColor: '{p.ambientColor}'");
-
-        if (!string.IsNullOrEmpty(p.ambientColor) &&
-            ColorUtility.TryParseHtmlString(p.ambientColor, out Color c))
-        {
-            _targetColor = c;
-        }
+        // ambientColor used to be fed into _targetColor here, i.e. into the DIRECTIONAL
+        // light's colour, which is not what the name says and was immediately
+        // overwritten by the sun colour anyway. Ambient comes from the skybox probe
+        // (see EnvironmentLighting); the field is accepted and ignored.
+        Debug.Log($"[SceneParamManager] Received ambientColor: '{p.ambientColor}' (ambient comes from the skybox probe)");
 
         // Key light from the estimated environment map (SceneLighting.sun on the
         // server). Without this the directional light kept whatever direction and
@@ -107,13 +105,18 @@ public class SceneParamManager : MonoBehaviour
             sceneRoot.transform.position = pos;
         }
 
-        if (p.skybox != null)
+        PanoramaSkybox panorama = skybox != null ? skybox.GetComponent<PanoramaSkybox>() : null;
+        if (p.skybox != null && panorama != null)
         {
-            skybox.GetComponent<PanoramaSkybox>().LoadFromName(p.skybox, p.skyboxRotation);
+            panorama.LoadFromName(p.skybox, p.skyboxRotation);
         }
 
+        // The ambient probe is rendered from the SAME skybox the viewer sees, once it
+        // has loaded -- not from LuxDiT's separate estimate, which was a third sky
+        // (the visible one, the one the sun was measured on, and the one lighting the
+        // scene all disagreed). EnvironmentLighting waits for the skybox itself.
         if (environmentLighting != null)
-            environmentLighting.Apply(p.lighting);
+            environmentLighting.Apply(p.lighting, panorama);
     }
 
     /// <summary>
