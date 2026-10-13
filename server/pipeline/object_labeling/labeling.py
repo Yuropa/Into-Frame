@@ -75,8 +75,13 @@ class ObjectLabelingConfiguration(PipelineStageConfiguration):
         captured_fov_margin_deg: float = 3.0,
         photo_detect_sr_factor: float = 2.0,
         size_veto_ratio: float = 3.0,
+        panorama_detect_scale: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Resolution of the panorama Grounding DINO pass, as a fraction of the
+        # panorama's size -- same reasoning as SegmentationConfiguration's
+        # panorama_detect_scale: outside the cone only occluder labels are needed.
+        self.panorama_detect_scale = float(panorama_detect_scale)
         # Fraction of a blob's mask that must lie inside a labelled box for the blob
         # to take its label.
         self.min_coverage = float(min_coverage)
@@ -188,11 +193,17 @@ class ObjectLabelingStage(PipelineStage):
             self.log_info(f"Photograph: {len(labelled)} labelled box(es)")
 
         pano_boxes = 0
-        for det in self._detect(pano_img, phrases, "panorama"):
+        scale = cfg.panorama_detect_scale if photo_img is not None else 1.0
+        detect_img = pano_img
+        if 0.0 < scale < 1.0:
+            detect_img = Image(pano_img.rgb().resize(
+                (max(16, int(pano_w * scale)), max(16, int(pano_h * scale))), PILImage.LANCZOS,
+            ))
+        for det in self._detect(detect_img, phrases, "panorama"):
             cls = normalize_category(det["label"])
             if cls not in OBJECT_CATEGORIES and cls not in ENVIRONMENT_CATEGORIES:
                 continue
-            box = [float(v) for v in det["box"]]
+            box = [float(v) / (scale if 0.0 < scale < 1.0 else 1.0) for v in det["box"]]
             # Inside the cone the photograph's pass is the authority.
             if photo_img is not None and cone.contains_box(box, cfg.captured_fov_margin_deg):
                 continue

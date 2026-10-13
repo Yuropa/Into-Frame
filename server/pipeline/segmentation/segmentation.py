@@ -81,8 +81,17 @@ class SegmentationConfiguration(PipelineStageConfiguration):
         # 2 or 4). Small blooms that are 20 px tall in a 1200 px photo clear SAM2's
         # mask-area floor at 2x; 4x costs four passes of SAM2 for little more.
         photo_detect_sr_factor: float = 2.0,
+        # Resolution the PANORAMA pass runs at, as a fraction of the panorama's
+        # size. With detect_on_photo the panorama pass only has to find occluders
+        # outside the cone -- things Panorama Foreground Inpainting must cut out of
+        # the terrain plate and that are never placed -- and a 4096-wide panorama is
+        # twelve SAM2 tiles (21 minutes on the 2026-10-13 run) where 2048 is three.
+        # Masks are upscaled back to full resolution for the crops. 1.0 restores the
+        # full-resolution pass.
+        panorama_detect_scale: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.panorama_detect_scale = float(panorama_detect_scale)
         self.detect_on_photo = bool(detect_on_photo)
         self.photo_detect_sr_factor = float(photo_detect_sr_factor)
         self.min_area_fraction = min_area_fraction
@@ -335,9 +344,30 @@ class SegmentationStage(PipelineStage):
         # a dozen+ full SAM2 passes) -- without on_progress here, that signal
         # was computed server-side and simply dropped, leaving the bar frozen
         # on this one step for the entire multi-minute call.
-        result = self._seg.segment(
-            input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task),
-        )
+        scale = cfg.panorama_detect_scale if photo_pass else 1.0
+        if 0.0 < scale < 1.0:
+            small_size = (max(16, int(input_image.width * scale)), max(16, int(input_image.height * scale)))
+            small = Image(input_image.rgb().resize(small_size, PILImage.LANCZOS))
+            self.log_info(
+                f"Panorama pass at {scale:.2f}x ({small_size[0]}x{small_size[1]} px): "
+                "it only has to find occluders outside the cone"
+            )
+            small_result = self._seg.segment(
+                small, self.temp, on_progress=self.make_progress_callback(segmenting_task),
+            )
+            full_w, full_h = input_image.width, input_image.height
+            masks = [
+                np.asarray(PILImage.fromarray(np.asarray(m, dtype=np.uint8) * 255).resize(
+                    (full_w, full_h), PILImage.NEAREST,
+                )) > 127
+                for m in small_result.masks
+            ]
+            boxes = [[v / scale for v in b] for b in small_result.boxes]
+            result = SegmentationResult(masks=masks, boxes=boxes, scores=small_result.scores)
+        else:
+            result = self._seg.segment(
+                input_image, self.temp, on_progress=self.make_progress_callback(segmenting_task),
+            )
         store_segmentation_result(result)
         if skipped_inside:
             self.log_info(
