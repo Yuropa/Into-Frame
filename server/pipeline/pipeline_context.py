@@ -207,6 +207,15 @@ class PipelineContext():
         self._current_stage = ""
         self._previous_stage = ""
         self._stage_order = []
+        # Stages whose cached data was found on disk but which the current config
+        # does not run (disabled or removed). Their values are kept -- a later stage
+        # may still legitimately read a key only they ever wrote -- but they must
+        # never SHADOW a stage that does run: _value() searches enabled stages first
+        # and only then falls back to these. Without that, the disabled Object
+        # Typing's stale metadata_{i} (declared after Object Labeling in config.yaml)
+        # outranked Labeling's fresh entries on the 2026-10-13 run and put fourteen
+        # "person" crops and eleven "aircraft" back into a meadow scene.
+        self._disabled_stages: set[str] = set()
         self._dirty_state: set[str] = set()
         self._dirty_stage_state: dict[str, set[str]] = {}
         # Stages that are re-running this session and whose previously-cached output
@@ -234,9 +243,15 @@ class PipelineContext():
         else:
             stages_to_search = list(reversed(self._stage_order))
 
-        # Walk stages in reverse order looking for the value
+        # Walk stages in reverse order looking for the value: the stages that run
+        # in this config first, then (only if none of them has it) the disabled ones.
         for stage in stages_to_search:
+            if stage in self._disabled_stages:
+                continue
             if stage in self._stage_state and name in self._stage_state[stage]:
+                return self._stage_state[stage][name]
+        for stage in stages_to_search:
+            if stage in self._disabled_stages and stage in self._stage_state and name in self._stage_state[stage]:
                 return self._stage_state[stage][name]
 
         # Fall back to global state
@@ -679,6 +694,7 @@ class PipelineContext():
             self._stage_order = list(stage_order)
 
         self._load_directory(path, self._state)
+        enabled = set(stage_order)
         for stage_path in sorted(path.iterdir()):
             if stage_path.is_dir():
                 stage_name = stage_path.name
@@ -686,7 +702,14 @@ class PipelineContext():
                     self._stage_state[stage_name] = {}
                 if stage_name not in self._stage_order:
                     self._insert_in_declared_order(stage_name, full_stage_order)
+                if stage_name not in enabled:
+                    self._disabled_stages.add(stage_name)
                 self._load_directory(stage_path, self._stage_state[stage_name])
+        if self._disabled_stages:
+            _log.info(
+                "Cached data from %d stage(s) not in this config kept as fallback only: %s",
+                len(self._disabled_stages), ", ".join(sorted(self._disabled_stages)),
+            )
 
     def _load_directory(self, path: Path, target: dict):
         for meta_file in path.glob("*.meta"):
