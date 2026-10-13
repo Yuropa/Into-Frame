@@ -17,6 +17,7 @@ from pipeline.object_distribution.object_distribution_result import (
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.object_typing.categories import DISTRIBUTABLE_CATEGORIES
 from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
+from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 
 _MIN_POINTS = 2
 _DEFAULT_BIN_COUNT = 48
@@ -58,7 +59,16 @@ def _run_pcf_cli(
     pcf_cli: Path,
     points: list[tuple[float, float]],
     bin_count: int,
-) -> dict | None:
+) -> tuple[dict | None, str | None]:
+    """Run pcf_cli on one group's points.
+
+    Returns (result, None) on success or (None, reason) on failure, where reason
+    carries the exit code and the last line of stderr -- the same contract
+    DistributionSynthesisStage's _run_synthesize_cli uses. An earlier version
+    returned a bare None on every failure path, so a missing shared library, a
+    timeout and a malformed point set all logged the identical "pcf_cli failed"
+    line with nothing to distinguish them.
+    """
     n = len(points)
     lines = [f"{bin_count}\n{n}"]
     for u, v in points:
@@ -73,16 +83,25 @@ def _run_pcf_cli(
             text=True,
             timeout=60,
         )
-        if result.returncode != 0:
-            return None
-        # Tolerant of anything printed alongside the JSON -- pcf_cli's stdout is clean
-        # today (it links neither synthesis_core.cpp nor voronoi-pcf.cpp, both of which
-        # print progress), but the identical assumption in DistributionSynthesisStage
-        # is what silently discarded every synthesize_cli result. Same class of bug,
-        # one line to be immune to it.
-        return parse_json_from_stream(result.stdout)
-    except Exception:
-        return None
+    except subprocess.TimeoutExpired:
+        return None, f"timed out after 60s with {n} points"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+    stderr_lines = (result.stderr or "").strip().splitlines()
+    last_stderr = stderr_lines[-1].strip() if stderr_lines else ""
+    if result.returncode != 0:
+        return None, f"exit {result.returncode}: {last_stderr or 'no stderr'}"
+    # Tolerant of anything printed alongside the JSON -- pcf_cli's stdout is clean
+    # today (it links neither synthesis_core.cpp nor voronoi-pcf.cpp, both of which
+    # print progress), but the identical assumption in DistributionSynthesisStage
+    # is what silently discarded every synthesize_cli result. Same class of bug,
+    # one line to be immune to it.
+    parsed = parse_json_from_stream(result.stdout)
+    if parsed is None:
+        head = " | ".join(result.stdout.strip().splitlines()[:2])[:200]
+        return None, f"no JSON object in stdout: {head or '(empty)'}"
+    return parsed, None
 
 
 class ObjectDistributionStageConfiguration(PipelineStageConfiguration):
@@ -192,12 +211,20 @@ class ObjectDistributionStage(PipelineStage):
         # Index-aligned with points/sizes -- see TypeDistribution.buckets for why the
         # visual variant travels with each exemplar instead of splitting the groups.
         buckets_by_group: dict[tuple[str, str], list[int]] = {}
+        fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
+        unphotographed = 0
         for obj_type in distributable_types:
             grp = correlation.groups[obj_type]
             for idx in grp.indices:
                 metadata = context.input_object(f"metadata_{idx}") or {}
                 box = metadata.get("box")
                 if not box:
+                    continue
+                # The spatial pattern is learned from what was photographed; an
+                # exemplar from the outpainted region is the generator's pattern,
+                # not the scene's (and usually a copy of a real one).
+                if not is_photographed(metadata, fov_restricted):
+                    unphotographed += 1
                     continue
 
                 # Same branch selection SceneGenerationStage uses to place real objects.
@@ -224,6 +251,9 @@ class ObjectDistributionStage(PipelineStage):
                 sizes_by_group.setdefault(key, []).append((float(width), float(height)))
                 buckets_by_group.setdefault(key, []).append(int(metadata.get("bucket") or 0))
 
+        if unphotographed:
+            self.log_info(f"Captured-cone policy: {unphotographed} detection(s) outside the photographed cone not used as exemplars")
+
         if not points_by_group:
             self.log_info("No objects could be unprojected to world space")
             result = ObjectDistributionResult()
@@ -237,9 +267,9 @@ class ObjectDistributionStage(PipelineStage):
             sizes = sizes_by_group[(obj_type, region_type)]
             buckets = buckets_by_group[(obj_type, region_type)]
             if len(points) >= _MIN_POINTS:
-                pcf_data = _run_pcf_cli(pcf_cli, points, self._bin_count)
+                pcf_data, reason = _run_pcf_cli(pcf_cli, points, self._bin_count)
                 if pcf_data is None:
-                    self.log_info(f"  {obj_type} [{region_type}]: pcf_cli failed, skipping")
+                    self.log_warning(f"  {obj_type} [{region_type}]: pcf_cli failed ({reason}), skipping")
                     self.advance_progress(task)
                     continue
                 dist = TypeDistribution(

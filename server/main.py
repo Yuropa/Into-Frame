@@ -43,6 +43,20 @@ def _check_conda_env():
         )
         sys.exit(1)
 
+def _parse_bool(value: str) -> bool:
+    """argparse `type` for an explicit boolean value. `type=bool` is the classic
+    trap -- it is just the bool() constructor, so any non-empty string including
+    "false" and "0" is True."""
+    if isinstance(value, bool):
+        return value
+    lowered = str(value).strip().lower()
+    if lowered in ("1", "true", "t", "yes", "y", "on"):
+        return True
+    if lowered in ("0", "false", "f", "no", "n", "off"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {value!r}")
+
+
 def create_parser():
     parser = argparse.ArgumentParser(
         description="Generate immersive scenes from an image"
@@ -108,12 +122,18 @@ def create_parser():
         default=3000,
         help="Port to run the asset server on"
     )
+    # BooleanOptionalAction, not type=bool: bool("false") is True, so the old
+    # declaration made `--debug false` (what frame.sh -d false sends) a no-op and
+    # intermediate files could never be switched off. Accepts --debug/--no-debug
+    # and, for frame.sh compatibility, an explicit true/false/yes/no value.
     server_parser.add_argument(
         '-d',
         '--debug',
-        help="Saves intermediate files for debugg",
+        help="Save intermediate pipeline files (--no-debug to disable)",
         default=True,
-        type=bool
+        type=_parse_bool,
+        nargs="?",
+        const=True,
     )
     server_parser.add_argument(
         '--debug-archive',
@@ -177,9 +197,11 @@ def create_parser():
     run_parser.add_argument(
         '-d',
         '--debug',
-        help="Saves intermediate files for debugg",
+        help="Save intermediate pipeline files (--debug false to disable)",
         default=True,
-        type=bool
+        type=_parse_bool,
+        nargs="?",
+        const=True,
     )
     run_parser.add_argument(
         '--debug-archive',
@@ -317,12 +339,12 @@ def handle_server(args):
     simulation_config.asset_port = args.asset_port
     simulation_config.log_mode = configuration.log_mode
 
-    pipeline = Pipeline(
-        config=_create_pipeline_config(args=args)
-    )
-
-    # Ensure all the models are downloaded
-    pipeline.download_models()
+    # One configuration, shared with the server. Building a second one here used
+    # to reconfigure root logging a second time (leaving the first log file empty)
+    # and clear output/build twice. Models are verified by Pipeline.run() on the
+    # first client request, so there is no separate download pass here either --
+    # it was the same snapshot_download loop running twice per server start.
+    pipeline = Pipeline(config=configuration)
 
     input_path = Path(args.input) if args.input else resource_directory() / "Mount Rainier.jpg"
 

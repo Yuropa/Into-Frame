@@ -67,6 +67,8 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         water_gradient_threshold: float = 0.04,
         terrain_gradient_threshold: float = 0.15,
         paint_width: int = 2,
+        water_connected_only: bool = True,
+        min_water_area_m2: float = 12.0,
     ):
         """
         certainty_threshold        — cells with certainty below this are candidates
@@ -87,6 +89,18 @@ class RegionMapRefinementConfiguration(PipelineStageConfiguration):
         self.water_gradient_threshold = water_gradient_threshold
         self.terrain_gradient_threshold = terrain_gradient_threshold
         self.paint_width = paint_width
+        # Pass 2 may only grow water OUT of water that is already known: a
+        # low-certainty cell in the elevation band becomes WATER only if it is
+        # connected, through other such cells, to a known-water cell. Without this
+        # the band test fires on every low-certainty cell of a flat terrain -- on
+        # the Paris capture, whose reconstructed terrain is flat by construction,
+        # the refined map came back as salt-and-pepper WATER across the whole
+        # 200 m grid, and the water mesh with it.
+        self.water_connected_only = bool(water_connected_only)
+        # And each resulting water body must be at least this big. Same reasoning
+        # and same default as Terrain Mesh's min_water_area_m2: a handful of cells
+        # is region-typing noise, a real lake clears this many times over.
+        self.min_water_area_m2 = float(min_water_area_m2)
 
 
 class RegionMapRefinementStage(PipelineStage):
@@ -222,10 +236,42 @@ class RegionMapRefinementStage(PipelineStage):
                 in_water_band = np.abs(height_map - water_elev) <= cfg.water_elevation_tolerance
                 flat_enough   = grad_mag < cfg.water_gradient_threshold
                 reclassify_water = low_cert & in_water_band & flat_enough
+                candidates = int(reclassify_water.sum())
+
+                if cfg.water_connected_only and reclassify_water.any():
+                    # Keep only candidate cells connected to known water through
+                    # the candidate set itself -- the band grows outward from a
+                    # real shoreline rather than appearing wherever the terrain
+                    # happens to be flat at that height.
+                    from scipy.ndimage import label as _label
+                    labeled, _ = _label(reclassify_water | water_mask_known)
+                    seeded = np.unique(labeled[water_mask_known])
+                    seeded = seeded[seeded > 0]
+                    reclassify_water &= np.isin(labeled, seeded)
+
                 region_map[reclassify_water] = int(RegionType.WATER)
+
+                pruned = 0
+                if cfg.min_water_area_m2 > 0:
+                    from scipy.ndimage import label as _label
+                    cell_area = cell_size_m * cell_size_m
+                    labeled, n = _label(region_map == int(RegionType.WATER))
+                    if n > 0:
+                        counts = np.bincount(labeled.ravel())
+                        small = np.flatnonzero(counts * cell_area < cfg.min_water_area_m2)
+                        small = small[small > 0]
+                        if small.size:
+                            drop = np.isin(labeled, small)
+                            # Back to what the cell was before this pass; the
+                            # original map is the best remaining evidence.
+                            region_map[drop] = region_map_depth.depth.astype(np.uint8)[drop]
+                            pruned = int(drop.sum())
+
                 self.log_info(
                     f"Water surface at Y={water_elev:.2f} m; "
-                    f"reclassified {reclassify_water.sum()} cells as WATER"
+                    f"reclassified {int(reclassify_water.sum())} of {candidates} candidate cells as WATER"
+                    + (f" (connected to known water only)" if cfg.water_connected_only else "")
+                    + (f", pruned {pruned} cells in bodies under {cfg.min_water_area_m2:.0f} m²" if pruned else "")
                 )
             else:
                 self.log_info("No known-water cells to derive surface elevation from")

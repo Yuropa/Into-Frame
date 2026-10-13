@@ -93,6 +93,7 @@ public class SceneObjectManager : MonoBehaviour
         _taskQueue.Clear();
         _totalTasks = 0;
         _completedTasks = 0;
+        progress?.ResetAssetFailures();
 
         foreach (var t in _tracked.Values)
             if (t.go != null) Destroy(t.go);
@@ -471,7 +472,7 @@ public class SceneObjectManager : MonoBehaviour
 
             if (req.result != UnityWebRequest.Result.Success)
             {
-                Debug.LogError($"[SceneObjectManager] Failed to download '{meshId}': {req.error}");
+                progress?.ReportAssetFailed(meshId, $"download: {req.error}");
                 yield break;
             }
 
@@ -491,15 +492,14 @@ public class SceneObjectManager : MonoBehaviour
 
             if (glbTask.IsFaulted)
             {
-                Debug.LogError($"[SceneObjectManager] GLTFast exception on '{meshId}': {glbTask.Exception}");
+                progress?.ReportAssetFailed(meshId, $"GLTFast exception: {glbTask.Exception}");
                 gltf.Dispose();
                 yield break;
             }
 
             if (!glbTask.Result)
             {
-                Debug.LogError($"[SceneObjectManager] GLTFast failed to parse '{meshId}'. " +
-                               $"Errors: {string.Join(" | ", logger.Errors)}");
+                progress?.ReportAssetFailed(meshId, $"GLTFast parse: {string.Join(" | ", logger.Errors)}");
                 gltf.Dispose();
                 yield break;
             }
@@ -517,7 +517,7 @@ public class SceneObjectManager : MonoBehaviour
 
         if (instantiateTask.IsFaulted)
         {
-            Debug.LogError($"[SceneObjectManager] Instantiation failed for '{meshId}': {instantiateTask.Exception}");
+            progress?.ReportAssetFailed(meshId, $"instantiation: {instantiateTask.Exception}");
             yield break;
         }
 
@@ -615,7 +615,7 @@ public class SceneObjectManager : MonoBehaviour
 
         if (req.result != UnityWebRequest.Result.Success)
         {
-            Debug.LogError($"[SceneObjectManager] Failed to download texture '{textureId}': {req.error}");
+            progress?.ReportAssetFailed(textureId, $"download: {req.error}");
             _textureWaiters.Remove(textureId);
             yield break;
         }

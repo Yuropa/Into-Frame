@@ -4,6 +4,7 @@ from pathlib import Path
 from PIL import Image as PILImage
 from remote_connection.remote_client import RemoteClient
 from pipeline.panorama.panorama_output import PanoramaOutput
+from pipeline.panorama.placement import placement_fov_deg
 
 
 class ImagePanoramaWorldGen(RemoteClient):
@@ -27,6 +28,8 @@ class ImagePanoramaWorldGen(RemoteClient):
         seed: int = 0,
         on_progress=None,
     ) -> PanoramaOutput:
-        data = {"image": input, "seed": seed, "fov": fov * 2.0, "caption": caption}
+        # See pipeline/panorama/placement.py for what this factor does to the scene
+        # and who else has to agree with it.
+        data = {"image": input, "seed": seed, "fov": placement_fov_deg(fov), "caption": caption}
         values = self.send(action="pano", input=data, temp_path=temp_path, on_progress=on_progress)
         return PanoramaOutput(values=values)

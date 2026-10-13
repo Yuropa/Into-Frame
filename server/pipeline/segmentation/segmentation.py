@@ -8,6 +8,8 @@ from pipeline.segmentation.foreground_segmentation import ForegroundSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.mask_inpainting import MaskInPainting
+from pipeline.segmentation.hires_crops import build_hires_crops, CAPTURED_FOV_RESTRICTED_KEY
+from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 import numpy as np
@@ -43,10 +45,37 @@ class SegmentationConfiguration(PipelineStageConfiguration):
         # image area; the smallest whole-scene false positive was ~33% -- 0.20 sits
         # with wide margin in that gap.
         max_area_fraction: float = 0.20,
+        # Keep only detections that lie (mostly) inside the photographed cone of
+        # the panorama. Everything outside it is the outpainter's guess, and the
+        # outpainter repeats the hero content around the sphere -- on the Shark
+        # Fin capture the same sea stack is detected three times, and across the
+        # five sample captures 65-85% of "real" detections were of generated
+        # pixels. Distribution Synthesis exists to populate the unobserved part
+        # from the observed statistics; it should not be fed hallucinated
+        # exemplars. See util.captured_cone.
+        restrict_to_captured_fov: bool = True,
+        # Degrees of slack on every side of the cone: an object straddling the
+        # photo's edge is still real (the outpainter continues it rather than
+        # inventing it), and the embedding is not pixel-exact at the border.
+        captured_fov_margin_deg: float = 3.0,
+        # Re-cut in-cone crops from the original photograph at native resolution
+        # (crop_hires_{i}); see pipeline/segmentation/hires_crops.py.
+        hires_crops_from_input: bool = True,
+        # The super-resolution factor the panorama went through before this stage
+        # (Panorama Supersampling is Swin2SR x2). Pixel counts alone say the
+        # panorama matches the photo's resolution inside the cone; it does not --
+        # it is the photo downsampled into a 2048-wide panorama and then
+        # upscaled 2x, so its real information content is the pre-SR width. Used
+        # only to decide whether the re-cut is worth doing. 1.0 if that stage is off.
+        panorama_sr_factor: float = 2.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.min_area_fraction = min_area_fraction
         self.max_area_fraction = max_area_fraction
+        self.restrict_to_captured_fov = bool(restrict_to_captured_fov)
+        self.captured_fov_margin_deg = float(captured_fov_margin_deg)
+        self.hires_crops_from_input = bool(hires_crops_from_input)
+        self.panorama_sr_factor = float(panorama_sr_factor)
 
 
 class SegmentationStage(PipelineStage):
@@ -131,12 +160,37 @@ class SegmentationStage(PipelineStage):
         min_area = cfg.min_area_fraction * img_area
         max_area = cfg.max_area_fraction * img_area
 
+        # The photographed cone, when the detection source is the panorama. None
+        # when the source is the photo itself (every pixel is real) or when there
+        # are no intrinsics to locate the photo with -- the cone filter and the
+        # hi-res re-cut are both skipped in that case, and the stage behaves as
+        # it did before either existed.
+        cone = None
+        if context.input_panorama(input_key) is not None:
+            cone = captured_cone_from_context(context, input_image.width, input_image.height)
+            if cone is None:
+                self.log_warning(
+                    "Detecting on the panorama but no intrinsics/input photo to locate "
+                    "the captured cone -- keeping detections from generated regions too"
+                )
+            else:
+                u0, u1 = cone.u_range
+                self.log_info(
+                    f"Captured cone: {cone.hfov_deg:.1f}° x {cone.vfov_deg:.1f}° "
+                    f"(panorama columns {u0:.0f}-{u1:.0f}), photo is "
+                    f"{cone.scale_gain() * cfg.panorama_sr_factor:.2f}x the panorama's native resolution there"
+                )
+        # (index, panorama box) of every stored crop that lies in the cone, for
+        # the hi-res re-cut after the loop.
+        in_cone: list[tuple[int, list[float]]] = []
+
         def store_segmentation_result(result: SegmentationResult):
             nonlocal total_crops
 
             # Cropping
             cropping_task = self.create_progress(result.length, "Cropping…")
             filtered = 0
+            filtered_fov = 0
             for crop in result.masked_images(input_image):
                 _, _, w, h = crop.box
                 area = w * h
@@ -144,6 +198,16 @@ class SegmentationStage(PipelineStage):
                     filtered += 1
                     self.advance_progress(cropping_task)
                     continue
+
+                # Flagged, not dropped: an out-of-cone detection is still useful
+                # as an occluder for Panorama Foreground Inpainting (a generated
+                # tree still has to come out of the terrain plate) and as a
+                # tracking target. What it must not do is get PLACED or taught to
+                # Distribution Synthesis as an exemplar -- Scene Generation, Object
+                # Distribution and Panorama Asset Generation read the flag.
+                inside = cone.contains_box(crop.box, cfg.captured_fov_margin_deg) if cone is not None else None
+                if inside is False:
+                    filtered_fov += 1
 
                 # Indices must stay contiguous (no holes for filtered-out crops) --
                 # downstream stages iterate range(OBJECT_COUNT) and assume every
@@ -156,12 +220,24 @@ class SegmentationStage(PipelineStage):
                     "box": [float(x) for x in crop.box],
                     "score": float(crop.score)
                 }
+                if inside is not None:
+                    # Recorded either way, so a run with the filter off can still
+                    # tell photographed detections from generated ones downstream.
+                    metadata["in_captured_fov"] = bool(inside)
+                    if inside:
+                        in_cone.append((i, metadata["box"]))
                 context.add_object(f"metadata_{i}", metadata)
                 total_crops += 1
                 self.advance_progress(cropping_task)
             self.finish_progress(cropping_task)
             if filtered:
                 self.log_info(f"  Filtered {filtered} crop(s) outside size bounds ({result.length - filtered} kept)")
+            if filtered_fov:
+                self.log_info(
+                    f"  {filtered_fov} crop(s) lie outside the photographed cone, {len(in_cone)} inside it"
+                    + (" -- outside ones will not be placed or used as exemplars"
+                       if cfg.restrict_to_captured_fov else "")
+                )
 
         # Foreground Segmentation
         # foreground_segmenting_task = self.create_progress(2, "Foreground Segmenting…")
@@ -216,6 +292,22 @@ class SegmentationStage(PipelineStage):
 
         self.advance_progress(segmenting_task)
         self.finish_progress(segmenting_task)
+
+        if cone is not None and cfg.hires_crops_from_input and in_cone:
+            photo = context.input_image(ContextKey.INPUT)
+            hires_task = self.create_progress(1, "Re-cutting crops from the photo…")
+            build_hires_crops(
+                self._seg, context, photo, cone, in_cone, self.temp, self.log_info,
+                sr_factor=cfg.panorama_sr_factor,
+                on_progress=self.make_progress_callback(hires_task),
+            )
+            self.finish_progress(hires_task)
+
+        if cone is not None:
+            # Read by Scene Generation, Object Distribution and Panorama Asset
+            # Generation: when True, a detection whose metadata says
+            # in_captured_fov == False is neither placed nor used as an exemplar.
+            context.add_object(CAPTURED_FOV_RESTRICTED_KEY, bool(cfg.restrict_to_captured_fov))
 
         context.add_object(output_key, total_crops)
         return context

@@ -616,12 +616,12 @@ class Pipeline:
             if stage_name not in self.config.seeds.explicit_stage_seeds:
                 self.config.seeds.stage_seeds[stage_name] = cached_seed_value
 
-        if output is not None:
+        def _write_seed_file(directory: Path):
             seed_data = {
                 "global_seed": self.config.seeds.global_seed,
                 "stage_seeds": self.config.seeds.stage_seeds,
             }
-            with open(output / "seed.json", "w") as f:
+            with open(directory / "seed.json", "w") as f:
                 write_json(seed_data, f)
 
         context = PipelineContext()
@@ -652,6 +652,12 @@ class Pipeline:
                 context.log_state()
         else:
             context.add_image(ContextKey.INPUT, input_image)
+
+        # Written AFTER the input-changed purge above: it used to be written before
+        # it, so a run on a new image wiped its own seed.json along with the stale
+        # cache and the next run had nothing to compare against.
+        if output is not None:
+            _write_seed_file(output)
 
         self.current_step = ""
         self.current_step_index = 0

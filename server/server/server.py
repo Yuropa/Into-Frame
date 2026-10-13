@@ -71,6 +71,20 @@ class SimulationServer():
         self._scene_id: Optional[str] = None
 
         self._pipeline_task: asyncio.Task | None = None
+        # Explicit pipeline state, so CLIENT_READY can be answered correctly at
+        # every point in a run's life rather than inferred from _scene_id alone:
+        #   idle     nothing has run; the next CLIENT_READY starts the pipeline
+        #   running  a run is in progress; CLIENT_READY gets the current progress
+        #   ready    a scene exists; CLIENT_READY gets the snapshot
+        #   failed   the last run raised; CLIENT_READY gets the error, not a rerun
+        # Before this, a reconnecting client (Unity reconnects 3 s after any
+        # close and re-sends CLIENT_READY) hit _request_pipeline while a run was
+        # in flight. That cancelled the asyncio wrapper, which does nothing to the
+        # thread actually running the pipeline, and started a second run on the
+        # same Pipeline object, GPU and output directory.
+        self._pipeline_state = "idle"
+        self._pipeline_error: Optional[str] = None
+        self._last_progress: Optional[dict] = None
         self._client_connected = asyncio.Event()
 
         self._asset_server = web.Application()
@@ -110,9 +124,15 @@ class SimulationServer():
                 if self._context is not None:
                     # Written out lazily on first request, so this can take a
                     # noticeable moment (a GLB export) before any byte moves --
-                    # worth saying so rather than looking stalled.
+                    # worth saying so rather than looking stalled. Exported off
+                    # the event loop: a terrain GLB takes seconds to write, and
+                    # doing it inline stalled every other asset request and the
+                    # WebSocket for the duration.
                     self._downloads.note(f"Exporting {filename}…")
-                    match = self._context.save_object(filename, self.asset_dir)
+                    context = self._context
+                    match = await asyncio.get_running_loop().run_in_executor(
+                        None, context.save_object, filename, self.asset_dir
+                    )
 
             if not match:
                 # Coulnd't write the file out either
@@ -239,7 +259,7 @@ class SimulationServer():
 
         try:
             async for raw in ws:
-                self.log.info(f"Raw message: {repr(raw)}")  # add this temporarily
+                self.log.debug(f"{client_id} -> {raw!r}")
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
@@ -250,13 +270,34 @@ class SimulationServer():
                 payload  = msg.get("payload", {})
 
                 if msg_type == ServerMessages.CLIENT_READY:
-                    self.log.info(f"{client_id} is ready")
-                    if self._scene_id is not None:
+                    self.log.info(f"{client_id} is ready (pipeline {self._pipeline_state})")
+                    if self._pipeline_state == "ready":
                         # Scene already generated — resend the cached snapshot instead of
                         # regenerating. The client compares scene_id and skips reload if unchanged.
                         await self._send_scene()
+                    elif self._pipeline_state == "running":
+                        # A run is in flight (this is usually a reconnect). Bring the
+                        # client up to date and let the run finish; it will get
+                        # SCENE_INIT with everyone else.
+                        if self._last_progress is not None:
+                            await self._send_to(ws, ClientMessages.PROGRESS, self._last_progress)
+                    elif self._pipeline_state == "failed":
+                        # Do not silently retry an 85-minute run because a client
+                        # reconnected. Tell it what happened; a deliberate retry is
+                        # a RETRY message (or a server restart).
+                        await self._send_to(ws, ClientMessages.PIPELINE_ERROR, {
+                            "message": self._pipeline_error or "pipeline failed",
+                            "retryable": True,
+                        })
                     else:
                         await self._request_pipeline()
+
+                elif msg_type == ServerMessages.RETRY:
+                    if self._pipeline_state in ("idle", "failed"):
+                        self.log.info(f"{client_id} requested a retry")
+                        await self._request_pipeline()
+                    else:
+                        self.log.info(f"{client_id} requested a retry but pipeline is {self._pipeline_state}")
 
                 elif msg_type == ServerMessages.OBJECT_EVENT:
                     self.log.info(f"{client_id}: {payload}")
@@ -271,23 +312,30 @@ class SimulationServer():
             self.clients.discard(ws)
             self.log.info(f"{client_id} disconnected")
 
+    async def _send_to(self, ws, message: ClientMessages, payload: dict):
+        data = json.dumps({"type": str(message), "payload": payload})
+        try:
+            await ws.send(data)
+        except Exception as e:
+            self.log.warning(f"[!] Failed to send to client: {e}")
+            self.clients.discard(ws)
+
     async def _request_pipeline(self):
         # A pipeline run draws its own Live display from the executor thread, so
         # the download bar has to be off the terminal before it starts.
         self._downloads.stop()
 
-        # Cancel the running pipeline if there is one
+        # Never start a second run while one is in flight. The pipeline executes
+        # in a thread-pool thread; cancelling the asyncio task that awaits it does
+        # not stop the thread, it just detaches it -- so the old "cancel and
+        # restart" here produced two concurrent runs on one GPU and one cache dir.
         if self._pipeline_task and not self._pipeline_task.done():
-            self.log.info("Cancelling running pipeline")
-            self._pipeline_task.cancel()
-            try:
-                await self._pipeline_task
-            except asyncio.CancelledError:
-                pass  # expected
-            await self.broadcast(ClientMessages.PIPELINE_CANCELLED, {
-                "message": "Pipeline cancelled — starting new run"
-            })
+            self.log.info("Pipeline already running; not starting another")
+            return
 
+        self._pipeline_state = "running"
+        self._pipeline_error = None
+        self._last_progress = None
         self._pipeline_task = asyncio.ensure_future(self._progress_scene())
 
     async def _progress_scene(self):
@@ -305,12 +353,15 @@ class SimulationServer():
                 # self.scene.encode() and would crash on None for every client after
                 # this one, not just this request.
                 self.log.error("Archive has no scene data (ContextKey.SCENE missing) — nothing to serve")
-                await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": "Archive has no scene data"})
+                self._pipeline_state = "failed"
+                self._pipeline_error = "Archive has no scene data"
+                await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": self._pipeline_error})
                 return
 
             self.scene = scene
             self._splat_material = self._context.splat_material(ContextKey.TERRAIN_MATERIAL)
             self._scene_id = str(uuid.uuid4())
+            self._pipeline_state = "ready"
             self.log.info("Serving pre-loaded scene")
             await self._send_scene()
             return
@@ -324,6 +375,7 @@ class SimulationServer():
                     update = await asyncio.get_running_loop().run_in_executor(None, progress_queue.get)
                     if update is None:
                         break
+                    self._last_progress = update
                     await self.broadcast(ClientMessages.PROGRESS, update)
                 except asyncio.CancelledError:
                     progress_queue.put(None)  # unblock the queue.get in executor
@@ -348,25 +400,38 @@ class SimulationServer():
 
         try:
             context_result = await asyncio.get_running_loop().run_in_executor(None, run_pipeline)
-            self.scene = context_result.scene(ContextKey.SCENE)
+            scene = context_result.scene(ContextKey.SCENE)
+            if scene is None:
+                raise RuntimeError(
+                    "pipeline finished without producing a scene (ContextKey.SCENE is "
+                    "missing -- an upstream stage skipped; see the run log)"
+                )
+            self.scene = scene
             self._splat_material = context_result.splat_material(ContextKey.TERRAIN_MATERIAL)
             self._context = context_result
             self._scene_id = str(uuid.uuid4())
         except asyncio.CancelledError:
             progress_queue.put(None)   # unblock drain
             await drain_task
+            self._pipeline_state = "idle"
             self.log.info("Pipeline cancelled")
             raise   # must re-raise so the Task is properly marked cancelled
         except Exception as e:
             self.log.error(f"Pipeline error: {e}", exc_info=True)
             progress_queue.put(None)
             await drain_task
-            await self.broadcast(ClientMessages.PIPELINE_ERROR, {"message": str(e)})
+            self._pipeline_state = "failed"
+            self._pipeline_error = f"{type(e).__name__}: {e}"
+            await self.broadcast(ClientMessages.PIPELINE_ERROR, {
+                "message": self._pipeline_error,
+                "retryable": True,
+            })
             return
 
         progress_queue.put(None)
         await drain_task
 
+        self._pipeline_state = "ready"
         self.log.info("Pipeline complete — sending scene")
         await self._send_scene()
  

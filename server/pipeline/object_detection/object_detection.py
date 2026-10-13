@@ -8,6 +8,8 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_detection.grounding_dino import GroundingDino
 from pipeline.segmentation.image_segmentation import ImageSeg
 from pipeline.segmentation.segmentation_result import SegmentationResult
+from pipeline.segmentation.hires_crops import build_hires_crops, CAPTURED_FOV_RESTRICTED_KEY
+from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 
@@ -27,10 +29,20 @@ class ObjectDetectionConfiguration(PipelineStageConfiguration):
         min_area_fraction: float = 0.0003,
         max_area_fraction: float = 0.20,
         confident_score: float = 0.45,
+        # Same cone restriction and hi-res re-cut as SegmentationStage -- see
+        # SegmentationConfiguration for the reasoning and util.captured_cone.
+        restrict_to_captured_fov: bool = True,
+        captured_fov_margin_deg: float = 3.0,
+        hires_crops_from_input: bool = True,
+        panorama_sr_factor: float = 2.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.min_area_fraction = min_area_fraction
         self.max_area_fraction = max_area_fraction
+        self.restrict_to_captured_fov = bool(restrict_to_captured_fov)
+        self.captured_fov_margin_deg = float(captured_fov_margin_deg)
+        self.hires_crops_from_input = bool(hires_crops_from_input)
+        self.panorama_sr_factor = float(panorama_sr_factor)
         # Grounding DINO score at or above which a detection is trusted for its
         # identity, not just its position -- i.e. allowed to anchor a visual
         # bucket in ObjectCategoryClusteringStage. Below it the detection is
@@ -106,6 +118,10 @@ class ObjectDetectionStage(PipelineStage):
         tags = [t.strip() for t in tags_str.split("|") if t.strip()]
         existing_count = context.input_object(ContextKey.OBJECT_COUNT) or 0
 
+        cone = None
+        if context.input_panorama(self._input_key()) is not None:
+            cone = captured_cone_from_context(context, input_image.width, input_image.height)
+
         task = self.create_progress(3, "Detecting objects…")
         if self._detector is None:
             self._detector = GroundingDino(self.device)
@@ -152,6 +168,8 @@ class ObjectDetectionStage(PipelineStage):
         next_idx = existing_count
         debug_entries = []
         filtered = 0
+        filtered_fov = 0
+        in_cone: list[tuple[int, list[float]]] = []
 
         cfg: ObjectDetectionConfiguration = self.config
         img_area = img_w * img_h
@@ -169,6 +187,11 @@ class ObjectDetectionStage(PipelineStage):
                 if w * h < min_area or w * h > max_area:
                     filtered += 1
                     continue
+
+                # Flagged rather than dropped -- see SegmentationStage for why.
+                inside = cone.contains_box(crop.box, cfg.captured_fov_margin_deg) if cone is not None else None
+                if inside is False:
+                    filtered_fov += 1
 
                 metadata = {
                     "box": [float(x), float(y), float(w), float(h)],
@@ -192,6 +215,10 @@ class ObjectDetectionStage(PipelineStage):
                     # see these crops.
                     "low_confidence": float(det["score"]) < cfg.confident_score,
                 }
+                if inside is not None:
+                    metadata["in_captured_fov"] = bool(inside)
+                    if inside:
+                        in_cone.append((next_idx, metadata["box"]))
 
                 context.add_image(f"crop_{next_idx}", crop.image)
                 context.add_object(f"metadata_{next_idx}", metadata)
@@ -202,6 +229,18 @@ class ObjectDetectionStage(PipelineStage):
                 next_idx += 1
 
         added = next_idx - existing_count
+
+        if cone is not None and cfg.hires_crops_from_input and in_cone:
+            photo = context.input_image(ContextKey.INPUT)
+            if self._seg is None:
+                self._seg = ImageSeg(self.preferred_device)
+            build_hires_crops(
+                self._seg, context, photo, cone, in_cone, self.temp, self.log_info,
+                sr_factor=cfg.panorama_sr_factor,
+            )
+        if cone is not None:
+            context.add_object(CAPTURED_FOV_RESTRICTED_KEY, bool(cfg.restrict_to_captured_fov))
+
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
         context.add_object("detection_complete", True)
 
@@ -212,6 +251,8 @@ class ObjectDetectionStage(PipelineStage):
 
         if filtered:
             self.log_info(f"  Filtered {filtered} detection(s) outside size bounds")
+        if filtered_fov:
+            self.log_info(f"  {filtered_fov} detection(s) lie outside the photographed cone ({len(in_cone)} inside)")
         self.log_info(f"Added {added} detections (SAM2: {existing_count}, total: {next_idx})")
         return context
 
