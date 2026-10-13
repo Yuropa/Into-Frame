@@ -53,6 +53,7 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         ridge_max_slope_angle_deg: float = 38.0,
         ridge_override_min_distance_m: float = 30.0,
         ridge_override_feather_m: float = 15.0,
+        ridge_max_metric_depth_m: float = 0.0,
         river_valley_depth: float = 0.5,
         river_drop_per_segment: float = 0.05,
         lake_y_range_threshold: float = 0.3,
@@ -173,6 +174,15 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.ridge_max_slope_angle_deg = ridge_max_slope_angle_deg
         self.ridge_override_min_distance_m = ridge_override_min_distance_m
         self.ridge_override_feather_m = ridge_override_feather_m
+        # A ridge chain whose METRIC depth (PANORAMA_DEPTH_METRIC, before the far
+        # range was compressed into the grid) is beyond this is not raised in the
+        # grid at all: it is the far field, and FarFieldBackdropStage stands it up
+        # at its own scale behind the grid. 0 means the grid's half-size. Without
+        # this the kilometre-away mountain was pulled into the 60-100 m band and
+        # modelled as a ring of rock around the meadow. 0 means the far-field start
+        # Panorama Depth Calibration measured (FAR_FIELD_START_M), falling back to
+        # the grid's half-size.
+        self.ridge_max_metric_depth_m = float(ridge_max_metric_depth_m)
         self.river_valley_depth = river_valley_depth
         self.river_drop_per_segment = river_drop_per_segment
         self.lake_y_range_threshold = lake_y_range_threshold
@@ -366,6 +376,27 @@ class TerrainReconstructionStage(PipelineStage):
         min_anchor_m = cfg.ridge_min_anchor_distance * z_half
         n_anchored, n_skipped = 0, 0
 
+        metric_depth = context.input_depth(ContextKey.PANORAMA_DEPTH_METRIC)
+        far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
+        metric_limit = (
+            cfg.ridge_max_metric_depth_m if cfg.ridge_max_metric_depth_m > 0
+            else float(far_start) if far_start else z_half
+        )
+        n_far = 0
+
+        def chain_metric_depth(chain: np.ndarray) -> "float | None":
+            """Median metric depth of the panorama pixels this chain was lifted from."""
+            if metric_depth is None:
+                return None
+            dh, dw = metric_depth.depth.shape[:2]
+            lon = np.arctan2(chain[:, 0], chain[:, 2])
+            lat = np.arctan2(chain[:, 1], np.hypot(chain[:, 0], chain[:, 2]).clip(1e-6))
+            cols = np.clip(((lon / (2.0 * np.pi) + 0.5) * dw).astype(int), 0, dw - 1)
+            rows = np.clip(((0.5 - lat / np.pi) * dh).astype(int), 0, dh - 1)
+            d = metric_depth.depth[rows, cols]
+            d = d[np.isfinite(d) & (d > 0)]
+            return float(np.median(d)) if d.size else None
+
         n_points_dropped = 0
         for raw_chain in ridge_chains:
             chain = np.asarray(raw_chain, dtype=np.float32)
@@ -374,6 +405,10 @@ class TerrainReconstructionStage(PipelineStage):
             horiz = np.sqrt(chain[:, 0] ** 2 + chain[:, 2] ** 2)
             if float(np.median(horiz)) < min_anchor_m:
                 n_skipped += 1
+                continue
+            d_metric = chain_metric_depth(chain)
+            if d_metric is not None and d_metric > metric_limit:
+                n_far += 1
                 continue
             # A chain can clear the median-distance qualification above while
             # still dipping past individual points close to the camera (noisy
@@ -397,7 +432,8 @@ class TerrainReconstructionStage(PipelineStage):
         self.log_info(
             f"Ridge chains: {n_anchored} anchored (≥{min_anchor_m:.0f} m), "
             f"{n_skipped} foreground skipped, {n_points_dropped} near-camera "
-            f"point(s) dropped (<{cfg.ridge_override_min_distance_m:.0f} m)"
+            f"point(s) dropped (<{cfg.ridge_override_min_distance_m:.0f} m), "
+            f"{n_far} beyond {metric_limit:.0f} m metric handed to the far-field backdrop"
         )
 
         # ── Critical-slope envelope ───────────────────────────────────────────

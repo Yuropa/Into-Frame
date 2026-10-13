@@ -23,6 +23,7 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         min_samples: int = 300,
         max_extrapolation_factor: float = 20.0,
         max_depth_m: Optional[float] = None,
+        far_fraction: float = 0.7,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -61,6 +62,15 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # content ordered and distinguishable without touching the near field.
         # None disables (only the relative max_extrapolation_factor cap above applies).
         self.max_depth_m = max_depth_m
+        # Where the far field begins, as a fraction of the deepest non-sky metric
+        # depth. Neither depth model measures distance past a few tens of metres: on
+        # the Rainier capture DA3 puts the summit at 53 m with a 55 m maximum and the
+        # calibrated panorama tops out at 36 m, for a mountain that is kilometres
+        # away. The saturated band -- everything at or near the maximum -- is the
+        # far field, whatever number it carries, and FarFieldBackdropStage stands it
+        # up behind the terrain grid while TerrainReconstructionStage keeps its
+        # ridges out of the grid. Written as FAR_FIELD_START_M for both.
+        self.far_fraction = float(far_fraction)
 
 
 def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -431,6 +441,28 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         # function to PANORAMA_OBJECT_DEPTH below keeps both maps agreeing on
         # where any given real-world point sits, with no scale factor to thread
         # between them. See _compress_far_range.
+        # The UNCOMPRESSED calibrated depth, kept alongside. PANORAMA_DEPTH below is
+        # compressed into max_depth_m because everything that builds the near
+        # terrain grid is tuned to that budget; the far field (the mountain that
+        # really is kilometres away) is represented by FarFieldBackdropStage from
+        # this map instead, at a scale the grid cannot hold. Ridge chains whose
+        # metric depth lies beyond the grid are handed to that stage too (see
+        # TerrainReconstructionStage.ridge_max_metric_depth_m).
+        metric = Depth(calibrated_arr.astype(np.float32))
+        context.add_depth(ContextKey.PANORAMA_DEPTH_METRIC, metric)
+        non_sky = calibrated_arr
+        if sky_mask is not None and np.asarray(sky_mask).shape == calibrated_arr.shape:
+            non_sky = calibrated_arr[~np.asarray(sky_mask, dtype=bool)]
+        finite = non_sky[np.isfinite(non_sky)]
+        if finite.size:
+            p50, p90, p995 = np.percentile(finite, [50, 90, 99.5])
+            far_start = float(cfg.far_fraction * p995)
+            context.add_object(ContextKey.FAR_FIELD_START_M, far_start)
+            self.log_info(
+                f"Metric panorama depth (uncompressed, non-sky): p50 {p50:.1f} m, p90 {p90:.1f} m, "
+                f"p99.5 {p995:.1f} m, max {finite.max():.0f} m — far field starts at "
+                f"{far_start:.1f} m ({cfg.far_fraction:.2f} x p99.5)"
+            )
         if cfg.max_depth_m is not None:
             calibrated_arr = _compress_far_range(calibrated_arr, cfg.max_depth_m)
         calibrated = Depth(calibrated_arr)

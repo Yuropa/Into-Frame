@@ -282,6 +282,20 @@ class HeightMapStage(PipelineStage):
                     f"(stride {cfg.point_cloud_stride}) → ground_point_cloud.glb"
                 )
 
+        # The far field is not terrain. Panorama pixels deeper than the far-field
+        # start (FAR_FIELD_START_M, where the depth models saturate -- see Panorama
+        # Depth Calibration's far_fraction) belong to FarFieldBackdropStage's shell,
+        # not to this grid; observing them here is what modelled the mountain as a
+        # ring of rock at 30 m. Tightens far_exclusion_radius to that start.
+        far_exclusion_radius = cfg.far_exclusion_radius
+        far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
+        if far_start:
+            if far_exclusion_radius is None or far_exclusion_radius > float(far_start):
+                self.log_info(
+                    f"Far exclusion tightened from {far_exclusion_radius} m to the far-field start "
+                    f"{float(far_start):.1f} m"
+                )
+                far_exclusion_radius = float(far_start)
         height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array, component_id_array, pano_uv_u_array, pano_uv_v_array, real_sample_mask_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
@@ -301,7 +315,7 @@ class HeightMapStage(PipelineStage):
             reclaimed_certainty_factor=cfg.reclaimed_certainty_factor,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
-            far_exclusion_radius=cfg.far_exclusion_radius,
+            far_exclusion_radius=far_exclusion_radius,
             flat_zone_certainty=cfg.flat_zone_certainty,
             certainty_falloff_meters=cfg.certainty_falloff_meters,
             elevation_distortion_power=cfg.elevation_distortion_power,

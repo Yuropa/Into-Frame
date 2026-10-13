@@ -470,6 +470,11 @@ stages:
                                  # and exponentiated over that gap was blowing up to tens of
                                  # kilometres for ~40% of the panorama, which then got discarded as
                                  # "out of bounds" downstream instead of read as real terrain.
+    far_fraction: 0.7           # where the far field begins, as a fraction of the deepest non-sky
+                                # metric depth. The depth models saturate (DA3 puts the Rainier summit
+                                # at 53 m of a 55 m maximum), so "far" is the saturated band, not a
+                                # distance. Read by Terrain Reconstruction (ridges kept out of the
+                                # grid) and Far Field Backdrop (stood up behind it).
     max_depth_m: 100.0          # hard ceiling on the farthest calibrated depth -- must match
                                  # Height Map's grid_size_meters / 2 below, since nothing farther
                                  # can ever land inside that grid anyway. Enforced by compressing
@@ -753,6 +758,9 @@ stages:
                                     # measured ground, which read as elevation spikes and crossing-seam
                                     # artifacts right around the user.
     ridge_override_feather_m: 15.0  # width (m) of the linear ramp-in beyond ridge_override_min_distance_m
+    ridge_max_metric_depth_m: 0     # a ridge whose UNCOMPRESSED depth (Panorama Depth Calibration's
+                                    # metric map) is beyond this is not raised in the grid; the Far
+                                    # Field Backdrop stands it up at its own scale. 0 = grid half-size.
                                     # before the envelope reaches full strength -- avoids a hard step
                                     # from real ground straight to the envelope's value at one exact
                                     # radius (30-45m here); full override still applies past that band.
@@ -1260,6 +1268,20 @@ stages:
     panorama_sr_factor: 2.0
     detect_on_photo: true          # Grounding DINO on the photograph for the cone
     photo_detect_sr_factor: 2.0
+
+  # Everything whose metric depth lies beyond the terrain grid, as a relief shell
+  # textured with the panorama and placed at an asymptotically mapped radius
+  # (300 m -> 290 m, 1 km -> 735 m, 3 km -> 799 m). The grid keeps the near field;
+  # the mountain stops being a 100 m ring of rock. See terrain/far_field_backdrop.py.
+  - name: Far Field Backdrop
+    stage: FarFieldBackdropStage
+    start_m: 0                  # 0 = Panorama Depth Calibration's far-field start (far_fraction)
+    start_radius_m: 0           # world radius the shell begins at; 0 = the grid's half-size
+    far_m: 500.0                # radius the most distant content approaches
+    scale_m: 0                  # e-folding in depth units; 0 = the saturated band's own width
+    stride_px: 8
+    max_depth_ratio: 1.8        # neighbours further apart than this ratio are a silhouette, not a surface
+    feather_px: 3.0
 
   - name: Object Instance Refinement
     stage: ObjectInstanceRefinementStage
