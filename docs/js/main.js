@@ -52,29 +52,6 @@ if (navToggle && navLinks) {
 
 
 /* ------------------------------------------------------------
-   Scroll-triggered fade-in animations
-   Adds .animate-fade-up to elements with [data-animate]
-   ------------------------------------------------------------ */
-const animatedEls = document.querySelectorAll('[data-animate]');
-
-if (animatedEls.length && 'IntersectionObserver' in window) {
-  const observer = new IntersectionObserver(
-    (entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('animate-fade-up');
-          observer.unobserve(entry.target);
-        }
-      });
-    },
-    { threshold: 0.15 }
-  );
-
-  animatedEls.forEach(el => observer.observe(el));
-}
-
-
-/* ------------------------------------------------------------
    Active nav link on scroll (intersection-based)
    ------------------------------------------------------------ */
 const sections   = document.querySelectorAll('section[id]');
