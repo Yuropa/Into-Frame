@@ -19,6 +19,7 @@ from pipeline.supersampling.image_supersampling import ImageSupersampling
 from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_prompt_prefix, lora_prompt_suffix
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.terrain.pattern_texture import (
+    bake_projected_colour,
     bake_real_layer, bake_real_layer_from_mesh, synthesize_region_layer, vegetation_bleed_mask,
     make_tileable, bake_macro_colour,
 )
@@ -36,6 +37,8 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
     RegionType.TERRAIN,
     RegionType.VEGETATION,
     RegionType.ROAD,
+    RegionType.FOREST,
+    RegionType.SNOW,
 })
 
 # Short on purpose: at FLUX Fill's guidance_scale (see TerrainTextureGenerationConfiguration)
@@ -60,6 +63,14 @@ _BASE_PROMPTS: dict[RegionType, str] = {
         "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
         "granite grit pebbles, sharp porous tarmac texture"
     ),
+    RegionType.FOREST: (
+        "overhead macro photograph of forest floor, fallen pine needles, moss, twigs, "
+        "dark humus soil"
+    ),
+    RegionType.SNOW: (
+        "overhead macro photograph of packed snow crust, granular firn, small ice "
+        "crystals, soft shadows"
+    ),
 }
 
 # PBR smoothness per region: 0 = perfectly rough/matte, 1 = mirror-smooth.
@@ -69,6 +80,8 @@ _LAYER_SMOOTHNESS: dict[RegionType, float] = {
     RegionType.TERRAIN:     0.08,
     RegionType.VEGETATION:  0.04,
     RegionType.ROAD:        0.18,
+    RegionType.FOREST:      0.04,
+    RegionType.SNOW:        0.30,
 }
 
 # How far Telea marches inward from a removed occluder's boundary when refilling its
@@ -105,6 +118,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         inpainting_type: str = "FLUX",
         num_inference_steps: int = 35,  # Higher headroom to resolve fine grains
         guidance_scale: float = 3.5,
+        tile_seam_fix: str = "offset",
         seam_width_fraction: float = 0.08,
         seam_dilation_px: int = 4,
         # Real pixels of context kept on each side of the seam band when _seam_fix_band
@@ -354,6 +368,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # there and a spoke metres long on the ground, so this is where the smear
         # can be averaged away.
         macro_angular_sigma_deg: float = 2.0,
+        macro_max_texel_m: float = 3.0,
+        macro_depth_tolerance: float = 0.6,
         # Region types whose detail tile may be cut from a near-field photo patch
         # (tile_source "patch"). Surfaces only: dirt, rock, road are flat and a
         # patch flattened onto its own plane is a texture of them. Vegetation is
@@ -366,6 +382,13 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.tile_source = str(tile_source).lower()
         self.macro_angular_sigma_deg = float(macro_angular_sigma_deg)
+        # bake_projected_colour's validity gates: a panorama pixel describes a texel
+        # only if it covers at most macro_max_texel_m of ground along the ray and the
+        # panorama's depth there agrees with the texel's distance within this fraction.
+        # "offset": make_tileable cross-fade; "flux": repaint the seam cross with FLUX.
+        self.tile_seam_fix = str(tile_seam_fix)
+        self.macro_max_texel_m = float(macro_max_texel_m)
+        self.macro_depth_tolerance = float(macro_depth_tolerance)
         self.patch_tile_types = frozenset(
             patch_tile_types if patch_tile_types is not None else ["ground", "terrain", "road", "trail"]
         )
@@ -984,11 +1007,20 @@ class TerrainTextureGenerationStage(PipelineStage):
             ))
         depth_depth = context.input_depth(ContextKey.PANORAMA_DEPTH)
         depth = depth_depth.depth if depth_depth is not None else None
-        canvas = bake_macro_colour(
-            np.asarray(panorama.rgb(), dtype=np.uint8), type_map, depth, height_map, half,
-            cfg.macro_map_size, angular_sigma_deg=cfg.macro_angular_sigma_deg,
-            world_blur_texels=cfg.macro_blur_texels,
+        region_depth = context.input_depth(ContextKey.REGION_MAP)
+        region_map = region_depth.depth if region_depth is not None else None
+        canvas, valid = bake_projected_colour(
+            panorama, height_map, half, cfg.macro_map_size, type_map, depth, region_map,
+            max_texel_m=cfg.macro_max_texel_m, depth_tolerance=cfg.macro_depth_tolerance,
+            blur_texels=cfg.macro_blur_texels,
         )
+        self.log_info(
+            f"Macro colour map: {valid.mean():.1%} of texels are a sound projection of the photograph "
+            f"(pixel shows a surface, depth agrees, footprint ≤ {cfg.macro_max_texel_m:.2f} m); the rest filled "
+            f"per region type from them"
+        )
+        if self.temp is not None:
+            PIL.Image.fromarray((valid * 255).astype(np.uint8)).save(self.temp / "macro_valid.png")
         mean = tuple(float(v) for v in canvas.reshape(-1, 3).mean(axis=0))
         macro = PIL.Image.fromarray((canvas.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
         self.log_info(
@@ -1047,7 +1079,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 (width, height), PIL.Image.NEAREST,
             ))
 
-        restore = np.isin(type_map, [int(RegionType.VEGETATION), int(RegionType.GROUND)])
+        restore = np.isin(type_map, [int(RegionType.VEGETATION), int(RegionType.GROUND), int(RegionType.SNOW)])
         restore[: height // 2, :] = False
         # Ground the occluder exclusion below is allowed to carve out of, kept so the
         # holes it makes can be filled from real neighbours rather than left as
@@ -1324,7 +1356,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             # not a defect in the texture.
             upright = np.isin(
                 np.rint(sampled).astype(np.int32),
-                [int(RegionType.VEGETATION), int(RegionType.BUILT)],
+                [int(RegionType.FOREST), int(RegionType.BUILT)],
             ).astype(np.float32)
 
             # Distance-weighted, because the artifact is: the panorama layer is a
@@ -1697,6 +1729,25 @@ class TerrainTextureGenerationStage(PipelineStage):
             result.putalpha(patch.split()[-1])
         return result
 
+    @staticmethod
+    def _fill_transparent(patch: PIL.Image.Image) -> PIL.Image.Image:
+        """RGB of an RGBA patch with its transparent pixels filled from the opaque
+        ones (push-pull), instead of dropping to black or to one flat mean. A
+        near-field reference patch is cut from a top-down bake and so carries the
+        unobserved wedges behind every occluder; black wedges seeded FLUX with
+        black streaks, and a flat mean tiled into blotches."""
+        from pipeline.terrain.pattern_texture import _push_pull
+        if patch.mode != "RGBA":
+            return patch.convert("RGB")
+        rgba = np.asarray(patch, dtype=np.float32)
+        alpha = np.clip(rgba[..., 3] / 255.0, 0.0, 1.0)
+        if alpha.min() >= 0.99:
+            return patch.convert("RGB")
+        if alpha.max() <= 0.01:
+            return patch.convert("RGB")
+        filled = _push_pull(rgba[..., :3] / 255.0, alpha)
+        return PIL.Image.fromarray((filled.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+
     def _patch_tile(
         self, panorama, type_map, region_val: int, depth, exclude_mask,
         cfg: "TerrainTextureGenerationConfiguration", debug_label: str,
@@ -1720,15 +1771,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         if cfg.use_patch_supersampling:
             patch = self._supersample_patch(patch)
             self._close_supersampler()
-        rgba = np.asarray(patch.convert("RGBA"), dtype=np.float32)
-        rgb, alpha = rgba[..., :3], rgba[..., 3] / 255.0
-        opaque = alpha > 0.5
-        if opaque.any() and not opaque.all():
-            # Outside the region mask the patch holds a neighbouring material;
-            # fill it with the region's own mean so it cannot tile into stripes.
-            mean = rgb[opaque].mean(axis=0)
-            rgb = rgb * alpha[..., None] + mean * (1.0 - alpha[..., None])
-        tile = make_tileable(PIL.Image.fromarray(rgb.clip(0, 255).astype(np.uint8), "RGB"))
+        # Outside the region mask the patch holds a neighbouring material or the
+        # unobserved wedge behind an occluder; fill it from the region's own pixels.
+        tile = make_tileable(self._fill_transparent(patch.convert("RGBA")))
         self._save_debug_step(cfg, debug_label, "p2_tileable", tile)
         return self._pack_local_height_channel(tile)
 
@@ -2029,7 +2074,9 @@ class TerrainTextureGenerationStage(PipelineStage):
             ox = border_fill_px + c * base_cell_w
 
             resized = patch.resize((w, h), PIL.Image.LANCZOS)
-            canvas_arr[oy:oy + h, ox:ox + w] = np.array(resized.convert("RGB"))
+            canvas_arr[oy:oy + h, ox:ox + w] = np.array(
+                TerrainTextureGenerationStage._fill_transparent(resized)
+            )
             keep = (
                 np.array(resized.split()[-1]) > 127
                 if resized.mode == "RGBA" else np.ones((h, w), dtype=bool)
@@ -2090,6 +2137,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         edges land at the centre as a "+"-shaped seam, repair each arm of
         that cross separately (_seam_fix_band), then shift back.
         """
+        if cfg.tile_seam_fix != "flux":
+            # Offset-and-feather (make_tileable): FLUX's repainted band came back
+            # at its own brightness, a visible frame around every repeat; the
+            # cross-fade's soft bands are hidden by the client's stochastic tiling.
+            return make_tileable(generated.convert("RGB"))
         inpainter = inpainter if inpainter is not None else self._inpainter
         T = cfg.tile_size
         arr = np.array(generated.convert("RGB"), dtype=np.uint8)

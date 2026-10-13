@@ -151,6 +151,7 @@ class RegionMapGenerator:
         near_field_min_radius_m: float = 5.0,
         prominence_min_m: float = 0.0,
         prominence_shoulder_m: float = 25.0,
+        canopy_idxs: tuple[int, ...] = (),
     ) -> tuple[np.ndarray, list[np.ndarray]]:
         """
         Extract the sky-foreground horizon per column and place it on a top-down
@@ -303,10 +304,21 @@ class RegionMapGenerator:
         # touch this column," independent of how/why its boundary is missing.
         water_present_column = water_mask.any(axis=0)                # (W,) bool
 
-        above_is_sky = np.zeros((h, w), dtype=bool)
-        above_is_sky[1:, :] = sky_mask[:-1, :]
-        # Any non-sky, non-water pixel directly below sky is a ridgeline candidate.
-        silhouette = (~sky_mask) & (~water_mask) & above_is_sky
+        # Trees are not a ridge. A conifer standing against the sky puts its crown
+        # on the silhouette at the elevation of its top, and a ring of such columns
+        # anchored a ring of hills where a flat meadow with a treeline stands. So
+        # canopy types (canopy_idxs) are looked THROUGH: a column's crest is the
+        # first pixel below the sky that is neither sky, water nor canopy, reached
+        # from the top through sky and canopy only. Where the canopy hides the
+        # ground entirely down to the horizon, the crest lands on the horizon-level
+        # ground behind it, i.e. no hill. Where a bare summit shows above the
+        # forest, the summit is still the crest.
+        canopy_mask = np.isin(type_idx_map, list(canopy_idxs)) if canopy_idxs else np.zeros((h, w), dtype=bool)
+        passable = sky_mask | canopy_mask
+        reached_from_top = np.cumprod(passable, axis=0).astype(bool)   # sky/canopy run from row 0
+        below_run = np.zeros((h, w), dtype=bool)
+        below_run[1:, :] = reached_from_top[:-1, :]
+        silhouette = (~passable) & (~water_mask) & below_run & sky_mask.any(axis=0)[None, :]
 
         has_silhouette = silhouette.any(axis=0)                      # (W,) bool
         boundary_row = silhouette.argmax(axis=0).astype(np.float64)  # (W,) float
@@ -890,7 +902,7 @@ class RegionMapGenerator:
             work_h, work_w = ref_h, ref_w
 
         sky_mask = types_work == sky_idx
-        occluder_mask = (types_work == RegionType.VEGETATION) | (types_work == RegionType.BUILT)
+        occluder_mask = (types_work == RegionType.FOREST) | (types_work == RegionType.BUILT)
         valid = (
             (~sky_mask) & (~occluder_mask)
             & np.isfinite(d_work) & (d_work > max(0.5, min_depth_m))

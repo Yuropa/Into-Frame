@@ -107,16 +107,17 @@ class TreelineBackdropStage(PipelineStage):
         W, H = panorama.width, panorama.height
         type_map = self._fit(type_depth.depth, H, W, order=0)
         depth = self._fit(depth_depth.depth, H, W, order=1)
-        vegetation = np.rint(type_map).astype(np.int32) == int(RegionType.VEGETATION)
+        vegetation = np.rint(type_map).astype(np.int32) == int(RegionType.FOREST)
         self.advance_progress(task)
 
         # ── Per column: the tallest upright run of far vegetation ──────────────
         # Canopy in the far field (beyond where the depth models saturate) is the
         # Far Field Backdrop's; this ribbon is the near treeline only.
         max_distance = cfg.max_distance_m
+        params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        grid_half = float(params.get("grid_size_meters", 200.0)) / 2.0
         far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
-        if far_start:
-            max_distance = min(max_distance, float(far_start))
+        max_distance = min(max_distance, max(float(far_start or 0.0), grid_half))
         far = vegetation & np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= max_distance)
         row_angle = math.pi / H
         top = np.full(W, -1, dtype=np.int32)

@@ -20,6 +20,17 @@ class RegionType(IntEnum):
     OTHER      = 6
     ROAD       = 7
     TRAIL      = 8
+    # Standing canopy (tree, forest) as distinct from the meadow underneath:
+    # VEGETATION is what you walk on and scatter grass into, FOREST is what hides
+    # the ground and stands against the sky. Snow is its own surface, not ground.
+    FOREST     = 9
+    SNOW       = 10
+
+    @classmethod
+    def canopy_types(cls) -> tuple["RegionType", ...]:
+        """Types that are standing vegetation seen against the sky -- a treeline,
+        not a landform. The ridge-line scan looks through them."""
+        return (cls.FOREST,)
 
     @property
     def ground_valid(self) -> bool:
@@ -28,7 +39,10 @@ class RegionType(IntEnum):
         Vegetation canopies and built structures occlude the ground, so their
         projected depth cannot be used to build a reliable height or region map.
         """
-        return self in (RegionType.WATER, RegionType.TERRAIN, RegionType.GROUND, RegionType.ROAD, RegionType.TRAIL)
+        return self in (
+            RegionType.WATER, RegionType.TERRAIN, RegionType.GROUND, RegionType.ROAD, RegionType.TRAIL,
+            RegionType.VEGETATION, RegionType.SNOW,
+        )
 
     @property
     def label(self) -> str:
@@ -93,7 +107,11 @@ _LABEL_RULES: list[_LabelRule] = [
     # of this coarse type are common and unremarkable in outdoor photography,
     # so "confidence" (not "corroboration") is the safe strategy here -- see
     # the strategy docstring above.
-    _LabelRule(("tree", "palm", "plant", "bush", "shrub", "flower", "vegetation", "forest", "jungle"), RegionType.VEGETATION, ambiguity=AMBIGUITY_CONFIDENCE),
+    _LabelRule(("tree", "palm", "forest", "jungle"), RegionType.FOREST, ambiguity=AMBIGUITY_CONFIDENCE),
+    # The meadow: grass, flowers and low plants are a SURFACE the viewer walks on,
+    # not an occluder, so they are no longer folded into the same type as trees
+    # (nor grass into bare ground).
+    _LabelRule(("grass", "field", "plant", "bush", "shrub", "flower", "vegetation"), RegionType.VEGETATION, ambiguity=AMBIGUITY_CONFIDENCE),
     _LabelRule(("building", "house", "skyscraper", "hovel", "shed", "cabin", "tower", "church", "temple"), RegionType.BUILT),
     # Commonly confused with sunlit natural rock/cliff faces (large, evenly-
     # lit, texture-rich vertical surfaces) by ADE20K-trained segmentation
@@ -104,8 +122,8 @@ _LABEL_RULES: list[_LabelRule] = [
     _LabelRule(("wall", "fence", "railing", "bannister", "column", "pillar"), RegionType.BUILT, ambiguity=AMBIGUITY_CORROBORATION),
     _LabelRule(("road", "pavement", "runway"), RegionType.ROAD),
     _LabelRule(("sidewalk", "path", "trail"), RegionType.TRAIL),
-    _LabelRule(("grass", "earth", "field", "sand", "dirt", "mud", "ground", "soil",
-      "floor", "snow", "ice"), RegionType.GROUND),
+    _LabelRule(("snow", "ice"), RegionType.SNOW),
+    _LabelRule(("earth", "sand", "dirt", "mud", "ground", "soil", "floor"), RegionType.GROUND),
 ]
 
 
@@ -160,6 +178,8 @@ REGION_TYPE_COLORS: dict[RegionType, tuple[int, int, int]] = {
     RegionType.OTHER:      (200, 200, 200),
     RegionType.ROAD:       (80,  80,  80),
     RegionType.TRAIL:      (180, 140, 100),
+    RegionType.FOREST:     (0,   90,  20),
+    RegionType.SNOW:       (235, 240, 250),
 }
 
 

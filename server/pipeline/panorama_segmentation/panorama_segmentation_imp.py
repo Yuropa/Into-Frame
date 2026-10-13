@@ -7,13 +7,21 @@ from typing import Any
 import numpy as np
 from PIL import Image
 import torch
-from transformers import SegformerImageProcessor, SegformerForSemanticSegmentation
+from transformers import AutoImageProcessor, SegformerImageProcessor, SegformerForSemanticSegmentation
 
 from remote_connection.remote_server import RemoteServer
 from util.panorama_tiling import Tile as _Tile, build_tiles as _build_tiles, extract_tile as _extract_tile
 
 
 _MODEL_ID = "nvidia/segformer-b5-finetuned-ade-640-640"
+# Both are ADE20K semantic models with the same 150 labels, so everything
+# downstream (the label -> region-type rules) is unchanged by the choice.
+# Mask2Former Swin-L is ~7 mIoU better than SegFormer-B5 on ADE20K validation
+# and draws far cleaner region boundaries.
+_MODEL_IDS = {
+    "segformer": "nvidia/segformer-b5-finetuned-ade-640-640",
+    "mask2former": "facebook/mask2former-swin-large-ade-semantic",
+}
 
 # Tile size matches the model's native trained resolution (640×640) exactly,
 # so a tile needs no resizing by the processor and the model sees genuine
@@ -170,6 +178,26 @@ class _ProbabilityAccumulator:
                 # the last write instead of summing them.
                 np.add.at(canvas, (row_grid[hit], col_grid[hit]), weighted[hit])
 
+    def add_points(self, rows: np.ndarray, cols: np.ndarray, weight: np.ndarray,
+                   ids: list[np.ndarray], vals: list[np.ndarray]) -> None:
+        """Like add(), for an arbitrary set of equirect pixels (a projected view)."""
+        rows = np.asarray(rows, dtype=np.int64); cols = np.asarray(cols, dtype=np.int64)
+        weight = np.asarray(weight, dtype=np.float32)
+        np.add.at(self.weight, (rows, cols), weight)
+        for point_ids, point_vals in zip(ids, vals):
+            weighted = (np.asarray(point_vals, dtype=np.float32) * weight).astype(np.float32)
+            for class_id in np.unique(point_ids):
+                key = int(class_id)
+                canvas = self.scores.get(key)
+                if canvas is None:
+                    if len(self.scores) >= _MAX_ACCUMULATED_CLASSES:
+                        self.overflow += 1
+                        continue
+                    canvas = np.zeros((self.height, self.width), dtype=np.float32)
+                    self.scores[key] = canvas
+                hit = point_ids == class_id
+                np.add.at(canvas, (rows[hit], cols[hit]), weighted[hit])
+
     def finalize(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """(label, confidence, runner-up label, runner-up confidence)."""
         # Running maxima over the per-class canvases rather than np.stack + argmax:
@@ -224,114 +252,263 @@ class _ProbabilityAccumulator:
         )
 
 
+
+# ── Perspective views ────────────────────────────────────────────────────────
+#
+# ADE20K is a dataset of ordinary perspective photographs. A 640 px square cut
+# straight out of an equirectangular panorama looks like one only near the
+# horizon; below it the projection stretches the ground into arcs no photo ever
+# contains, and on the Rainier capture the model called the entire near-field
+# ground, on both sides of the camera, "water". So the panorama is rendered
+# into pinhole views (a ring of yaws at a few pitches), the model runs on those,
+# and every view's per-pixel class probabilities are projected back onto the
+# equirect and accumulated exactly as the overlapping tiles were.
+#
+# Direction convention is the panorama's own (pano_utils.map_image_to_pano):
+# +z forward at the panorama's centre column, +x right, +y DOWN (row 0 is the
+# zenith), phi = atan2(x, z), theta = asin(y), u = (phi/pi + 1)/2, v = theta/pi + 0.5.
+
+
+def _view_rotation(yaw_deg: float, pitch_deg: float) -> np.ndarray:
+    """World-from-view rotation: pitch (positive = look up) then yaw (positive =
+    turn right, i.e. toward +x)."""
+    p, q = np.radians(pitch_deg), np.radians(yaw_deg)
+    # y is down, so looking up tilts forward toward -y.
+    rx = np.array([[1, 0, 0], [0, np.cos(p), -np.sin(p)], [0, np.sin(p), np.cos(p)]], dtype=np.float64)
+    ry = np.array([[np.cos(q), 0, np.sin(q)], [0, 1, 0], [-np.sin(q), 0, np.cos(q)]], dtype=np.float64)
+    return ry @ rx
+
+
+def _equirect_uv(d: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    phi = np.arctan2(d[..., 0], d[..., 2])
+    theta = np.arcsin(np.clip(d[..., 1], -1.0, 1.0))
+    return (phi / np.pi + 1.0) / 2.0, theta / np.pi + 0.5
+
+
+def _equirect_dirs(h: int, w: int) -> np.ndarray:
+    """Unit direction of every equirect pixel centre, (h, w, 3)."""
+    u = (np.arange(w, dtype=np.float64) + 0.5) / w
+    v = (np.arange(h, dtype=np.float64) + 0.5) / h
+    uu, vv = np.meshgrid(u, v)
+    phi = (uu * 2.0 - 1.0) * np.pi
+    theta = (vv - 0.5) * np.pi
+    return np.stack([np.cos(theta) * np.sin(phi), np.sin(theta), np.cos(theta) * np.cos(phi)], axis=-1)
+
+
+def _render_view(pano: np.ndarray, rot: np.ndarray, fov_deg: float, size: int) -> np.ndarray:
+    """Pinhole render of the equirect `pano` (H, W, 3) uint8 along `rot`."""
+    import cv2
+    H, W = pano.shape[:2]
+    t = np.tan(np.radians(fov_deg) / 2.0)
+    xs = ((np.arange(size, dtype=np.float64) + 0.5) / size * 2.0 - 1.0) * t
+    xx, yy = np.meshgrid(xs, xs)
+    d = np.stack([xx, yy, np.ones_like(xx)], axis=-1)
+    d = d / np.linalg.norm(d, axis=-1, keepdims=True)
+    d = d @ rot.T
+    u, v = _equirect_uv(d)
+    # One wrapped column on each side so the seam samples across it.
+    padded = np.concatenate([pano[:, -1:], pano, pano[:, :1]], axis=1)
+    map_x = (u * W + 0.5).astype(np.float32)          # +1 for the pad, -0.5 for pixel centres
+    map_y = (v * H - 0.5).astype(np.float32)
+    return cv2.remap(padded, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def _feather_from_normalised(nx: np.ndarray, ny: np.ndarray) -> np.ndarray:
+    """Weight for a view pixel at normalised image coordinates in [-1, 1]: 1 at
+    the view's centre, tapering to the floor at its edges (the tile feather's
+    role, so overlapping views hand over where the evidence changes)."""
+    r = np.maximum(np.abs(nx), np.abs(ny))
+    return np.clip(np.cos(np.pi / 2.0 * np.clip(r, 0.0, 1.0)) ** 2, 0.05, 1.0).astype(np.float32)
+
+
 class PanoramaSegmentationServer(RemoteServer):
     def setup(self):
-        self.processor = SegformerImageProcessor.from_pretrained(_MODEL_ID)
-        self.model = SegformerForSemanticSegmentation.from_pretrained(_MODEL_ID)
+        self.model_name = None
+        self.processor = None
+        self.model = None
+
+    def _load(self, model_name: str) -> None:
+        if self.model is not None and self.model_name == model_name:
+            return
+        model_id = _MODEL_IDS.get(model_name, model_name)
+        if model_name == "mask2former":
+            from transformers import Mask2FormerForUniversalSegmentation
+            self.processor = AutoImageProcessor.from_pretrained(model_id)
+            self.model = Mask2FormerForUniversalSegmentation.from_pretrained(model_id)
+        else:
+            self.processor = SegformerImageProcessor.from_pretrained(model_id)
+            self.model = SegformerForSemanticSegmentation.from_pretrained(model_id)
         self.model.to(self.device)
         self.model.eval()
+        self.model_name = model_name
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
         if action == "segment":
-            return self._segment(input)
+            if isinstance(input, dict):
+                return self._segment(
+                    input["panorama"], input.get("photo"), input.get("photo_hfov_deg"),
+                    input.get("model", "segformer"), input.get("views") or {},
+                )
+            return self._segment(input, None, None, "segformer", {})
         raise ValueError(f"Unknown action: {action}")
 
-    def _segment(self, image: Image.Image) -> dict:
-        orig_w, orig_h = image.size
-        img_arr = np.array(image.convert("RGB"))
+    # ── per-image class probabilities ────────────────────────────────────────
 
-        tiles = _build_tiles(orig_w, orig_h, _TILE_SIZE, _TILE_OVERLAP_FRAC)
-        self.report_progress(0.05, f"Segmenting {len(tiles)} tile(s)…")
-
-        label_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
-        # Top-1/top-2 softmax confidence and top-2 (runner-up) class id per
-        # pixel -- kept alongside the argmax label so downstream stages can
-        # tell a confident, unambiguous call apart from a close one (their
-        # difference is the margin), and know what the model's second-best
-        # guess was (see PanoramaRegionStage / panorama_region_result's
-        # ambiguity_strategy_for_label for how this is used to catch e.g.
-        # "wall" called on what's actually a cliff face, or "tree" called on
-        # dark, mottled rock texture).
-        confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
-        runnerup_canvas = np.zeros((orig_h, orig_w), dtype=np.int16)
-        runnerup_confidence_canvas = np.zeros((orig_h, orig_w), dtype=np.float32)
-        weight_canvas = np.full((orig_h, orig_w), -1.0, dtype=np.float32)
-        # See _BLEND_TILE_PROBABILITIES. None -> the winner-take-all canvases above
-        # are used exactly as before, so the flag bisects cleanly.
-        accumulator = _ProbabilityAccumulator(orig_h, orig_w) if _BLEND_TILE_PROBABILITIES else None
-
-        for batch_start in range(0, len(tiles), _MAX_BATCH):
-            batch = tiles[batch_start: batch_start + _MAX_BATCH]
-            crops = [Image.fromarray(_extract_tile(img_arr, t)) for t in batch]
-
-            inputs = self.processor(images=crops, return_tensors="pt")
+    def _probabilities(self, images: list[Image.Image]) -> torch.Tensor:
+        """(B, C, h, w) per-pixel class probabilities at each image's own size.
+        All images in a batch must share one size."""
+        w, h = images[0].size
+        if self.model_name == "mask2former":
+            inputs = self.processor(
+                images=images, return_tensors="pt", do_resize=False,
+            )
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
-
             with torch.no_grad():
                 outputs = self.model(**inputs)
-            logits = outputs.logits  # (B, num_classes, h/4, w/4)
+            cls = torch.softmax(outputs.class_queries_logits, dim=-1)[..., :-1]      # (B, Q, C)
+            masks = torch.sigmoid(outputs.masks_queries_logits)                      # (B, Q, h', w')
+            seg = torch.einsum("bqc,bqhw->bchw", cls, masks)
+            seg = torch.nn.functional.interpolate(seg, size=(h, w), mode="bilinear", align_corners=False)
+            return seg / seg.sum(dim=1, keepdim=True).clamp_min(1e-6)
+        inputs = self.processor(images=images, return_tensors="pt")
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        logits = torch.nn.functional.interpolate(outputs.logits, size=(h, w), mode="bilinear", align_corners=False)
+        return torch.softmax(logits, dim=1)
 
-            for i, tile in enumerate(batch):
-                tile_logits = torch.nn.functional.interpolate(
-                    logits[i: i + 1],
-                    size=(tile.h, tile.w),
-                    mode="bilinear",
-                    align_corners=False,
-                )
-                # top-2 subsumes plain argmax: index 0 of the topk is exactly
-                # the argmax label, so this is no extra work over what the
-                # label alone already cost.
-                probs = torch.softmax(tile_logits, dim=1)
-                top2_val, top2_idx = probs.topk(2, dim=1)
-                tile_label = top2_idx[:, 0].squeeze(0).cpu().numpy().astype(np.int16)
-                tile_confidence = top2_val[:, 0].squeeze(0).cpu().numpy().astype(np.float32)
-                tile_runnerup = top2_idx[:, 1].squeeze(0).cpu().numpy().astype(np.int16)
-                tile_runnerup_confidence = top2_val[:, 1].squeeze(0).cpu().numpy().astype(np.float32)
-                tile_weight = _feather_window(tile.h, tile.w)
-                if accumulator is not None:
-                    accumulator.add(
-                        tile, tile_weight,
-                        [tile_label, tile_runnerup],
-                        [tile_confidence, tile_runnerup_confidence],
-                    )
-                else:
-                    _paste_tiles(
-                        [label_canvas, confidence_canvas, runnerup_canvas, runnerup_confidence_canvas],
-                        [tile_label, tile_confidence, tile_runnerup, tile_runnerup_confidence],
-                        weight_canvas, tile_weight, tile,
-                    )
+    @staticmethod
+    def _top2(probs: torch.Tensor):
+        """(label, conf, runner-up, runner-up conf) numpy maps for one (C, h, w)."""
+        val, idx = probs.topk(2, dim=0)
+        return (
+            idx[0].cpu().numpy().astype(np.int16), val[0].cpu().numpy().astype(np.float32),
+            idx[1].cpu().numpy().astype(np.int16), val[1].cpu().numpy().astype(np.float32),
+        )
 
-            done = min(len(tiles), batch_start + len(batch))
-            self.report_progress(0.05 + 0.85 * done / len(tiles), f"Segmenting tiles… ({done}/{len(tiles)})")
+    # ── the two strategies ──────────────────────────────────────────────────
 
-        if accumulator is not None:
-            (label_canvas, confidence_canvas,
-             runnerup_canvas, runnerup_confidence_canvas) = accumulator.finalize()
-            if accumulator.overflow:
-                # report_progress is the only channel this process has back to the
-                # pipeline log -- there is no logger on RemoteServer, and a bare
-                # print here goes to a subprocess stdout nothing reads.
-                self.report_progress(
-                    0.95,
-                    f"tile blending: {accumulator.overflow} class sighting(s) past the "
-                    f"{_MAX_ACCUMULATED_CLASSES}-class ceiling were dropped",
-                )
-
+    def _segment(self, image: Image.Image, photo, photo_hfov_deg, model_name: str, views: dict) -> dict:
+        self._load(model_name)
+        orig_w, orig_h = image.size
+        if int(views.get("count", 0)) <= 0:
+            label, conf, runnerup, runnerup_conf = self._segment_tiles(image)
+        else:
+            label, conf, runnerup, runnerup_conf = self._segment_views(image, photo, photo_hfov_deg, views)
         self.report_progress(0.95, "Done")
-
         id2label = self.model.config.id2label
         return {
-            "label_map": label_canvas.tolist(),
-            # Raw ndarrays (not .tolist()): RemoteObject.encode auto-spills
-            # these to a temp .npy file instead of inlining them as JSON,
-            # which matters at full panorama resolution.
-            "confidence_map": confidence_canvas,
-            "runnerup_label_map": runnerup_canvas,
-            "runnerup_confidence_map": runnerup_confidence_canvas,
+            "label_map": label.tolist(),
+            "confidence_map": conf,
+            "runnerup_label_map": runnerup,
+            "runnerup_confidence_map": runnerup_conf,
             "id2label": {str(k): v for k, v in id2label.items()},
             "width": orig_w,
             "height": orig_h,
         }
+
+    def _segment_views(self, image: Image.Image, photo, photo_hfov_deg, views: dict):
+        """Render pinhole views, segment each, accumulate back on the equirect.
+        The hero photograph, when given, is one more view: the real pixels at
+        the panorama's centre, weighted `photo_weight` times a rendered view."""
+        W, H = image.size
+        pano = np.array(image.convert("RGB"))
+        count = int(views.get("count", 8))
+        fov = float(views.get("fov_deg", 90.0))
+        size = int(views.get("size_px", 768))
+        pitches = [float(p) for p in views.get("pitches_deg", [50.0, 0.0, -50.0])]
+        photo_weight = float(views.get("photo_weight", 2.0))
+        batch_size = int(views.get("batch", 4))
+
+        specs = [(360.0 * k / count, pitch) for pitch in pitches for k in range(count)]
+        acc = _ProbabilityAccumulator(H, W)
+        dirs = _equirect_dirs(H, W).reshape(-1, 3)
+        t = np.tan(np.radians(fov) / 2.0)
+        total = len(specs) + (1 if photo is not None else 0)
+        done = 0
+        self.report_progress(0.05, f"Segmenting {len(specs)} view(s)…")
+
+        for b0 in range(0, len(specs), batch_size):
+            batch = specs[b0: b0 + batch_size]
+            rots = [_view_rotation(yaw, pitch) for yaw, pitch in batch]
+            renders = [Image.fromarray(_render_view(pano, rot, fov, size)) for rot in rots]
+            probs = self._probabilities(renders)
+            for i, rot in enumerate(rots):
+                label, conf, runnerup, runnerup_conf = self._top2(probs[i])
+                # Equirect pixels inside this view, and where they land in it.
+                local = dirs @ rot                       # rot^T applied to each row
+                z = local[:, 2]
+                front = z > 1e-6
+                nx = np.zeros(len(z)); ny = np.zeros(len(z))
+                nx[front] = local[front, 0] / z[front] / t
+                ny[front] = local[front, 1] / z[front] / t
+                inside = front & (np.abs(nx) < 1.0) & (np.abs(ny) < 1.0)
+                idx = np.nonzero(inside)[0]
+                col = np.clip(((nx[idx] + 1.0) / 2.0 * size).astype(np.int64), 0, size - 1)
+                row = np.clip(((ny[idx] + 1.0) / 2.0 * size).astype(np.int64), 0, size - 1)
+                weight = _feather_from_normalised(nx[idx], ny[idx])
+                acc.add_points(
+                    idx // W, idx % W, weight,
+                    [label[row, col], runnerup[row, col]],
+                    [conf[row, col], runnerup_conf[row, col]],
+                )
+            done += len(batch)
+            self.report_progress(0.05 + 0.8 * done / total, f"Segmenting views… ({done}/{total})")
+
+        if photo is not None and photo_hfov_deg:
+            # The photo is embedded with WorldGen's linear-in-angle mapping
+            # (util/captured_cone.py): longitude = (px/w - 0.5) * hfov, latitude =
+            # (py/h - 0.5) * vfov. Rows/cols of the equirect inside that cone map
+            # straight to photo pixels.
+            pw, ph = photo.size
+            short = min(pw, ph)
+            scale = max(1.0, size / short)              # never downsample the real pixels
+            tw, th = int(round(pw * scale / 32)) * 32, int(round(ph * scale / 32)) * 32
+            resized = photo.convert("RGB").resize((tw, th), Image.LANCZOS)
+            probs = self._probabilities([resized])
+            label, conf, runnerup, runnerup_conf = self._top2(probs[0])
+            hfov = float(photo_hfov_deg)
+            vfov = np.degrees(2.0 * np.arctan(np.tan(np.radians(hfov) / 2.0) * ph / pw))
+            lon = ((np.arange(W) + 0.5) / W - 0.5) * 360.0
+            lat = ((np.arange(H) + 0.5) / H - 0.5) * 180.0
+            px = (lon / hfov + 0.5)                     # normalised [0, 1] across the photo
+            py = (lat / vfov + 0.5)
+            cols_in = np.nonzero((px >= 0.0) & (px < 1.0))[0]
+            rows_in = np.nonzero((py >= 0.0) & (py < 1.0))[0]
+            if cols_in.size and rows_in.size:
+                rr, cc = np.meshgrid(rows_in, cols_in, indexing="ij")
+                pcol = np.clip((px[cc] * tw).astype(np.int64), 0, tw - 1)
+                prow = np.clip((py[rr] * th).astype(np.int64), 0, th - 1)
+                weight = photo_weight * _feather_from_normalised(px[cc] * 2.0 - 1.0, py[rr] * 2.0 - 1.0)
+                acc.add_points(
+                    rr.ravel(), cc.ravel(), weight.ravel(),
+                    [label[prow, pcol].ravel(), runnerup[prow, pcol].ravel()],
+                    [conf[prow, pcol].ravel(), runnerup_conf[prow, pcol].ravel()],
+                )
+            self.report_progress(0.9, "Photograph segmented")
+
+        out = acc.finalize()
+        if acc.overflow:
+            self.report_progress(0.92, f"view blending: {acc.overflow} class sighting(s) past the ceiling were dropped")
+        return out
+
+    def _segment_tiles(self, image: Image.Image):
+        """The original strategy: overlapping equirect tiles at the model's native size."""
+        orig_w, orig_h = image.size
+        img_arr = np.array(image.convert("RGB"))
+        tiles = _build_tiles(orig_w, orig_h, _TILE_SIZE, _TILE_OVERLAP_FRAC)
+        self.report_progress(0.05, f"Segmenting {len(tiles)} tile(s)…")
+        accumulator = _ProbabilityAccumulator(orig_h, orig_w)
+        for batch_start in range(0, len(tiles), _MAX_BATCH):
+            batch = tiles[batch_start: batch_start + _MAX_BATCH]
+            crops = [Image.fromarray(_extract_tile(img_arr, t)) for t in batch]
+            probs = self._probabilities(crops)
+            for i, tile in enumerate(batch):
+                label, conf, runnerup, runnerup_conf = self._top2(probs[i])
+                accumulator.add(tile, _feather_window(tile.h, tile.w), [label, runnerup], [conf, runnerup_conf])
+            done = min(len(tiles), batch_start + len(batch))
+            self.report_progress(0.05 + 0.85 * done / len(tiles), f"Segmenting tiles… ({done}/{len(tiles)})")
+        return accumulator.finalize()
 
 
 if __name__ == "__main__":

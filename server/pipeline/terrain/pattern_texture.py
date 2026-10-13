@@ -275,11 +275,12 @@ def vegetation_bleed_mask(
     pv_i = np.clip(np.round(pv / max(1, panorama.height - 1) * (pano_h - 1)).astype(np.int64), 0, pano_h - 1)
 
     sampled_types = region_type_map[pv_i, pu_i]
-    vegetation_fraction = float((sampled_types == int(RegionType.VEGETATION)).mean())
+    foliage = [int(RegionType.VEGETATION), int(RegionType.FOREST)]
+    vegetation_fraction = float(np.isin(sampled_types, foliage).mean())
     if vegetation_fraction > max_vegetation_fraction:
         return None
 
-    return region_type_map == int(RegionType.VEGETATION)
+    return np.isin(region_type_map, foliage)
 
 
 # ── Real-content baking (mesh-projected) ──────────────────────────────────────
@@ -537,6 +538,150 @@ def make_tileable(image: PIL.Image.Image, feather_frac: float = 0.3) -> PIL.Imag
     return PIL.Image.fromarray(out.clip(0, 255).astype(np.uint8), "RGB")
 
 
+def _push_pull(colour: np.ndarray, weight: np.ndarray) -> np.ndarray:
+    """Fill the zero-weight texels of `colour` (H, W, 3) from the weighted ones:
+    a pyramid of normalised 2x2 averages pulled down and pushed back up, so a
+    hole takes the average of the nearest valid colour at whatever scale first
+    reaches it. Valid texels (weight 1) are returned unchanged."""
+    from scipy.ndimage import zoom as _zoom
+    h, w = weight.shape
+    if h <= 2 or w <= 2:
+        total = float(weight.sum())
+        mean = (colour * weight[..., None]).sum(axis=(0, 1)) / max(total, 1e-6) if total > 0 else colour.mean(axis=(0, 1))
+        return np.broadcast_to(mean, colour.shape).astype(np.float32)
+    ph, pw = h + (h % 2), w + (w % 2)
+    c = np.zeros((ph, pw, 3), dtype=np.float32); c[:h, :w] = colour * weight[..., None]
+    m = np.zeros((ph, pw), dtype=np.float32); m[:h, :w] = weight
+    c_small = c.reshape(ph // 2, 2, pw // 2, 2, 3).sum(axis=(1, 3))
+    m_small = m.reshape(ph // 2, 2, pw // 2, 2).sum(axis=(1, 3))
+    c_small = c_small / np.maximum(m_small, 1e-6)[..., None]
+    filled_small = _push_pull(c_small, np.clip(m_small, 0.0, 1.0))
+    up = _zoom(filled_small, (h / filled_small.shape[0], w / filled_small.shape[1], 1), order=1)
+    wgt = np.clip(weight, 0.0, 1.0)[..., None]
+    return (colour * wgt + up * (1.0 - wgt)).astype(np.float32)
+
+
+def bake_projected_colour(
+    panorama: Panorama,
+    height_map: np.ndarray,
+    half: float,
+    canvas_size: int,
+    type_map: np.ndarray,
+    depth: "np.ndarray | None",
+    region_map: "np.ndarray | None",
+    max_texel_m: float = 0.6,
+    depth_tolerance: float = 0.35,
+    near_m: float = 3.0,
+    blur_texels: float = 1.0,
+    near_vegetation_m: float = 8.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The photograph projected onto the terrain where that projection is sound,
+    and filled from itself everywhere else.
+
+    A top-down bake of the panorama is a starburst wherever it projects a pixel
+    onto ground that pixel does not show: a conifer or the mountain lands on the
+    flat far field as a spoke metres long. The fix is not blur. Each texel of the
+    grid is a world point; the panorama pixel it projects to is only evidence
+    about that texel when (a) the pixel shows a surface (not sky, canopy or a
+    building), (b) the panorama's own depth there agrees with the texel's
+    distance (a mountain pixel at 110 m does not describe a texel at 150 m on
+    the plain, nor the horizon band a texel anywhere), and (c) the pixel covers
+    at most max_texel_m of ground along the view ray (distance times the pixel's
+    angle over the grazing cosine). Texels that fail are holes, filled per region
+    type from the valid texels of the same type (push-pull), so the far meadow
+    is meadow-coloured from the meadow that was seen, not from the trees behind.
+
+    Returns (canvas (S, S, 3) float32 in [0, 1], valid (S, S) bool), row 0 at Z = -half.
+    """
+    from scipy.ndimage import map_coordinates as _map, zoom as _zoom
+    S = canvas_size
+    ys, xs = np.mgrid[0:S, 0:S].astype(np.float64)
+    Z = ys / S * (2.0 * half) - half
+    X = xs / S * (2.0 * half) - half
+    hm_h, hm_w = height_map.shape
+    row_c = ((Z + half) / (2.0 * half) * (hm_h - 1)).clip(0, hm_h - 1)
+    col_c = ((X + half) / (2.0 * half) * (hm_w - 1)).clip(0, hm_w - 1)
+    Y = np.nan_to_num(_map(height_map, [row_c, col_c], order=1, mode="nearest").astype(np.float64), nan=0.0)
+    pts = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+    d = np.linalg.norm(pts, axis=1)
+    pu, pv, _lat = panorama._project_vertices(pts.astype(np.float32))
+    pu = np.asarray(pu, dtype=np.float64).reshape(S, S); pv = np.asarray(pv, dtype=np.float64).reshape(S, S)
+    d = d.reshape(S, S)
+    W, H = panorama.width, panorama.height
+
+    # (a) what the pixel shows
+    th, tw = type_map.shape
+    tu = np.clip(np.rint(pu / max(W - 1, 1) * (tw - 1)).astype(np.int64), 0, tw - 1)
+    tv = np.clip(np.rint(pv / max(H - 1, 1) * (th - 1)).astype(np.int64), 0, th - 1)
+    shown = type_map[tv, tu].astype(np.int32)
+    surface = np.isin(shown, [int(t) for t in (
+        RegionType.TERRAIN, RegionType.GROUND, RegionType.VEGETATION, RegionType.SNOW,
+        RegionType.ROAD, RegionType.TRAIL, RegionType.WATER,
+    )])
+    valid = surface
+    # A meadow is upright too: a 0.5 m plant at 20 m from a 1 m camera smears
+    # plant_height * d / camera_height = 10 m along its ray, so beyond
+    # near_vegetation_m the meadow's pixels are not a sound projection either
+    # and the meadow colour comes from the near meadow via the fill.
+    valid &= ~((shown == int(RegionType.VEGETATION)) & (d > near_vegetation_m))
+    # (b) the panorama's depth agrees with the texel's distance
+    if depth is not None:
+        dh, dw = depth.shape
+        du = np.clip(np.rint(pu / max(W - 1, 1) * (dw - 1)).astype(np.int64), 0, dw - 1)
+        dv = np.clip(np.rint(pv / max(H - 1, 1) * (dh - 1)).astype(np.int64), 0, dh - 1)
+        dp = depth[dv, du].astype(np.float64)
+        agree = np.isfinite(dp) & (np.abs(dp - d) <= depth_tolerance * np.maximum(d, near_m))
+        valid &= agree
+    # (c) the pixel's ground footprint
+    texel = 2.0 * half / S
+    gy, gx = np.gradient(Y, texel)                     # dY/dZ (rows), dY/dX (cols)
+    normal = np.stack([-gx, np.ones_like(Y), -gy], axis=-1)
+    normal /= np.linalg.norm(normal, axis=-1, keepdims=True)
+    ray = -pts.reshape(S, S, 3) / np.maximum(d, 1e-6)[..., None]
+    cos_g = np.abs((normal * ray).sum(axis=-1))
+    footprint = d * (np.pi / H) / np.maximum(cos_g, 0.05)
+    valid &= footprint <= max_texel_m
+
+    rgb = np.asarray(panorama.rgb(), dtype=np.float32) / 255.0
+    colour = np.stack([_map(rgb[..., c], [pv, pu], order=1, mode="nearest") for c in range(3)], axis=-1).astype(np.float32)
+
+    # A valid pixel still describes its texel only at the scale of its footprint:
+    # an upright flower at 10 m is smeared along its ray over the metre its pixel
+    # covers. Blur each texel by its own footprint (normalised convolution over
+    # the valid texels, so holes do not darken the edge), coarse where the
+    # projection is coarse and crisp where it is not.
+    sigmas = np.clip(footprint / texel / 2.0, 0.5, 24.0)
+    levels = [0.5, 2.0, 6.0, 16.0]
+    w = valid.astype(np.float32)
+    blurred = []
+    for sg in levels:
+        num = np.stack([gaussian_filter(colour[..., c] * w, sigma=sg) for c in range(3)], axis=-1)
+        den = gaussian_filter(w, sigma=sg)
+        blurred.append(num / np.maximum(den, 1e-4)[..., None])
+    idx = np.clip(np.searchsorted(np.asarray(levels), sigmas), 0, len(levels) - 1)
+    colour = np.choose(idx[..., None], [b[..., :] for b in blurred]).astype(np.float32)
+
+    # Fill per region type of the TEXEL (where the viewer stands), from the
+    # valid texels of that type.
+    if region_map is not None:
+        rh, rw = region_map.shape
+        region = np.rint(_zoom(region_map.astype(np.float32), (S / rh, S / rw), order=0)).astype(np.int32)
+    else:
+        region = np.zeros((S, S), dtype=np.int32)
+    weight = valid.astype(np.float32)
+    filled = _push_pull(colour, weight) if valid.any() else colour
+    out = filled.copy()
+    for t in np.unique(region):
+        here = region == t
+        w_t = weight * here
+        if w_t.sum() < 16:
+            continue                                   # too little of this type was seen: global fill
+        out[here] = _push_pull(colour, w_t)[here]
+    if blur_texels > 0:
+        out = np.stack([gaussian_filter(out[..., c], sigma=blur_texels) for c in range(3)], axis=-1)
+    return out.clip(0, 1).astype(np.float32), valid
+
+
 def bake_macro_colour(
     panorama_rgb: np.ndarray,
     type_map: np.ndarray,
@@ -548,40 +693,17 @@ def bake_macro_colour(
     world_blur_texels: float = 1.5,
     near_vegetation_m: float = 8.0,
     work_width: int = 1024,
+    region_map: "np.ndarray | None" = None,
+    max_texel_m: float = 0.6,
+    depth_tolerance: float = 0.35,
 ) -> np.ndarray:
-    """The photograph's large-scale GROUND colour over the terrain grid.
-
-    A top-down bake of the panorama is a starburst wherever the panorama holds
-    something upright: a conifer on the horizon becomes a dark spoke metres long,
-    and no amount of blur in WORLD space removes it, because the spoke is the same
-    pixel repeated along one ray. The smear is removable in the panorama's own
-    angular domain instead, where a tree is a few columns wide: blur there, then
-    bake. Pixels that are not ground at all -- sky, built structures, canopy
-    beyond the near meadow -- are first replaced by their nearest ground colour so
-    the blur has nothing but ground to average.
-
-    Returns (canvas_size, canvas_size, 3) float32 in [0, 1], row 0 at Z = -half.
-    """
-    from scipy.ndimage import distance_transform_edt, zoom as _zoom
-    H, W = type_map.shape
-    scale = min(1.0, work_width / float(W))
-    sw, sh = max(1, int(round(W * scale))), max(1, int(round(H * scale)))
-    rgb = np.asarray(PIL.Image.fromarray(panorama_rgb).resize((sw, sh), PIL.Image.BILINEAR), dtype=np.float32) / 255.0
-    types = np.rint(_zoom(type_map.astype(np.float32), (sh / H, sw / W), order=0)).astype(np.int32)
-    valid = np.isin(types, [int(RegionType.TERRAIN), int(RegionType.GROUND), int(RegionType.ROAD),
-                            int(RegionType.TRAIL), int(RegionType.WATER)])
-    if depth is not None and depth.shape == (H, W):
-        d = _zoom(depth.astype(np.float32), (sh / H, sw / W), order=1)
-        valid |= (types == int(RegionType.VEGETATION)) & np.isfinite(d) & (d <= near_vegetation_m)
-    else:
-        valid |= (types == int(RegionType.VEGETATION)) & (np.arange(sh)[:, None] > sh // 2)
-    if valid.any() and not valid.all():
-        _, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
-        rgb = rgb[iy, ix]
-    sigma = max(0.5, angular_sigma_deg / 360.0 * sw)
-    rgb = np.stack([gaussian_filter(rgb[..., c], sigma=sigma, mode=("nearest", "wrap")) for c in range(3)], axis=-1)
-    small = Panorama((rgb.clip(0, 1) * 255.0 + 0.5).astype(np.uint8))
-    canvas = bake_real_layer(small, height_map, half, half, half, canvas_size)
-    if world_blur_texels > 0:
-        canvas = np.stack([gaussian_filter(canvas[..., c], sigma=world_blur_texels) for c in range(3)], axis=-1)
-    return canvas.astype(np.float32)
+    """The photograph's large-scale ground colour over the terrain grid: see
+    bake_projected_colour, which replaces the angular-blur bake (that still left
+    radial spokes wherever the far field was flat, because the smear is the
+    projection's, not the image's)."""
+    canvas, _valid = bake_projected_colour(
+        Panorama(np.asarray(panorama_rgb, dtype=np.uint8)), height_map, half, canvas_size,
+        type_map, depth, region_map, max_texel_m=max_texel_m, depth_tolerance=depth_tolerance,
+        blur_texels=world_blur_texels,
+    )
+    return canvas

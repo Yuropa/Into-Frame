@@ -7,6 +7,7 @@ from PIL import Image as PILImage
 from scipy.ndimage import uniform_filter1d, zoom as ndimage_zoom
 
 from remote_connection.remote_client import RemoteClient
+from pipeline.panorama.placement import placement_fov_deg
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_segmentation.panorama_region_result import (
@@ -27,6 +28,10 @@ from util.image_utils import Image
 _MIN_REGION_FRACTION = 0.005
 
 _MODEL_ID = "nvidia/segformer-b5-finetuned-ade-640-640"
+_MODEL_IDS = {
+    "segformer": "nvidia/segformer-b5-finetuned-ade-640-640",
+    "mask2former": "facebook/mask2former-swin-large-ade-semantic",
+}
 
 
 class PanoramaSegmentationClient(RemoteClient):
@@ -38,8 +43,17 @@ class PanoramaSegmentationClient(RemoteClient):
     def model_names(cls) -> list[str]:
         return [_MODEL_ID]
 
-    def segment(self, panorama: PILImage.Image, temp_path: Path) -> dict:
-        return self.send(action="segment", input=panorama, temp_path=temp_path)
+    def segment(
+        self, panorama: PILImage.Image, temp_path: Path, photo: PILImage.Image | None = None,
+        photo_hfov_deg: float | None = None, model: str = "segformer", views: dict | None = None,
+    ) -> dict:
+        return self.send(
+            action="segment", temp_path=temp_path,
+            input={
+                "panorama": panorama, "photo": photo, "photo_hfov_deg": photo_hfov_deg,
+                "model": model, "views": views or {},
+            },
+        )
 
 
 def _connected_components(mask: np.ndarray) -> tuple[np.ndarray, int]:
@@ -366,12 +380,14 @@ def _reject_snow_water(
     labels, n_components = _connected_components(water_mask)
     corrected = type_idx_map.copy()
     rejected = np.zeros_like(water_mask)
-    fallback = np.where(runnerup_type_idx_map == water, int(RegionType.GROUND), runnerup_type_idx_map)
+    groundish = [int(RegionType.GROUND), int(RegionType.SNOW)]
+    fallback = np.where(np.isin(runnerup_type_idx_map, groundish) | (runnerup_type_idx_map == water),
+                        int(RegionType.SNOW), runnerup_type_idx_map)
 
     for component in range(1, n_components + 1):
         comp_mask = labels == component
         snow_fraction = float(snow_like[comp_mask].mean())
-        ground_fraction = float((runnerup_type_idx_map[comp_mask] == int(RegionType.GROUND)).mean())
+        ground_fraction = float(np.isin(runnerup_type_idx_map[comp_mask], groundish).mean())
         if snow_fraction >= min_snow_fraction and ground_fraction >= min_ground_runnerup_fraction:
             corrected[comp_mask] = fallback[comp_mask].astype(corrected.dtype)
             rejected |= comp_mask
@@ -405,6 +421,13 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         log,
         keys=None,
         seed: int = 0,
+        model: str = "mask2former",
+        view_count: int = 8,
+        view_fov_deg: float = 90.0,
+        view_size_px: int = 768,
+        view_pitches_deg: list[float] | None = None,
+        use_photo: bool = True,
+        photo_weight: float = 2.0,
         nadir_cutoff_deg: float = -55.0,
         nadir_band_deg: float = 15.0,
         confidence_margin_threshold: float = 0.2,
@@ -418,6 +441,19 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         snow_water_min_ground_runnerup_fraction: float = 0.50,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Which ADE20K model, and how the panorama is shown to it: rendered as
+        # view_count pinhole views of view_fov_deg at each pitch (0 = the old
+        # equirect tiling), with the hero photograph as one more view inside its
+        # cone at photo_weight times a rendered view's weight (use_photo; off for the
+        # pass over the object-removed terrain panorama, whose content differs from
+        # the photograph where objects were removed).
+        self.model = str(model)
+        self.view_count = int(view_count)
+        self.view_fov_deg = float(view_fov_deg)
+        self.view_size_px = int(view_size_px)
+        self.view_pitches_deg = [float(p) for p in (view_pitches_deg or [50.0, 0.0, -50.0])]
+        self.use_photo = bool(use_photo)
+        self.photo_weight = float(photo_weight)
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_band_deg = nadir_band_deg
         # Context key of another already-computed region type map to sanity-check
@@ -544,7 +580,25 @@ class PanoramaRegionStage(PipelineStage):
             self._client = PanoramaSegmentationClient(self.device)
         self.advance_progress(task)
 
-        raw = self._client.segment(panorama.rgb(), self.temp)
+        photo, photo_hfov = None, None
+        if cfg.use_photo:
+            photo_image = context.input_image(ContextKey.INPUT)
+            intrinsics = context.input_intrinsics(ContextKey.INTRINSICS)
+            if photo_image is not None and intrinsics is not None:
+                photo, photo_hfov = photo_image.rgb(), placement_fov_deg(intrinsics.fov)
+                self.log_info(f"Hero photograph segmented as a view inside its {photo_hfov:.1f}° cone")
+        if cfg.view_count > 0:
+            self.log_info(
+                f"Segmenting with {cfg.model}: {cfg.view_count} x {len(cfg.view_pitches_deg)} perspective "
+                f"view(s) of {cfg.view_fov_deg:.0f}° at {cfg.view_size_px} px"
+            )
+        raw = self._client.segment(
+            panorama.rgb(), self.temp, photo=photo, photo_hfov_deg=photo_hfov, model=cfg.model,
+            views={
+                "count": cfg.view_count, "fov_deg": cfg.view_fov_deg, "size_px": cfg.view_size_px,
+                "pitches_deg": cfg.view_pitches_deg, "photo_weight": cfg.photo_weight,
+            },
+        )
         self.advance_progress(task)
 
         seg = _build_result(raw, confidence_margin_threshold=cfg.confidence_margin_threshold)
@@ -675,7 +729,7 @@ class PanoramaRegionStage(PipelineStage):
         return context.panorama_regions(regions_key) is not None
 
     def model_names(self) -> list[str]:
-        return PanoramaSegmentationClient.model_names()
+        return [_MODEL_IDS.get(self.config.model, self.config.model)]
 
     def clean_up(self):
         if self._client is not None:

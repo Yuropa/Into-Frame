@@ -312,6 +312,21 @@ stages:
                             # SegFormer's raw output and replaced by the reliable ring above.
     nadir_band_deg: 15.0    # degrees of ring immediately above the cutoff used for the
                             # per-column majority vote that replaces the excluded band.
+    # ADE20K semantic model and how the panorama is presented to it. mask2former is
+    # Mask2Former Swin-L (same 150 labels as the SegFormer-B5 it replaces, ~7 mIoU
+    # better, cleaner boundaries). The model was trained on perspective photographs,
+    # so the panorama is rendered into pinhole views (view_count yaws at each pitch,
+    # view_fov_deg wide) and the per-pixel class probabilities are accumulated back
+    # on the equirect; view_count 0 restores the equirect tiling, which on Rainier
+    # called the whole near-field ground "water". The hero photograph is one more
+    # view inside its cone, at photo_weight times a rendered view's weight.
+    model: mask2former
+    view_count: 8
+    view_fov_deg: 90.0
+    view_size_px: 768
+    view_pitches_deg: [50.0, 0.0, -50.0]
+    use_photo: true
+    photo_weight: 2.0
 
     # Snow mislabelled as water. SegFormer calls a sunlit snowfield "water"/"lake",
     # and on the Rainier capture that reached the client as a water chain 10 m from
@@ -350,6 +365,12 @@ stages:
     stage: PanoramaRegionStage
     nadir_cutoff_deg: -55.0
     nadir_band_deg: 15.0
+    model: mask2former
+    view_count: 8
+    view_fov_deg: 90.0
+    view_size_px: 768
+    view_pitches_deg: [50.0, 0.0, -50.0]
+    use_photo: false            # this panorama had its objects removed; the photo still has them
     # Same snow rejection as the original-photo pass above -- this one is the map
     # RegionMapStage and HeightMapStage actually read, and the snow is still snow
     # after foreground removal. Measured on Rainier: water 0.83% -> 0.19%, and the
@@ -467,6 +488,15 @@ stages:
     # (very common for mountain horizons) indistinguishable from its hard-clamped sky value.
     num_bins: 14
     min_samples: 300
+    # After the curve fit, rescale both maps so the ground straight below the camera
+    # sits camera_height_meters away (median of depth x sin(elevation) over the rows
+    # steeper than anchor_min_elevation_deg). DA3's absolute scale on one photo is
+    # unreliable (Rainier: nadir at 0.3 m, everything 3x too close); the camera
+    # height is the metric fact Height Map already pins the nadir to. Must match
+    # Height Map's camera_height_meters.
+    anchor_to_camera_height: true
+    camera_height_meters: 1.0
+    anchor_min_elevation_deg: 45.0
     max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
                                  # range at this many times the farthest/nearest fitted median
                                  # metric depth, instead of an unbounded log-space extrapolation —
@@ -1131,7 +1161,7 @@ stages:
     # a meadow seen from eye level is upright plants, and flattening those onto the
     # ground is the starburst. "flux" restores generated tiles for every region.
     tile_source: patch
-    patch_tile_types: [ground, terrain, road, trail]
+    patch_tile_types: [ground, terrain, road, trail, snow]
     # Sample tiled layers stochastically in the shader (hex grid of random offsets)
     # so a 4 m tile never visibly repeats and the cross-fade bands disappear.
     stochastic_tiling: true
@@ -1139,10 +1169,17 @@ stages:
     # 1.5 texels (~0.4 m per texel over 200 m, so no projection smear survives),
     # multiplied into the tiled layers as macro / mean. The tiles carry the
     # detail, the photograph carries the snow patches, dirt and meadow colour.
-    macro_map_size: 512
+    macro_map_size: 1024
     macro_blur_texels: 1.5
     macro_strength: 1.0
     macro_angular_sigma_deg: 2.0   # low-pass in the panorama's angular domain first: a
+    # The macro map is the photograph projected onto the terrain where the projection
+    # is sound (surface pixel, depth agrees within macro_depth_tolerance, footprint
+    # <= macro_max_texel_m along the ray), filled per region type from itself
+    # elsewhere -- no more radial spokes from the flat far field.
+    macro_max_texel_m: 3.0        # the macro map is colour at ~0.2 m/texel; a 3 m footprint still describes it
+    macro_depth_tolerance: 0.6    # rejects the horizon band (depth a tenth of the texel distance), keeps the mid meadow
+    tile_seam_fix: offset         # offset-and-feather; "flux" repaints the seam cross (left a bright frame)
                                    # tree is a few columns there and a spoke metres long
                                    # on the ground, so that is where the smear averages out
 

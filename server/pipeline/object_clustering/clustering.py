@@ -291,7 +291,7 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 # TREES typed as towers, sitting in 0.61-1.00 VEGETATION. Only the
                 # region map separates those two populations; class, confidence and
                 # caption all look alike.
-                vegetation = float((sub == int(RegionType.VEGETATION)).mean())
+                vegetation = float((sub == int(RegionType.FOREST)).mean())
                 if vegetation >= threshold:
                     return f"{vegetation * 100:.0f}% of its box is tree canopy"
             return None

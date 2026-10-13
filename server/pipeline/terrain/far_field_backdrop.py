@@ -134,7 +134,12 @@ class FarFieldBackdropStage(PipelineStage):
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_half = float(params.get("grid_size_meters", 200.0)) / 2.0
         measured_start = context.input_object(ContextKey.FAR_FIELD_START_M)
-        start_m = cfg.start_m if cfg.start_m > 0 else (float(measured_start) if measured_start else grid_half)
+        # The grid owns everything inside its half-size, ridge chains included
+        # (TerrainReconstructionStage); this shell takes what lies beyond it. The
+        # measured saturation start only moves the boundary OUT, never in: on the
+        # Rainier capture a 10.8 m start had put the forest and the whole mountain on
+        # the shell over a flat plain.
+        start_m = cfg.start_m if cfg.start_m > 0 else max(float(measured_start or 0.0), grid_half)
         start_radius = cfg.start_radius_m if cfg.start_radius_m > 0 else grid_half
 
         W, H = panorama.width, panorama.height
@@ -145,6 +150,20 @@ class FarFieldBackdropStage(PipelineStage):
         far = np.isfinite(depth) & (depth > start_m)
         if sky is not None:
             far &= ~sky
+        # A mountain the ridge chains anchored into the terrain (Region Map /
+        # Terrain Reconstruction) must not also stand on this shell behind it, or
+        # the viewer sees two summits. When any chain was anchored, the landform
+        # types are the terrain's; the shell keeps what the grid cannot hold.
+        chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
+        if chains and type_depth is not None:
+            types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+            landform = np.isin(types_full, [int(RegionType.TERRAIN), int(RegionType.SNOW)])
+            removed = int((far & landform).sum())
+            far &= ~landform
+            self.log_info(
+                f"Far-field backdrop: {len(chains)} ridge chain(s) anchored in the terrain, "
+                f"{removed} terrain/snow px left to it"
+            )
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)

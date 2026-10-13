@@ -378,9 +378,13 @@ class TerrainReconstructionStage(PipelineStage):
 
         metric_depth = context.input_depth(ContextKey.PANORAMA_DEPTH_METRIC)
         far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
+        # Chains inside the grid are this stage's, however saturated their depth:
+        # the Far Field Backdrop starts at the grid's edge (see that stage), so a
+        # chain skipped here for being "beyond the far start" but inside the grid
+        # would be nowhere. The far start only ever moves the limit outward.
         metric_limit = (
             cfg.ridge_max_metric_depth_m if cfg.ridge_max_metric_depth_m > 0
-            else float(far_start) if far_start else z_half
+            else max(float(far_start or 0.0), z_half)
         )
         n_far = 0
 

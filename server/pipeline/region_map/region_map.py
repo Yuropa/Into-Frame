@@ -281,6 +281,7 @@ class RegionMapStage(PipelineStage):
             panorama_depth=panorama_depth,
             prominence_min_m=cfg.ridge_prominence_min_m,
             prominence_shoulder_m=cfg.ridge_prominence_shoulder_m,
+            canopy_idxs=tuple(int(t) for t in RegionType.canopy_types()),
         )
         context.add_depth(ContextKey.MOUNTAIN_SILHOUETTE, silhouette_grid)
         context.add_object(ContextKey.MOUNTAIN_RIDGE_CHAINS, ridge_chains)

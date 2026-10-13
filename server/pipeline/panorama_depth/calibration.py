@@ -24,6 +24,9 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         max_extrapolation_factor: float = 20.0,
         max_depth_m: Optional[float] = None,
         far_fraction: float = 0.7,
+        anchor_to_camera_height: bool = True,
+        camera_height_meters: float = 1.0,
+        anchor_min_elevation_deg: float = 45.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -71,6 +74,17 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # up behind the terrain grid while TerrainReconstructionStage keeps its
         # ridges out of the grid. Written as FAR_FIELD_START_M for both.
         self.far_fraction = float(far_fraction)
+        # DA3's metric scale on a single photograph is only approximately metric
+        # (the Rainier capture came out ~3x too small: the ground straight below the
+        # camera at 0.3 m). The one metric fact the pipeline already commits to is
+        # camera_height_meters (Height Map pins the nadir to it), so after the curve
+        # fit both maps are rescaled so the ground under the camera sits at that
+        # height: the nadir ray at elevation -e below the horizon hits flat ground at
+        # h / sin(e), and the median of depth * sin(e) over the rows steeper than
+        # anchor_min_elevation_deg is the camera height the depth map implies.
+        self.anchor_to_camera_height = bool(anchor_to_camera_height)
+        self.camera_height_meters = float(camera_height_meters)
+        self.anchor_min_elevation_deg = float(anchor_min_elevation_deg)
 
 
 def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -243,6 +257,58 @@ def _apply_panorama_depth_curve(
 
     corrected = np.clip(corrected, 1e-3, 1e6)
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
+
+
+def _camera_height_scale(
+    depth: np.ndarray,
+    camera_height_m: float,
+    min_elevation_deg: float,
+    sky_mask: Optional[np.ndarray],
+) -> tuple[float, float]:
+    """Scale that puts the ground under the camera at camera_height_m.
+
+    Every pixel in the rows steeper than min_elevation_deg below the horizon is
+    assumed to be ground (flat enough there: at 45 deg and below, a 1 m camera
+    sees at most 1.4 m away). Each gives a camera-height estimate
+    depth * sin(elevation); the median is robust to the odd rock or flower.
+    Returns (scale, implied_height), or (1.0, nan) when nothing can be measured.
+    """
+    h, w = depth.shape
+    rows = np.arange(h)
+    elevation = (0.5 - (rows + 0.5) / h) * 180.0          # +90 at the top row, -90 at the bottom
+    steep = elevation <= -abs(min_elevation_deg)
+    if not steep.any():
+        return 1.0, float("nan")
+    band = depth[steep]
+    sin_e = np.sin(np.radians(-elevation[steep]))[:, None]
+    valid = np.isfinite(band) & (band > 0)
+    if sky_mask is not None and np.asarray(sky_mask).shape == depth.shape:
+        valid &= ~np.asarray(sky_mask, dtype=bool)[steep]
+    if valid.sum() < 100:
+        return 1.0, float("nan")
+    implied = float(np.median((band * sin_e)[valid]))
+    if not np.isfinite(implied) or implied <= 1e-3:
+        return 1.0, float("nan")
+    return float(camera_height_m / implied), implied
+
+
+def _saturation_plateau(depth: np.ndarray, sky_mask: Optional[np.ndarray]) -> float:
+    """The depth the model saturates at: the largest non-sky value that survives a
+    median filter. The mountain can be a tiny fraction of the non-sky pixels (under
+    0.5 % on Rainier, with the meadow filling the lower hemisphere), so no high
+    percentile finds it; the filtered maximum does, while a lone hot pixel does not."""
+    from scipy.ndimage import median_filter
+    h, w = depth.shape
+    step = max(1, w // 1024)
+    small = depth[::step, ::step].astype(np.float32)
+    valid = np.isfinite(small) & (small > 0)
+    if sky_mask is not None and np.asarray(sky_mask).shape == depth.shape:
+        valid &= ~np.asarray(sky_mask, dtype=bool)[::step, ::step]
+    if not valid.any():
+        return float(np.nanmax(depth))
+    filled = np.where(valid, small, 0.0)
+    filtered = median_filter(filled, size=5)
+    return float(filtered[valid].max())
 
 
 def _compress_far_range(
@@ -435,6 +501,19 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         calibrated_arr = _apply_panorama_depth_curve(
             dap_pred_raw, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
         )
+        anchor_scale = 1.0
+        if cfg.anchor_to_camera_height:
+            anchor_scale, implied = _camera_height_scale(
+                calibrated_arr, cfg.camera_height_meters, cfg.anchor_min_elevation_deg, sky_mask,
+            )
+            if anchor_scale != 1.0:
+                calibrated_arr = calibrated_arr * anchor_scale
+                self.log_info(
+                    f"Depth anchored to the camera height: the nadir implies {implied:.2f} m, "
+                    f"camera_height_meters is {cfg.camera_height_meters:.2f} m -> both maps scaled x{anchor_scale:.2f}"
+                )
+            else:
+                self.log_info("Depth anchor: nadir height could not be measured, scale unchanged")
         # Far-range compression, not a global scale: the near field has to stay
         # metric because camera_height_meters anchors everything downstream to it.
         # The curve depends only on max_depth_m, so applying the identical
@@ -455,13 +534,18 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             non_sky = calibrated_arr[~np.asarray(sky_mask, dtype=bool)]
         finite = non_sky[np.isfinite(non_sky)]
         if finite.size:
+            # The saturation plateau is the top of the distribution, not a high
+            # percentile of it: on Rainier the mountain is under 0.5 % of non-sky
+            # pixels, so p99.5 (15 m) sat on the meadow and the far field started at
+            # 10.8 m. p99.9 stays off single-pixel outliers.
             p50, p90, p995 = np.percentile(finite, [50, 90, 99.5])
-            far_start = float(cfg.far_fraction * p995)
+            plateau = _saturation_plateau(calibrated_arr, sky_mask)
+            far_start = float(cfg.far_fraction * plateau)
             context.add_object(ContextKey.FAR_FIELD_START_M, far_start)
             self.log_info(
                 f"Metric panorama depth (uncompressed, non-sky): p50 {p50:.1f} m, p90 {p90:.1f} m, "
-                f"p99.5 {p995:.1f} m, max {finite.max():.0f} m — far field starts at "
-                f"{far_start:.1f} m ({cfg.far_fraction:.2f} x p99.5)"
+                f"p99.5 {p995:.1f} m, saturation plateau {plateau:.0f} m — far field starts at "
+                f"{far_start:.1f} m ({cfg.far_fraction:.2f} x the plateau)"
             )
         if cfg.max_depth_m is not None:
             calibrated_arr = _compress_far_range(calibrated_arr, cfg.max_depth_m)
@@ -485,6 +569,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             calibrated_object_arr = _apply_panorama_depth_curve(
                 dap_pred_raw_fit, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
             )
+            calibrated_object_arr = calibrated_object_arr * anchor_scale
             if cfg.max_depth_m is not None:
                 # The identical curve PANORAMA_DEPTH got above -- it's a pure
                 # function of max_depth_m, so both maps place the same real-world
