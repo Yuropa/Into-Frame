@@ -114,6 +114,8 @@ stages:
     # meadow of hundreds and no lupine at all. See segmentation/photo_detection.py.
     detect_on_photo: true
     photo_detect_sr_factor: 2.0
+    panorama_detect_scale: 0.5   # the panorama pass only finds occluders outside the cone:
+                                 # 2048 px is three SAM2 tiles instead of twelve (21 min)
 
   # One grounding model decides what every blob is -- see
   # pipeline/object_labeling/labeling.py. Replaces Object Classification (BLIP),
@@ -129,6 +131,7 @@ stages:
     add_unmatched_boxes: true    # labelled boxes no blob covers become detections of their own
     represented_fraction: 0.4
     photo_detect_sr_factor: 2.0  # the same detection photo Object Segmentation used
+    panorama_detect_scale: 0.5   # Grounding DINO on a half-size panorama outside the cone
     size_veto_ratio: 3.0         # metric-height prior veto (person 1.7 m, car 1.5 m, ...)
 
   - name: Object Classification
