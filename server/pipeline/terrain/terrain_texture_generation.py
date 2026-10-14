@@ -338,6 +338,11 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # hands over to the tiled material. Ramps from full weight at half this
         # value to zero at it.
         panorama_max_texel_m: float = 0.6,
+        # Beyond this radius, unobserved terrain (the ridge envelope / outpainted
+        # dome) keeps the projected panorama regardless of the texel-size and
+        # upright gates -- see _panorama_visibility_weight. 0 disables.
+        panorama_far_ring_radius_m: float = 30.0,
+        panorama_far_ring_feather_m: float = 8.0,
         # Delight the panorama layer with the same shading-only operation the object
         # crops and reference patches get (use_intrinsic_delighting /
         # intrinsic_delight_strength), so the one surface that is lit by the client
@@ -398,6 +403,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.macro_strength = float(macro_strength)
         self.reference_max_distance_m = float(reference_max_distance_m)
         self.panorama_max_texel_m = float(panorama_max_texel_m)
+        self.panorama_far_ring_radius_m = float(panorama_far_ring_radius_m)
+        self.panorama_far_ring_feather_m = float(panorama_far_ring_feather_m)
         self.delight_panorama_layer = bool(delight_panorama_layer)
         self.tile_size = tile_size
         self.blend_map_size = blend_map_size
@@ -897,6 +904,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             panorama_terrain = self._ground_colour_panorama(context, panorama_terrain)
         height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
         height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        observed_depth = context.input_depth(ContextKey.HEIGHT_MAP_OBSERVED_MASK)
 
         if panorama_terrain is not None and height_map_depth is not None:
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
@@ -939,6 +947,9 @@ class TerrainTextureGenerationStage(PipelineStage):
                 upright_falloff_radius_m=cfg.panorama_upright_falloff_radius_m,
                 max_texel_m=cfg.panorama_max_texel_m,
                 pano_rows=panorama_terrain.height,
+                observed_mask=(observed_depth.depth if observed_depth is not None else None),
+                far_ring_radius_m=cfg.panorama_far_ring_radius_m,
+                far_ring_feather_m=cfg.panorama_far_ring_feather_m,
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -1215,6 +1226,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         upright_falloff_radius_m: float = 25.0,
         max_texel_m: float = 0.0,
         pano_rows: int = 2048,
+        observed_mask: Optional[np.ndarray] = None,
+        far_ring_radius_m: float = 0.0,
+        far_ring_feather_m: float = 8.0,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
@@ -1283,6 +1297,17 @@ class TerrainTextureGenerationStage(PipelineStage):
         handing the texel to the synthetic/pattern layers. Feathered rather than
         binary, so the handover doesn't produce a hard-edged stencil of the canopy.
 
+        The far ring is the exception to every gate above. Beyond far_ring_radius_m,
+        wherever the height map was never observed (the ridge envelope and the
+        outpainted dome, 60-140 m on Rainier), the texel-size gate and the upright
+        gate stripped the photograph off exactly the geometry nobody can walk to and
+        everybody looks at: the region map labels that ring FOREST (the treeline's
+        panorama rows, projected outward), so the blend maps handed the mountain to
+        the forest tile at 50x repeat, 70-90% weight, with the panorama under 12%.
+        The projected panorama is exact from the capture point and is the only real
+        information about that ring, so there it keeps the plain latitude weight
+        (observed_mask False, feathered in over far_ring_feather_m).
+
         Returns a float32 array of shape (blend_map_size, blend_map_size) in [0, 1].
         """
         us = np.linspace(0.0, 1.0, blend_map_size, dtype=np.float32)
@@ -1305,6 +1330,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             nadir_fade_deg=nadir_fade_deg,
             horizon_fade_deg=horizon_fade_deg,
         ).reshape(blend_map_size, blend_map_size)
+        base_weight = weight.copy()
 
         if max_texel_m > 0.0:
             # Ground covered by ONE panorama pixel at this texel: distance times the
@@ -1394,6 +1420,20 @@ class TerrainTextureGenerationStage(PipelineStage):
             keep = np.clip(gaussian_filter(1.0 - upright, sigma=sigma), 0.0, 1.0)
             # strength 1 -> the gate applies in full; strength 0 -> weight unchanged.
             weight = weight * (1.0 - strength * (1.0 - keep))
+
+        if (
+            far_ring_radius_m > 0.0
+            and observed_mask is not None
+            and np.shape(observed_mask) == height_map.shape
+        ):
+            observed = map_coordinates(
+                np.asarray(observed_mask, dtype=np.float32), [row_c.ravel(), col_c.ravel()],
+                order=1, mode="nearest",
+            ).reshape(blend_map_size, blend_map_size)
+            r_ring = np.sqrt(X ** 2 + Z ** 2)
+            ring = np.clip((r_ring - far_ring_radius_m) / max(far_ring_feather_m, 1e-6), 0.0, 1.0)
+            ring = (ring * (1.0 - observed.clip(0.0, 1.0))).astype(np.float32)
+            weight = weight + ring * (base_weight - weight)
 
         return (weight ** blend_power).astype(np.float32)
 

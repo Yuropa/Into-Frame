@@ -1,5 +1,6 @@
 import trimesh
 import numpy as np
+from pathlib import Path
 from typing import Self, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -359,20 +360,67 @@ class Mesh:
         material = PBRMaterial(baseColorTexture=image)
         self.mesh.visual = TextureVisuals(uv=uv, material=material)
 
+    # The scene is built in a LEFT-handed frame: +X is the right-hand side of the
+    # photograph, +Y up, +Z forward (HeightMapGenerator's grid, Panorama.mesh_uvs'
+    # azimuth, every placed object's position). glTF is right-handed with +Z
+    # forward and -X right, so a file that stores these coordinates verbatim is a
+    # mirror image, and a conformant loader (glTFast negates X on import) hands
+    # Unity the mirror image: the terrain, the water, the treeline and every
+    # instanced mesh arrived flipped left-to-right while scene.json's positions
+    # did not. Measured on the Rainier scene, 82% of the grass tufts were then
+    # more than 15 cm off the ground they were placed on (16% floating, 66%
+    # buried) and the meadow's east-shore grass stood in the mirrored lake.
+    #
+    # So the file stores the glTF frame: X negated and the winding reversed so the
+    # faces still point outward. load() undoes it for files that carry the marker
+    # below; a GLB without the marker predates this and is read as before.
+    _HANDEDNESS_MARKER = "intoframe_handedness"
+
+    @staticmethod
+    def _mirror_x(tm: trimesh.Trimesh) -> trimesh.Trimesh:
+        out = tm.copy()
+        vertices = np.array(out.vertices, dtype=np.float64)
+        vertices[:, 0] *= -1.0
+        faces = np.array(out.faces, dtype=np.int64)[:, ::-1]
+        # Assigning through the setters drops every cached derived quantity
+        # (face/vertex normals included), so normals are rebuilt for the new
+        # winding instead of being the stale mirror-image ones.
+        out.vertices = vertices
+        out.faces = faces
+        return out
+
     def save(self, path):
-        self.mesh.export(str(path), include_normals=True)
-        if self.extra_uv is not None and str(path).lower().endswith(".glb"):
-            from util.gltf_uv2 import inject_texcoord1
-            inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image)
-        if self.skin_bone_heights is not None and str(path).lower().endswith(".glb"):
-            from util.gltf_skin import inject_skin
-            inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
+        self._mirror_x(self.mesh).export(str(path), include_normals=True)
+        if str(path).lower().endswith(".glb"):
+            from util.gltf_uv2 import _read_glb, _write_glb
+            if self.extra_uv is not None:
+                from util.gltf_uv2 import inject_texcoord1
+                inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image)
+            if self.skin_bone_heights is not None:
+                from util.gltf_skin import inject_skin
+                inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
+            tree, bin_data = _read_glb(Path(path).read_bytes())
+            tree.setdefault("asset", {}).setdefault("extras", {})[self._HANDEDNESS_MARKER] = "gltf"
+            _write_glb(Path(path), tree, bin_data)
+
+    @classmethod
+    def _stored_in_gltf_frame(cls, path) -> bool:
+        if not str(path).lower().endswith(".glb"):
+            return False
+        try:
+            from util.gltf_uv2 import _read_glb
+            tree, _ = _read_glb(Path(path).read_bytes())
+        except Exception:
+            return False
+        return (tree.get("asset", {}).get("extras", {}) or {}).get(cls._HANDEDNESS_MARKER) == "gltf"
 
     @classmethod
     def load(cls, path) -> Self:
         loaded = trimesh.load(str(path), force="mesh")
         if not isinstance(loaded, trimesh.Trimesh):
             raise ValueError(f"Expected a single Trimesh at {path}, got {type(loaded).__name__}")
+        if cls._stored_in_gltf_frame(path):
+            loaded = cls._mirror_x(loaded)
         mesh = cls(loaded)
 
         # trimesh models one UV set and no skinning, so loading through it drops both

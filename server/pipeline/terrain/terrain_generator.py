@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.ndimage import map_coordinates, gaussian_filter
+from scipy.ndimage import map_coordinates, gaussian_filter, binary_dilation, distance_transform_edt
 from scipy.spatial import Delaunay
 from typing import Optional
 import trimesh
@@ -72,6 +72,7 @@ class TerrainMeshGenerator:
         water_depression_m: float = 0.5,
         min_water_area_m2: float = 12.0,
         water_level_percentile: float = 25.0,
+        water_depression_ramp_m: float = 2.0,
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
@@ -303,6 +304,12 @@ class TerrainMeshGenerator:
                     water_grid, hm, is_water, Y_pos, row_rm, col_rm,
                     water_level_percentile,
                 )
+                # Distance to the nearest dry cell, in metres, as a 0..1 ramp over
+                # water_depression_ramp_m (see the carve below).
+                cell_m = grid_size_meters / max(w_rm, 1)
+                dist_m = distance_transform_edt(water_grid) * cell_m
+                ramp = np.clip(dist_m / max(water_depression_ramp_m, 1e-6), 0.0, 1.0).astype(np.float32)
+                water_depth_frac = map_coordinates(ramp, [row_rm, col_rm], order=1, mode="nearest")
 
         # ── Formation mask ────────────────────────────────────────────────────
         # Same idea as the water mask above: capture each formation vertex's real
@@ -362,13 +369,25 @@ class TerrainMeshGenerator:
             Y_pos = np.where(is_formation, formation_Y - formation_depression_m, Y_pos)
 
         if water_Y is not None:
-            # Carve the lakebed a fixed margin below the (already correct,
-            # noise-free) water surface so an animated water plane's wave
-            # amplitude never exposes the terrain underneath it. Applied after
-            # the formation depression so real water always wins in the rare
-            # case a cell is classified as both (e.g. the submerged base of a
-            # rock formation that also pokes above the surface elsewhere).
-            Y_pos = np.where(is_water, water_Y - water_depression_m, Y_pos)
+            # Carve the lakebed below the (already correct, noise-free) water
+            # surface so an animated water plane's wave amplitude never exposes
+            # the terrain underneath it. Applied after the formation depression
+            # so real water always wins in the rare case a cell is classified as
+            # both (e.g. the submerged base of a rock formation that also pokes
+            # above the surface elsewhere).
+            #
+            # Ramped in from the shore rather than a fixed drop at the first wet
+            # vertex. The old carve put every wet vertex water_depression_m under
+            # the level, so a shoreline triangle with one wet corner fell 0.5-1.5 m
+            # across a 20-40 cm edge, all the way round the lake, and the water
+            # sheet (fully-wet triangles only) left those steps uncovered: the
+            # "spiky" ring at the Rainier lake, 1,051 vertices up to 1.46 m off the
+            # height map. Now the bed is the terrain itself at the shore (never
+            # raised: min with the level, so a wet vertex above the level is pulled
+            # down to it and one below keeps its own depth) and reaches the full
+            # depression water_depression_ramp_m in.
+            bed = np.minimum(Y_pos, water_Y)
+            Y_pos = np.where(is_water, bed - water_depression_m * water_depth_frac, Y_pos)
 
         # ── Vertex array ──────────────────────────────────────────────────
         vertices = np.stack([X_pos, Y_pos, Z_pos], axis=-1).astype(np.float32)
@@ -412,9 +431,22 @@ class TerrainMeshGenerator:
         # water-chain pinning made it flat.
         water_mesh: Optional[Mesh] = None
         if water_Y is not None:
-            water_face_mask = is_water[faces].all(axis=1)
+            # Every triangle with at least one wet corner, not only the fully wet
+            # ones: the shoreline triangles are where the bed starts to descend, and
+            # a sheet that stops one triangle short of the shore shows the bed. Each
+            # sheet triangle is flat at the level of its own wet corners (one body
+            # per triangle in practice), so the sheet meets the dry corners' terrain
+            # at the shore instead of sitting a step below it.
+            wet_count = is_water[faces].sum(axis=1)
+            water_face_mask = wet_count > 0
             if water_face_mask.any():
-                water_vertices = np.stack([X_pos, water_Y, Z_pos], axis=-1).astype(np.float32)
+                sheet_faces = faces[water_face_mask]
+                corner_level = np.where(is_water, water_Y, np.nan)[sheet_faces]
+                face_level = np.nanmean(corner_level, axis=1).astype(np.float32)
+                water_vertices = np.stack(
+                    [X_pos[sheet_faces], np.repeat(face_level[:, None], 3, axis=1), Z_pos[sheet_faces]], axis=-1
+                ).reshape(-1, 3).astype(np.float32)
+                sheet_faces = np.arange(len(water_vertices)).reshape(-1, 3)
                 # Mirrored by Unity's IntoFrame/WaterSurface shader, which replaces
                 # this material outright and re-declares the same two numbers as its
                 # own defaults -- keep the two in step. It is also what the exported
@@ -439,11 +471,11 @@ class TerrainMeshGenerator:
                 )
                 water_tri_mesh = trimesh.Trimesh(
                     vertices=water_vertices,
-                    faces=faces[water_face_mask],
+                    faces=sheet_faces,
                     visual=trimesh.visual.TextureVisuals(material=water_material),
                     process=False,
                 )
-                water_tri_mesh.remove_unreferenced_vertices()
+                water_tri_mesh.merge_vertices()
                 water_mesh = Mesh(water_tri_mesh)
 
         return Mesh(tri_mesh), water_mesh, pano_uv, uv_folds_fixed
@@ -464,6 +496,8 @@ class TerrainMeshGenerator:
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
+        water_level_percentile: float = 25.0,
+        water_depression_ramp_m: float = 2.0,
     ) -> Mesh:
         """
         Build a coarse, geometry-only collision mesh for the terrain.
@@ -496,6 +530,8 @@ class TerrainMeshGenerator:
             # Must match generate()'s own value or the collider is carved for a
             # different set of lakes than the visual mesh shows.
             min_water_area_m2=min_water_area_m2,
+            water_level_percentile=water_level_percentile,
+            water_depression_ramp_m=water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=formation_depression_m,
@@ -811,6 +847,73 @@ class TerrainMeshGenerator:
         return np.concatenate(vertex_chunks, axis=0), faces, np.concatenate(uv_chunks, axis=0)
 
     @staticmethod
+    def level_water_bodies(
+        height: np.ndarray,
+        water: np.ndarray,
+        *,
+        grid_size_meters: float,
+        min_area_m2: float,
+        percentile: float,
+        bank_blend_m: float,
+        bank_max_step_m: float,
+        log=None,
+    ) -> np.ndarray:
+        """Flatten each body of water IN THE HEIGHT MAP to one level, and grade the
+        bank around it to meet that level.
+
+        The reconstruction under a lake is a guess at a surface that reflects the
+        sky and reads as far: on the Rainier capture the labelled lake sat in a
+        basin 1 m under the meadow it is in, tilted by 0.7 m from one shore to the
+        other. Terrain Mesh levels its water vertices (_level_water) and carves the
+        bed, but it cannot move the dry bank, so a flat sheet met banks up to 0.9 m
+        above it and the shoreline triangles stepped down into the lake all the way
+        round -- the "spiky" ring -- while every object placed from the height map
+        stood on the unlevelled bank.
+
+        So the levelling happens once, here, in the map every later stage reads:
+        the body becomes its level (read from the shore ring, see _level_water for
+        why that and why a low percentile), and dry cells within bank_blend_m are
+        blended to the level at the shore. A bank more than bank_max_step_m from
+        the level is left alone: that is a cliff meeting the sea (Shark Fin), a real
+        discontinuity the sheet simply disappears into, and dragging the clifftop
+        toward sea level would cut a trench along its edge.
+        """
+        from scipy.ndimage import label as _label
+
+        water = _prune_small_water(np.asarray(water, dtype=bool), grid_size_meters=grid_size_meters, min_area_m2=min_area_m2)
+        if not water.any():
+            return height
+        # 8-connected, like _prune_small_water: a body pinched to a diagonal thread
+        # is one body, not a lake plus a string of one-cell puddles.
+        labels, count = _label(water, structure=np.ones((3, 3), dtype=bool))
+        out = np.array(height, dtype=np.float64, copy=True)
+        cell = grid_size_meters / max(water.shape[1], 1)
+        for component in range(1, count + 1):
+            body = labels == component
+            shore = binary_dilation(body, iterations=3) & ~body
+            heights = height[shore]
+            heights = heights[np.isfinite(heights)]
+            if heights.size < 16:
+                heights = height[body]
+                heights = heights[np.isfinite(heights)]
+            if heights.size == 0:
+                continue
+            level = float(np.percentile(heights, percentile))
+            out[body] = level
+            if bank_blend_m > 0.0:
+                dist = distance_transform_edt(~body) * cell
+                bank = (~water) & (dist < bank_blend_m) & (np.abs(out - level) <= bank_max_step_m)
+                t = (dist[bank] / bank_blend_m).clip(0.0, 1.0)
+                out[bank] = level * (1.0 - t) + out[bank] * t
+            if log is not None:
+                area = float(body.sum()) * cell * cell
+                log(
+                    f"  water body {component}: {area:.0f} m2 levelled to {level:+.2f} m "
+                    f"(shore p{percentile:.0f}; body was {np.percentile(height[body], 25):+.2f}..{np.percentile(height[body], 75):+.2f} m)"
+                )
+        return out.astype(height.dtype, copy=False)
+
+    @staticmethod
     def _level_water(
         water_grid: np.ndarray,
         height_grid: np.ndarray,
@@ -857,7 +960,7 @@ class TerrainMeshGenerator:
         """
         from scipy.ndimage import label as _label
 
-        labels, count = _label(water_grid)
+        labels, count = _label(water_grid, structure=np.ones((3, 3), dtype=bool))
         if count == 0:
             return Y_pos.copy()
 
@@ -873,8 +976,20 @@ class TerrainMeshGenerator:
             if not member.any():
                 continue
             if height_grid is not None and height_grid.shape == water_grid.shape:
-                heights = height_grid[labels == component]
+                # A water surface meets its shore AT the surface, so the shore is
+                # where the level is read: the ring of dry cells just outside the
+                # body. The body's own cells are the reconstruction's guess at a
+                # surface that reflects the sky and reads as "far", which on the
+                # Rainier lake sat 1 m below the meadow it is in. The same low
+                # percentile, for the same one-sided reason as above (a cliff
+                # misread as shore pushes the ring up, nothing pushes it down).
+                body = labels == component
+                shore = binary_dilation(body, iterations=3) & ~body
+                heights = height_grid[shore]
                 heights = heights[np.isfinite(heights)]
+                if heights.size < 16:
+                    heights = height_grid[body]
+                    heights = heights[np.isfinite(heights)]
             else:
                 # Region and height grids are the same resolution on every capture
                 # measured, but they are produced by different stages and nothing

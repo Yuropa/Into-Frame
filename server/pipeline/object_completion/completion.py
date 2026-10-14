@@ -49,6 +49,7 @@ from pipeline.object_typing.categories import (
 from pipeline.panorama_asset_generation.generation import _largest_consistent, _plausible_shape
 from pipeline.segmentation.hires_crops import hires_key, is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 from pipeline.segmentation.photo_detection import DETECTION_PHOTO_FACTOR_KEY
+from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 
@@ -82,6 +83,9 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         guidance_scale: float = 30.0,
         refine_strength: float = 0.0,
         min_kept_visible_fraction: float = 0.5,
+        occluder_reach_fraction: float = 0.25,
+        truncated_edge_fraction: float = 0.3,
+        context_background: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to complete. Default: every placeable object class; never
@@ -119,6 +123,16 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         # fraction of the originally visible pixels, or the completion is rejected
         # (the model replaced the object instead of continuing it).
         self.min_kept_visible_fraction = float(min_kept_visible_fraction)
+        # See build_completion_canvas: how far from the visible silhouette an
+        # occluder is painted, and how much of a box side must be opaque for the
+        # object to count as cut off there.
+        self.occluder_reach_fraction = float(occluder_reach_fraction)
+        self.truncated_edge_fraction = float(truncated_edge_fraction)
+        # Paint the completion in the object's own surroundings (the object-removed
+        # terrain panorama warped into the canvas) instead of on a white card. On
+        # white the model has nothing to continue but the prompt: a riverboat cut
+        # by the frame was continued with a figure standing at its end.
+        self.context_background = bool(context_background)
 
 
 def build_completion_canvas(
@@ -129,7 +143,10 @@ def build_completion_canvas(
     object_fraction: float,
     dilate_px: int,
     border_extend_fraction: float,
-) -> tuple[PILImage.Image, PILImage.Image, np.ndarray, float, tuple[int, int], float]:
+    reach_fraction: float = 0.25,
+    truncated_edge_fraction: float = 0.3,
+    background: Optional[PILImage.Image] = None,
+) -> tuple[PILImage.Image, PILImage.Image, np.ndarray, float, tuple[int, int], float, dict[str, bool]]:
     """Compose the inpainting canvas and mask.
 
     cutout:          RGBA object cutout in its own crop space.
@@ -138,8 +155,26 @@ def build_completion_canvas(
                      cutout's box (may extend outside it).
     touches:         {"left","right","top","bottom": bool}, edges of the photograph
                      the object's box reaches.
+    reach_fraction:  an occluder is only painted within this fraction of the
+                     object's size of its visible silhouette. The hidden part of a
+                     connected object is adjacent to its visible part; the rest of
+                     the occluder is not the object and painting it only invites
+                     the model to put something else there. The hole is the
+                     occluder's bounding rectangle inside that band, not its
+                     silhouette: a person-shaped hole on the Rainier lupine crop
+                     came back filled with a person (two white mannequins, built
+                     into the flower mesh and placed 36 times).
+    truncated_edge_fraction: a side of the visible silhouette's box along which at
+                     least this fraction of the edge is opaque is a cut, whatever
+                     cut it (the photograph's frame, an undetected occluder, the
+                     quay in front of a riverboat), and is opened like a frame
+                     edge so the object can continue past it.
+    background:      optional RGB canvas-sized image of the object's surroundings
+                     with the objects removed; the completion is then painted in
+                     context instead of on white. The visible object is composited
+                     over it.
     Returns (canvas RGB, mask L, visible bool array, scale, (ox, oy) placement,
-    masked fraction of the canvas).
+    masked fraction of the canvas, effective touches).
     """
     cw, ch = cutout.size
     scale = object_fraction * canvas_px / max(cw, ch, 1)
@@ -148,11 +183,21 @@ def build_completion_canvas(
     scaled = cutout.resize((sw, sh), PILImage.LANCZOS)
     alpha = np.asarray(scaled.split()[-1], dtype=np.float32) / 255.0
 
-    canvas = np.full((canvas_px, canvas_px, 3), 255.0, dtype=np.float32)
+    if background is not None and background.size == (canvas_px, canvas_px):
+        canvas = np.asarray(background.convert("RGB"), dtype=np.float32).copy()
+    else:
+        canvas = np.full((canvas_px, canvas_px, 3), 255.0, dtype=np.float32)
     rgb = np.asarray(scaled.convert("RGB"), dtype=np.float32)
-    canvas[oy:oy + sh, ox:ox + sw] = rgb * alpha[..., None] + 255.0 * (1.0 - alpha[..., None])
+    region = canvas[oy:oy + sh, ox:ox + sw]
+    canvas[oy:oy + sh, ox:ox + sw] = rgb * alpha[..., None] + region * (1.0 - alpha[..., None])
     visible = np.zeros((canvas_px, canvas_px), dtype=bool)
     visible[oy:oy + sh, ox:ox + sw] = alpha > 0.5
+
+    # The band around the visible silhouette an occluder may be painted in.
+    reach_px = max(int(dilate_px), int(round(reach_fraction * max(sw, sh))))
+    allowed = np.asarray(
+        PILImage.fromarray(visible.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(2 * reach_px + 1))
+    ) > 127
 
     mask = np.zeros((canvas_px, canvas_px), dtype=bool)
     for m, mx, my in occluder_masks:
@@ -167,7 +212,29 @@ def build_completion_canvas(
         cx0, cy0 = max(0, cx0), max(0, cy0)
         cx1, cy1 = min(canvas_px, cx1), min(canvas_px, cy1)
         if cx1 > cx0 and cy1 > cy0:
-            mask[cy0:cy1, cx0:cx1] |= tile[sy0:sy0 + (cy1 - cy0), sx0:sx0 + (cx1 - cx0)]
+            occ = np.zeros((canvas_px, canvas_px), dtype=bool)
+            occ[cy0:cy1, cx0:cx1] = tile[sy0:sy0 + (cy1 - cy0), sx0:sx0 + (cx1 - cx0)]
+            hole = occ & allowed
+            if hole.any():
+                ys, xs = np.nonzero(hole)
+                rect = np.zeros((canvas_px, canvas_px), dtype=bool)
+                rect[ys.min():ys.max() + 1, xs.min():xs.max() + 1] = True
+                mask |= rect & allowed
+
+    # Sides along which the visible silhouette is cut straight off.
+    touches = dict(touches)
+    obj = visible[oy:oy + sh, ox:ox + sw]
+    edge = max(1, min(2, sw, sh))
+    cut = {
+        "left": float(obj[:, :edge].any(axis=1).mean()),
+        "right": float(obj[:, -edge:].any(axis=1).mean()),
+        "top": float(obj[:edge, :].any(axis=0).mean()),
+        "bottom": float(obj[-edge:, :].any(axis=0).mean()),
+    }
+    for side, fraction in cut.items():
+        if fraction >= truncated_edge_fraction:
+            touches[side] = True
+
     ext_w, ext_h = int(sw * border_extend_fraction), int(sh * border_extend_fraction)
     if touches.get("left"):
         mask[oy:oy + sh, max(0, ox - ext_w):ox + 2] = True
@@ -192,13 +259,95 @@ def build_completion_canvas(
         mask &= ~visible
     canvas_img = PILImage.fromarray(canvas.clip(0, 255).astype(np.uint8), "RGB")
     mask_img = PILImage.fromarray(mask.astype(np.uint8) * 255, "L")
-    return canvas_img, mask_img, visible, scale, (ox, oy), float(mask.mean())
+    return canvas_img, mask_img, visible, scale, (ox, oy), float(mask.mean()), touches
+
+
+def _object_only(matte: np.ndarray, visible: np.ndarray, painted: np.ndarray, grow_px: int) -> np.ndarray:
+    """Restrict a matte of the completed canvas to the object: inside the
+    photographed silhouette or the painted holes (grown a little for the matte's
+    own edge), and in a connected component that contains photographed pixels."""
+    from scipy.ndimage import label as _label
+    allowed = visible | painted
+    if grow_px > 0:
+        allowed = np.asarray(
+            PILImage.fromarray(allowed.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(2 * int(grow_px) + 1))
+        ) > 127
+    mask = matte & allowed
+    if not mask.any():
+        return mask
+    labels, count = _label(mask)
+    keep = np.unique(labels[mask & visible])
+    keep = keep[keep > 0]
+    return np.isin(labels, keep) if keep.size else np.zeros_like(mask)
 
 
 class ObjectCompletionStage(PipelineStage):
     @classmethod
     def config_class(cls) -> type[ObjectCompletionConfiguration]:
         return ObjectCompletionConfiguration
+
+    # ── context background ───────────────────────────────────────────────────
+
+    @staticmethod
+    def _locate_in_photo(photo: Image, cutout: PILImage.Image, photo_box, factor: float) -> Optional[tuple[float, float]]:
+        """Where the hi-res cutout sits in the photograph, in NATIVE photo pixels.
+        The cutout was cut from the photograph upscaled by `factor` for detection
+        (DETECTION_PHOTO_FACTOR), so it is matched downscaled, as a masked template,
+        inside the detection box grown by half its size: the box is right to a few
+        pixels, the match settles the rest. None when there is nothing to match."""
+        import cv2
+        rgba = np.asarray(cutout.convert("RGBA"))
+        f = max(float(factor), 1e-6)
+        tw, th = max(2, int(round(rgba.shape[1] / f))), max(2, int(round(rgba.shape[0] / f)))
+        small = np.asarray(cutout.convert("RGBA").resize((tw, th), PILImage.LANCZOS))
+        template = np.ascontiguousarray(small[..., :3])
+        tmask = (small[..., 3] > 127).astype(np.uint8)
+        if tmask.sum() < 16:
+            return None
+        image = np.asarray(photo.image.convert("RGB"))
+        H, W = image.shape[:2]
+        bx, by, bw, bh = photo_box
+        x0, y0 = int(max(0, bx - bw * 0.5)), int(max(0, by - bh * 0.5))
+        x1, y1 = int(min(W, bx + bw * 1.5)), int(min(H, by + bh * 1.5))
+        window = np.ascontiguousarray(image[y0:y1, x0:x1])
+        if window.shape[0] < th or window.shape[1] < tw:
+            return None
+        result = cv2.matchTemplate(window, template, cv2.TM_SQDIFF, mask=np.repeat(tmask[..., None], 3, axis=2))
+        my, mx = np.unravel_index(int(np.argmin(result)), result.shape)
+        return float(x0 + mx), float(y0 + my)
+
+    def _background_canvas(
+        self, photo: Image, cutout: PILImage.Image, photo_box, factor: float, cone, terrain_pano,
+        canvas_px: int, object_fraction: float,
+    ) -> Optional[PILImage.Image]:
+        """The object's surroundings with the objects removed (PANORAMA_TERRAIN),
+        warped into the completion canvas so each canvas pixel shows what stands
+        behind that point of the photograph -- including beyond the photograph's
+        frame, where the outpainted panorama continues the scene."""
+        from scipy.ndimage import map_coordinates
+        origin = self._locate_in_photo(photo, cutout, photo_box, factor)
+        if origin is None:
+            return None
+        cw, ch = cutout.size
+        scale = object_fraction * canvas_px / max(cw, ch, 1)
+        sw, sh = max(1, int(round(cw * scale))), max(1, int(round(ch * scale)))
+        ox, oy = (canvas_px - sw) // 2, (canvas_px - sh) // 2
+        f = max(float(factor), 1e-6)
+        # canvas px -> cutout px (/scale) -> native photo px (/factor) + origin
+        px = origin[0] + (np.arange(canvas_px, dtype=np.float64) - ox) / scale / f
+        py = origin[1] + (np.arange(canvas_px, dtype=np.float64) - oy) / scale / f
+        PX, PY = np.meshgrid(px, py)
+        # CapturedCone.photo_to_pano, vectorised, onto the terrain panorama's grid.
+        lon = (PX / cone.photo_w - 0.5) * cone.hfov_deg
+        lat = (PY / cone.photo_h - 0.5) * cone.vfov_deg
+        arr = np.asarray(terrain_pano.image.convert("RGB"), dtype=np.float32)
+        cols = np.mod((lon / 360.0 + 0.5) * arr.shape[1], arr.shape[1])
+        rows = np.clip((lat / 180.0 + 0.5) * arr.shape[0], 0, arr.shape[0] - 1)
+        out = np.stack([
+            map_coordinates(arr[..., c], [rows.ravel(), cols.ravel()], order=1, mode="wrap").reshape(canvas_px, canvas_px)
+            for c in range(3)
+        ], axis=-1)
+        return PILImage.fromarray(out.clip(0, 255).astype(np.uint8), "RGB")
 
     def __init__(self, config: ObjectCompletionConfiguration) -> None:
         super().__init__(config)
@@ -295,6 +444,10 @@ class ObjectCompletionStage(PipelineStage):
             context.add_object(COMPLETION_SUMMARY_KEY, {"completed": 0})
             return context
         depths = {i: self._depth_at(depth, m["box"], panorama.width, panorama.height) for i, m in metas.items()}
+        cone = captured_cone_from_context(context, panorama.width, panorama.height) if cfg.context_background else None
+        terrain_pano = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.context_background else None
+        if cfg.context_background and (cone is None or terrain_pano is None):
+            self.log_warning("Object completion: no captured cone or terrain panorama; completing on white")
 
         # Decide which selected crops have anything to complete, before loading FLUX.
         jobs = []
@@ -305,19 +458,30 @@ class ObjectCompletionStage(PipelineStage):
             if hires is None:
                 continue
             bx, by, bw, bh = m["photo_box"]
-            touches = {
+            frame = {
                 "left": bx <= 1.5, "top": by <= 1.5,
                 "right": bx + bw >= pw - 1.5, "bottom": by + bh >= ph - 1.5,
             }
             occluders = self._occluders(context, idx, metas, depths, factor)
             cutout = hires.image.convert("RGBA")
-            canvas, mask, visible, scale, origin, masked = build_completion_canvas(
-                cutout, occluders, touches, cfg.canvas_px, cfg.object_fraction,
+            background = None
+            if cone is not None and terrain_pano is not None:
+                background = self._background_canvas(
+                    photo, cutout, m["photo_box"], factor, cone, terrain_pano, cfg.canvas_px, cfg.object_fraction,
+                )
+            canvas, mask, visible, scale, origin, masked, touches = build_completion_canvas(
+                cutout, occluders, frame, cfg.canvas_px, cfg.object_fraction,
                 cfg.occluder_dilate_px, cfg.border_extend_fraction,
+                reach_fraction=cfg.occluder_reach_fraction,
+                truncated_edge_fraction=cfg.truncated_edge_fraction,
+                background=background,
             )
             if masked < cfg.min_occluded_fraction:
                 continue
-            jobs.append((idx, m, canvas, mask, visible, masked, len(occluders), touches))
+            cut_sides = [side for side, on in touches.items() if on and not frame.get(side)]
+            if cut_sides:
+                self.log_info(f"  crop_{idx}: silhouette cut off at the {', '.join(cut_sides)}; opened to continue")
+            jobs.append((idx, m, canvas, mask, visible, masked, len(occluders), touches, background is not None))
         jobs.sort(key=lambda j: -j[5])
         jobs = jobs[: cfg.max_crops]
         self.log_info(
@@ -334,11 +498,12 @@ class ObjectCompletionStage(PipelineStage):
         self.advance_progress(task)
         results: list[tuple[int, dict, PILImage.Image, np.ndarray]] = []
         try:
-            for n, (idx, m, canvas, mask, visible, masked, n_occ, touches) in enumerate(jobs):
+            for n, (idx, m, canvas, mask, visible, masked, n_occ, touches, in_context) in enumerate(jobs):
                 cls = normalize_category(m.get("class")).replace("_", " ")
+                setting = "in its real surroundings" if in_context else "centered on a plain white background"
                 prompt = (
                     f"a complete {cls}, the entire {cls} fully visible from top to bottom, "
-                    f"nothing hidden or cut off, centered on a plain white background, "
+                    f"nothing hidden or cut off, {setting}, "
                     f"natural daylight, photorealistic, sharp detail"
                 )
                 debug = self.temp / f"crop_{idx}" if self.temp is not None else None
@@ -364,7 +529,7 @@ class ObjectCompletionStage(PipelineStage):
                     continue
                 if debug is not None:
                     out.save(debug / "03_completed.png")
-                results.append((idx, m, out.convert("RGB"), visible))
+                results.append((idx, m, out.convert("RGB"), visible, np.asarray(mask) > 127))
                 self.log_info(
                     f"  crop_{idx} ({cls}): {masked:.1%} of the canvas completed "
                     f"({n_occ} occluder(s){', touches frame' if any(touches.values()) else ''})"
@@ -380,12 +545,19 @@ class ObjectCompletionStage(PipelineStage):
         written, rejected = 0, 0
         self._foreground = ForegroundSeg(self.preferred_device)
         try:
-            for idx, m, out, visible in results:
+            for idx, m, out, visible, painted in results:
                 seg = self._foreground.segment(Image(out))
                 if seg.is_empty():
                     rejected += 1
                     continue
                 mask = np.asarray(seg.masks[0], dtype=bool)
+                # The object is what the photograph showed plus what was painted for
+                # it, and nothing that is not connected to the photographed pixels:
+                # a figure the model added beside the object is not the object.
+                mask = _object_only(mask, visible, painted, cfg.occluder_dilate_px)
+                if not mask.any():
+                    rejected += 1
+                    continue
                 kept = float((mask & visible).sum()) / max(float(visible.sum()), 1.0)
                 if kept < cfg.min_kept_visible_fraction:
                     self.log_info(

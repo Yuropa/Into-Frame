@@ -55,6 +55,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         water_depression_m: float = 0.5,
         min_water_area_m2: float = 12.0,
         water_level_percentile: float = 25.0,
+        water_depression_ramp_m: float = 2.0,
         # Coarse geometry-only collision mesh (see TerrainMeshGenerator.
         # generate_physics_mesh), written to ContextKey.TERRAIN_PHYSICS_MESH for
         # Unity's MeshCollider -- same Poisson-disc near-camera density bias as
@@ -116,6 +117,9 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         # Percentile of a water body's own terrain height used as its flat surface
         # level -- see TerrainMeshGenerator._level_water.
         self.water_level_percentile = float(water_level_percentile)
+        # Metres in from the shore over which the lakebed descends to its full
+        # water_depression_m (see TerrainMeshGenerator.generate).
+        self.water_depression_ramp_m = float(water_depression_ramp_m)
         self.physics_inner_min_dist = physics_inner_min_dist
         self.physics_outer_min_dist = physics_outer_min_dist
         self.physics_n_boundary = physics_n_boundary
@@ -426,6 +430,7 @@ class TerrainMeshStage(PipelineStage):
             water_depression_m=cfg.water_depression_m,
             min_water_area_m2=cfg.min_water_area_m2,
             water_level_percentile=cfg.water_level_percentile,
+            water_depression_ramp_m=cfg.water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,
@@ -486,6 +491,8 @@ class TerrainMeshStage(PipelineStage):
             region_map=region_map,
             water_depression_m=cfg.water_depression_m,
             min_water_area_m2=cfg.min_water_area_m2,
+            water_level_percentile=cfg.water_level_percentile,
+            water_depression_ramp_m=cfg.water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,
             formation_depression_m=cfg.formation_depression_m,

@@ -129,7 +129,8 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         billboard_distance_m: float = 10.0,
         min_mesh_angular_px: float = 90.0,
         viewer_px_per_degree: float = 34.0,
-        generator_type: str = "TRELLIS",
+        generator_type: str = "SAM3D",
+        category_generators: dict[str, str] | None = None,
         include_categories: list[str] | None = None,
         exclude_categories: list[str] | None = None,
         billboard_top_k: int = 4,
@@ -343,6 +344,16 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # match Scene Generation's for the two to be comparable at all.
         self.viewer_px_per_degree = float(viewer_px_per_degree)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
+        # Per-class override of generator_type ({class: generator name}). SAM3D bakes
+        # the photograph onto a single coherent surface and is the right tool for
+        # anything rigid (boats, bridges, people, furniture), but reconstructs foliage
+        # as a relief sheet; TRELLIS.2 is generative and gives a plant volume with
+        # stems and heads, at the cost of needing several draws and repainting the
+        # object from its prior. Route by what the object is.
+        self.category_generators = {
+            str(k).lower(): ModelGeneratorType[str(v).upper()]
+            for k, v in (category_generators or {}).items()
+        }
         self.category_filter = CategoryFilter(include_categories, exclude_categories)
         self.billboard_top_k = billboard_top_k
         self.score_weight_confidence = score_weight_confidence
@@ -383,7 +394,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
             min_mesh_angular_px (default 90 -- a group whose largest box subtends
             less screen height than this stays billboard-only),
             viewer_px_per_degree (default 34.0 -- display the above is quoted in),
-            generator_type (default TRELLIS),
+            generator_type (default SAM3D),
+            category_generators (default {} -- {class: generator} overrides, e.g.
+            flower/plant/bush -> TRELLIS),
             max_mesh_faces (default 8000 -- per-mesh face budget; 0 disables)
     """
 
@@ -498,86 +511,106 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # takes the GPU.
         self._close_supersampler()
         asset_task = self.create_progress(len(group_best), "Generating 3D assets…")
-        super().clean_up()
-        gen = ModelGenerator(self.preferred_device, type=self.config.generator_type)
-
-        try:
-            for (obj_class, bucket), (idx, depth, score) in group_best.items():
-                mesh_key = f"category_mesh_{obj_class}_{bucket}"
-
-                cached = context.mesh(mesh_key)
-                if cached is not None:
-                    self.log_info(f"  {mesh_key}: cached ({cached.vertex_count}v {cached.face_count}f)")
-                    self.advance_progress(asset_task)
-                    continue
-
-                self.log_info(f"  {mesh_key}: {depth:.1f} m, score {score:.2f} → 3D mesh (crop_{idx})")
-                # Prefer the delit crop: meshify BAKES this image into the GLB's
-                # texture, so a lit crop here bakes the sun into geometry that the
-                # client then lights again -- the same double-lighting the
-                # billboard path has, but permanent. Falls back to the raw crop
-                # when delighting is off or failed for this one image.
-                # ... and prefer the native-resolution cut from the photograph over the
-                # panorama's downsampled copy when one exists (see hires_crops.py).
-                # The delit variant is itself made from the hi-res crop when there
-                # is one, so this order keeps both preferences.
-                # A generator whose texture is its own albedo (TRELLIS.2) gets the
-                # photographed crop instead: it needs the shading as a depth cue
-                # and de-lights on its own.
-                if gen.produces_albedo:
-                    crop = self._source_crop(context, idx) or context.image(_delit_key(idx))
-                else:
-                    crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
-
-                fill_ratio = mask_fill_ratio(crop)
-                if fill_ratio is not None and fill_ratio <= 0.0:
-                    self.log_info(f"  {mesh_key}: crop_{idx} has an empty mask, skipping mesh (billboard-only)")
-                    self.advance_progress(asset_task)
-                    continue
-
-                temp_path = self.temp / mesh_key if self.temp is not None else None
-                if temp_path is not None:
-                    temp_path.mkdir(parents=True, exist_ok=True)
-                super().clean_up()
-                try:
-                    mesh = gen.meshify(crop, temp_path, seed=self.seed)
-                    # See repair_meshes: Poisson reconstruction cannot carry a UV
-                    # texture through, so it only runs when asked for, or when the
-                    # reconstruction came back colour-only anyway (SAM3D's
-                    # out-of-memory fallback) and there is no texture to protect.
-                    if self.config.repair_meshes or not mesh.has_texture:
-                        mesh = mesh.repair()
-                    raw_faces = mesh.face_count
-                    mesh = mesh.decimate(self.config.max_mesh_faces)
-                    if not mesh.has_texture:
-                        # Colour-only reconstruction (SAM3D's out-of-memory fallback):
-                        # the client ignores COLOR_0, so bake it into a texture.
-                        mesh = mesh.bake_vertex_colours()
-                    mesh.fit_to_box(1.0, 1.0)
-                except Exception as e:
-                    # A single degenerate crop (e.g. a near-empty mask the
-                    # generator's own preprocessing collapses to nothing)
-                    # shouldn't take down every other group's mesh --
-                    # scene_generation.py already falls back to this group's
-                    # billboard pool when category_mesh_{class}_{bucket} is
-                    # absent.
-                    self.log_info(f"  {mesh_key}: meshify failed ({e}), falling back to billboard-only")
-                    self.advance_progress(asset_task)
-                    continue
-                context.add_mesh(mesh_key, mesh)
-                decimated = (
-                    f" (decimated from {raw_faces}f)" if mesh.face_count < raw_faces else ""
-                )
-                self.log_info(
-                    f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f{decimated}"
-                    + (" textured" if mesh.has_texture else " vertex-colour only")
-                )
-                self.advance_progress(asset_task)
-        finally:
-            gen.close()
+        # One generator process at a time: the groups are batched by the generator
+        # their class routes to (category_generators), the default generator's
+        # batch first, so the two models never share the GPU.
+        batches: dict[ModelGeneratorType, list] = {self.config.generator_type: []}
+        for key, val in group_best.items():
+            batches.setdefault(self._generator_for(key[0]), []).append((key, val))
+        for gen_type, batch in batches.items():
+            if not batch:
+                continue
+            self.log_info(
+                f"{gen_type.name}: {len(batch)} group(s) "
+                f"({', '.join(f'{c}_{b}' for (c, b), _ in batch)})"
+            )
+            super().clean_up()
+            gen = ModelGenerator(self.preferred_device, type=gen_type)
+            try:
+                self._meshify_groups(context, gen, batch, asset_task)
+            finally:
+                gen.close()
 
         self.finish_progress(asset_task)
         return context
+
+    def _generator_for(self, obj_class: str) -> ModelGeneratorType:
+        return self.config.category_generators.get(
+            str(obj_class).lower(), self.config.generator_type
+        )
+
+    def _meshify_groups(self, context: PipelineContext, gen: ModelGenerator, batch: list, asset_task) -> None:
+        for (obj_class, bucket), (idx, depth, score) in batch:
+            mesh_key = f"category_mesh_{obj_class}_{bucket}"
+
+            cached = context.mesh(mesh_key)
+            if cached is not None:
+                self.log_info(f"  {mesh_key}: cached ({cached.vertex_count}v {cached.face_count}f)")
+                self.advance_progress(asset_task)
+                continue
+
+            self.log_info(f"  {mesh_key}: {depth:.1f} m, score {score:.2f} → 3D mesh (crop_{idx})")
+            # Prefer the delit crop: meshify BAKES this image into the GLB's
+            # texture, so a lit crop here bakes the sun into geometry that the
+            # client then lights again -- the same double-lighting the
+            # billboard path has, but permanent. Falls back to the raw crop
+            # when delighting is off or failed for this one image.
+            # ... and prefer the native-resolution cut from the photograph over the
+            # panorama's downsampled copy when one exists (see hires_crops.py).
+            # The delit variant is itself made from the hi-res crop when there
+            # is one, so this order keeps both preferences.
+            # A generator whose texture is its own albedo (TRELLIS.2) gets the
+            # photographed crop instead: it needs the shading as a depth cue
+            # and de-lights on its own.
+            if gen.produces_albedo:
+                crop = self._source_crop(context, idx) or context.image(_delit_key(idx))
+            else:
+                crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
+
+            fill_ratio = mask_fill_ratio(crop)
+            if fill_ratio is not None and fill_ratio <= 0.0:
+                self.log_info(f"  {mesh_key}: crop_{idx} has an empty mask, skipping mesh (billboard-only)")
+                self.advance_progress(asset_task)
+                continue
+
+            temp_path = self.temp / mesh_key if self.temp is not None else None
+            if temp_path is not None:
+                temp_path.mkdir(parents=True, exist_ok=True)
+            super().clean_up()
+            try:
+                mesh = gen.meshify(crop, temp_path, seed=self.seed)
+                # See repair_meshes: Poisson reconstruction cannot carry a UV
+                # texture through, so it only runs when asked for, or when the
+                # reconstruction came back colour-only anyway (SAM3D's
+                # out-of-memory fallback) and there is no texture to protect.
+                if self.config.repair_meshes or not mesh.has_texture:
+                    mesh = mesh.repair()
+                raw_faces = mesh.face_count
+                mesh = mesh.decimate(self.config.max_mesh_faces)
+                if not mesh.has_texture:
+                    # Colour-only reconstruction (SAM3D's out-of-memory fallback):
+                    # the client ignores COLOR_0, so bake it into a texture.
+                    mesh = mesh.bake_vertex_colours()
+                mesh.fit_to_box(1.0, 1.0)
+            except Exception as e:
+                # A single degenerate crop (e.g. a near-empty mask the
+                # generator's own preprocessing collapses to nothing)
+                # shouldn't take down every other group's mesh --
+                # scene_generation.py already falls back to this group's
+                # billboard pool when category_mesh_{class}_{bucket} is
+                # absent.
+                self.log_info(f"  {mesh_key}: meshify failed ({e}), falling back to billboard-only")
+                self.advance_progress(asset_task)
+                continue
+            context.add_mesh(mesh_key, mesh)
+            decimated = (
+                f" (decimated from {raw_faces}f)" if mesh.face_count < raw_faces else ""
+            )
+            self.log_info(
+                f"  {mesh_key}: {mesh.vertex_count}v {mesh.face_count}f{decimated}"
+                + (" textured" if mesh.has_texture else " vertex-colour only")
+            )
+            self.advance_progress(asset_task)
 
     def _build_card_meshes(
         self, context: PipelineContext, billboard_pools: dict, card_sources: dict,
@@ -1309,7 +1342,9 @@ class PanoramaAssetGenerationStage(PipelineStage):
         return True
 
     def model_names(self) -> list[str]:
-        names = ModelGenerator.model_names(type=self.config.generator_type)
+        names: list[str] = []
+        for gen_type in {self.config.generator_type, *self.config.category_generators.values()}:
+            names = names + ModelGenerator.model_names(type=gen_type)
         if self.config.use_intrinsic_delighting:
             from pipeline.intrinsic_images.image_intrinsics import ImageIntrinsics
             names = names + ImageIntrinsics.model_names()
@@ -1352,6 +1387,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
             stats["Total vertices"] = f"{total_verts:,}"
             stats["Total triangles"] = f"{total_faces:,}"
             stats["Generator"] = self.config.generator_type.name
+            if self.config.category_generators:
+                stats["Generator overrides"] = ", ".join(
+                    f"{c}: {t.name}" for c, t in sorted(self.config.category_generators.items())
+                )
         return ReportSection(
             stage_name=self.name,
             title="3D Object Reconstruction",

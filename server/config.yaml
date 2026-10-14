@@ -865,6 +865,17 @@ stages:
 
   - name: Terrain Noise Refinement
     stage: TerrainNoiseRefinementStage
+    # Each body of water (REGION_MAP's WATER, bodies under water_min_area_m2 ignored)
+    # is flattened to its shoreline's height and the bank within water_bank_blend_m
+    # graded to meet it, in the height map every placement stage reads. On the
+    # 2026-10-14 Rainier run the lake sat in a basin 1 m under the meadow, tilted
+    # 0.7 m shore to shore: the water sheet met banks 0.9 m above it and the
+    # shoreline triangles stepped into it all the way round. A bank more than
+    # water_bank_max_step_m from the level (a cliff over the sea) is left alone.
+    water_min_area_m2: 12.0
+    water_level_percentile: 25.0
+    water_bank_blend_m: 3.0
+    water_bank_max_step_m: 1.5
     road_blend_weight: 0.8        # how strongly road skeleton flattens terrain (0–1)
     road_blur_sigma: 4.0          # pixel radius for softening road mask edges
     road_terrain_smooth_sigma: 6.0 # smoothing radius for the graded road proxy
@@ -962,6 +973,10 @@ stages:
                              # -- reverted to 0. Ramps up to 1.0 at the domain corner as before. Only
                              # applies where HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on
                              # real point-cloud geometry get zero added noise regardless of distance.
+    water_depression_ramp_m: 2.0 # metres in from the shore over which the lakebed descends to its full
+                             # water_depression_m. The bed is the terrain itself at the shoreline (the
+                             # water surface is levelled to the shore's own height) so no step is cut
+                             # around the lake; the sheet covers every shoreline triangle.
     water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
                              # WATER cells), so an eventually-animated water plane's wave amplitude
                              # never exposes the terrain underneath it. Also emits a separate flat
@@ -1150,6 +1165,13 @@ stages:
     # flat ground at 30 m from a 1.8 m eye is ~0.8 m per pixel (the pinwheel); a
     # 45-degree mountain face at 100 m is ~0.2 m and keeps its photographed snow.
     panorama_max_texel_m: 0.6
+    # The far ring -- unobserved terrain beyond this radius, i.e. the ridge envelope
+    # and the outpainted dome -- keeps the projected panorama regardless of the
+    # gates above. On the 2026-10-14 Rainier run the region map labelled 70-91% of
+    # the ring FOREST and the blend maps painted the mountain with the forest tile
+    # at 50x repeat (panorama weight under 0.12 beyond 60 m).
+    panorama_far_ring_radius_m: 30.0
+    panorama_far_ring_feather_m: 8.0
     # Delight the panorama layer the same way the object crops and reference patches
     # are delit (shading only, colour kept), so the surface the viewer walks on is not
     # the one thing still carrying the photographed sun under the client's own sun.
@@ -1806,6 +1828,12 @@ stages:
     guidance_scale: 30.0
     refine_strength: 0.35       # full-canvas img2img pass: re-renders the object with FLUX detail at canvas resolution
     min_kept_visible_fraction: 0.5
+    occluder_reach_fraction: 0.25 # an occluder is painted only within this fraction of the object's size of
+                                  # its visible silhouette, as a rectangle: a person-shaped hole beside the
+                                  # Rainier lupine came back as two white mannequins in the flower mesh
+    truncated_edge_fraction: 0.3  # a box side at least this opaque along its length is a cut (frame, quay,
+                                  # undetected occluder) and is opened like a frame edge: the half riverboat
+    context_background: true      # paint in the object-removed panorama's surroundings, not on white
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
@@ -1921,7 +1949,21 @@ stages:
     min_mesh_angular_px: 90.0
     viewer_px_per_degree: 34.0   # must match Scene Generation's value below
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
-    generator_type: TRELLIS       # TRELLIS.2-4B: textured, volumetric plants where SAM3D returned sheets; ~1 min per bucket
+    # Default reconstructor, plus per-class overrides. SAM3D bakes the photograph
+    # onto one coherent surface: right for anything rigid (the Paris riverboats kept
+    # their hull lettering), one deterministic draw, ~1 min per bucket -- but it
+    # returns foliage as a relief sheet that Scene Generation then billboards.
+    # TRELLIS.2-4B is generative: a lupine comes back as stems with separate heads
+    # and is textured all round, but it repaints the object from its prior (a boat
+    # became a stick, a person a slab), is erratic across seeds (four draws are
+    # scored against the cutout, ~2 min per bucket) and its mesh is a fragment soup.
+    # So: SAM3D by default, TRELLIS for the plant classes SAM3D cannot do. Trees go
+    # to Tree Mesh Refinement either way.
+    generator_type: SAM3D
+    category_generators:
+      flower: TRELLIS
+      plant: TRELLIS
+      bush: TRELLIS
     # Face budget per category mesh. SAM3D returns its reconstruction undecimated and
     # nothing touched it, which is fine for a hero object and is not what these are --
     # one mesh is shared by every instance of its (class, bucket), and those run to

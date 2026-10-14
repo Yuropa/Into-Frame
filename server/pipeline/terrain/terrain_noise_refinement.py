@@ -62,6 +62,13 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         log: Logger,
         keys=None,
         seed: int = 0,
+        # Water: level each body to its shoreline and grade the bank to meet it
+        # (TerrainMeshGenerator.level_water_bodies). Same min area as Terrain
+        # Mesh's min_water_area_m2 so the two agree about what is a lake.
+        water_min_area_m2: float = 12.0,
+        water_level_percentile: float = 25.0,
+        water_bank_blend_m: float = 3.0,
+        water_bank_max_step_m: float = 1.5,
         # Road grading
         road_blend_weight: float = 0.8,
         road_blur_sigma: float = 2.0,
@@ -125,6 +132,10 @@ class TerrainNoiseRefinementConfiguration(PipelineStageConfiguration):
         self.noise_scale = noise_scale
         self.noise_octaves = noise_octaves
         self.noise_amplitude = noise_amplitude
+        self.water_min_area_m2 = float(water_min_area_m2)
+        self.water_level_percentile = float(water_level_percentile)
+        self.water_bank_blend_m = float(water_bank_blend_m)
+        self.water_bank_max_step_m = float(water_bank_max_step_m)
         self.linear_diffusivity = linear_diffusivity
         self.diffusion_dt = diffusion_dt
         self.landlab_resolution = landlab_resolution
@@ -442,6 +453,26 @@ class TerrainNoiseRefinementStage(PipelineStage):
                 f"(mean certainty {float(restore_certainty[true_observed].mean()):.2f}), reverted "
                 f"toward measured elevation"
             )
+
+        # After the observed-cell restore above: the measured heights under a lake are
+        # the reflection's, and restoring them would tilt the lake again.
+        region_depth = context.input_depth(ContextKey.REGION_MAP)
+        if region_depth is not None and cfg.water_min_area_m2 >= 0.0:
+            from pipeline.terrain.terrain_generator import TerrainMeshGenerator
+            from pipeline.panorama_segmentation.panorama_region_result import RegionType
+            rm = region_depth.depth
+            if rm.shape == terrain.shape:
+                terrain = TerrainMeshGenerator.level_water_bodies(
+                    terrain, rm.astype(np.int16) == int(RegionType.WATER),
+                    grid_size_meters=float(params.get("grid_size_meters", 100.0) or 100.0),
+                    min_area_m2=cfg.water_min_area_m2,
+                    percentile=cfg.water_level_percentile,
+                    bank_blend_m=cfg.water_bank_blend_m,
+                    bank_max_step_m=cfg.water_bank_max_step_m,
+                    log=self.log_info,
+                )
+            else:
+                self.log_warning(f"Region map {rm.shape} does not match the height map {terrain.shape}; water not levelled")
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(terrain.astype(np.float32)))
 
