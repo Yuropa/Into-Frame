@@ -314,10 +314,23 @@ def _reject_snow_water(
     saturation_threshold: float,
     min_snow_fraction: float,
     min_ground_runnerup_fraction: float,
+    cone_mask: "np.ndarray | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Reclassify WATER regions that are really SNOW, per connected component.
     Returns (corrected map, mask of corrected pixels).
+
+    2026-10-14: the components are taken INSIDE the photographed cone when
+    `cone_mask` is given, and VEGETATION counts as a ground-like runner-up. On the
+    current segmentation the Rainier snowfield's raw component ran into the
+    outpainted "water" under the camera and became one 2.1 M px blob with a
+    snow-like fraction of 0.00, and its runner-up is now the meadow around it
+    (VEGETATION 0.9), so the test never fired and the snowfield went through the
+    whole pipeline as a lake 3.6 m from the viewer. Inside the cone the two snow
+    bodies score 0.40/0.54 snow-like with 0.93/0.67 ground-or-vegetation
+    runner-ups; the Seine 0.13/0.00, the Shark Fin ocean 0.16/0.13, and the other
+    samples' in-cone water 0.24/0.28 at most. Corrected pixels become SNOW where
+    they are snow-like and their runner-up elsewhere.
 
     ADE20K has a `snow` class and _LABEL_RULES already maps it to GROUND, so the
     taxonomy is not the problem -- SegFormer simply calls a sunlit snowfield
@@ -377,12 +390,16 @@ def _reject_snow_water(
     saturation = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
     snow_like = (value > value_threshold) & (saturation < saturation_threshold)
 
-    labels, n_components = _connected_components(water_mask)
+    scope = water_mask & cone_mask if cone_mask is not None and cone_mask.shape == water_mask.shape else water_mask
+    labels, n_components = _connected_components(scope)
     corrected = type_idx_map.copy()
     rejected = np.zeros_like(water_mask)
-    groundish = [int(RegionType.GROUND), int(RegionType.SNOW)]
-    fallback = np.where(np.isin(runnerup_type_idx_map, groundish) | (runnerup_type_idx_map == water),
-                        int(RegionType.SNOW), runnerup_type_idx_map)
+    groundish = [int(RegionType.GROUND), int(RegionType.SNOW), int(RegionType.TERRAIN), int(RegionType.VEGETATION)]
+    fallback = np.where(
+        snow_like | np.isin(runnerup_type_idx_map, [int(RegionType.GROUND), int(RegionType.SNOW)])
+        | (runnerup_type_idx_map == water),
+        int(RegionType.SNOW), runnerup_type_idx_map,
+    )
 
     for component in range(1, n_components + 1):
         comp_mask = labels == component
@@ -636,6 +653,15 @@ class PanoramaRegionStage(PipelineStage):
         # reference map, because a snowfield is mislabelled in the original
         # photograph itself and there is no second opinion to appeal to.
         if cfg.reject_snow_water:
+            cone_mask = None
+            if photo is not None and photo_hfov:
+                from util.captured_cone import CapturedCone
+                H_t, W_t = resolved_type_idx_map.shape
+                cone = CapturedCone.from_fov(photo_hfov, W_t, H_t, photo.width, photo.height)
+                u0, u1 = cone.u_range
+                v0, v1 = cone.v_range
+                cone_mask = np.zeros((H_t, W_t), dtype=bool)
+                cone_mask[int(max(0, v0)):int(min(H_t, v1)), int(max(0, u0)):int(min(W_t, u1))] = True
             resolved_type_idx_map, snow_rejected = _reject_snow_water(
                 resolved_type_idx_map,
                 seg.runnerup_type_idx_map,
@@ -644,6 +670,7 @@ class PanoramaRegionStage(PipelineStage):
                 saturation_threshold=cfg.snow_water_saturation_threshold,
                 min_snow_fraction=cfg.snow_water_min_snow_fraction,
                 min_ground_runnerup_fraction=cfg.snow_water_min_ground_runnerup_fraction,
+                cone_mask=cone_mask,
             )
             n_snow = int(snow_rejected.sum())
             if n_snow > 0:

@@ -1836,9 +1836,12 @@ stages:
     occluder_reach_fraction: 0.25 # an occluder is painted only within this fraction of the object's size of
                                   # its visible silhouette, as a rectangle: a person-shaped hole beside the
                                   # Rainier lupine came back as two white mannequins in the flower mesh
-    truncated_edge_fraction: 0.3  # a box side at least this opaque along its length is a cut (frame, quay,
-                                  # undetected occluder) and is opened like a frame edge: the half riverboat
+    truncated_edge_fraction: 0.5  # a box side at least this opaque along its length is a cut (frame, quay,
+                                  # undetected occluder) and is opened like a frame edge: the half riverboat.
+                                  # 0.3 fired on a paintbrush cluster's straight left edge (Rainier crop_133)
     context_background: true      # paint in the object-removed panorama's surroundings, not on white
+    background_diff: 18.0         # a painted hole this close (mean |diff|, 0-255) to the context canvas was
+                                  # filled with background, not object, and is left out of the cutout
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage

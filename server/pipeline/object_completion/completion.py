@@ -43,6 +43,7 @@ from PIL import Image as PILImage, ImageFilter
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.inpainting.inpainting import InPainting, InPaintingType
+from pipeline.object_typing.categories import VEGETATION_CATEGORIES
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES, GRASS_TUFT_CATEGORY, CategoryFilter, normalize_category,
 )
@@ -86,6 +87,7 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         occluder_reach_fraction: float = 0.25,
         truncated_edge_fraction: float = 0.3,
         context_background: bool = True,
+        background_diff: float = 18.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to complete. Default: every placeable object class; never
@@ -133,6 +135,9 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         # white the model has nothing to continue but the prompt: a riverboat cut
         # by the frame was continued with a figure standing at its end.
         self.context_background = bool(context_background)
+        # A painted hole whose mean absolute difference to the context canvas is
+        # under this (0-255) was filled with background, not object, and is dropped.
+        self.background_diff = float(background_diff)
 
 
 def build_completion_canvas(
@@ -262,23 +267,56 @@ def build_completion_canvas(
     return canvas_img, mask_img, visible, scale, (ox, oy), float(mask.mean()), touches
 
 
-def _object_only(matte: np.ndarray, visible: np.ndarray, painted: np.ndarray, grow_px: int) -> np.ndarray:
+def _object_only(
+    matte: np.ndarray, visible: np.ndarray, painted: np.ndarray, grow_px: int,
+    completed: Optional[np.ndarray] = None, background: Optional[np.ndarray] = None,
+    background_diff: float = 18.0,
+) -> tuple[np.ndarray, int]:
     """Restrict a matte of the completed canvas to the object: inside the
     photographed silhouette or the painted holes (grown a little for the matte's
-    own edge), and in a connected component that contains photographed pixels."""
+    own edge), and in a connected component that contains photographed pixels.
+
+    A painted hole whose pixels came back as its own surroundings -- the model
+    continued the background, not the object -- is not part of the object: with
+    the context canvas, a hole opened beside a paintbrush was filled with meadow
+    and the matte took the meadow as a 1 m oval of flower. Such a hole (mean
+    absolute difference to the background canvas under background_diff, per
+    connected hole) is dropped. Returns (mask, holes dropped)."""
     from scipy.ndimage import label as _label
+    dropped = 0
+    if completed is not None and background is not None and painted.any():
+        diff = np.abs(completed.astype(np.float32) - background.astype(np.float32)).mean(axis=2)
+        # The refinement pass re-renders the context too, so even untouched
+        # background differs from the (blurrier) context canvas; measured on
+        # Rainier 9-16 outside the holes against 27 for a hole filled with meadow
+        # and 35-44 for holes the model actually painted something into. The
+        # threshold is therefore relative to this crop's own baseline.
+        outside = ~painted & ~visible
+        baseline = float(diff[outside].mean()) if outside.any() else 0.0
+        threshold = max(background_diff, 2.5 * baseline)
+        holes, count = _label(painted)
+        keep_painted = np.zeros_like(painted)
+        for h in range(1, count + 1):
+            hole = holes == h
+            if float(diff[hole].mean()) >= threshold:
+                keep_painted |= hole
+            else:
+                dropped += 1
+        painted = keep_painted
     allowed = visible | painted
     if grow_px > 0:
         allowed = np.asarray(
             PILImage.fromarray(allowed.astype(np.uint8) * 255).filter(ImageFilter.MaxFilter(2 * int(grow_px) + 1))
         ) > 127
-    mask = matte & allowed
-    if not mask.any():
-        return mask
+    # The photographed pixels ARE the object, whatever the matte made of a busy
+    # background (with the surroundings painted in, BiRefNet picked the far bank
+    # instead of the plant on three Rainier crops and the cutout kept 0% of the
+    # photograph); the matte only decides what the painted holes added.
+    mask = visible | (matte & allowed)
     labels, count = _label(mask)
     keep = np.unique(labels[mask & visible])
     keep = keep[keep > 0]
-    return np.isin(labels, keep) if keep.size else np.zeros_like(mask)
+    return (np.isin(labels, keep) if keep.size else np.zeros_like(mask)), dropped
 
 
 class ObjectCompletionStage(PipelineStage):
@@ -469,11 +507,16 @@ class ObjectCompletionStage(PipelineStage):
                 background = self._background_canvas(
                     photo, cutout, m["photo_box"], factor, cone, terrain_pano, cfg.canvas_px, cfg.object_fraction,
                 )
+            # A plant's silhouette is straight-edged by nature (a cluster, a stem
+            # against its neighbours) and a cut one is not worth continuing: the
+            # opening gets meadow painted into it. Only rigid things get the test.
+            cls_now = normalize_category(m.get("class"))
+            edge_fraction = 2.0 if cls_now in VEGETATION_CATEGORIES else cfg.truncated_edge_fraction
             canvas, mask, visible, scale, origin, masked, touches = build_completion_canvas(
                 cutout, occluders, frame, cfg.canvas_px, cfg.object_fraction,
                 cfg.occluder_dilate_px, cfg.border_extend_fraction,
                 reach_fraction=cfg.occluder_reach_fraction,
-                truncated_edge_fraction=cfg.truncated_edge_fraction,
+                truncated_edge_fraction=edge_fraction,
                 background=background,
             )
             if masked < cfg.min_occluded_fraction:
@@ -481,7 +524,7 @@ class ObjectCompletionStage(PipelineStage):
             cut_sides = [side for side, on in touches.items() if on and not frame.get(side)]
             if cut_sides:
                 self.log_info(f"  crop_{idx}: silhouette cut off at the {', '.join(cut_sides)}; opened to continue")
-            jobs.append((idx, m, canvas, mask, visible, masked, len(occluders), touches, background is not None))
+            jobs.append((idx, m, canvas, mask, visible, masked, len(occluders), touches, background))
         jobs.sort(key=lambda j: -j[5])
         jobs = jobs[: cfg.max_crops]
         self.log_info(
@@ -498,9 +541,9 @@ class ObjectCompletionStage(PipelineStage):
         self.advance_progress(task)
         results: list[tuple[int, dict, PILImage.Image, np.ndarray]] = []
         try:
-            for n, (idx, m, canvas, mask, visible, masked, n_occ, touches, in_context) in enumerate(jobs):
+            for n, (idx, m, canvas, mask, visible, masked, n_occ, touches, background) in enumerate(jobs):
                 cls = normalize_category(m.get("class")).replace("_", " ")
-                setting = "in its real surroundings" if in_context else "centered on a plain white background"
+                setting = "in its real surroundings" if background is not None else "centered on a plain white background"
                 prompt = (
                     f"a complete {cls}, the entire {cls} fully visible from top to bottom, "
                     f"nothing hidden or cut off, {setting}, "
@@ -529,7 +572,7 @@ class ObjectCompletionStage(PipelineStage):
                     continue
                 if debug is not None:
                     out.save(debug / "03_completed.png")
-                results.append((idx, m, out.convert("RGB"), visible, np.asarray(mask) > 127))
+                results.append((idx, m, out.convert("RGB"), visible, np.asarray(mask) > 127, background))
                 self.log_info(
                     f"  crop_{idx} ({cls}): {masked:.1%} of the canvas completed "
                     f"({n_occ} occluder(s){', touches frame' if any(touches.values()) else ''})"
@@ -545,16 +588,20 @@ class ObjectCompletionStage(PipelineStage):
         written, rejected = 0, 0
         self._foreground = ForegroundSeg(self.preferred_device)
         try:
-            for idx, m, out, visible, painted in results:
+            for idx, m, out, visible, painted, background in results:
                 seg = self._foreground.segment(Image(out))
-                if seg.is_empty():
-                    rejected += 1
-                    continue
-                mask = np.asarray(seg.masks[0], dtype=bool)
+                matte = np.asarray(seg.masks[0], dtype=bool) if not seg.is_empty() else np.zeros_like(visible)
                 # The object is what the photograph showed plus what was painted for
                 # it, and nothing that is not connected to the photographed pixels:
                 # a figure the model added beside the object is not the object.
-                mask = _object_only(mask, visible, painted, cfg.occluder_dilate_px)
+                mask, dropped = _object_only(
+                    matte, visible, painted, cfg.occluder_dilate_px,
+                    completed=np.asarray(out.convert("RGB")),
+                    background=(np.asarray(background.convert("RGB")) if background is not None else None),
+                    background_diff=cfg.background_diff,
+                )
+                if dropped:
+                    self.log_info(f"  crop_{idx}: {dropped} painted hole(s) came back as background, dropped")
                 if not mask.any():
                     rejected += 1
                     continue

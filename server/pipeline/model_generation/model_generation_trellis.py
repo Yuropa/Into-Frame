@@ -134,14 +134,12 @@ class ModelGeneratorTrellis(ModelGeneratorBase):
 
         e = np.sort(ext)
         thickness = float(e[0] / max(e[1], 1e-6))
-        # An elongated subject may have been photographed end-on (a boat bow-on),
-        # so the picture is allowed to match either the broadside (x/y) or the
-        # end-on (z/y) silhouette, as Scene Generation's own aspect gate does.
-        endon_aspect = float(ext[2] / max(ext[1], 1e-6))
-        aspect_term = min(
-            abs(np.log(max(mesh_aspect, 1e-3) / max(crop_aspect, 1e-3))),
-            abs(np.log(max(endon_aspect, 1e-3) / max(crop_aspect, 1e-3))),
-        )
+        # The front view only. TRELLIS.2's mesh is image-aligned (image x -> +x),
+        # so the picture must match the broadside silhouette; allowing the end-on
+        # (z/y) view as well, the way Scene Generation's gate does for a boat
+        # photographed bow-on, let a 1.0 x 0.37 x 0.24 flower BED pass at 0.20 by
+        # being compared end-on, and the scene got 31 pancakes on the lake.
+        aspect_term = abs(np.log(max(mesh_aspect, 1e-3) / max(crop_aspect, 1e-3)))
         # A silhouette sparser than the picture is normal (vertices thin out on
         # a plant); one much FULLER than the picture is a block with the picture
         # painted on it, which is the failure nothing downstream can catch.
