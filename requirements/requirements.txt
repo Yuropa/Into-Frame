@@ -36,3 +36,6 @@ ultralytics>=8.3.237
 websockets>=12.0
 reportlab>=4.0.0
 git+https://github.com/openai/CLIP.git
+# scripts/render-scene.py: headless preview renders over EGL (PyOpenGL >= 3.1.9 for NumPy 2)
+pyrender>=0.1.45
+PyOpenGL>=3.1.9

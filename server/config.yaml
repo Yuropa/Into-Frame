@@ -1348,8 +1348,13 @@ stages:
     stage: FarFieldBackdropStage
     start_m: 0                  # 0 = Panorama Depth Calibration's far-field start (far_fraction)
     start_radius_m: 0           # world radius the shell begins at; 0 = the grid's half-size
+    far_band_fraction: 0.9      # "far" = depth beyond this fraction of the calibrated map's ceiling (or the
+                                # measured far start, whichever is farther). The old floor was the grid's
+                                # half-size, which the depth ceiling never exceeds, so no scene ever got a
+                                # backdrop: the Eiffel Tower sat in the saturated band and was dropped.
     far_m: 500.0                # radius the most distant content approaches
     scale_m: 0                  # e-folding in depth units; 0 = the saturated band's own width
+    close_px: 10                # bridge sky-typed gaps inside a far structure (a lattice tower, a crown)
     stride_px: 8
     max_depth_ratio: 1.8        # neighbours further apart than this ratio are a silhouette, not a surface
     feather_px: 3.0

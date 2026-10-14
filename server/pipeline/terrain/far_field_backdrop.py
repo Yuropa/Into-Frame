@@ -81,6 +81,8 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         far_m: float = 500.0,
         scale_m: float = 0.0,
         start_radius_m: float = 0.0,
+        far_band_fraction: float = 0.9,
+        close_px: int = 10,
         stride_px: int = 8,
         max_depth_ratio: float = 1.8,
         feather_px: float = 3.0,
@@ -100,6 +102,8 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # spreads over ~63% of [start_radius, far] and the depth noise inside it is
         # not amplified into a crumpled shell.
         self.start_radius_m = float(start_radius_m)
+        self.far_band_fraction = float(far_band_fraction)
+        self.close_px = int(close_px)
         self.far_m = float(far_m)
         self.scale_m = float(scale_m)
         # Vertex spacing in panorama pixels (8 on a 4096-wide panorama is 512x256
@@ -134,12 +138,6 @@ class FarFieldBackdropStage(PipelineStage):
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_half = float(params.get("grid_size_meters", 200.0)) / 2.0
         measured_start = context.input_object(ContextKey.FAR_FIELD_START_M)
-        # The grid owns everything inside its half-size, ridge chains included
-        # (TerrainReconstructionStage); this shell takes what lies beyond it. The
-        # measured saturation start only moves the boundary OUT, never in: on the
-        # Rainier capture a 10.8 m start had put the forest and the whole mountain on
-        # the shell over a flat plain.
-        start_m = cfg.start_m if cfg.start_m > 0 else max(float(measured_start or 0.0), grid_half)
         start_radius = cfg.start_radius_m if cfg.start_radius_m > 0 else grid_half
 
         W, H = panorama.width, panorama.height
@@ -147,6 +145,26 @@ class FarFieldBackdropStage(PipelineStage):
         sky = None
         if type_depth is not None:
             sky = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32) == int(RegionType.SKY)
+        # "Far" is the saturated band of the calibrated depth, not a distance: the
+        # map is compressed toward max_depth_m (Panorama Depth Calibration), so the
+        # Eiffel Tower, the far bank of the Seine and a 900 m peak all sit within a
+        # few metres of its ceiling. The measured saturation start only moves the
+        # boundary OUT, never in (a 10.8 m start once put the Rainier forest on the
+        # shell), but the floor must be inside the map's own range: the old floor
+        # was the grid's half-size, which the ceiling never exceeds, so no capture
+        # ever got a backdrop ("nothing beyond 100 m" on every run). The floor is
+        # now far_band_fraction of the map's ceiling: on Paris max(30, 0.9 x 70) =
+        # 63 m takes the tower and the far bank; on Rainier max(73, 0.9 x 100) = 90 m
+        # takes the mountain, whose landform pixels the ridge chains then hand back
+        # to the terrain below.
+        finite = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
+        depth_max = float(finite.max()) if finite.size else 0.0
+        band_floor = cfg.far_band_fraction * depth_max
+        start_m = cfg.start_m if cfg.start_m > 0 else max(float(measured_start or 0.0), band_floor)
+        self.log_info(
+            f"Far-field backdrop: depth ceiling {depth_max:.1f} m, measured far start "
+            f"{float(measured_start or 0.0):.1f} m, band floor {band_floor:.1f} m -> far beyond {start_m:.1f} m"
+        )
         far = np.isfinite(depth) & (depth > start_m)
         if sky is not None:
             far &= ~sky
@@ -164,6 +182,43 @@ class FarFieldBackdropStage(PipelineStage):
                 f"Far-field backdrop: {len(chains)} ridge chain(s) anchored in the terrain, "
                 f"{removed} terrain/snow px left to it"
             )
+        # A built structure that reaches the far band goes to the shell whole. The
+        # depth model reads a thin lattice against the sky at its surroundings'
+        # distance: the Eiffel Tower measured 23-30 m over most of its height and
+        # only its top quarter sat in the band, so the shell carried a sliver of
+        # tip and the rest, which no terrain stage builds, vanished.
+        if type_depth is not None and far.any():
+            from scipy.ndimage import label as _label
+            types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+            built = types_full == int(RegionType.BUILT)
+            if built.any():
+                labels, count = _label(built, structure=np.ones((3, 3), dtype=bool))
+                touching = np.unique(labels[built & far])
+                touching = touching[touching > 0]
+                if touching.size:
+                    whole = np.isin(labels, touching) & ~far
+                    depth = np.where(whole, depth_max, depth)
+                    far |= whole
+                    self.log_info(
+                        f"Far-field backdrop: {touching.size} built structure(s) reach the far band; "
+                        f"{int(whole.sum())} px of them moved to the shell whole"
+                    )
+        # Bridge the sky-typed gaps inside a far structure. The Eiffel Tower's
+        # lattice is typed half SKY, so per-pixel it is a cloud of specks the
+        # stride-8 grid and the silhouette rule reduce to nothing; closed over
+        # close_px it is one silhouette, and the sky pixels inside it keep the
+        # panorama's own sky colour on the strip. Only sky-typed pixels are taken,
+        # so real sky between two far things is never bridged.
+        if cfg.close_px > 0 and far.any():
+            from scipy.ndimage import binary_closing
+            closed = binary_closing(far, iterations=cfg.close_px)
+            gained = closed & ~far
+            if sky is not None:
+                gained &= sky
+            if gained.any():
+                depth = np.where(gained & ~(np.isfinite(depth) & (depth > start_m)), depth_max, depth)
+                far |= gained
+                self.log_info(f"Far-field backdrop: closed {int(gained.sum())} sky-typed px inside far structures")
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
