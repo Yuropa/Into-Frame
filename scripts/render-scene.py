@@ -491,7 +491,7 @@ def render_sky(sky_img: PILImage.Image, yaw_deg: float, Rv: np.ndarray, width: i
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
-    ap.add_argument("--out", type=Path, default=None, help="output directory (default: <run_dir>/render)")
+    ap.add_argument("--out", type=Path, default=None, help="output directory (default: scratch/render/<run-id>)")
     ap.add_argument("--config", type=Path, default=ROOT / "server" / "config.yaml")
     ap.add_argument("--width", type=int, default=1200)
     ap.add_argument("--views", default="photo,left,right,step", help="comma list of photo,left,right,back,step,high")
@@ -504,7 +504,9 @@ def main() -> int:
     args = ap.parse_args()
 
     run_dir = args.run_dir.resolve()
-    out = (args.out or (run_dir / "render")).resolve()
+    # Not inside the run directory: the context loader treats its subdirectories
+    # as stage caches.
+    out = (args.out or (ROOT / "scratch" / "render" / run_dir.name)).resolve()
     out.mkdir(parents=True, exist_ok=True)
     log = lambda s: print(s, flush=True)  # noqa: E731
 
