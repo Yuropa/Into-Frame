@@ -53,5 +53,9 @@ class ModelGenerator():
             seed=seed,
         )
 
+    @property
+    def produces_albedo(self) -> bool:
+        return bool(getattr(self.generator, "produces_albedo", False))
+
     def close(self):
         self.generator.close()

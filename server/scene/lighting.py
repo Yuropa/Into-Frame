@@ -40,7 +40,7 @@ _SUN_PERCENTILE = 99.9
 # 0.012. At 6.0 the two clear alpine days land at 1.5 and 1.04, the sunset at 0.46,
 # and the two whose maps are mostly haze near zero -- see _SUN_INTENSITY_FLOOR for
 # how those still get a key light when the map has an identifiable peak.
-_SUN_INTENSITY_SCALE = 6.0
+_SUN_INTENSITY_SCALE = 9.0
 
 # When the merged radiance has a genuinely concentrated peak (peak/mean above this)
 # the scene has a sun even if its irradiance share is small -- Paris's map is a

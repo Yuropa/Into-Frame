@@ -521,7 +521,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 # panorama's downsampled copy when one exists (see hires_crops.py).
                 # The delit variant is itself made from the hi-res crop when there
                 # is one, so this order keeps both preferences.
-                crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
+                # A generator whose texture is its own albedo (TRELLIS.2) gets the
+                # photographed crop instead: it needs the shading as a depth cue
+                # and de-lights on its own.
+                if gen.produces_albedo:
+                    crop = self._source_crop(context, idx) or context.image(_delit_key(idx))
+                else:
+                    crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
 
                 fill_ratio = mask_fill_ratio(crop)
                 if fill_ratio is not None and fill_ratio <= 0.0:

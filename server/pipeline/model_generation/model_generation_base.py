@@ -6,6 +6,11 @@ from util.image_utils import Image
 from remote_connection.remote_client import RemoteClient 
 
 class ModelGeneratorBase(RemoteClient):
+    # True when the generator's texture is its own albedo estimate and it wants the
+    # photographed (lit) crop as input; False when it bakes the input pixels in
+    # as-is and should be fed the delit crop.
+    produces_albedo = False
+
     @classmethod
     def model_names(cls) -> list[str]:
         return []

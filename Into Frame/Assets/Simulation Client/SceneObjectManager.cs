@@ -611,7 +611,9 @@ public class SceneObjectManager : MonoBehaviour
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
         waterMaterialManager?.RegisterMeshLoaded(container, container.name);
-        if (container.name.EndsWith("(backdrop)"))
+        // The treeline strip is panorama pixels with their light baked in, like the
+        // backdrop; lit again with quads whose normals face the origin it rendered black.
+        if (container.name.EndsWith("(backdrop)") || container.name.EndsWith("(treeline)"))
             MakeUnlit(container);
     }
 

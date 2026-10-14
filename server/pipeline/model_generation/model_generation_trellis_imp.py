@@ -1,9 +1,13 @@
-from path_utils import add_project_paths
+from path_utils import add_project_paths, add_system_path, lib_path
 add_project_paths()
+# TRELLIS.2 is vendored under lib/, not installed into the env as a package.
+add_system_path(lib_path() / "TRELLIS.2")
+add_system_path(lib_path() / "TRELLIS.2" / "o-voxel")
 
 from pathlib import Path
 from typing import Any
 
+import torch
 import o_voxel
 from PIL import Image
 from trellis2.pipelines import Trellis2ImageTo3DPipeline

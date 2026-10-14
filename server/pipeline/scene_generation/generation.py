@@ -300,7 +300,13 @@ _MIN_MESH_HEIGHT_FRACTION = 0.10
 # It also has to admit a deliberately narrow card: a 3-plane fan is [W, 1.0, 0.866W]
 # for any width W, which scores a constant 0.866 here and would have been rejected
 # outright by the old test for any conifer narrower than about 1:8.
-_MIN_MESH_THICKNESS_FRACTION = 0.4
+#
+# 2026-10-14: lowered to 0.3 for TRELLIS.2 reconstructions. Its upright lupine
+# (category_mesh_flower_1, the one draw of six Rainier crops that agreed with its
+# picture, plausibility 0.11) measured 0.38: a 1 m wide, 0.4 m deep flower stalk is
+# the real shape, not a card, and 0.4 billboarded all 14 of its instances. The worst
+# genuine sheet in the table above sits at 0.225, so 0.3 keeps 1.3x of margin.
+_MIN_MESH_THICKNESS_FRACTION = 0.3
 
 # A reconstructed category mesh describes the same object its instance's 2D box
 # measured, so the two have to agree about that object's shape. This is the ratio

@@ -1800,11 +1800,11 @@ stages:
     object_fraction: 0.6        # visible object fills this much of the canvas; the rest is room to grow
     occluder_depth_margin: 0.10 # same "who is in front" margin as Asset Generation's occlusion score
     occluder_dilate_px: 8
-    min_occluded_fraction: 0.02 # under this, nothing is hidden: leave the crop to super-resolution
+    min_occluded_fraction: 0.0  # 0: every bucket representative goes through completion + refinement (billboard texture quality)
     border_extend_fraction: 0.3
     num_inference_steps: 28
     guidance_scale: 30.0
-    refine_strength: 0.0        # >0: a second full-canvas img2img pass for detail on the visible part
+    refine_strength: 0.35       # full-canvas img2img pass: re-renders the object with FLUX detail at canvas resolution
     min_kept_visible_fraction: 0.5
 
   - name: Panorama Asset Generation
@@ -1921,7 +1921,7 @@ stages:
     min_mesh_angular_px: 90.0
     viewer_px_per_degree: 34.0   # must match Scene Generation's value below
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
-    generator_type: SAM3D
+    generator_type: TRELLIS       # TRELLIS.2-4B: textured, volumetric plants where SAM3D returned sheets; ~1 min per bucket
     # Face budget per category mesh. SAM3D returns its reconstruction undecimated and
     # nothing touched it, which is fine for a hero object and is not what these are --
     # one mesh is shared by every instance of its (class, bucket), and those run to
