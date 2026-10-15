@@ -434,7 +434,11 @@ stages:
     guidance_scale: 5.5         # FLUX's prompt-adherence strength for the sky generation;
                                 # raised from 4.0 for a stronger, more defined cloud/atmosphere
                                 # result instead of hewing close to the muted procedural gradient.
-    strength: 0.85              # how much of the gradient composite (incl. real photographed
+    strength: 0.6               # how much of the gradient composite (incl. real photographed
+                                # sky) is replaced. 0.85 let FLUX turn Rainier's clear blue sky into
+                                # a dusk dome over a cloud sea; the prompt now also follows the
+                                # photograph's measured cloudiness (see _sky_prompt).
+                                # (previous comment:) how much of the gradient composite (incl. real photographed
                                 # sky) survives Pass 2 vs. being replaced by FLUX's own
                                 # generation. 1.0 = fully overwritten, ignores the input almost
                                 # entirely; lower keeps more of the original sky's colour/texture.

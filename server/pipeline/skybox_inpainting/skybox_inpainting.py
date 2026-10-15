@@ -131,11 +131,42 @@ def _time_of_day_label(sun_el_deg: float) -> str:
         return "dusk"
 
 
-def _sky_prompt(time_label: str) -> str:
+def _cloudiness(source_arr: np.ndarray, sky_mask: np.ndarray, cone_cols: "tuple[int, int] | None" = None) -> float:
+    """Fraction of the photographed sky that is cloud: bright and unsaturated.
+    Measured inside the photographed cone when one is given (the outpainted sky
+    is a guess), over every sky pixel otherwise. Rainier's sky: 0.00 in the cone."""
+    rgb = source_arr.astype(np.float32) / 255.0
+    mx = rgb.max(axis=2)
+    mn = rgb.min(axis=2)
+    sat = np.where(mx > 0, (mx - mn) / np.maximum(mx, 1e-6), 0.0)
+    cloud = (sat < 0.18) & (mx > 0.65)
+    scope = sky_mask.copy()
+    if cone_cols is not None:
+        c0, c1 = cone_cols
+        band = np.zeros_like(scope)
+        band[:, max(0, c0):min(scope.shape[1], c1)] = True
+        if (scope & band).sum() > 1000:
+            scope &= band
+    return float(cloud[scope].mean()) if scope.any() else 0.0
+
+
+def _sky_prompt(time_label: str, cloudiness: float = 0.0) -> str:
+    # The prompt used to ask for cumulus and cirrus whatever the photograph
+    # showed, and at strength 0.85 FLUX obliged: a clear saturated-blue Rainier
+    # sky came back as a dusk dome over a sea of cloud, whose grey bank stood
+    # above the ridge. Describe the sky the photograph actually has.
+    if cloudiness < 0.05:
+        clouds = "a completely clear, cloudless sky, deep saturated blue at the zenith fading to pale haze at the horizon"
+    elif cloudiness < 0.3:
+        clouds = "a mostly clear blue sky with a few small, thin, scattered clouds"
+    elif cloudiness < 0.7:
+        clouds = "a partly cloudy sky with soft natural cumulus clouds"
+    else:
+        clouds = "an overcast sky, a smooth even layer of grey-white cloud"
     return (
         f"A photorealistic equirectangular 360-degree view of the upper atmosphere, {time_label}. "
-        "Looking straight up into a seamless daytime sky filled with soft, natural clouds "
-        "and realistic atmospheric haze. Clean blue sky expanse, cirrus and cumulus cloud textures, "
+        f"Looking straight up into a seamless daytime sky: {clouds}. "
+        "Realistic atmospheric haze near the horizon, no landscape, no ground, no sea of clouds, "
         "uniform lighting, ultra-detailed, high quality, panoramic backdrop."
     )
 
@@ -424,7 +455,18 @@ class SkyboxInpaintingStage(PipelineStage):
 
         # Lead with the FLUX_DEV_PANORAMA_LORA_2 trigger sequence so the LoRA activates its
         # spherical/HDRI generation mode instead of its base perspective-photo bias.
-        prompt = lora_prompt_prefix(PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2) + _sky_prompt(time_label)
+        cone_cols = None
+        try:
+            from util.captured_cone import captured_cone_from_context
+            cone = captured_cone_from_context(context, w, h)
+            if cone is not None:
+                u0, u1 = cone.u_range
+                cone_cols = (int(u0), int(u1))
+        except Exception:
+            cone_cols = None
+        cloudiness = _cloudiness(source_arr, sky_mask, cone_cols)
+        self.log_info(f"Photographed sky: {cloudiness:.0%} cloud")
+        prompt = lora_prompt_prefix(PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2) + _sky_prompt(time_label, cloudiness)
         self.log_info(f"FLUX prompt: {prompt!r}")
 
         flux_max = 1536
