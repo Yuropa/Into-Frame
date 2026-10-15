@@ -29,6 +29,20 @@ Shader "IntoFrame/TerrainSplat"
         _Layer6TileRepeat ("Layer 6 Tile Repeat", Float) = 50.0
         _Layer7TileRepeat ("Layer 7 Tile Repeat", Float) = 50.0
 
+        // Per-layer packed PBR detail (linear; RG tangent normal xy, B occlusion,
+        // A smoothness), same UV as the layer's tile and sampled with its sampler
+        // (separate samplers for these would exceed D3D11's 16 per shader).
+        _Layer0Pbr ("Layer 0 PBR", 2D) = "bump" {}
+        _Layer1Pbr ("Layer 1 PBR", 2D) = "bump" {}
+        _Layer2Pbr ("Layer 2 PBR", 2D) = "bump" {}
+        _Layer3Pbr ("Layer 3 PBR", 2D) = "bump" {}
+        _Layer4Pbr ("Layer 4 PBR", 2D) = "bump" {}
+        _Layer5Pbr ("Layer 5 PBR", 2D) = "bump" {}
+        _Layer6Pbr ("Layer 6 PBR", 2D) = "bump" {}
+        _Layer7Pbr ("Layer 7 PBR", 2D) = "bump" {}
+        _NormalStrength ("Detail Normal Strength", Range(0, 2)) = 1.0
+        _OcclusionStrength ("Detail Occlusion Strength", Range(0, 1)) = 1.0
+
         // Per-layer PBR smoothness (0 = perfectly matte, 1 = mirror-smooth).
         // Water should be ~0.88; soil/grass/gravel near 0.
         _Layer0Smoothness ("Layer 0 Smoothness", Range(0,1)) = 0.1
@@ -143,6 +157,8 @@ Shader "IntoFrame/TerrainSplat"
             TEXTURE2D(_Layer6Tile); SAMPLER(sampler_Layer6Tile);
             TEXTURE2D(_Layer7Tile); SAMPLER(sampler_Layer7Tile);
             TEXTURE2D(_MacroMap);   SAMPLER(sampler_MacroMap);
+            TEXTURE2D(_Layer0Pbr); TEXTURE2D(_Layer1Pbr); TEXTURE2D(_Layer2Pbr); TEXTURE2D(_Layer3Pbr);
+            TEXTURE2D(_Layer4Pbr); TEXTURE2D(_Layer5Pbr); TEXTURE2D(_Layer6Pbr); TEXTURE2D(_Layer7Pbr);
 
             // ── Material CBUFFER ───────────────────────────────────────────
             CBUFFER_START(UnityPerMaterial)
@@ -176,6 +192,8 @@ Shader "IntoFrame/TerrainSplat"
                 int    _StochasticLayers;
                 int    _NoMacroLayers;
                 float  _MacroStrength;
+                float  _NormalStrength;
+                float  _OcclusionStrength;
                 float4 _MacroMean;
                 float  _HeightBlendSharpness;
                 float4 _TerrainExtent;
@@ -383,17 +401,41 @@ Shader "IntoFrame/TerrainSplat"
                 ACCUMULATE_LAYER(6, tex6, w6) ACCUMULATE_LAYER(7, tex7, w7)
                 half3 albedo = albedoEq + albedoTiled * macroMod;
 
-                // Blend per-layer smoothness with the same height-biased weights
-                half smoothness =
-                    _Layer0Smoothness * w0 + _Layer1Smoothness * w1 +
-                    _Layer2Smoothness * w2 + _Layer3Smoothness * w3 +
-                    _Layer4Smoothness * w4 + _Layer5Smoothness * w5 +
-                    _Layer6Smoothness * w6 + _Layer7Smoothness * w7;
+                // Packed PBR detail, blended with the same height-biased weights: tangent
+                // normal xy, occlusion, smoothness. Each layer reads its own map with its
+                // tile's sampler and UV (stochastic where the tile is), so detail and
+                // colour stay registered.
+                half4 pbr0 = SAMPLE_LAYER(_Layer0Pbr, sampler_Layer0Tile, uv0, 1);
+                half4 pbr1 = SAMPLE_LAYER(_Layer1Pbr, sampler_Layer1Tile, uv1, 2);
+                half4 pbr2 = SAMPLE_LAYER(_Layer2Pbr, sampler_Layer2Tile, uv2, 4);
+                half4 pbr3 = SAMPLE_LAYER(_Layer3Pbr, sampler_Layer3Tile, uv3, 8);
+                half4 pbr4 = SAMPLE_LAYER(_Layer4Pbr, sampler_Layer4Tile, uv4, 16);
+                half4 pbr5 = SAMPLE_LAYER(_Layer5Pbr, sampler_Layer5Tile, uv5, 32);
+                half4 pbr6 = SAMPLE_LAYER(_Layer6Pbr, sampler_Layer6Tile, uv6, 64);
+                half4 pbr7 = SAMPLE_LAYER(_Layer7Pbr, sampler_Layer7Tile, uv7, 128);
+                half4 pbr = pbr0 * w0 + pbr1 * w1 + pbr2 * w2 + pbr3 * w3
+                          + pbr4 * w4 + pbr5 * w5 + pbr6 * w6 + pbr7 * w7;
+                half smoothness = pbr.a;
+                half occlusion = lerp(1.0h, pbr.b, _OcclusionStrength);
+                half2 nXY = (pbr.rg * 2.0h - 1.0h) * _NormalStrength;
+                half3 normalTS = normalize(half3(nXY, sqrt(saturate(1.0h - dot(nXY, nXY)))));
+
+                // Tangent frame from screen-space derivatives of the terrain grid UV
+                // (every tiled layer is that UV times a factor, so one frame serves all);
+                // no tangents on the mesh, and its UV is computed, not stored.
+                float3 N = normalize(IN.normalWS);
+                float3 dp1 = ddx(IN.positionWS), dp2 = ddy(IN.positionWS);
+                float2 duv1 = ddx(uv), duv2 = ddy(uv);
+                float3 dp2perp = cross(dp2, N), dp1perp = cross(N, dp1);
+                float3 T = dp2perp * duv1.x + dp1perp * duv2.x;
+                float3 B = dp2perp * duv1.y + dp1perp * duv2.y;
+                float invmax = rsqrt(max(max(dot(T, T), dot(B, B)), 1e-20));
+                float3 normalWS = normalize(T * invmax * normalTS.x + B * invmax * normalTS.y + N * normalTS.z);
 
                 // URP PBR lighting
                 InputData inputData = (InputData)0;
                 inputData.positionWS             = IN.positionWS;
-                inputData.normalWS               = normalize(IN.normalWS);
+                inputData.normalWS               = normalWS;
                 inputData.viewDirectionWS        = GetWorldSpaceNormalizeViewDir(IN.positionWS);
                 inputData.fogCoord               = IN.fogFactor;
                 inputData.vertexLighting         = half3(0, 0, 0);
@@ -411,8 +453,8 @@ Shader "IntoFrame/TerrainSplat"
                 surfaceData.albedo     = albedo;
                 surfaceData.metallic   = 0.0h;
                 surfaceData.smoothness = smoothness;
-                surfaceData.normalTS   = half3(0.0h, 0.0h, 1.0h);
-                surfaceData.occlusion  = 1.0h;
+                surfaceData.normalTS   = normalTS;
+                surfaceData.occlusion  = occlusion;
                 surfaceData.alpha      = 1.0h;
 
                 half4 color = UniversalFragmentPBR(inputData, surfaceData);

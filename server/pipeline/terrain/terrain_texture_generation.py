@@ -487,6 +487,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # Paint this many candidates (consecutive seeds) and keep the one whose
         # texture is least arranged in rings around the camera (near_ground.ring_score).
         near_candidates: int = 3,
+        # Packed PBR detail per tiled layer (util.material_maps.terrain_layer_pbr):
+        # normal from the tile's micro-height, cavity occlusion, smoothness. The
+        # panorama layer has none (its relief is the mesh's own).
+        pbr_maps: bool = True,
+        pbr_normal_strength: float = 1.5,
+        pbr_cavity_strength: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.near_plate_m = float(near_plate_m)
@@ -505,6 +511,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.near_seam_strength = float(near_seam_strength)
         self.near_nadir_fill_m = float(near_nadir_fill_m)
         self.near_candidates = max(1, int(near_candidates))
+        self.pbr_maps = bool(pbr_maps)
+        self.pbr_normal_strength = float(pbr_normal_strength)
+        self.pbr_cavity_strength = float(pbr_cavity_strength)
         self.tile_source = str(tile_source).lower()
         self.macro_angular_sigma_deg = float(macro_angular_sigma_deg)
         # bake_projected_colour's validity gates: a panorama pixel describes a texel
@@ -853,6 +862,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         # After the Fill pipeline is closed: the plate loads FLUX.1-dev, a second
         # 24 GB pipeline that must not sit beside the first.
         material = self._near_ground_layer(context, cfg, material)
+        if cfg.pbr_maps:
+            self._add_pbr_maps(material, cfg)
 
         context.add_splat_material(ContextKey.TERRAIN_MATERIAL, material)
 
@@ -1122,6 +1133,25 @@ class TerrainTextureGenerationStage(PipelineStage):
             material.macro_mean = macro_mean
             material.macro_strength = cfg.macro_strength
         return material
+
+    def _add_pbr_maps(self, material: SplatMaterial, cfg: "TerrainTextureGenerationConfiguration") -> None:
+        """Packed normal/occlusion/smoothness for every tiled layer, in place.
+        Tiles and the near plate are seamless, so every filter wraps."""
+        from util.material_maps import terrain_layer_pbr
+        for layer in material.layers:
+            if layer.equirect:
+                continue
+            layer.pbr = terrain_layer_pbr(
+                layer.tile, layer.smoothness, normal_strength=cfg.pbr_normal_strength,
+                cavity_strength=cfg.pbr_cavity_strength, wrap=True,
+            )
+            arr = np.asarray(layer.pbr, dtype=np.float32) / 255.0
+            self.log_info(
+                f"PBR maps for layer '{layer.name}': mean occlusion {arr[..., 2].mean():.2f}, "
+                f"smoothness {arr[..., 3].mean():.2f}"
+            )
+            if self.temp is not None:
+                layer.pbr.save(self.temp / f"pbr_{layer.name}.png")
 
     def _near_ground_layer(
         self,
@@ -2790,7 +2820,9 @@ class TerrainTextureGenerationStage(PipelineStage):
         gradient, since the tile is meant to be lit flat/overcast already.
         """
         gray = np.array(rgb_img.convert("L"), dtype=np.float32)
-        high_freq = gray - gaussian_filter(gray, sigma=8.0)
+        # Wrap: every image packed here is a tile meant to repeat; a reflecting
+        # filter broke the height at the edges (2-3.5x the interior step).
+        high_freq = gray - gaussian_filter(gray, sigma=8.0, mode="wrap")
 
         h_min, h_max = high_freq.min(), high_freq.max()
         if h_max - h_min > 1e-5:
@@ -2798,7 +2830,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         else:
             height = np.full_like(gray, 128.0)
         # Smooth slightly to avoid single-pixel flicker in the shader's blend weights.
-        height = gaussian_filter(height, sigma=1.0).clip(0, 255).astype(np.uint8)
+        height = gaussian_filter(height, sigma=1.0, mode="wrap").clip(0, 255).astype(np.uint8)
 
         rgba = np.dstack([np.array(rgb_img.convert("RGB"), dtype=np.uint8), height])
         return PIL.Image.fromarray(rgba, "RGBA")

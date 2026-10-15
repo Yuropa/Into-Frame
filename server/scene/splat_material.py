@@ -46,6 +46,10 @@ class SplatLayer:
     # a second time. Wire/manifest field is the inverse, `no_macro`, so an absent
     # field means the ordinary multiply.
     macro: bool = True
+    # Packed PBR detail, linear RGBA, same UV as `tile`: RG = tangent-space normal
+    # xy (0.5 = flat), B = ambient occlusion, A = smoothness (see
+    # util.material_maps.terrain_layer_pbr). None -> flat, unoccluded, `smoothness`.
+    pbr: "PILImage.Image | None" = None
 
 
 class SplatMaterial:
@@ -244,6 +248,7 @@ class SplatMaterial:
                     "stochastic": layer.stochastic,
                     "no_macro": not layer.macro,
                     "tile": _b64(layer.tile),
+                    **({"pbr": _b64(layer.pbr)} if layer.pbr is not None else {}),
                 }
                 for layer in self.layers
             ],
@@ -269,6 +274,7 @@ class SplatMaterial:
                 smoothness=entry.get("smoothness", 0.1),
                 stochastic=entry.get("stochastic", False),
                 macro=not entry.get("no_macro", False),
+                pbr=_from_b64(entry["pbr"]) if entry.get("pbr") else None,
             )
             for entry in data["layers"]
         ]
@@ -304,6 +310,11 @@ class SplatMaterial:
             bm.save(path / f"blend_map_{i}.png")
         for layer in self.layers:
             layer.tile.save(path / f"tile_{layer.name}.png")
+            pbr_path = path / f"pbr_{layer.name}.png"
+            if layer.pbr is not None:
+                layer.pbr.save(pbr_path)
+            elif pbr_path.exists():
+                pbr_path.unlink()
 
     @classmethod
     def load(cls, path: Path) -> Self:
@@ -318,6 +329,8 @@ class SplatMaterial:
                 smoothness=entry.get("smoothness", 0.1),
                 stochastic=entry.get("stochastic", False),
                 macro=not entry.get("no_macro", False),
+                pbr=(PILImage.open(path / f"pbr_{entry['name']}.png").copy()
+                     if (path / f"pbr_{entry['name']}.png").exists() else None),
             )
             for entry in manifest["layers"]
         ]

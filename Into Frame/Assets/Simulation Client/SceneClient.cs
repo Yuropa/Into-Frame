@@ -381,6 +381,7 @@ public class SplatLayerData
     public bool   stochastic;  // true → hex-grid stochastic sampling (no visible repeat)
     public bool   no_macro;    // true → a tiled layer the macro colour multiply must skip
                                // (a world-space bake that already carries the photo's colour)
+    public string pbr;         // optional base64 PNG, linear: RG normal xy, B occlusion, A smoothness
 }
 
 [Serializable]

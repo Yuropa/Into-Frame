@@ -35,6 +35,10 @@ public class TerrainMaterialManager : MonoBehaviour
     public Texture2D[] LayerTiles      { get; private set; } = Array.Empty<Texture2D>();
     public float[]     LayerFactors    { get; private set; } = Array.Empty<float>();
     public float[]     LayerSmoothness { get; private set; } = Array.Empty<float>();
+    // Packed PBR detail per layer (linear): RG tangent normal xy, B occlusion, A
+    // smoothness. A layer without one gets a 1x1 flat texture carrying its
+    // scalar smoothness, so the shader always reads the same channels.
+    public Texture2D[] LayerPbr        { get; private set; } = Array.Empty<Texture2D>();
     public Texture2D[] BlendMaps       { get; private set; } = Array.Empty<Texture2D>();
     public int         EquirectMask    { get; private set; }
     public int         StochasticMask  { get; private set; }
@@ -74,6 +78,18 @@ public class TerrainMaterialManager : MonoBehaviour
         Shader.PropertyToID("_Layer5TileRepeat"),
         Shader.PropertyToID("_Layer6TileRepeat"),
         Shader.PropertyToID("_Layer7TileRepeat"),
+    };
+
+    static readonly int[] _layerPbrIds =
+    {
+        Shader.PropertyToID("_Layer0Pbr"),
+        Shader.PropertyToID("_Layer1Pbr"),
+        Shader.PropertyToID("_Layer2Pbr"),
+        Shader.PropertyToID("_Layer3Pbr"),
+        Shader.PropertyToID("_Layer4Pbr"),
+        Shader.PropertyToID("_Layer5Pbr"),
+        Shader.PropertyToID("_Layer6Pbr"),
+        Shader.PropertyToID("_Layer7Pbr"),
     };
 
     static readonly int[] _layerSmoothnessIds =
@@ -117,6 +133,7 @@ public class TerrainMaterialManager : MonoBehaviour
         LayerTiles      = new Texture2D[data.layers.Length];
         LayerFactors    = new float[data.layers.Length];
         LayerSmoothness = new float[data.layers.Length];
+        LayerPbr        = new Texture2D[data.layers.Length];
         EquirectMask    = 0;
         StochasticMask  = 0;
         NoMacroMask     = 0;
@@ -135,6 +152,15 @@ public class TerrainMaterialManager : MonoBehaviour
             LayerTiles[i]      = DecodeTexture(data.layers[i].tile, $"tile_{data.layers[i].name}", linear: false);
             LayerFactors[i]    = data.layers[i].tile_factor > 0f ? data.layers[i].tile_factor : 1.0f;
             LayerSmoothness[i] = data.layers[i].smoothness;
+            if (!string.IsNullOrEmpty(data.layers[i].pbr))
+            {
+                LayerPbr[i] = DecodeTexture(data.layers[i].pbr, $"pbr_{data.layers[i].name}", linear: true);
+                LayerPbr[i].wrapMode = LayerTiles[i] != null ? LayerTiles[i].wrapMode : TextureWrapMode.Repeat;
+            }
+            else
+            {
+                LayerPbr[i] = FlatPbr(data.layers[i].smoothness);
+            }
             if (data.layers[i].equirect)
                 EquirectMask |= (1 << i);
             if (data.layers[i].stochastic)
@@ -250,6 +276,8 @@ public class TerrainMaterialManager : MonoBehaviour
                 mpb.SetFloat(_layerTileRepeatIds[i], LayerFactors[i]);
             if (i < LayerSmoothness.Length)
                 mpb.SetFloat(_layerSmoothnessIds[i], LayerSmoothness[i]);
+            if (i < LayerPbr.Length && LayerPbr[i] != null)
+                mpb.SetTexture(_layerPbrIds[i], LayerPbr[i]);
         }
 
         mpb.SetInt(_equirectLayersId, EquirectMask);
@@ -299,6 +327,16 @@ public class TerrainMaterialManager : MonoBehaviour
             return mf.sharedMesh.bounds;
 
         return null;
+    }
+
+    // 1x1 linear (0.5, 0.5, 1, smoothness): flat normal, no occlusion.
+    private static Texture2D FlatPbr(float smoothness)
+    {
+        var tex = new Texture2D(1, 1, TextureFormat.RGBA32, mipChain: false, linear: true);
+        tex.SetPixel(0, 0, new Color(0.5f, 0.5f, 1f, Mathf.Clamp01(smoothness)));
+        tex.Apply(false, false);
+        tex.wrapMode = TextureWrapMode.Repeat;
+        return tex;
     }
 
     private static Texture2D DecodeTexture(string base64, string label, bool linear)

@@ -1200,6 +1200,12 @@ stages:
     near_seam_strength: 0.45    # light repaint of the cross-faded edge band, to clean the ghosting
     near_candidates: 3          # paint this many and keep the one least arranged in rings around the camera
     near_nadir_fill_m: 2.0      # fill the start within this radius from around it (the nadir blob became a boulder)
+    # Packed PBR detail per tiled layer: normal from the tile's micro-height (its
+    # alpha), cavity occlusion, smoothness (util/material_maps.py). Unity's terrain
+    # shader blends them like the tiles and feeds URP's normal, occlusion, smoothness.
+    pbr_maps: true
+    pbr_normal_strength: 1.5
+    pbr_cavity_strength: 0.5
     panorama_far_ring_feather_m: 8.0
     # Delight the panorama layer the same way the object crops and reference patches
     # are delit (shading only, colour kept), so the surface the viewer walks on is not
@@ -2312,6 +2318,19 @@ stages:
     lod_exempt_classes:
       - grass_tuft                    # thousands of instances on one card: no LODGroup
 
+  - name: Material Maps
+    stage: MaterialMapsStage
+    # glTF normal, occlusion and metallic-roughness textures for every placed mesh
+    # asset (pipeline/material_maps/material_maps.py): normals and cavity occlusion
+    # from the base colour's detail, geometric occlusion from depth renders in
+    # ao_directions directions (pyrender/EGL), roughness by class, metallic 0 for
+    # natural classes -- TRELLIS marked the Rainier flowers metallic 0.74.
+    normal_strength: 2.0
+    cavity_strength: 0.5
+    ao_directions: 64
+    ao_resolution: 512
+    min_faces_for_geometric_ao: 100   # below this a mesh is a card: image-derived maps only
+    max_texture_size: 1024
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false

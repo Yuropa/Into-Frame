@@ -96,7 +96,17 @@ def cutout_shader_dir() -> str:
         raise RuntimeError("pyrender's mesh.frag changed; the alpha cutout patch no longer applies")
     # 0.02, not the glTF MASK 0.5: the terrain's panorama overlay carries its blend
     # weight in the vertex alpha and must survive at any weight above nothing.
-    frag.write_text(text.replace(marker, marker + "\n    if (frag_color.a < 0.02) discard;"))
+    text = text.replace(marker, marker + "\n    if (frag_color.a < 0.02) discard;")
+    # Occlusion on ambient light only, as URP does (UniversalFragmentPBR applies
+    # surfaceData.occlusion to global illumination, not to the main light);
+    # pyrender multiplies it into everything, which made every mapped asset
+    # look far darker here than it will in Unity.
+    amb = "    color.xyz += base_color.xyz * ambient_light;"
+    ao_block = "    float ao = texture(material.occlusion_texture, uv_0).r;\n    color.xyz *= ao;"
+    if amb in text and ao_block in text:
+        text = text.replace(ao_block, "    // occlusion applied to ambient above")
+        text = text.replace(amb, "#ifdef HAS_OCCLUSION_TEX\n    color.xyz += base_color.xyz * ambient_light * texture(material.occlusion_texture, uv_0).r;\n#else\n" + amb + "\n#endif")
+    frag.write_text(text)
     return str(dst)
 
 
@@ -152,8 +162,12 @@ def quad() -> trimesh.Trimesh:
 
 # ── materials ────────────────────────────────────────────────────────────────────
 
+NO_PBR_MAPS = False  # --no-pbr-maps: base colour only, for before/after comparisons
+
+
 def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit: bool = False,
-                 blend: bool = False, color=None, roughness: float = 0.9, double_sided: bool = True):
+                 blend: bool = False, color=None, roughness: float = 0.9, double_sided: bool = True,
+                 normal_image: PILImage.Image | None = None, occlusion_image: PILImage.Image | None = None):
     kwargs = dict(metallicFactor=0.0, roughnessFactor=roughness, doubleSided=double_sided,
                   alphaMode="BLEND" if blend else "OPAQUE")
     img = image
@@ -163,6 +177,14 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
     if img is not None:
         img = img.convert("RGBA")
         arr = np.asarray(img)
+        src_mat = getattr(tm.visual, "material", None)
+        if image is None and str(getattr(src_mat, "alphaMode", "") or "").upper() == "MASK":
+            # glTF MASK: Unity cuts at alphaCutoff (0.5 by default). The shader's own
+            # discard is at 0.02 for the terrain overlays, so a card's soft matte
+            # edge used to draw as a translucent box.
+            cut = float(getattr(src_mat, "alphaCutoff", None) or 0.5) * 255.0
+            arr = arr.copy()
+            arr[..., 3] = np.where(arr[..., 3] >= cut, 255, 0).astype(np.uint8)
         kwargs["baseColorTexture"] = pyrender.Texture(source=arr, source_channels="RGBA")
         if unlit:
             # The photograph's own light is in the pixels: show them as emission
@@ -174,6 +196,41 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
         kwargs["baseColorFactor"] = list(color)
     else:
         kwargs["baseColorFactor"] = [0.6, 0.6, 0.6, 1.0]
+    # The glTF PBR maps Material Maps writes (what glTFast reads in Unity), unless
+    # the caller supplied its own image or the surface is drawn unlit.
+    src = getattr(tm.visual, "material", None) if image is None and not unlit and not NO_PBR_MAPS else None
+    if src is not None:
+        def _tex(img, channels):
+            return pyrender.Texture(source=np.asarray(img.convert(channels)), source_channels=channels)
+        # Normal maps are off by default: pyrender's normal-map path shades a mesh
+        # differently even with a perfectly flat map (the Rainier tree came out 15%
+        # darker with every texel at 128,128,255), so it cannot judge them; Unity's
+        # glTFast follows the glTF spec. RENDER_PBR_MAPS=n,o,mr turns them on.
+        _maps = os.environ.get("RENDER_PBR_MAPS", "o,mr").split(",")
+        if getattr(src, "normalTexture", None) is not None and "n" in _maps:
+            # to_gl mirrors X; glTFast keeps the tangent frame right through the
+            # tangent's w sign, pyrender's derivative frame (b = n x t) does not,
+            # which inverts the bitangent: flip green to compensate.
+            na = np.asarray(src.normalTexture.convert("RGB")).copy()
+            na[..., 1] = 255 - na[..., 1]
+            kwargs["normalTexture"] = pyrender.Texture(source=na, source_channels="RGB")
+        if getattr(src, "occlusionTexture", None) is not None and "o" in _maps:
+            kwargs["occlusionTexture"] = _tex(src.occlusionTexture, "RGB")
+        if getattr(src, "metallicRoughnessTexture", None) is not None and getattr(src, "normalTexture", None) is not None and "mr" in _maps:
+            # Only alongside the other maps: TRELLIS's own metallic-roughness texture
+            # alone marks plants as metal, which the client shows but this renderer
+            # historically did not; Material Maps replaces it.
+            # pyrender reads roughness from R and metallic from G; glTF (and glTFast)
+            # store them in G and B. Swizzle, or every asset renders ~80% metallic.
+            mr = np.asarray(src.metallicRoughnessTexture.convert("RGB"))
+            kwargs["metallicRoughnessTexture"] = pyrender.Texture(
+                source=np.stack([mr[..., 1], mr[..., 2], mr[..., 2]], axis=-1).astype(np.uint8), source_channels="RGB")
+            kwargs["metallicFactor"] = 1.0
+            kwargs["roughnessFactor"] = 1.0
+    if normal_image is not None and not NO_PBR_MAPS and "n" in os.environ.get("RENDER_PBR_MAPS", "o,mr").split(","):
+        kwargs["normalTexture"] = pyrender.Texture(source=np.asarray(normal_image.convert("RGB")), source_channels="RGB")
+    if occlusion_image is not None and not NO_PBR_MAPS:
+        kwargs["occlusionTexture"] = pyrender.Texture(source=np.asarray(occlusion_image.convert("RGB")), source_channels="RGB")
     return pyrender.MetallicRoughnessMaterial(**kwargs)
 
 
@@ -273,6 +330,59 @@ def bake_terrain_texture(splat, height_map: np.ndarray, half: float, size: int,
         return PILImage.fromarray((albedo.clip(0, 1) * 255).astype(np.uint8), "RGB")
     albedo = albedo_eq + albedo_plain + albedo_tiled * macro_mod
     return PILImage.fromarray((albedo.clip(0, 1) * 255).astype(np.uint8), "RGB")
+
+
+def bake_terrain_pbr(splat, height_map: np.ndarray, half: float, size: int,
+                     height_blend_sharpness: float = 4.0, plate_layers: bool = False):
+    """The layers' packed PBR detail (see SplatLayer.pbr) blended over the same
+    top-down grid as bake_terrain_texture: (normal RGB image, occlusion RGB
+    image), or None when no layer has any. plate_layers=False leaves the no-macro
+    layers out (they are drawn as their own overlays); the panorama layer counts
+    as flat. Normals keep the tile's own encoding, which is also the bake's:
+    image rows run with the tile's rows."""
+    layers = list(splat.layers)
+    if not any(getattr(l, "pbr", None) is not None for l in layers):
+        return None
+    us = (np.arange(size, dtype=np.float64) + 0.5) / size
+    U, V = np.meshgrid(us, us)
+
+    def sample(img, u, v, wrap):
+        arr = np.asarray(img.convert("RGBA"), dtype=np.float32) / 255.0
+        h, w = arr.shape[:2]
+        if wrap:
+            cols, rows, mode = np.mod(u, 1.0) * w - 0.5, np.mod(v, 1.0) * h - 0.5, "wrap"
+        else:
+            cols, rows, mode = u * (w - 1), v * (h - 1), "nearest"
+        return np.stack([map_coordinates(arr[..., c], [rows.ravel(), cols.ravel()], order=1, mode=mode).reshape(u.shape)
+                         for c in range(4)], axis=-1)
+
+    acc = np.zeros((size, size, 4), dtype=np.float32); wsum = np.zeros((size, size), dtype=np.float32)
+    for i, layer in enumerate(layers):
+        if not plate_layers and not getattr(layer, "macro", True):
+            continue
+        bm = splat.blend_maps[i // 4] if i // 4 < len(splat.blend_maps) else None
+        if bm is None:
+            continue
+        w = sample(bm, U, V, wrap=False)[..., i % 4]
+        if layer.equirect:
+            pbr = np.zeros((size, size, 4), dtype=np.float32); pbr[..., :2] = 0.5; pbr[..., 2] = 1.0
+            tex_a = np.ones((size, size), dtype=np.float32)
+        else:
+            tf = float(layer.tile_factor)
+            tex_a = sample(layer.tile, U * tf, V * tf, wrap=True)[..., 3]
+            if getattr(layer, "pbr", None) is not None:
+                pbr = sample(layer.pbr, U * tf, V * tf, wrap=True)
+            else:
+                pbr = np.zeros((size, size, 4), dtype=np.float32); pbr[..., :2] = 0.5; pbr[..., 2] = 1.0
+        b = w * np.power(tex_a + 1e-4, height_blend_sharpness)
+        acc += pbr * b[..., None]; wsum += b
+    acc /= np.maximum(wsum, 1e-4)[..., None]
+    nxy = acc[..., :2] * 2.0 - 1.0
+    nz = np.sqrt(np.clip(1.0 - (nxy ** 2).sum(-1), 0.0, 1.0))
+    normal = np.concatenate([nxy, nz[..., None]], axis=-1) * 0.5 + 0.5
+    occ = np.repeat(acc[..., 2:3], 3, axis=-1)
+    to_img = lambda a: PILImage.fromarray((a.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+    return to_img(normal), to_img(occ)
 
 
 def baked_pano_uv_sampler(vertices: np.ndarray, uv: np.ndarray):
@@ -428,7 +538,10 @@ class SceneBuilder:
                 if baked is not None:
                     tex, uv = baked
                     tm.visual = trimesh.visual.TextureVisuals(uv=uv)
-                    mat = material_for(tm, image=tex, double_sided=False, roughness=0.95)
+                    pbr_bake = getattr(self, "_terrain_pbr", None)
+                    mat = material_for(tm, image=tex, double_sided=False, roughness=0.95,
+                                       normal_image=pbr_bake[0] if pbr_bake else None,
+                                       occlusion_image=pbr_bake[1] if pbr_bake else None)
                 else:
                     mat = material_for(tm, double_sided=False)
                 if self._pano_pass is not None:
@@ -486,6 +599,7 @@ class SceneBuilder:
         params = self.context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         self._pano_pass = None
         self._plate_passes = []
+        self._terrain_pbr = None
         if splat is None or hm is None or not splat.layers:
             self.log("  terrain: no splat material / height map, using the GLB's own material")
             return None
@@ -498,6 +612,7 @@ class SceneBuilder:
             # remainder is what the tiles paint); pass 2 draws the panorama layer
             # through TEXCOORD_1 with its blend weight as a vertex colour.
             tex = bake_terrain_texture(splat, hm.depth.astype(np.float32), half, int(self.args.terrain_texture), skip_equirect=True)
+            self._terrain_pbr = bake_terrain_pbr(splat, hm.depth.astype(np.float32), half, int(self.args.terrain_texture))
             self._pano_pass = self._panorama_pass_mesh(splat, terrain, half)
             self._plate_passes = self._plate_pass_meshes(splat, terrain, half)
         else:
@@ -542,7 +657,16 @@ class SceneBuilder:
             tm = trimesh.Trimesh(vertices=v * 0.999, faces=keep, process=False)
             tm.visual = trimesh.visual.TextureVisuals(uv=uv)
             tm.metadata["pano_weight"] = np.stack([np.ones_like(w), np.ones_like(w), np.ones_like(w), w], axis=-1).astype(np.float32)
-            mat = material_for(tm, image=layer.tile.convert("RGB"), double_sided=False, roughness=0.95, blend=True)
+            pbr = getattr(layer, "pbr", None)
+            normal_img = occ_img = None
+            if pbr is not None:
+                a = np.asarray(pbr.convert("RGBA"), dtype=np.float32) / 255.0
+                nxy = a[..., :2] * 2.0 - 1.0
+                nz = np.sqrt(np.clip(1.0 - (nxy ** 2).sum(-1), 0.0, 1.0))
+                normal_img = PILImage.fromarray(((np.concatenate([nxy, nz[..., None]], -1) * 0.5 + 0.5) * 255).astype(np.uint8), "RGB")
+                occ_img = PILImage.fromarray((np.repeat(a[..., 2:3], 3, -1) * 255).astype(np.uint8), "RGB")
+            mat = material_for(tm, image=layer.tile.convert("RGB"), double_sided=False, roughness=0.95, blend=True,
+                               normal_image=normal_img, occlusion_image=occ_img)
             out.append((tm, mat))
             self.log(f"  terrain: '{layer.name}' drawn as its own overlay ({layer.tile.size[0]} px x{tf:g}, {len(keep)} faces)")
         return out
@@ -673,6 +797,7 @@ def main() -> int:
     ap.add_argument("--views", default="photo,left,right,step", help="comma list of photo,left,right,back,step,high,down")
     ap.add_argument("--terrain-texture", type=int, default=2048, help="baked terrain texture size (px)")
     ap.add_argument("--no-grass", action="store_true")
+    ap.add_argument("--no-pbr-maps", action="store_true", help="ignore normal/occlusion/metallic-roughness textures on assets")
     ap.add_argument("--material", type=Path, default=None, help="use this saved splat_material directory instead of the run's")
     ap.add_argument("--only", default="", help="render only placed objects whose name contains this (environment meshes always render)")
     ap.add_argument("--exclude", default="", help="skip placed objects whose name contains this")
@@ -683,6 +808,8 @@ def main() -> int:
     ap.add_argument("--pano-uv", choices=["baked", "analytic"], default="baked",
                     help="terrain panorama layer through the mesh's baked TEXCOORD_1 (what Unity samples) or the analytic projection")
     args = ap.parse_args()
+    global NO_PBR_MAPS
+    NO_PBR_MAPS = bool(args.no_pbr_maps)
 
     run_dir = args.run_dir.resolve()
     # Not inside the run directory: the context loader treats its subdirectories
