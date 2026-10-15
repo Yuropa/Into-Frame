@@ -97,6 +97,10 @@ _SR_KEY = "crop_sr_{idx}"
 # {category_mesh_{class}_{bucket}: {"idx", "class", "bucket", "depth"}} for every
 # group this stage chose a mesh representative for (see run()).
 MESH_SOURCES_KEY = "mesh_sources"
+# What became of each mesh group: "mesh", or why it has none ("empty_mask",
+# "meshify_failed"). Lets has_expected_output tell a group that was tried and fell
+# back to its card or billboard from one that was never reached.
+MESH_OUTCOMES_KEY = "mesh_outcomes"
 
 # Widest a detection box may be relative to its height and still be believed as a
 # picture of this class. A card or a reconstruction is a picture of the SUBJECT, and
@@ -511,6 +515,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         # takes the GPU.
         self._close_supersampler()
         asset_task = self.create_progress(len(group_best), "Generating 3D assets…")
+        self._mesh_outcomes: dict[str, str] = {}
         # One generator process at a time: the groups are batched by the generator
         # their class routes to (category_generators), the default generator's
         # batch first, so the two models never share the GPU.
@@ -532,6 +537,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 gen.close()
 
         self.finish_progress(asset_task)
+        context.add_object(MESH_OUTCOMES_KEY, self._mesh_outcomes)
         return context
 
     def _generator_for(self, obj_class: str) -> ModelGeneratorType:
@@ -546,6 +552,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             cached = context.mesh(mesh_key)
             if cached is not None:
                 self.log_info(f"  {mesh_key}: cached ({cached.vertex_count}v {cached.face_count}f)")
+                self._mesh_outcomes[mesh_key] = "mesh"
                 self.advance_progress(asset_task)
                 continue
 
@@ -570,6 +577,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             fill_ratio = mask_fill_ratio(crop)
             if fill_ratio is not None and fill_ratio <= 0.0:
                 self.log_info(f"  {mesh_key}: crop_{idx} has an empty mask, skipping mesh (billboard-only)")
+                self._mesh_outcomes[mesh_key] = "empty_mask"
                 self.advance_progress(asset_task)
                 continue
 
@@ -600,9 +608,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 # billboard pool when category_mesh_{class}_{bucket} is
                 # absent.
                 self.log_info(f"  {mesh_key}: meshify failed ({e}), falling back to billboard-only")
+                self._mesh_outcomes[mesh_key] = "meshify_failed"
                 self.advance_progress(asset_task)
                 continue
             context.add_mesh(mesh_key, mesh)
+            self._mesh_outcomes[mesh_key] = "mesh"
             decimated = (
                 f" (decimated from {raw_faces}f)" if mesh.face_count < raw_faces else ""
             )
@@ -1312,8 +1322,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
             count, context.object, context.image, panorama_depth, pano_w, pano_h,
             region_type_map=region_type_depth.depth if region_type_depth is not None else None,
         )
+        # A group whose reconstruction was tried and failed (empty mask, meshify
+        # error) has no mesh and never will without a --rerun; the outcome record
+        # says it was tried, so it doesn't hold the stage, and every stage after it,
+        # incomplete on every invocation.
+        outcomes = context.object(MESH_OUTCOMES_KEY) or {}
         for obj_class, bucket in group_best:
-            if context.mesh(f"category_mesh_{obj_class}_{bucket}") is None:
+            key = f"category_mesh_{obj_class}_{bucket}"
+            if context.mesh(key) is None and key not in outcomes:
                 return False
         # Deliberately NOT checking for the _card meshes, even though run() publishes
         # them. _build_card_meshes skips a group whose crop is missing or whose card
