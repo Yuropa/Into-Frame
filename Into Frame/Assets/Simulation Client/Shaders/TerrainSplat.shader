@@ -89,6 +89,11 @@ Shader "IntoFrame/TerrainSplat"
         // transform). Kills the visible repeat of a 4 m tile and hides the soft
         // bands of a photo patch made tileable by cross-fading.
         _StochasticLayers ("Stochastic Layers Bitmask", Int) = 0
+        // Bitmask: bit i set means tiled layer i already carries the photograph's
+        // colour (a world-space bake such as the near-ground plate) and is
+        // accumulated unmodulated, like an equirect layer, instead of being
+        // multiplied by the macro map.
+        _NoMacroLayers ("No-Macro Layers Bitmask", Int) = 0
     }
 
     SubShader
@@ -169,6 +174,7 @@ Shader "IntoFrame/TerrainSplat"
                 float  _Layer7Smoothness;
                 int    _EquirectLayers;
                 int    _StochasticLayers;
+                int    _NoMacroLayers;
                 float  _MacroStrength;
                 float4 _MacroMean;
                 float  _HeightBlendSharpness;
@@ -370,7 +376,7 @@ Shader "IntoFrame/TerrainSplat"
                 half3 albedoEq = half3(0, 0, 0);
                 half3 albedoTiled = half3(0, 0, 0);
                 #define ACCUMULATE_LAYER(i, tex, w) \
-                    { if (((_EquirectLayers >> (i)) & 1) != 0) albedoEq += tex.rgb * (w); else albedoTiled += tex.rgb * (w); }
+                    { if ((((_EquirectLayers | _NoMacroLayers) >> (i)) & 1) != 0) albedoEq += tex.rgb * (w); else albedoTiled += tex.rgb * (w); }
                 ACCUMULATE_LAYER(0, tex0, w0) ACCUMULATE_LAYER(1, tex1, w1)
                 ACCUMULATE_LAYER(2, tex2, w2) ACCUMULATE_LAYER(3, tex3, w3)
                 ACCUMULATE_LAYER(4, tex4, w4) ACCUMULATE_LAYER(5, tex5, w5)

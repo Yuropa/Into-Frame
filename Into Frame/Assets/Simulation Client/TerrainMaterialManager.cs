@@ -38,6 +38,7 @@ public class TerrainMaterialManager : MonoBehaviour
     public Texture2D[] BlendMaps       { get; private set; } = Array.Empty<Texture2D>();
     public int         EquirectMask    { get; private set; }
     public int         StochasticMask  { get; private set; }
+    public int         NoMacroMask     { get; private set; }
     public Texture2D   MacroMap        { get; private set; }
     public float       MacroStrength   { get; private set; }
     public Vector4     MacroMean       { get; private set; } = new Vector4(0.5f, 0.5f, 0.5f, 1f);
@@ -89,6 +90,7 @@ public class TerrainMaterialManager : MonoBehaviour
 
     static readonly int _equirectLayersId   = Shader.PropertyToID("_EquirectLayers");
     static readonly int _stochasticLayersId = Shader.PropertyToID("_StochasticLayers");
+    static readonly int _noMacroLayersId    = Shader.PropertyToID("_NoMacroLayers");
     static readonly int _macroMapId         = Shader.PropertyToID("_MacroMap");
     static readonly int _macroStrengthId    = Shader.PropertyToID("_MacroStrength");
     static readonly int _macroMeanId        = Shader.PropertyToID("_MacroMean");
@@ -117,6 +119,7 @@ public class TerrainMaterialManager : MonoBehaviour
         LayerSmoothness = new float[data.layers.Length];
         EquirectMask    = 0;
         StochasticMask  = 0;
+        NoMacroMask     = 0;
 
         for (int i = 0; i < data.layers.Length; i++)
         {
@@ -136,6 +139,8 @@ public class TerrainMaterialManager : MonoBehaviour
                 EquirectMask |= (1 << i);
             if (data.layers[i].stochastic)
                 StochasticMask |= (1 << i);
+            if (data.layers[i].no_macro)
+                NoMacroMask |= (1 << i);
         }
 
         // Macro colour map (see SplatMaterialData.macro). sRGB like the tiles; the
@@ -249,6 +254,7 @@ public class TerrainMaterialManager : MonoBehaviour
 
         mpb.SetInt(_equirectLayersId, EquirectMask);
         mpb.SetInt(_stochasticLayersId, StochasticMask);
+        mpb.SetInt(_noMacroLayersId, NoMacroMask);
         mpb.SetFloat(_macroStrengthId, MacroMap != null ? MacroStrength : 0f);
         mpb.SetVector(_macroMeanId, MacroMean);
         if (MacroMap != null)

@@ -40,6 +40,12 @@ class SplatLayer:
     # tile that is not perfectly seamless still reads as one continuous material.
     # Meaningless for an equirect layer.
     stochastic: bool = False
+    # When False the shader leaves this tiled layer out of the macro colour
+    # multiply (see SplatMaterial.macro): a world-space bake that already carries
+    # the photograph's colour -- the near-ground plate -- must not be tinted by it
+    # a second time. Wire/manifest field is the inverse, `no_macro`, so an absent
+    # field means the ordinary multiply.
+    macro: bool = True
 
 
 class SplatMaterial:
@@ -236,6 +242,7 @@ class SplatMaterial:
                     "equirect": layer.equirect,
                     "smoothness": layer.smoothness,
                     "stochastic": layer.stochastic,
+                    "no_macro": not layer.macro,
                     "tile": _b64(layer.tile),
                 }
                 for layer in self.layers
@@ -261,6 +268,7 @@ class SplatMaterial:
                 equirect=entry.get("equirect", False),
                 smoothness=entry.get("smoothness", 0.1),
                 stochastic=entry.get("stochastic", False),
+                macro=not entry.get("no_macro", False),
             )
             for entry in data["layers"]
         ]
@@ -280,7 +288,8 @@ class SplatMaterial:
             "tile_size": self.tile_size,
             "layers": [
                 {"name": layer.name, "tile_factor": layer.tile_factor, "equirect": layer.equirect,
-                 "smoothness": layer.smoothness, "stochastic": layer.stochastic}
+                 "smoothness": layer.smoothness, "stochastic": layer.stochastic,
+                 "no_macro": not layer.macro}
                 for layer in self.layers
             ],
         }
@@ -308,6 +317,7 @@ class SplatMaterial:
                 equirect=entry.get("equirect", False),
                 smoothness=entry.get("smoothness", 0.1),
                 stochastic=entry.get("stochastic", False),
+                macro=not entry.get("no_macro", False),
             )
             for entry in manifest["layers"]
         ]

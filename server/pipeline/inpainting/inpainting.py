@@ -1,6 +1,6 @@
 import torch
 from PIL import Image as PILImage
-from pipeline.inpainting.inpainting_flux import InPaintingFlux
+from pipeline.inpainting.inpainting_flux import InPaintingFlux, DEV_MODEL_ID
 from pipeline.inpainting.inpainting_lama import InPaintingLama
 from pipeline.inpainting.inpainting_objectclear import InPaintingObjectClear
 from pipeline.panorama.panorama_lora import PanoramaLoraType
@@ -11,6 +11,12 @@ class InPaintingType(Enum):
     FLUX = 1
     LAMA = 2
     OBJECTCLEAR = 3
+    # FLUX.1-dev through FluxInpaintPipeline: with a full mask this is plain
+    # img2img on the base model, which paints the near-ground plate (see
+    # pipeline/terrain/near_ground.py) far better than FLUX.1-Fill does -- the
+    # Fill model, conditioned on an all-masked image, returns dim, structureless
+    # ground at every strength.
+    FLUX_DEV = 4
 
     @classmethod
     def default(cls):
@@ -33,6 +39,14 @@ class InPainting:
                     lora_type=lora_type,
                     lora_scale=lora_scale,
                 )
+            case InPaintingType.FLUX_DEV:
+                self.generator = InPaintingFlux(
+                    device=device,
+                    torch_dtype=torch_dtype,
+                    lora_type=lora_type,
+                    lora_scale=lora_scale,
+                    base_model=DEV_MODEL_ID,
+                )
             case InPaintingType.LAMA:
                 self.generator = InPaintingLama(
                     device=device,
@@ -53,6 +67,8 @@ class InPainting:
         match type:
             case InPaintingType.FLUX:
                 return InPaintingFlux.model_names(lora_type)
+            case InPaintingType.FLUX_DEV:
+                return InPaintingFlux.model_names(lora_type, base_model=DEV_MODEL_ID)
             case InPaintingType.LAMA:
                 return InPaintingLama.model_names()
             case InPaintingType.OBJECTCLEAR:

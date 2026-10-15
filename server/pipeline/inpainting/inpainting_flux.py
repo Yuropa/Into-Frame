@@ -14,13 +14,18 @@ from pipeline.panorama.panorama_lora import PanoramaLoraType, lora_checkpoint_di
 # LoRAs currently registered in panorama_lora.py were trained on plain FLUX.1-dev rather than
 # FLUX.1-Fill-dev.
 FILL_MODEL_ID = "black-forest-labs/FLUX.1-Fill-dev"
+DEV_MODEL_ID = "black-forest-labs/FLUX.1-dev"
 
 class InPaintingFlux:
-    def __init__(self, device, torch_dtype, lora_type: PanoramaLoraType | None = None, lora_scale: float = 1.0):
+    def __init__(self, device, torch_dtype, lora_type: PanoramaLoraType | None = None, lora_scale: float = 1.0,
+                 base_model: str | None = None):
+        """base_model: checkpoint to load when no LoRA picks one (default the Fill
+        model); DEV_MODEL_ID gives FluxInpaintPipeline on FLUX.1-dev, which with a
+        full mask is plain img2img on the base model."""
         self.device = device
         self.torch_dtype = torch_dtype
 
-        self.model_id = lora_base_model(lora_type) if lora_type is not None else FILL_MODEL_ID
+        self.model_id = lora_base_model(lora_type) if lora_type is not None else (base_model or FILL_MODEL_ID)
         pipeline_cls = FluxFillPipeline if self.model_id == FILL_MODEL_ID else FluxInpaintPipeline
 
         self.pipeline = pipeline_cls.from_pretrained(
@@ -46,8 +51,8 @@ class InPaintingFlux:
         self.pipeline.set_progress_bar_config(disable=True)
 
     @classmethod
-    def model_names(cls, lora_type: PanoramaLoraType | None = None) -> list[str]:
-        return [lora_base_model(lora_type) if lora_type is not None else FILL_MODEL_ID]
+    def model_names(cls, lora_type: PanoramaLoraType | None = None, base_model: str | None = None) -> list[str]:
+        return [lora_base_model(lora_type) if lora_type is not None else (base_model or FILL_MODEL_ID)]
 
     def set_lora_enabled(self, enabled: bool) -> None:
         """Toggle the loaded LoRA on/off without reloading the pipeline.
@@ -87,7 +92,11 @@ class InPaintingFlux:
         init_img = input_image.resize((width, height), PILImage.LANCZOS)
         mask_img = mask_image.resize((width, height), PILImage.NEAREST)
 
-        generator = torch.Generator(device=self.device).manual_seed(seed)
+        # FLUX.1-dev (the near-ground plate) draws its noise on the CPU so a seed
+        # gives the same image on either GPU; a CUDA generator's stream depends on
+        # the device, and the device is picked by free memory at run time.
+        gen_device = "cpu" if self.model_id == DEV_MODEL_ID else self.device
+        generator = torch.Generator(device=gen_device).manual_seed(seed)
         output = self.pipeline(
             prompt=prompt,
             image=init_img,

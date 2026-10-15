@@ -1178,6 +1178,28 @@ stages:
     # the ring FOREST and the blend maps painted the mountain with the forest tile
     # at 50x repeat (panorama weight under 0.12 beyond 60 m).
     panorama_far_ring_radius_m: 30.0
+    # Near-ground plate (pipeline/terrain/near_ground.py): the material as the shader
+    # would draw it, baked top-down over ~24 m around the camera, repainted by FLUX as
+    # one photograph of the ground seen from above (layout kept, tile repeat replaced
+    # by coherent ground), added as a world-space layer under a soft disc. The tile
+    # factor is the odd integer nearest grid / near_plate_m, so the plate is centred on
+    # the camera with no shader offset (9 -> 22.2 m on a 200 m grid). 0 disables.
+    near_plate_m: 24.0
+    near_plate_px: 2048         # 1024 repaint, 2x supersample, then the detail pass
+    near_strength: 0.85         # FLUX.1-dev img2img strength of the full-plate repaint
+    near_detail_strength: 0.3   # second pass in overlapping 1024 crops at full resolution; 0 skips
+    near_full_fraction: 0.7     # weight 1 within this fraction of the plate's half-size...
+    near_edge_fraction: 0.96    # ...fading to 0 at this fraction
+    near_delight: true          # divide the low-frequency shading out, as for the patches
+    near_init_panorama: true    # the projected panorama is in the start (its near meadow colour)...
+    near_init_blur_m: 0.6       # ...blurred to colour only, so its radial streaks are not kept...
+    near_init_noise: 0.15       # ...with grain over it, so the model paints ground rather than blur
+    near_layout_strength: 0.9   # the start's low frequencies put back under the generated detail
+    near_guidance_scale: 2.5    # lower than the tiles' 3.5: less of FLUX.1-dev's dramatic drone look
+    near_seam_band: 0.2         # repaint this fraction of the plate at its edges so it wraps (0: not tileable)
+    near_seam_strength: 0.45    # light repaint of the cross-faded edge band, to clean the ghosting
+    near_candidates: 3          # paint this many and keep the one least arranged in rings around the camera
+    near_nadir_fill_m: 2.0      # fill the start within this radius from around it (the nadir blob became a boulder)
     panorama_far_ring_feather_m: 8.0
     # Delight the panorama layer the same way the object crops and reference patches
     # are delit (shading only, colour kept), so the surface the viewer walks on is not

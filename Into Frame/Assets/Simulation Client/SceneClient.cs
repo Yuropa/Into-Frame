@@ -379,6 +379,8 @@ public class SplatLayerData
     public bool   equirect;    // true → sample with equirectangular world-position UV
     public float  smoothness;  // PBR smoothness [0,1]: 0 = matte, ~0.88 = water
     public bool   stochastic;  // true → hex-grid stochastic sampling (no visible repeat)
+    public bool   no_macro;    // true → a tiled layer the macro colour multiply must skip
+                               // (a world-space bake that already carries the photo's colour)
 }
 
 [Serializable]

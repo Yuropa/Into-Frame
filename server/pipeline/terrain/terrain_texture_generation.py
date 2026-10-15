@@ -24,6 +24,10 @@ from pipeline.terrain.pattern_texture import (
     make_tileable, bake_macro_colour,
 )
 from pipeline.terrain.terrain_generator import TerrainMeshGenerator
+from pipeline.terrain.near_ground import (
+    bake_material_window, blend_crops, make_seamless, near_weight_map, plate_tile_factor, ring_score, seam_error,
+    with_layer, wrap_padded,
+)
 from scene.splat_material import SplatLayer, SplatMaterial
 from util.image_utils import Image, lab_color_transfer
 from util.delight import delight_preserving_chroma
@@ -71,6 +75,45 @@ _BASE_PROMPTS: dict[RegionType, str] = {
         "overhead macro photograph of packed snow crust, granular firn, small ice "
         "crystals, soft shadows"
     ),
+}
+
+# What each region type is when seen as the ground plane from above -- the
+# near-ground plate (see pipeline/terrain/near_ground.py) is one photograph of
+# the floor, not a material swatch, so these describe surfaces, not macro grains.
+_NEAR_GROUND_PHRASES: dict[RegionType, str] = {
+    RegionType.GROUND: "bare earth",
+    RegionType.TERRAIN: "stony ground",
+    RegionType.VEGETATION: "meadow",
+    RegionType.ROAD: "paving",
+    RegionType.TRAIL: "a dirt footpath",
+    RegionType.FOREST: "forest floor",
+    RegionType.SNOW: "snow",
+    RegionType.WATER: "a shallow pool",
+}
+
+# The surface the plate is mostly made of, described only in positive terms:
+# FLUX.1-dev reads "no boulders" or "a few small stones" as a request for
+# stones and filled the meadow plate with rocks and puddles.
+_NEAR_GROUND_SURFACES: dict[RegionType, str] = {
+    RegionType.VEGETATION: (
+        "a lush subalpine meadow, a continuous dense carpet of fine green grass and low meadow "
+        "plants with a few tiny wildflowers, occasional small patches of bare brown soil, the "
+        "grass so fine it reads as an even texture"
+    ),
+    RegionType.FOREST: (
+        "an open forest floor, an even carpet of fallen needles, moss and low leafy plants, "
+        "fine and continuous"
+    ),
+    RegionType.GROUND: (
+        "bare earth, fine dry soil and grit with sparse low tufts of grass, even and continuous"
+    ),
+    RegionType.TERRAIN: (
+        "stony mountain ground, fine gravel and grit with low cushion plants, even and continuous"
+    ),
+    RegionType.TRAIL: "a packed-dirt footpath through low grass, fine and even",
+    RegionType.ROAD: "weathered asphalt paving, fine and even",
+    RegionType.SNOW: "old granular snow, fine and even",
+    RegionType.WATER: "a shallow pool over fine silt",
 }
 
 # PBR smoothness per region: 0 = perfectly rough/matte, 1 = mirror-smooth.
@@ -383,8 +426,85 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # to avoid -- so it keeps the FLUX overhead-material tile, colour-matched
         # by the macro map like every other tiled layer.
         patch_tile_types: list[str] | None = None,
+        # Near-ground plate (pipeline/terrain/near_ground.py): the material as the
+        # shader would draw it, baked top-down over a square of about this many
+        # metres centred on the camera, repainted by FLUX as one photograph of the
+        # ground seen from above, and added as a world-space layer (odd tile
+        # factor, so no shader offset) under a soft disc. 0 disables.
+        near_plate_m: float = 24.0,
+        # Resolution of the plate. FLUX paints it at 1024; the detail pass below
+        # brings it to this size.
+        near_plate_px: int = 2048,
+        # img2img strength of the full-plate repaint: low enough that the bake's
+        # layout (trail, soil, meadow) survives, high enough to replace the tile
+        # repeat with coherent ground.
+        near_strength: float = 0.55,
+        # Second pass over the upscaled plate in overlapping 1024 px crops (nine
+        # for a 2048 plate) at this strength, adding detail at the plate's own
+        # texel size. 0 skips it (the plate is then a 2x supersample of the 1024
+        # repaint).
+        near_detail_strength: float = 0.3,
+        # The plate's blend weight is 1 within near_full_fraction of its half-size
+        # and fades to 0 at near_edge_fraction of it.
+        near_full_fraction: float = 0.7,
+        near_edge_fraction: float = 0.96,
+        # Divide the repaint's low-frequency shading out (same operation as the
+        # reference patches), so the client's sun lights it like everything else.
+        near_delight: bool = True,
+        # Include the projected panorama in the starting image. Inside the plate
+        # the projection is a radial smear, so the start is blurred to colour only
+        # (near_init_blur_m) and the repaint invents the structure; without the
+        # panorama the start is the tiles and the macro map, which are darker and
+        # know nothing of the near meadow.
+        near_init_panorama: bool = True,
+        # Gaussian blur of the starting image, in metres of ground: wide enough to
+        # dissolve the projection's streaks (0 keeps every pixel).
+        near_init_blur_m: float = 0.6,
+        # Gaussian noise (fraction of full scale) added to the blurred start. A
+        # blurred photograph is in-distribution and the model returns it blurred
+        # at any strength below ~0.95; grain over it is not, and the model
+        # replaces the grain with ground while keeping the colour under it.
+        near_init_noise: float = 0.15,
+        # After the repaint, the start's low frequencies (the same blur) are put
+        # back under the generated detail at this strength: 1 keeps the bake's
+        # colour layout exactly (snow patch, bare soil, the sunlit side), 0
+        # keeps the model's own.
+        near_layout_strength: float = 0.9,
+        # Classifier-free guidance of the repaint; lower than the tiles' 3.5 keeps
+        # FLUX.1-dev from its dramatic drone-shot look (boulders, long shadows).
+        near_guidance_scale: float = 2.5,
+        # Make the plate wrap: its edges are repainted to meet (a band of this
+        # fraction of the plate, rolled to the middle, never touching the ground
+        # under the camera) and every later step treats it as a torus. With an
+        # odd tile factor the shader already repeats it every plate width, so a
+        # seamless plate can carry the ground beyond its disc too. 0 disables.
+        near_seam_band: float = 0.2,
+        near_seam_strength: float = 0.45,
+        # Replace the start image within this radius of the camera by the ring
+        # just outside it: straight down is the panorama's outpainted nadir, a
+        # grey blob the repaint turns into a boulder under the player's feet.
+        near_nadir_fill_m: float = 2.0,
+        # Paint this many candidates (consecutive seeds) and keep the one whose
+        # texture is least arranged in rings around the camera (near_ground.ring_score).
+        near_candidates: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.near_plate_m = float(near_plate_m)
+        self.near_plate_px = int(near_plate_px)
+        self.near_strength = float(near_strength)
+        self.near_detail_strength = float(near_detail_strength)
+        self.near_full_fraction = float(near_full_fraction)
+        self.near_edge_fraction = float(near_edge_fraction)
+        self.near_delight = bool(near_delight)
+        self.near_init_panorama = bool(near_init_panorama)
+        self.near_init_blur_m = float(near_init_blur_m)
+        self.near_init_noise = float(near_init_noise)
+        self.near_layout_strength = float(near_layout_strength)
+        self.near_guidance_scale = float(near_guidance_scale)
+        self.near_seam_band = float(near_seam_band)
+        self.near_seam_strength = float(near_seam_strength)
+        self.near_nadir_fill_m = float(near_nadir_fill_m)
+        self.near_candidates = max(1, int(near_candidates))
         self.tile_source = str(tile_source).lower()
         self.macro_angular_sigma_deg = float(macro_angular_sigma_deg)
         # bake_projected_colour's validity gates: a panorama pixel describes a texel
@@ -730,6 +850,9 @@ class TerrainTextureGenerationStage(PipelineStage):
             self._close_captioner()
 
         material = self._build_material(context, cfg, present_types, tiles, region_map_depth, tile_factors)
+        # After the Fill pipeline is closed: the plate loads FLUX.1-dev, a second
+        # 24 GB pipeline that must not sit beside the first.
+        material = self._near_ground_layer(context, cfg, material)
 
         context.add_splat_material(ContextKey.TERRAIN_MATERIAL, material)
 
@@ -999,6 +1122,206 @@ class TerrainTextureGenerationStage(PipelineStage):
             material.macro_mean = macro_mean
             material.macro_strength = cfg.macro_strength
         return material
+
+    def _near_ground_layer(
+        self,
+        context: PipelineContext,
+        cfg: "TerrainTextureGenerationConfiguration",
+        material: SplatMaterial,
+    ) -> SplatMaterial:
+        """The near-ground plate -- see pipeline/terrain/near_ground.py. Returns
+        `material` unchanged when disabled or when the height map is missing."""
+        if cfg.near_plate_m <= 0.0 or cfg.near_plate_px <= 0:
+            return material
+        height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
+        height_map_params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS)
+        if height_map_depth is None:
+            self.log_info("Near-ground plate: no height map, skipped")
+            return material
+        if len(material.layers) >= 8:
+            self.log_warning("Near-ground plate: the material already has 8 layers, skipped")
+            return material
+        grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
+        half = grid_size / 2.0
+        factor = plate_tile_factor(grid_size, cfg.near_plate_m)
+        plate_half = grid_size / factor / 2.0
+        px = cfg.near_plate_px
+
+        # What the shader would draw there today, top-down.
+        init = bake_material_window(
+            material, height_map_depth.depth, half, px, plate_half, include_equirect=cfg.near_init_panorama,
+        )
+        init_img = PIL.Image.fromarray((init * 255.0 + 0.5).astype(np.uint8), "RGB")
+        self._save_debug_step(cfg, "near", "01_init_bake", init_img)
+
+        prompt = self._near_ground_prompt(context, half, plate_half)
+        self.log_info(
+            f"Near-ground plate: {2 * plate_half:.1f} m square (tile factor {factor}), {px}px "
+            f"({200.0 * plate_half / px:.1f} cm/texel); prompt \"{prompt}\""
+        )
+
+        base = 1024
+        seed = cfg.seed + 101
+        work = init_img.resize((base, base), PIL.Image.LANCZOS)
+        if cfg.near_nadir_fill_m > 0.0:
+            arr = np.asarray(work, dtype=np.float32)
+            t = (np.arange(base) + 0.5) / base * 2.0 * plate_half - plate_half
+            r = np.hypot(*np.meshgrid(t, t))
+            r0 = cfg.near_nadir_fill_m
+            ring = (r > r0) & (r < 2.0 * r0)
+            fill = arr[ring].mean(axis=0) if ring.any() else arr.reshape(-1, 3).mean(axis=0)
+            k = ((r - 0.75 * r0) / (0.5 * r0)).clip(0.0, 1.0)
+            k = (k * k * (3.0 - 2.0 * k))[..., None]
+            work = PIL.Image.fromarray((arr * k + fill * (1.0 - k)).clip(0, 255).astype(np.uint8), "RGB")
+        sigma_px = cfg.near_init_blur_m / (2.0 * plate_half) * base if cfg.near_init_blur_m > 0.0 else 0.0
+        layout = work.filter(PIL.ImageFilter.GaussianBlur(radius=sigma_px)) if sigma_px > 0 else work
+        start = layout
+        if cfg.near_init_noise > 0.0:
+            rng = np.random.default_rng(seed)
+            arr = np.asarray(layout, dtype=np.float32) / 255.0
+            arr = arr + rng.normal(0.0, cfg.near_init_noise, arr.shape).astype(np.float32)
+            start = PIL.Image.fromarray((arr.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
+        self._save_debug_step(cfg, "near", "01b_init_start", start)
+        full_mask = PIL.Image.new("L", (base, base), 255)
+        dev_device, dev_dtype = preferred_device(DeviceStrategy.MEMORY)
+        painter = InPainting(dev_device, dev_dtype, InPaintingType.FLUX_DEV)
+        try:
+            candidates = []
+            for k in range(cfg.near_candidates):
+                img = painter.inpaint(
+                    input_image=start, mask_image=full_mask, temp_path=self.temp, prompt=prompt,
+                    num_inference_steps=cfg.num_inference_steps, guidance_scale=cfg.near_guidance_scale,
+                    strength=cfg.near_strength, seed=seed + 1000 * k,
+                ).convert("RGB")
+                score = ring_score(img)
+                candidates.append((abs(score), k, img))
+                self._save_debug_step(cfg, "near", f"02_repaint_candidate_{k}", img)
+            best_score, best_k, painted = min(candidates, key=lambda c: c[0])
+            self.log_info(
+                "Near-ground plate candidates, ring score (0 = no rings around the camera): "
+                + ", ".join(f"{k}: {sc:.3f}" for sc, k, _ in candidates) + f" -> kept {best_k}"
+            )
+            self._save_debug_step(cfg, "near", "02_repaint", painted)
+            if cfg.near_layout_strength > 0.0 and sigma_px > 0:
+                gen = np.asarray(painted, dtype=np.float32)
+                gen_lo = np.asarray(painted.filter(PIL.ImageFilter.GaussianBlur(radius=sigma_px)), dtype=np.float32)
+                init_lo = np.asarray(layout, dtype=np.float32)
+                mixed = gen + cfg.near_layout_strength * (init_lo - gen_lo)
+                painted = PIL.Image.fromarray(mixed.clip(0, 255).astype(np.uint8), "RGB")
+                self._save_debug_step(cfg, "near", "02b_layout", painted)
+
+            seamless = cfg.near_seam_band > 0.0
+            if seamless:
+                before = seam_error(painted)
+                painted = make_seamless(
+                    painted,
+                    lambda img, mask: painter.inpaint(
+                        input_image=img, mask_image=mask, temp_path=self.temp, prompt=prompt,
+                        num_inference_steps=cfg.num_inference_steps, guidance_scale=cfg.near_guidance_scale,
+                        strength=cfg.near_seam_strength, seed=seed + 50,
+                    ),
+                    band_fraction=cfg.near_seam_band,
+                )
+                after = seam_error(painted)
+                self.log_info(
+                    f"Near-ground plate made seamless: wrap-edge difference {before[0]:.1f} -> {after[0]:.1f} "
+                    f"(interior neighbour difference {after[1]:.1f})"
+                )
+                self._save_debug_step(cfg, "near", "02c_seamless", painted)
+            pad = base // 16
+
+            # Up to the plate's resolution: Swin2SR where the ratio is exactly 2x,
+            # LANCZOS otherwise.
+            if px == 2 * base and cfg.use_patch_supersampling:
+                self._init_supersampler()
+                try:
+                    def supersample(img: PIL.Image.Image) -> PIL.Image.Image:
+                        return self._samp.supersample(Image(img), self.temp).image.convert("RGB")
+                    plate = wrap_padded(painted, pad, supersample) if seamless else supersample(painted)
+                finally:
+                    self._close_supersampler()
+                plate = plate.resize((px, px), PIL.Image.LANCZOS)
+            else:
+                plate = painted.resize((px, px), PIL.Image.LANCZOS)
+
+            if cfg.near_detail_strength > 0.0 and px > base:
+                # Detail at the plate's own texel size, nothing new: asking for
+                # "every pebble" here scattered stones across the whole plate.
+                detail_prompt = prompt + ", crisp fine texture"
+
+                def regenerate(x0: int, y0: int, piece: PIL.Image.Image) -> PIL.Image.Image:
+                    return painter.inpaint(
+                        input_image=piece, mask_image=PIL.Image.new("L", piece.size, 255),
+                        temp_path=self.temp, prompt=detail_prompt,
+                        num_inference_steps=cfg.num_inference_steps, guidance_scale=cfg.near_guidance_scale,
+                        strength=cfg.near_detail_strength, seed=seed + 1 + (y0 * 7 + x0) // 64,
+                    )
+
+                plate = blend_crops(px, base, base // 2, regenerate, plate, wrap=seamless)
+                self._save_debug_step(cfg, "near", "03_detail", plate)
+        finally:
+            painter.close()
+
+        if cfg.near_delight and cfg.use_intrinsic_delighting:
+            if seamless:
+                plate = wrap_padded(plate, px // 8, lambda img: self._delight_patch(img, cfg))
+            else:
+                plate = self._delight_patch(plate, cfg)
+            self._close_intrinsics()
+            self._save_debug_step(cfg, "near", "04_delit", plate)
+        if seamless:
+            edge, inner = seam_error(plate)
+            self.log_info(f"Near-ground plate final wrap-edge difference {edge:.1f} (interior {inner:.1f})")
+
+        tile = self._pack_local_height_channel(plate.convert("RGB"))
+        weight = near_weight_map(cfg.blend_map_size, half, plate_half, cfg.near_full_fraction, cfg.near_edge_fraction)
+        layer = SplatLayer(name="near", tile=tile, tile_factor=float(factor), smoothness=0.05,
+                           stochastic=False, macro=False)
+        material = with_layer(material, layer, weight)
+        self.log_info(
+            f"Near-ground plate added as layer {len(material.layers) - 1}: full weight within "
+            f"{plate_half * cfg.near_full_fraction:.1f} m, gone at {plate_half * cfg.near_edge_fraction:.1f} m"
+        )
+        return material
+
+    def _near_ground_prompt(self, context: PipelineContext, half: float, plate_half: float) -> str:
+        """One aerial photograph of the ground: the surface sentence of the region
+        type that covers most of the plate, the others named as minor parts, and
+        the scene caption."""
+        region_depth = context.input_depth(ContextKey.REGION_MAP)
+        ranked: list[tuple[RegionType, float]] = []
+        if region_depth is not None:
+            rm = region_depth.depth
+            h, w = rm.shape
+            r0 = int((0.5 - plate_half / (2 * half)) * h)
+            r1 = int((0.5 + plate_half / (2 * half)) * h) + 1
+            c0 = int((0.5 - plate_half / (2 * half)) * w)
+            c1 = int((0.5 + plate_half / (2 * half)) * w) + 1
+            window = rm[max(r0, 0):r1, max(c0, 0):c1]
+            values, counts = np.unique(window.astype(np.int32), return_counts=True)
+            total = float(counts.sum()) or 1.0
+            for idx in np.argsort(-counts):
+                try:
+                    rt = RegionType(int(values[idx]))
+                except ValueError:
+                    continue
+                if rt in _NEAR_GROUND_SURFACES:
+                    ranked.append((rt, counts[idx] / total))
+        dominant = ranked[0][0] if ranked else RegionType.VEGETATION
+        minor = [_NEAR_GROUND_PHRASES[rt] for rt, frac in ranked[1:] if frac >= 0.15]
+        surface = _NEAR_GROUND_SURFACES[dominant]
+        if minor:
+            surface += ", with some " + " and ".join(minor)
+        caption = context.input_object(ContextKey.INPUT_CAPTION)
+        scene = f" The place is: {str(caption).strip()}." if caption else ""
+        # "High-altitude aerial" sets the scale: asked for a close photograph of
+        # ground, FLUX.1-dev draws metre-wide herbs and boulders whatever width
+        # the prompt states.
+        return (
+            "flat overcast daylight: high-altitude aerial photograph straight down onto "
+            + surface + ", evenly spread across the whole frame with no focal point and nothing in the "
+            "centre." + scene + " Diffuse even light, uniform exposure, photorealistic, sharp"
+        )
 
     def _macro_map(
         self, panorama, height_map: np.ndarray, half: float,
@@ -2560,6 +2883,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         )
         if self.config.pass1_inpainting_type == "LAMA":
             names = names + InPainting.model_names(InPaintingType.LAMA)
+        if self.config.near_plate_m > 0.0:
+            names = names + InPainting.model_names(InPaintingType.FLUX_DEV)
         if self.config.describe_material and self.config.use_photo_reference:
             names = names + [CaptioningModel.FLORENCE2.value]
         if self.config.use_intrinsic_delighting and self.config.use_photo_reference:
