@@ -94,7 +94,9 @@ def cutout_shader_dir() -> str:
     marker = "frag_color = clamp(vec4(pow(color.xyz, vec3(1.0/2.2)), color.a * base_color.a), 0.0, 1.0);"
     if marker not in text:
         raise RuntimeError("pyrender's mesh.frag changed; the alpha cutout patch no longer applies")
-    frag.write_text(text.replace(marker, marker + "\n    if (frag_color.a < 0.5) discard;"))
+    # 0.02, not the glTF MASK 0.5: the terrain's panorama overlay carries its blend
+    # weight in the vertex alpha and must survive at any weight above nothing.
+    frag.write_text(text.replace(marker, marker + "\n    if (frag_color.a < 0.02) discard;"))
     return str(dst)
 
 
@@ -178,11 +180,14 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
 # ── terrain texture bake ─────────────────────────────────────────────────────────
 
 def bake_terrain_texture(splat, height_map: np.ndarray, half: float, size: int,
-                         height_blend_sharpness: float = 4.0) -> PILImage.Image:
+                         height_blend_sharpness: float = 4.0,
+                         pano_uv_at=None, skip_equirect: bool = False) -> PILImage.Image:
     """TerrainSplat.shader evaluated on a top-down grid: blend maps at the grid UV,
-    tiled layers at uv * tile_factor, the equirect layer at the texel's own
-    panorama direction from the camera, height-biased weights, macro colour on
-    the tiled layers. Row 0 is Z = -half (the server's canvas convention)."""
+    tiled layers at uv * tile_factor, the equirect layer at the panorama UV the
+    mesh carries (TEXCOORD_1, what Unity samples; `pano_uv_at(X, Z) -> (u, v)`
+    interpolated from the mesh) or, without it, at the texel's own analytic
+    direction from the camera; height-biased weights, macro colour on the tiled
+    layers. Row 0 is Z = -half (the server's canvas convention)."""
     us = (np.arange(size, dtype=np.float64) + 0.5) / size
     U, V = np.meshgrid(us, us)  # V: row 0 at z = -half
     X = (U - 0.5) * 2.0 * half
@@ -222,10 +227,13 @@ def bake_terrain_texture(splat, height_map: np.ndarray, half: float, size: int,
     texs = []
     for i, layer in enumerate(layers):
         if layer.equirect:
-            lon = np.arctan2(X, Z)
-            lat = np.arctan2(Y, np.sqrt(X ** 2 + Z ** 2).clip(1e-6))
-            u = (lon + np.pi) / (2.0 * np.pi)
-            v = 0.5 - lat / np.pi
+            if pano_uv_at is not None:
+                u, v = pano_uv_at(X, Z)
+            else:
+                lon = np.arctan2(X, Z)
+                lat = np.arctan2(Y, np.sqrt(X ** 2 + Z ** 2).clip(1e-6))
+                u = (lon + np.pi) / (2.0 * np.pi)
+                v = 0.5 - lat / np.pi
             tex = sample(layer.tile, u, v, wrap=True)
             tex[..., 3] = 1.0
         else:
@@ -248,8 +256,43 @@ def bake_terrain_texture(splat, height_map: np.ndarray, half: float, size: int,
         mean = np.asarray(getattr(splat, "macro_mean", None) or (0.5, 0.5, 0.5), dtype=np.float32)
         m = sample(macro, U, V, wrap=False)[..., :3]
         macro_mod = 1.0 + strength * (m / np.maximum(mean, 0.02) - 1.0)
+    if skip_equirect:
+        # The tiled layers only, renormalised among themselves: the panorama is
+        # alpha-blended over this in a second pass with its own weight, which
+        # performs the lerp the shader does.
+        tiled_total = sum(biased[i] for i, l in enumerate(layers) if not l.equirect) + 1e-4
+        albedo_tiled = np.zeros((size, size, 3), dtype=np.float32)
+        for i, layer in enumerate(layers):
+            if not layer.equirect:
+                albedo_tiled += texs[i][..., :3] * (biased[i] / tiled_total)[..., None]
+        albedo = albedo_tiled * macro_mod
+        return PILImage.fromarray((albedo.clip(0, 1) * 255).astype(np.uint8), "RGB")
     albedo = albedo_eq + albedo_tiled * macro_mod
     return PILImage.fromarray((albedo.clip(0, 1) * 255).astype(np.uint8), "RGB")
+
+
+def baked_pano_uv_sampler(vertices: np.ndarray, uv: np.ndarray):
+    """Interpolates the mesh's per-vertex panorama UV (glTF V, 0 = image bottom)
+    over the top-down grid. U wraps at the longitude seam, so it is interpolated as
+    an angle (cos, sin); V is interpolated directly and returned as an image row
+    fraction (0 = top), the convention bake_terrain_texture samples with."""
+    from scipy.interpolate import LinearNDInterpolator, NearestNDInterpolator
+    xz = vertices[:, [0, 2]]
+    ang = uv[:, 0] * 2.0 * np.pi
+    values = np.stack([np.cos(ang), np.sin(ang), 1.0 - uv[:, 1]], axis=-1)
+    linear = LinearNDInterpolator(xz, values)
+    nearest = NearestNDInterpolator(xz, values)
+
+    def at(X, Z):
+        pts = np.stack([X.ravel(), Z.ravel()], axis=-1)
+        out = linear(pts)
+        missing = np.isnan(out[:, 0])
+        if missing.any():
+            out[missing] = nearest(pts[missing])
+        u = (np.arctan2(out[:, 1], out[:, 0]) / (2.0 * np.pi)) % 1.0
+        v = out[:, 2]
+        return u.reshape(X.shape), v.reshape(X.shape)
+    return at
 
 
 # ── scene assembly ───────────────────────────────────────────────────────────────
@@ -292,6 +335,10 @@ class SceneBuilder:
             if name in env_names or name.startswith("formation"):
                 continue
             if self.args.no_grass and "grass" in name:
+                continue
+            if self.args.only and self.args.only not in name:
+                continue
+            if self.args.exclude and self.args.exclude in name:
                 continue
             pos = vec(o.get("position"))
             rot = vec(o.get("rotation"))
@@ -337,7 +384,19 @@ class SceneBuilder:
                     continue
                 mat = material_for(tm)
                 geom = to_gl(tm)
+                smooth = False
+                if key.endswith("_card"):
+                    # Crossed cards carry both windings; averaged normals cancel and
+                    # flat ones light one side black. The server exports bent normals
+                    # (up + 0.5 x outward from the card's axis); rebuild those here.
+                    vv = np.asarray(geom.vertices)
+                    out = vv[:, [0, 2]] - vv[:, [0, 2]].mean(axis=0)
+                    out /= np.linalg.norm(out, axis=1, keepdims=True).clip(1e-6)
+                    nrm = np.stack([0.5 * out[:, 0], np.ones(len(vv)), 0.5 * out[:, 1]], axis=-1)
+                    geom.vertex_normals = nrm / np.linalg.norm(nrm, axis=1, keepdims=True)
+                    smooth = True
             else:
+                smooth = False
                 img = self.image_for(key)
                 if img is None:
                     stats["skipped"] += len(poses)
@@ -345,7 +404,7 @@ class SceneBuilder:
                 geom = to_gl(quad())
                 mat = material_for(geom, image=img)
             gl_poses = np.stack([_MIRROR @ p @ _MIRROR for p in poses])
-            ps.add(pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=False))
+            ps.add(pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=smooth))
 
         # Environment meshes.
         terrain_pose = None
@@ -368,6 +427,13 @@ class SceneBuilder:
                     mat = material_for(tm, image=tex, double_sided=False, roughness=0.95)
                 else:
                     mat = material_for(tm, double_sided=False)
+                if self._pano_pass is not None:
+                    # Second pass for the panorama layer: the same mesh, textured with
+                    # the panorama through its own baked UV (TEXCOORD_1, what Unity
+                    # samples per fragment), weighted per vertex by the blend map.
+                    # A top-down bake cannot paint a near-vertical face; this can.
+                    pano_tm, pano_mat = self._pano_pass
+                    self._pano_node = (pano_tm, pano_mat, _MIRROR @ pose @ _MIRROR)
             elif name == "water":
                 mat = material_for(tm, blend=True, color=[0.10, 0.30, 0.45, 0.90], roughness=0.1)
             elif name in ("treeline", "backdrop"):
@@ -377,6 +443,11 @@ class SceneBuilder:
             ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))
             stats["env"] += 1
 
+        if getattr(self, "_pano_node", None) is not None:
+            pano_tm, pano_mat, gl_pose = self._pano_node
+            pm = pyrender.Mesh.from_trimesh(to_gl(pano_tm), material=pano_mat, poses=np.array([gl_pose]), smooth=False)
+            ps.add(pm)
+            self._pano_node = None
         self._add_sun(ps)
         return ps, stats
 
@@ -385,18 +456,53 @@ class SceneBuilder:
         splat = self.context.input_splat_material(ContextKey.TERRAIN_MATERIAL)
         hm = self.context.input_depth(ContextKey.HEIGHT_MAP)
         params = self.context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        self._pano_pass = None
         if splat is None or hm is None or not splat.layers:
             self.log("  terrain: no splat material / height map, using the GLB's own material")
             return None
         half = float(params.get("grid_size_meters", 200.0)) / 2.0
         t = time.time()
-        tex = bake_terrain_texture(splat, hm.depth.astype(np.float32), half, int(self.args.terrain_texture))
-        self.log(f"  terrain: baked {len(splat.layers)} layer(s) to {tex.size[0]} px in {time.time() - t:.1f} s")
+        terrain = self.context.input_mesh(ContextKey.TERRAIN_MESH)
+        two_pass = self.args.pano_uv == "baked" and terrain is not None and terrain.extra_uv is not None
+        if two_pass:
+            # Pass 1 bakes only the tiled layers (panorama weight zeroed, so the
+            # remainder is what the tiles paint); pass 2 draws the panorama layer
+            # through TEXCOORD_1 with its blend weight as a vertex colour.
+            tex = bake_terrain_texture(splat, hm.depth.astype(np.float32), half, int(self.args.terrain_texture), skip_equirect=True)
+            self._pano_pass = self._panorama_pass_mesh(splat, terrain, half)
+        else:
+            tex = bake_terrain_texture(splat, hm.depth.astype(np.float32), half, int(self.args.terrain_texture))
+        self.log(f"  terrain: baked {len(splat.layers)} layer(s) to {tex.size[0]} px in {time.time() - t:.1f} s"
+                 f" (panorama layer {'drawn through the mesh' + chr(39) + 's baked UV in a second pass' if two_pass else 'from the analytic projection'})")
         v = np.asarray(tm.vertices)
         u = (v[:, 0] + half) / (2.0 * half)
         w = (v[:, 2] + half) / (2.0 * half)  # 0 at z = -half == image row 0 (top)
         uv = np.stack([u, 1.0 - w], axis=-1)  # GL: v = 1 is the image's top row
         return tex, uv
+
+    def _panorama_pass_mesh(self, splat, terrain, half: float):
+        """The terrain again, textured with the equirect layer through TEXCOORD_1 and
+        weighted per vertex by that layer's blend-map weight (pyrender multiplies
+        COLOR_0 into the texture)."""
+        layer_index = next((i for i, l in enumerate(splat.layers) if l.equirect), None)
+        if layer_index is None:
+            return None
+        bm = splat.blend_maps[layer_index // 4]
+        w_img = np.asarray(bm.convert("RGBA"), dtype=np.float32)[..., layer_index % 4] / 255.0
+        v = np.asarray(terrain.mesh.vertices)
+        u = (v[:, 0] + half) / (2.0 * half)
+        z = (v[:, 2] + half) / (2.0 * half)
+        hgt, wid = w_img.shape
+        w = map_coordinates(w_img, [(z * (hgt - 1)).clip(0, hgt - 1), (u * (wid - 1)).clip(0, wid - 1)], order=1, mode="nearest")
+        uv = np.asarray(terrain.extra_uv, dtype=np.float64)
+        # Pulled 0.2% toward the camera (the origin) so it passes the depth test
+        # over the base terrain it duplicates; blended with the weight as alpha.
+        pano_tm = trimesh.Trimesh(vertices=v * 0.998, faces=np.asarray(terrain.mesh.faces), process=False)
+        pano_tm.visual = trimesh.visual.TextureVisuals(uv=uv)
+        colours = np.stack([np.ones_like(w), np.ones_like(w), np.ones_like(w), w], axis=-1)
+        pano_tm.visual.vertex_colors = (colours * 255).astype(np.uint8)
+        mat = material_for(pano_tm, image=splat.layers[layer_index].tile, double_sided=False, roughness=0.95, blend=True)
+        return pano_tm, mat
 
     def _ambient(self):
         sky = self._sky_mean()
@@ -497,10 +603,14 @@ def main() -> int:
     ap.add_argument("--views", default="photo,left,right,step", help="comma list of photo,left,right,back,step,high")
     ap.add_argument("--terrain-texture", type=int, default=2048, help="baked terrain texture size (px)")
     ap.add_argument("--no-grass", action="store_true")
-    ap.add_argument("--sun-scale", type=float, default=4.0, help="directional light intensity per unit of the scene's sun intensity")
+    ap.add_argument("--only", default="", help="render only placed objects whose name contains this (environment meshes always render)")
+    ap.add_argument("--exclude", default="", help="skip placed objects whose name contains this")
+    ap.add_argument("--sun-scale", type=float, default=2.0, help="directional light intensity per unit of the scene's sun intensity")
     ap.add_argument("--ambient", type=float, default=0.45, help="ambient as a fraction of the sky's mean colour")
     ap.add_argument("--exposure", type=float, default=1.0)
     ap.add_argument("--no-shadows", action="store_true")
+    ap.add_argument("--pano-uv", choices=["baked", "analytic"], default="baked",
+                    help="terrain panorama layer through the mesh's baked TEXCOORD_1 (what Unity samples) or the analytic projection")
     args = ap.parse_args()
 
     run_dir = args.run_dir.resolve()

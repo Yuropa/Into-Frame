@@ -79,6 +79,8 @@ class TerrainMeshGenerator:
         sky_mask: Optional[np.ndarray] = None,
         pano_uv_u: Optional[Depth] = None,
         pano_uv_v: Optional[Depth] = None,
+        sample_height_map: Optional[Depth] = None,
+        pano_uv_max_height_drift_m: float = 0.5,
     ) -> tuple[Mesh, Optional[Mesh], Optional[np.ndarray]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -239,6 +241,20 @@ class TerrainMeshGenerator:
                     pano_uv_v.depth, [row_coords, col_coords], order=0, mode="nearest",
                 ).astype(np.float32)
                 use_stored = (observed_weight > 0.5) & np.isfinite(obs_u) & np.isfinite(obs_v)
+                # A cached pixel is only right for a vertex that still stands where
+                # its depth sample landed. The ridge envelope raised the Rainier
+                # ring's far-band cells by 9 m (sample at -0.5 m, final 8.9 m) and
+                # the trust mask still passed them, so a dome vertex 10 degrees up
+                # kept the horizon pixel its sample came from, next to neighbours
+                # that did not: 80-row triangles, the streaks on the flanks. Compare
+                # against the raw sampled height and drop the stored UV when the
+                # vertex has moved more than pano_uv_max_height_drift_m.
+                if sample_height_map is not None and sample_height_map.depth.shape == hm.shape:
+                    sampled_y = map_coordinates(
+                        np.nan_to_num(sample_height_map.depth.astype(np.float64), nan=1e9),
+                        [row_coords, col_coords], order=1, mode="nearest",
+                    )
+                    use_stored &= np.abs(Y_pos - sampled_y) <= pano_uv_max_height_drift_m
                 if use_stored.any():
                     pano_uv = pano_uv.copy()
                     pano_uv[use_stored, 0] = obs_u[use_stored]

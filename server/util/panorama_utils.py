@@ -404,10 +404,33 @@ class Panorama:
                 # in an equirectangular panorama, so the smallest non-sky row
                 # scanning down from the top is exactly the photographed
                 # ridge/horizon line for that azimuth.
-                row_if_nonsky = np.where(~sky_arr, np.arange(H)[:, None], H)
-                ridge_row = np.minimum.accumulate(row_if_nonsky[::-1], axis=0)[::-1][0, :]
+                # The ridge is the sky/ground boundary nearest the horizon: one row
+                # below the LAST sky row in the column's upper part. It used to be
+                # the first non-sky row scanning down from the zenith, which the
+                # sky mask this stage actually receives (Panorama Depth's, derived
+                # from depth, not from typing) defeats: 3,598 of 4,096 columns on the
+                # Rainier capture carry a non-sky speck in their top ten rows, so
+                # ridge_row was ~0 almost everywhere and every overshooting dome
+                # vertex was squeezed onto the top of the panorama -- the mountain
+                # painted with zenith sky (stored V = 1.000 on the whole upper dome).
+                # Scanning down from the top, but starting below the zenith cap
+                # (the top 15% of rows, elevations above 63 degrees): a mask that
+                # is a depth-model by-product carries specks there, and a real
+                # ridge never stands that high. Scanning UP from the horizon for
+                # the last sky row is no better -- the same mask calls far ground
+                # near the horizon "sky" and the ridge lands a hundred rows low.
+                top = int(H * 0.15)
+                band = sky_arr[top:]
+                has_ground = (~band).any(axis=0)
+                ridge_row = np.where(has_ground, top + np.argmin(band, axis=0), H)
 
-                overshoot = sky_arr[pv_i, pu_i] & (ridge_row[pu_i] < H)
+                # Overshoot means ABOVE the column's ridge row, not "on a sky-typed
+                # pixel": the typing calls a bright snowfield on the mountain's face
+                # SKY, and a vertex projecting onto it, well below the ridge, was
+                # being snapped 9-12 degrees down while its neighbours stayed put --
+                # one triangle then spanned up to 76 panorama rows, the vertical
+                # streaks on the Rainier dome's flanks.
+                overshoot = (pv < ridge_row[pu_i]) & (ridge_row[pu_i] < H)
                 if overshoot.any():
                     # A vertex's world position is a *reconstruction* -- a
                     # mountainside/ridge vertex can legitimately sit higher

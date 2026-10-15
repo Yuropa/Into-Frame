@@ -619,16 +619,37 @@ public class SceneObjectManager : MonoBehaviour
 
     // The far-field backdrop is a photograph of distant scenery with its own light
     // in it, standing in front of a skybox that is rendered unlit; lighting it again
-    // with the scene's sun makes the two disagree. URP Lit and Unlit share the
-    // _BaseMap/_AlphaClip/_Cutoff property names, so swapping the shader keeps the
-    // texture and the cutout.
+    // with the scene's sun makes the two disagree.
+    //
+    // The material glTFast builds is NOT URP Lit: its texture lives in
+    // baseColorTexture and its cutoff in alphaCutoff, so a bare shader swap to URP
+    // Unlit left _BaseMap empty and the strip rendered as white quads with no
+    // cutout. Carry the texture and the cutoff across by hand, and keep the strip
+    // double-sided and alpha-clipped.
     private static void MakeUnlit(GameObject root)
     {
         var unlit = Shader.Find("Universal Render Pipeline/Unlit");
         if (unlit == null) return;
         foreach (var r in root.GetComponentsInChildren<Renderer>(true))
             foreach (var m in r.materials)
-                if (m != null) m.shader = unlit;
+            {
+                if (m == null) continue;
+                Texture tex = null;
+                if (m.HasProperty("baseColorTexture")) tex = m.GetTexture("baseColorTexture");
+                if (tex == null && m.HasProperty("_BaseMap")) tex = m.GetTexture("_BaseMap");
+                if (tex == null && m.HasProperty("_MainTex")) tex = m.GetTexture("_MainTex");
+                float cutoff = 0.5f;
+                if (m.HasProperty("alphaCutoff")) cutoff = m.GetFloat("alphaCutoff");
+                else if (m.HasProperty("_Cutoff")) cutoff = m.GetFloat("_Cutoff");
+
+                m.shader = unlit;
+                if (tex != null) m.SetTexture("_BaseMap", tex);
+                m.SetColor("_BaseColor", Color.white);
+                m.SetFloat("_AlphaClip", 1f);
+                m.SetFloat("_Cutoff", cutoff);
+                m.EnableKeyword("_ALPHATEST_ON");
+                m.SetFloat("_Cull", (float)UnityEngine.Rendering.CullMode.Off);
+            }
     }
 
     // Loads a geometry-only GLB (e.g. the terrain's TERRAIN_PHYSICS_MESH) and

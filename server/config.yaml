@@ -973,6 +973,9 @@ stages:
                              # -- reverted to 0. Ramps up to 1.0 at the domain corner as before. Only
                              # applies where HEIGHT_MAP_OBSERVED_MASK is false — vertices sitting on
                              # real point-cloud geometry get zero added noise regardless of distance.
+    pano_uv_max_height_drift_m: 0.5 # a vertex keeps its depth sample's cached panorama pixel only while it
+                             # still stands within this of the sampled height; the ridge envelope raised
+                             # Rainier's far ring 9 m above its samples and the stale pixels streaked it
     water_depression_ramp_m: 2.0 # metres in from the shore over which the lakebed descends to its full
                              # water_depression_m. The bed is the terrain itself at the shoreline (the
                              # water surface is levelled to the shore's own height) so no step is cut

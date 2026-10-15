@@ -316,14 +316,50 @@ class PipelineContext():
         one whenever Panorama Depth happens to have run after Skybox
         Inpainting (which it always does in the default pipeline order).
         Returns None if neither is present.
+
+        The preference has to be searched for: _value() returns the most recent
+        writer's value whatever its type, and in the default order Panorama Depth
+        (object) runs after Skybox Inpainting (image), so input_image() found
+        nothing and every caller fell through to the depth by-product. Measured on
+        the Rainier capture, that mask has non-sky specks in the top ten rows of
+        3,598 of 4,096 columns and calls 35% of the far ground near the horizon
+        sky; Terrain Mesh's ridge snap read its ridge at row 0 and painted the
+        mountain dome with zenith sky.
         """
-        image = self.input_image(name)
-        if image is not None:
-            return np.array(image.image.convert("L")) > 127
-        obj = self.input_object(name)
-        if obj is None:
-            return None
-        return np.asarray(obj, dtype=bool)
+        image_value, object_value = None, None
+        for value in self._values_in_search_order(name, self._previous_stage):
+            if image_value is None and value.image() is not None:
+                image_value = value
+                break
+            if object_value is None and value.object() is not None:
+                object_value = value
+        if image_value is not None:
+            return np.array(image_value.image().image.convert("L")) > 127
+        if object_value is not None:
+            return np.asarray(object_value.object(), dtype=bool)
+        return None
+
+    def _values_in_search_order(self, name: ContextKeyName, search_stage: Optional[str] = None):
+        """Every stored value for `name`, most recent writer first, in the same
+        order _value() searches (enabled stages, then disabled ones, then the
+        global state)."""
+        if search_stage is None:
+            search_stage = self._current_stage
+        if search_stage and search_stage in self._stage_order:
+            idx = self._stage_order.index(search_stage)
+            stages_to_search = list(reversed(self._stage_order[:idx + 1]))
+        else:
+            stages_to_search = list(reversed(self._stage_order))
+        for stage in stages_to_search:
+            if stage in self._disabled_stages:
+                continue
+            if stage in self._stage_state and name in self._stage_state[stage]:
+                yield self._stage_state[stage][name]
+        for stage in stages_to_search:
+            if stage in self._disabled_stages and stage in self._stage_state and name in self._stage_state[stage]:
+                yield self._stage_state[stage][name]
+        if name in self._state:
+            yield self._state[name]
 
     # Mesh 
     def add_mesh(self, name: ContextKeyName, input: Any):
@@ -346,6 +382,14 @@ class PipelineContext():
     def depth(self, name: ContextKeyName) -> Optional[Depth]:
         return self._value(name).depth()
     
+    def input_depth_from(self, name: ContextKeyName, stage: str) -> Optional[Depth]:
+        """The value a specific earlier stage wrote for `name`, ignoring later
+        writers of the same key (e.g. Height Map's raw HEIGHT_MAP, before Terrain
+        Reconstruction and Terrain Noise Refinement overwrote it)."""
+        if stage not in self._stage_state or name not in self._stage_state[stage]:
+            return None
+        return self._stage_state[stage][name].depth()
+
     def input_depth(self, name: ContextKeyName) -> Optional[Depth]:
         return self._value(name, self._previous_stage).depth()
 

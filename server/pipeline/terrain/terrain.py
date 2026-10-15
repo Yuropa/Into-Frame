@@ -56,6 +56,10 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         min_water_area_m2: float = 12.0,
         water_level_percentile: float = 25.0,
         water_depression_ramp_m: float = 2.0,
+        # A vertex keeps its depth sample's cached panorama pixel only while it
+        # still stands within this of the sampled height (see
+        # TerrainMeshGenerator.generate); past it the UV is re-projected.
+        pano_uv_max_height_drift_m: float = 0.5,
         # Coarse geometry-only collision mesh (see TerrainMeshGenerator.
         # generate_physics_mesh), written to ContextKey.TERRAIN_PHYSICS_MESH for
         # Unity's MeshCollider -- same Poisson-disc near-camera density bias as
@@ -120,6 +124,7 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         # Metres in from the shore over which the lakebed descends to its full
         # water_depression_m (see TerrainMeshGenerator.generate).
         self.water_depression_ramp_m = float(water_depression_ramp_m)
+        self.pano_uv_max_height_drift_m = float(pano_uv_max_height_drift_m)
         self.physics_inner_min_dist = physics_inner_min_dist
         self.physics_outer_min_dist = physics_outer_min_dist
         self.physics_n_boundary = physics_n_boundary
@@ -437,6 +442,8 @@ class TerrainMeshStage(PipelineStage):
             sky_mask=sky_mask,
             pano_uv_u=pano_uv_u,
             pano_uv_v=pano_uv_v,
+            sample_height_map=context.input_depth_from(ContextKey.HEIGHT_MAP, "Height Map"),
+            pano_uv_max_height_drift_m=cfg.pano_uv_max_height_drift_m,
         )
         if uv_folds_fixed:
             total_faces = len(mesh.mesh.faces) if mesh is not None else 0
