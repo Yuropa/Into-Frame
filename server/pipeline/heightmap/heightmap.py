@@ -5,6 +5,7 @@ from logging import Logger
 import numpy as np
 import torch
 
+from pipeline.panorama_depth.calibration import CAMERA_HEIGHT_KEY
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.heightmap.heightmap_generator import HeightMapGenerator
@@ -230,6 +231,9 @@ class HeightMapStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, intrinsics_key, output_key = self._resolved_keys()
         cfg: HeightMapConfiguration = self.config
+        # Measured from the photo by Panorama Depth Calibration when it could be
+        # (see CAMERA_HEIGHT_KEY); the configured height otherwise.
+        camera_height = float((context.input_object(CAMERA_HEIGHT_KEY) or {}).get("meters") or cfg.camera_height_meters)
 
         task = self.create_progress(3, "Height Map…")
 
@@ -310,7 +314,7 @@ class HeightMapStage(PipelineStage):
             ground_y_max=cfg.ground_y_max,
             use_equirectangular=cfg.use_equirectangular,
             smooth_sigma=cfg.smooth_sigma,
-            camera_height_meters=cfg.camera_height_meters,
+            camera_height_meters=camera_height,
             sky_mask=sky_mask,
             flood_fill=cfg.flood_fill,
             flood_fill_max_step=cfg.flood_fill_max_step,
@@ -362,7 +366,7 @@ class HeightMapStage(PipelineStage):
             "grid_size_meters":    cfg.grid_size_meters,
             "grid_resolution":     cfg.grid_resolution,
             "ground_y_max":        cfg.ground_y_max,
-            "camera_height_meters": cfg.camera_height_meters,
+            "camera_height_meters": camera_height,
         })
 
         if self.temp is not None:

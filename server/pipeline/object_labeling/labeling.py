@@ -38,6 +38,7 @@ import numpy as np
 import torch
 from PIL import Image as PILImage
 
+
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_detection.grounding_dino import GroundingDino
@@ -52,6 +53,11 @@ from pipeline.scene_generation.object_scale import OBJECT_HEIGHT_PRIORS
 from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
+
+PHOTO_DETECTIONS_KEY = "photo_detections"
+
+# Rigid things people ride on or in; their models carry the passengers.
+_CARRIERS = frozenset({"boat", "ship", "bus", "car", "truck"})
 
 LABELING_MARKER = "labeling_complete"
 
@@ -421,9 +427,21 @@ class ObjectLabelingStage(PipelineStage):
             self.log_info(f"Added {added} detection(s) for labelled boxes no blob represented")
         if cone is not None:
             context.add_object(CAPTURED_FOV_RESTRICTED_KEY, True)
+        # The detector's photo boxes as found, whether or not a blob kept them:
+        # Panorama Depth Calibration measures people and cars in them to scale the
+        # camera height (Paris's one upright person was folded into the boat blob).
+        context.add_object(PHOTO_DETECTIONS_KEY, [
+            {"class": b["class"], "name": b.get("name"), "score": round(b["score"], 4),
+             "photo_box": [round(float(v), 2) for v in b["photo_box"]]}
+            for b in labelled if b["origin"] == "photo" and b.get("photo_box")
+        ])
         context.add_object(ContextKey.OBJECT_COUNT, next_idx)
 
         self._size_veto(context, next_idx, panorama)
+        self._aboard(context, next_idx, [
+            ("detector", b) for b in labelled
+            if b["origin"] == "photo" and b.get("photo_box") and b["class"] in _CARRIERS
+        ])
 
         if self.output is not None:
             (self.output / "labeling_debug.json").write_text(json.dumps({
@@ -431,6 +449,39 @@ class ObjectLabelingStage(PipelineStage):
             }, indent=1, default=float))
         context.add_object(LABELING_MARKER, True)
         return context
+
+    def _aboard(self, context: PipelineContext, count: int, detector_boxes=()) -> None:
+        """People on a boat (or in a bus...) are part of its model: the reference
+        view and the 3D reconstruction carry the passengers. Placed again as their own
+        card they float beside the hull (Paris: the tour boat's crowd hovered behind
+        it), so a person mostly inside a rigid object's photo box is folded into it."""
+        rigid = []
+        for idx in range(count):
+            m = context.object(f"metadata_{idx}") or {}
+            if normalize_category(m.get("class")) in _CARRIERS and m.get("photo_box"):
+                rigid.append((f"crop_{idx}", m))
+        rigid.extend(detector_boxes)
+        folded = []
+        for idx in range(count):
+            m = context.object(f"metadata_{idx}") or {}
+            if normalize_category(m.get("class")) != "person" or not m.get("photo_box"):
+                continue
+            x, y, w, h = (float(v) for v in m["photo_box"])
+            for ridx, r in rigid:
+                rx, ry, rw, rh = (float(v) for v in r["photo_box"])
+                if rw * rh < 0.8 * w * h:
+                    continue
+                iw = max(0.0, min(x + w, rx + rw) - max(x, rx))
+                ih = max(0.0, min(y + h, ry + rh) - max(y, ry))
+                if iw * ih >= 0.6 * w * h:
+                    context.add_object(f"metadata_{idx}", {
+                        **m, "class": "indeterminate", "low_confidence": True,
+                        "label_source": "none", "part_of": ridx,
+                    })
+                    folded.append(f"crop_{idx} -> {ridx} ({r.get('class')})")
+                    break
+        if folded:
+            self.log_info(f"Aboard: {len(folded)} person crop(s) folded into the object carrying them — " + "; ".join(folded[:6]))
 
     def _size_veto(self, context: PipelineContext, count: int, panorama) -> None:
         ratio = self.config.size_veto_ratio

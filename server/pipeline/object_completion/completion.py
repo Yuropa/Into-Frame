@@ -757,6 +757,13 @@ class ObjectCompletionStage(PipelineStage):
                     matte = np.asarray(res.masks[0], dtype=bool)
                     if matte.mean() < 0.02:
                         continue
+                    # The object was drawn isolated on white; a matte running along
+                    # the canvas edge is background the model painted in (Rainier's
+                    # paintbrush came back on a grey slab and meshed as boxes).
+                    edge = np.concatenate([matte[:3].ravel(), matte[-3:].ravel(), matte[:, :3].ravel(), matte[:, -3:].ravel()])
+                    if edge.mean() > 0.05:
+                        self.log_info(f"  crop_{idx}: reference candidate {k} runs into the canvas edge, skipped")
+                        continue
                     rgb = np.asarray(out, dtype=np.float32)[matte]
                     err = float(np.abs(rgb.mean(0) - target).mean()) if target is not None else 0.0
                     if self.temp is not None:

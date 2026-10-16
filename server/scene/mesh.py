@@ -333,7 +333,7 @@ class Mesh:
         )
         return Mesh(baked)
 
-    def match_texture_colour(self, reference_rgba: "PILImage.Image", max_gain: float = 2.5) -> "tuple[np.ndarray, np.ndarray] | None":
+    def match_texture_colour(self, reference_rgba: "PILImage.Image", max_gain: float = 2.5, min_gain: float = 0.85) -> "tuple[np.ndarray, np.ndarray] | None":
         """Scale the base-colour texture per channel so its mean over the surface
         (sampled at the vertex UVs, so atlas padding does not count) matches the
         mean of the reference's opaque pixels. Returns (before, after) means, or
@@ -361,7 +361,7 @@ class Mesh:
         cols = np.clip((uv[:, 0] % 1.0) * (w - 1), 0, w - 1).astype(int)
         rows = np.clip((1.0 - (uv[:, 1] % 1.0)) * (h - 1), 0, h - 1).astype(int)
         current = arr[rows, cols, :3].mean(axis=0)
-        gain = np.clip(target / np.maximum(current, 1.0), 1.0 / max_gain, max_gain)
+        gain = np.clip(target / np.maximum(current, 1.0), min_gain, max_gain)
         arr[..., :3] = np.clip(arr[..., :3] * gain, 0, 255)
         out = _PIL.fromarray(arr.astype(np.uint8), "RGBA")
         setattr(material, attr, out if mode == "RGBA" else out.convert(mode))

@@ -633,6 +633,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     # the client ignores COLOR_0, so bake it into a texture.
                     mesh = mesh.bake_vertex_colours()
                 mesh.fit_to_box(1.0, 1.0)
+                # Plants have no flat faces. When the reconstructor gives up on one
+                # it returns boxes (Rainier's flower_0, 99% of its area on axis-aligned
+                # faces, rendered as marble pillars; Paris's tree_1, 90%); a billboard
+                # is better than that.
+                if obj_class in VEGETATION_CATEGORIES:
+                    boxy = _axis_aligned_fraction(mesh)
+                    if boxy > 0.6:
+                        raise ValueError(f"{boxy:.0%} of its surface is axis-aligned faces (a box, not a plant)")
                 if self.config.match_texture_colour:
                     ref = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop)
                     matched = mesh.match_texture_colour(ref)
@@ -1091,8 +1099,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # crop_212, the texture of a whole tree bucket's card). Still placed and
             # pooled, never picked as the picture a mesh or card is made from.
             on_seam = bool(box is not None and pano_w and (box[0] <= 2 or box[0] + box[2] >= pano_w - 2))
+            # Likewise a crop in deep shadow: Rainier's crop_181 averages (12, 20, 13)
+            # and its tree meshed as black slabs.
+            too_dark = _crop_too_dark(get_image(f"crop_{idx}"))
             candidates_by_group.setdefault(key, []).append({
-                "idx": idx, "box": box, "depth": depth, "metadata": metadata, "on_seam": on_seam,
+                "idx": idx, "box": box, "depth": depth, "metadata": metadata, "on_seam": on_seam or too_dark,
             })
 
         group_best: dict[tuple[str, int], tuple[int, float, float]] = {}
@@ -1480,3 +1491,26 @@ class PanoramaAssetGenerationStage(PipelineStage):
     def clean_up(self):
         self._close_supersampler()
         super().clean_up()
+
+
+def _crop_too_dark(crop, min_mean: float = 30.0) -> bool:
+    """True when the crop's opaque pixels average darker than min_mean (0-255)."""
+    if crop is None:
+        return False
+    try:
+        arr = np.asarray(crop.image.convert("RGBA"), dtype=np.float32)
+    except Exception:
+        return False
+    opaque = arr[..., 3] > 127
+    if opaque.sum() < 16:
+        return False
+    return float(arr[..., :3][opaque].mean()) < min_mean
+
+
+def _axis_aligned_fraction(mesh) -> float:
+    """Share of the surface area on faces whose normal is within ~11 deg of an axis."""
+    t = mesh.mesh
+    normals = np.abs(np.asarray(t.face_normals))
+    area = np.asarray(t.area_faces)
+    total = float(area.sum())
+    return float(area[normals.max(axis=1) > 0.98].sum() / total) if total > 0 else 0.0

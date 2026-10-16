@@ -9,6 +9,17 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama.placement import placement_fov_deg
 from util.depth_utils import Depth
 
+# {"meters", "source", ...}: the camera height the scene is built at. Read by
+# Height Map and Region Map in preference to their own camera_height_meters.
+CAMERA_HEIGHT_KEY = "camera_height_estimate"
+
+# Classes whose real height is narrow enough to set the scene's scale, with the
+# height:width a plausible single instance has (a "person" box 76x92 is a crowd).
+_HEIGHT_ANCHORS = {
+    "person": (1.70, 1.6), "car": (1.50, 0.25), "bus": (3.20, 0.25), "motorcycle": (1.10, 0.4),
+    "bicycle": (1.10, 0.4), "bench": (0.90, 0.2), "fire_hydrant": (0.75, 0.8), "trash_bin": (1.00, 0.6),
+}
+
 
 class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
     def __init__(
@@ -27,6 +38,9 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         anchor_to_camera_height: bool = True,
         camera_height_meters: float = 1.0,
         anchor_min_elevation_deg: float = 45.0,
+        estimate_camera_height: bool = True,
+        max_camera_height_m: float = 60.0,
+        max_anchor_spread: float = 2.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -85,6 +99,18 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         self.anchor_to_camera_height = bool(anchor_to_camera_height)
         self.camera_height_meters = float(camera_height_meters)
         self.anchor_min_elevation_deg = float(anchor_min_elevation_deg)
+        # Measure the camera height from the photograph instead of assuming
+        # camera_height_meters, when the photo carries the evidence: the ground
+        # plane fitted to DA3's photo depth gives the height in DA3's units, and
+        # people / cars of known size give the scale of those units. Paris was shot
+        # from a bridge ~10 m up; built at 1 m everything near the camera came out
+        # ~10x small and the Seine a pool. Without a usable anchor (Rainier has none)
+        # or with anchors that disagree by more than max_anchor_spread, the
+        # configured height stands. Published as CAMERA_HEIGHT_KEY for Height Map
+        # and Region Map.
+        self.estimate_camera_height = bool(estimate_camera_height)
+        self.max_camera_height_m = float(max_camera_height_m)
+        self.max_anchor_spread = float(max_anchor_spread)
 
 
 def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -501,16 +527,40 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         calibrated_arr = _apply_panorama_depth_curve(
             dap_pred_raw, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
         )
+        camera_height = cfg.camera_height_meters
+        estimate = {"meters": camera_height, "source": "config"}
+        if cfg.estimate_camera_height:
+            try:
+                measured = self._measure_camera_height(context, da3_depth.depth, intrinsics, panorama_depth.depth.shape)
+            except Exception as exc:   # an estimate must never cost the run
+                self.log_warning(f"Camera height estimate failed ({exc}); using {camera_height:.2f} m")
+                measured = None
+            if measured is not None:
+                estimate = measured
+                camera_height = measured["meters"]
+        context.add_object(CAMERA_HEIGHT_KEY, estimate)
         anchor_scale = 1.0
-        if cfg.anchor_to_camera_height:
+        if estimate.get("source") == "photo":
+            # Measured from the photograph: its size anchors give DA3's metric scale
+            # directly, and the curve maps the panorama onto DA3's units. The nadir
+            # is generated content and disagreed with the photo by 1.55x on Paris
+            # (tour boat 66 m away instead of ~40), so it is reported, not used.
+            anchor_scale = float(estimate["scale"])
+            _, implied = _camera_height_scale(calibrated_arr, camera_height, cfg.anchor_min_elevation_deg, sky_mask)
+            calibrated_arr = calibrated_arr * anchor_scale
+            self.log_info(
+                f"Depth scaled x{anchor_scale:.2f} by the photo's size anchors (camera {camera_height:.2f} m); "
+                f"the generated nadir would have implied {implied * anchor_scale:.2f} m"
+            )
+        elif cfg.anchor_to_camera_height:
             anchor_scale, implied = _camera_height_scale(
-                calibrated_arr, cfg.camera_height_meters, cfg.anchor_min_elevation_deg, sky_mask,
+                calibrated_arr, camera_height, cfg.anchor_min_elevation_deg, sky_mask,
             )
             if anchor_scale != 1.0:
                 calibrated_arr = calibrated_arr * anchor_scale
                 self.log_info(
                     f"Depth anchored to the camera height: the nadir implies {implied:.2f} m, "
-                    f"camera_height_meters is {cfg.camera_height_meters:.2f} m -> both maps scaled x{anchor_scale:.2f}"
+                    f"camera height is {camera_height:.2f} m ({estimate['source']}) -> both maps scaled x{anchor_scale:.2f}"
                 )
             else:
                 self.log_info("Depth anchor: nadir height could not be measured, scale unchanged")
@@ -593,6 +643,115 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    def _measure_camera_height(self, context: PipelineContext, da3: np.ndarray, intrinsics, pano_shape) -> Optional[dict]:
+        """Camera height from the photograph, or None when the evidence is not there.
+
+        1. Ground plane: RANSAC over DA3's photo point cloud below the image middle,
+           normal within 20 deg of vertical; the plane's distance from the camera is
+           the height in DA3 units.
+        2. Scale: every photographed person / car / ... (by its photo box, kept only
+           when its height:width is one instance's) measured at DA3's median depth in
+           its box; prior height / measured height is the metric scale.
+        Needs at least one anchor; several must agree within max_anchor_spread."""
+        from util.captured_cone import captured_cone_from_context
+        from pipeline.object_typing.categories import normalize_category
+        cfg: PanoramaDepthCalibrationConfiguration = self.config
+        depth = np.asarray(da3, dtype=np.float64)
+        dh, dw = depth.shape[:2]
+        # Intrinsics are given at their own resolution; bring them to the depth map's.
+        iw = float(getattr(intrinsics, "width", dw) or dw)
+        ih = float(getattr(intrinsics, "height", dh) or dh)
+        fx = float(intrinsics.fx) * dw / iw
+        fy = float(intrinsics.fy) * dh / ih
+        px = float(getattr(intrinsics, "px", iw / 2.0)) * dw / iw
+        py = float(getattr(intrinsics, "py", ih / 2.0)) * dh / ih
+
+        v, u = np.mgrid[0:dh, 0:dw]
+        pts = np.stack([(u + 0.5 - px) / fx * depth, (v + 0.5 - py) / fy * depth, depth], axis=-1)
+        sel = (v > dh * 0.55) & np.isfinite(depth) & (depth > 0)
+        cloud = pts[sel]
+        if len(cloud) < 500:
+            return None
+        rng = np.random.default_rng(self.config.seed)
+        tol = 0.03 * float(np.median(cloud[:, 2]))
+        best = None
+        for _ in range(400):
+            a = cloud[rng.choice(len(cloud), 3, replace=False)]
+            n = np.cross(a[1] - a[0], a[2] - a[0])
+            norm = np.linalg.norm(n)
+            if norm < 1e-12:
+                continue
+            n = n / norm
+            n = n if n[1] > 0 else -n            # image y points down, toward the ground
+            if n[1] < np.cos(np.radians(20.0)):
+                continue
+            inliers = np.abs((cloud - a[0]) @ n) < tol
+            if best is None or inliers.sum() > best.sum():
+                best = inliers
+        if best is None or best.mean() < 0.4:
+            self.log_info("Camera height: no clean ground plane in the photo, keeping the configured height")
+            return None
+        q = cloud[best]
+        centre = q.mean(axis=0)
+        normal = np.linalg.svd(q - centre)[2][2]
+        normal = normal if normal[1] > 0 else -normal
+        height_da3 = float(abs(centre @ normal))
+
+        cone = captured_cone_from_context(context, pano_shape[1], pano_shape[0])
+        if cone is None:
+            return None
+        sx, sy = dw / float(cone.photo_w), dh / float(cone.photo_h)
+        ratios, weights, used = [], [], []
+        # The labeler's photo detections when it published them, else the blobs.
+        candidates = context.input_object("photo_detections")
+        if candidates is None:
+            count = int(context.input_object(ContextKey.OBJECT_COUNT) or 0)
+            candidates = [context.input_object(f"metadata_{i}") or {} for i in range(count)]
+        for idx, m in enumerate(candidates):
+            cls = normalize_category(m.get("vetoed_class") or m.get("class"))
+            box = m.get("photo_box")
+            if cls not in _HEIGHT_ANCHORS or not box or m.get("synthetic"):
+                continue
+            prior, min_aspect = _HEIGHT_ANCHORS[cls]
+            x, y, w, h = (float(b) for b in box)
+            if w <= 0 or h / w < min_aspect or h * sy < 4:
+                continue
+            patch = depth[int(y * sy):int((y + h) * sy) + 1, int(x * sx):int((x + w) * sx) + 1]
+            patch = patch[np.isfinite(patch) & (patch > 0)]
+            if patch.size == 0:
+                continue
+            measured = h * sy * float(np.median(patch)) / fy
+            if measured <= 1e-4:
+                continue
+            ratios.append(prior / measured)
+            weights.append(float(m.get("confidence") or m.get("score") or 0.5))
+            used.append(f"{cls} {int(w)}x{int(h)} px x{prior / measured:.1f}")
+        if not ratios:
+            self.log_info(
+                f"Camera height: ground plane {height_da3:.2f} (DA3 units) but nothing of known size "
+                f"in the photo to scale it, keeping the configured {cfg.camera_height_meters:.2f} m"
+            )
+            return None
+        ratios_arr = np.asarray(ratios)
+        spread = float(ratios_arr.max() / ratios_arr.min())
+        if spread > cfg.max_anchor_spread:
+            self.log_info(
+                f"Camera height: size anchors disagree {spread:.1f}x ({', '.join(used)}), "
+                f"keeping the configured {cfg.camera_height_meters:.2f} m"
+            )
+            return None
+        scale = float(np.exp(np.average(np.log(ratios_arr), weights=np.asarray(weights))))
+        meters = height_da3 * scale
+        if not np.isfinite(meters) or meters < 0.5 or meters > cfg.max_camera_height_m:
+            self.log_info(f"Camera height: measured {meters:.1f} m is out of range, keeping the configured height")
+            return None
+        self.log_info(
+            f"Camera height measured from the photo: {meters:.2f} m (ground plane {height_da3:.2f} DA3 units "
+            f"x scale {scale:.2f} from {len(ratios)} anchor(s): {', '.join(used)})"
+        )
+        return {"meters": round(meters, 3), "source": "photo", "anchors": len(ratios),
+                "plane_da3": round(height_da3, 4), "scale": round(scale, 4)}
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         # context.depth() would also match ContextKey.PANORAMA_DEPTH written by the earlier

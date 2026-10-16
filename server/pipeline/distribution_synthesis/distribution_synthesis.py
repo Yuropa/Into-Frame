@@ -262,6 +262,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         photo_veto_classes: list[str] | None = None,
         photo_veto_regions: list[str] | None = None,
         photo_veto_margin_deg: float = 3.0,
+        treeline_margin_m: float = 8.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Paint radius and falloff per class. max_paint_radius_m and
@@ -302,6 +303,11 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         )
         self.photo_veto_regions = [str(r).lower() for r in (photo_veto_regions or ["forest"])]
         self.photo_veto_margin_deg = float(photo_veto_margin_deg)
+        # Vegetation is not painted higher than this above the highest exemplar of
+        # its group: Rainier's "terrain" region runs up the mountain's lower slope at
+        # the grid edge, and a tree painted 24 m up it stood on the summit's outline.
+        # <= 0 disables.
+        self.treeline_margin_m = float(treeline_margin_m)
         # Small coloured blooms the detector undercounts; their painted density is
         # scaled by features.bloom_recall, up to bloom_max_boost.
         self.bloom_classes = frozenset(str(c).lower() for c in (bloom_classes or ["flower"]))
@@ -1066,6 +1072,26 @@ class DistributionSynthesisStage(PipelineStage):
                     except KeyError:
                         pass
 
+        # See treeline_margin_m: per group, the highest ground any exemplar stands on.
+        treeline_rejected: dict[int, int] = {}
+        heights = None
+        group_treeline: dict[int, float] = {}
+        if cfg.treeline_margin_m > 0:
+            hm = context.input_depth(ContextKey.HEIGHT_MAP)
+            if hm is not None:
+                heights = np.asarray(hm.depth, dtype=np.float32)
+                for gi, (_rt, obj_t, d, _p) in enumerate(groups):
+                    if obj_t not in VEGETATION_CATEGORIES or not len(d.points):
+                        continue
+                    pts = np.asarray(d.points, dtype=np.float64)
+                    r, c = world_to_cell(pts[:, 0], pts[:, 1], grid_size_meters, heights.shape[0])
+                    r = np.clip(np.asarray(r, dtype=int), 0, heights.shape[0] - 1)
+                    c = np.clip(np.asarray(c, dtype=int), 0, heights.shape[1] - 1)
+                    h = heights[r, c]
+                    h = h[np.isfinite(h)]
+                    if h.size:
+                        group_treeline[gi] = float(h.max()) + cfg.treeline_margin_m
+
         # Set when every tile failed -- see the _RAN_MARKER decision at the end of run().
         total_failure = False
 
@@ -1183,6 +1209,13 @@ class DistributionSynthesisStage(PipelineStage):
                                 photo_vetoed[job["group_idx"]] = photo_vetoed.get(job["group_idx"], 0) + 1
                                 continue
 
+                    limit = group_treeline.get(job["group_idx"])
+                    if limit is not None:
+                        hr, hc = (int(v) for v in world_to_cell(x, z, grid_size_meters, heights.shape[0]))
+                        if 0 <= hr < heights.shape[0] and 0 <= hc < heights.shape[1] and heights[hr, hc] > limit:
+                            treeline_rejected[job["group_idx"]] = treeline_rejected.get(job["group_idx"], 0) + 1
+                            continue
+
                     job_paint_radius, job_falloff, job_affinity = group_rules[job["group_idx"]]
                     cell_row = cell_col = None
                     if job_affinity is not None:
@@ -1289,6 +1322,8 @@ class DistributionSynthesisStage(PipelineStage):
                 f"  {obj_type} [{region_type}]: painted {len(placed)} instances"
                 + (f" ({near_rejected[group_idx]} dropped inside the near edge)"
                    if near_rejected.get(group_idx) else "")
+                + (f" ({treeline_rejected[group_idx]} above the treeline)"
+                   if treeline_rejected.get(group_idx) else "")
                 + (f" ({overlapped[group_idx]} dropped overlapping another rigid object)"
                    if overlapped.get(group_idx) else "")
                 + (f" ({photo_vetoed[group_idx]} vetoed inside the photographed view)"

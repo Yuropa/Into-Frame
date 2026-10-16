@@ -7,6 +7,7 @@ from PIL import Image as PILImage
 import torch
 from scipy.ndimage import binary_dilation
 
+from pipeline.panorama_depth.calibration import CAMERA_HEIGHT_KEY
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.region_map.region_map_generator import RegionMapGenerator
@@ -188,6 +189,9 @@ class RegionMapStage(PipelineStage):
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
+        # Measured from the photo by Panorama Depth Calibration when it could be
+        # (see CAMERA_HEIGHT_KEY); the configured height otherwise.
+        camera_height = float((context.input_object(CAMERA_HEIGHT_KEY) or {}).get("meters") or cfg.camera_height_meters)
 
         task = self.create_progress(6, "Region Map…")
 
@@ -220,14 +224,14 @@ class RegionMapStage(PipelineStage):
             # (already computed by this point in the pipeline) with the unrestricted
             # Panorama.project_3d instead.
             _, _, X_grid, Z_grid = grid_cell_panorama_uv(
-                cfg.grid_size_meters, cfg.grid_resolution, cfg.camera_height_meters,
+                cfg.grid_size_meters, cfg.grid_resolution, camera_height,
                 panorama_source_rgb.shape[0], panorama_source_rgb.shape[1],
             )
             height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
             if height_map_depth is not None and height_map_depth.depth.shape == X_grid.shape:
                 Y_grid = height_map_depth.depth.astype(np.float32)
             else:
-                Y_grid = np.full_like(X_grid, -cfg.camera_height_meters)
+                Y_grid = np.full_like(X_grid, -camera_height)
             vertices = np.stack(
                 [X_grid.ravel(), Y_grid.ravel(), Z_grid.ravel()], axis=1
             ).astype(np.float64)
@@ -272,7 +276,7 @@ class RegionMapStage(PipelineStage):
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
-            camera_height_meters=cfg.camera_height_meters,
+            camera_height_meters=camera_height,
             sky_mask=sky_mask,
             nadir_exclusion_radius=cfg.nadir_exclusion_radius,
             nadir_ramp_width=cfg.nadir_ramp_width,
@@ -460,7 +464,7 @@ class RegionMapStage(PipelineStage):
             grid_size_meters=cfg.grid_size_meters,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
-            camera_height_meters=cfg.camera_height_meters,
+            camera_height_meters=camera_height,
         )
         context.add_object(ContextKey.WATER_CHAINS, water_chains)
         self.log_info(f"Water chains: {len(water_chains)}")
