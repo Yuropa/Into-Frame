@@ -9,7 +9,7 @@ from pipeline.model_generation.model_generation import ModelGenerator, ModelGene
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
-    VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY,
+    VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY, ALWAYS_MESH_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES,
 )
 from pipeline.grass_cover.cards import crossed_card_mesh
 from util.lod_metrics import angular_height_px_from_box
@@ -90,6 +90,7 @@ from pipeline.supersampling.image_supersampling import ImageSupersampling
 # imports this module's curation helpers -- so the key is spelled here rather than
 # imported from there.
 _COMPLETE_KEY = "crop_complete_{idx}"
+_REFERENCE_KEY = "crop_reference_{idx}"
 
 # Super-resolved source crop, written by _source_crop the first time any consumer
 # (delighting, meshing, cards) asks for a crop that is smaller than min_source_px.
@@ -159,8 +160,28 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         refine_alpha: bool = True,
         max_sr_passes: int = 2,
         delight_blur_fraction: float = 0.02,
+        always_mesh_classes: list[str] | None = None,
+        outpainted_classes: list[str] | None = None,
+        far_landmark_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # See categories.ALWAYS_MESH_CATEGORIES: every bucket of these classes is
+        # reconstructed, whatever its distance or size on screen.
+        self.always_mesh_classes = frozenset(
+            always_mesh_classes if always_mesh_classes is not None else ALWAYS_MESH_CATEGORIES
+        )
+        # Landmarks stand beyond the depth map's reach by nature (the Eiffel Tower
+        # is a kilometre from the Seine bank), so "unmeasured depth" is no evidence
+        # against them: they keep the sky test but skip the far-clamp one. Placed at
+        # the clamp, angular size x distance still gives them the right size on screen.
+        self.far_landmark_classes = frozenset(
+            far_landmark_classes if far_landmark_classes is not None
+            else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
+        )
+        # See hires_crops.is_photographed.
+        self.outpainted_classes = frozenset(
+            outpainted_classes if outpainted_classes is not None else OUTPAINTED_PLACEABLE_CATEGORIES
+        )
         # Classes that get a crossed-card LOD alongside (or instead of) their
         # reconstruction, published under category_mesh_{class}_{bucket}_card.
         #
@@ -573,6 +594,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 crop = self._source_crop(context, idx) or context.image(_delit_key(idx))
             else:
                 crop = context.image(_delit_key(idx)) or self._source_crop(context, idx)
+            # A rigid object reconstructs from its generated reference view when it
+            # has one (ObjectCompletionStage._reference_views): whole, at eye level,
+            # on white -- the view a single-image reconstructor is built for.
+            if obj_class in self.config.always_mesh_classes:
+                reference = context.input_image(_REFERENCE_KEY.format(idx=idx))
+                if reference is not None:
+                    self.log_info(f"  {mesh_key}: reconstructing from the reference view of crop_{idx}")
+                    crop = reference
 
             fill_ratio = mask_fill_ratio(crop)
             if fill_ratio is not None and fill_ratio <= 0.0:
@@ -962,7 +991,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # Out-of-cone detections get no mesh and no place in a billboard pool:
             # nothing downstream will place them, and a pool of generated crops
             # would otherwise be what a synthetic instance ends up wearing.
-            if not is_photographed(metadata, fov_restricted):
+            if not is_photographed(metadata, fov_restricted, self.config.outpainted_classes):
                 skipped_debug.append({"idx": idx, "class": metadata.get("class"), "reason": "outside_captured_fov"})
                 continue
 
@@ -991,6 +1020,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     region_type_map, panorama_depth, far_depth, pano_w, pano_h,
                 )
                 limit = self.config.max_background_fraction
+                if obj_class in self.config.far_landmark_classes:
+                    clamped_fraction = 0.0
                 if sky_fraction > limit or clamped_fraction > limit:
                     skipped_debug.append({
                         "idx": idx,
@@ -1130,7 +1161,8 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if card_source is not None:
                 card_sources[pool_key] = card_source["idx"]
 
-            within_threshold = [s for s in scored if s["depth"] < threshold]
+            always_mesh = obj_class in self.config.always_mesh_classes
+            within_threshold = scored if always_mesh else [s for s in scored if s["depth"] < threshold]
             if not within_threshold:
                 continue  # nothing close enough to mesh -- billboard-only group
 
@@ -1169,7 +1201,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # the honest one -- 529 rows of panorama is 46 degrees of elevation no
             # matter which way the tower faces, whereas the boat's 297 columns are
             # 297 only because it happens to sit broadside.
-            if self.config.min_mesh_angular_px > 0 and pano_h:
+            if self.config.min_mesh_angular_px > 0 and pano_h and not always_mesh:
                 def _angular_px(s) -> "float | None":
                     b = s.get("box")
                     return None if b is None else angular_height_px_from_box(

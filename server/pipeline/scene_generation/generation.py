@@ -10,7 +10,9 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, normalize_category,
 )
-from pipeline.object_typing.categories import GRASS_TUFT_CATEGORY
+from pipeline.object_typing.categories import (
+    GRASS_TUFT_CATEGORY, ALWAYS_MESH_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES,
+)
 from pipeline.scene_generation.projection import (
     height_map_y_at,
     mesh_y_at,
@@ -56,8 +58,29 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         lod_billboard_screen_fraction: float = 0.003,
         lod_exempt_classes: list[str] | None = None,
         water_allowed_classes: list[str] | None = None,
+        always_mesh_classes: list[str] | None = None,
+        outpainted_classes: list[str] | None = None,
+        far_landmark_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
+        # size, borrowing a sibling bucket's when their own has none, and given no
+        # camera-facing billboard LOD.
+        self.always_mesh_classes = frozenset(
+            always_mesh_classes if always_mesh_classes is not None else ALWAYS_MESH_CATEGORIES
+        )
+        # Exempt from the _MAX_OBJECT_SIZE_M cull: a landmark (the Eiffel Tower)
+        # really is taller than 25 m, and placed at the depth clamp its size is
+        # angular extent x that distance -- right on screen, which is what matters
+        # for something that far away.
+        self.far_landmark_classes = frozenset(
+            far_landmark_classes if far_landmark_classes is not None
+            else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
+        )
+        # See hires_crops.is_photographed.
+        self.outpainted_classes = frozenset(
+            outpainted_classes if outpainted_classes is not None else OUTPAINTED_PLACEABLE_CATEGORIES
+        )
         # Runtime LODs. The mesh-vs-card choice (min_mesh_angular_px) is made ONCE,
         # from the start position; walk up to a card and it stays a card, walk away
         # from a mesh and it stays an 8,000-triangle mesh. With this on, every
@@ -949,7 +972,13 @@ class SceneGenerationStage(PipelineStage):
                     origin_y = terrain_y - float(card_mesh.mesh.bounds[0][1]) * sy
                     levels.append(("mesh", card_key, (sx, sy, sx), origin_y,
                                    self.config.lod_card_screen_fraction))
-                chosen = billboard_texture_key(idx, cls, pool_key, metadata)
+                # A rigid object keeps its geometry at every distance (see
+                # ALWAYS_MESH_CATEGORIES); with no billboard level the mesh level
+                # carries the cull threshold instead.
+                chosen = (
+                    None if cls in self.config.always_mesh_classes and levels
+                    else billboard_texture_key(idx, cls, pool_key, metadata)
+                )
                 if chosen is not None:
                     levels.append(("texture", chosen[0], (float(width), float(height), 1.0),
                                    terrain_y + float(height) / 2.0,
@@ -993,7 +1022,7 @@ class SceneGenerationStage(PipelineStage):
                     self.advance_progress(generation_task)
                     continue
 
-                if not is_photographed(metadata, fov_restricted):
+                if not is_photographed(metadata, fov_restricted, self.config.outpainted_classes):
                     # Detected in the outpainted part of the panorama: a guess
                     # about a guess, and usually a duplicate of something real.
                     # Synthesis fills that ground from the photographed exemplars.
@@ -1045,7 +1074,7 @@ class SceneGenerationStage(PipelineStage):
                     position, width, height = result
 
                 max_dim = max(width, height)
-                if max_dim > _MAX_OBJECT_SIZE_M:
+                if max_dim > _MAX_OBJECT_SIZE_M and cls not in self.config.far_landmark_classes:
                     self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
                     self.advance_progress(generation_task)
                     continue
@@ -1226,6 +1255,18 @@ class SceneGenerationStage(PipelineStage):
                 mesh_key = f"category_mesh_{cls}_{bucket}"
                 pool_key = f"{cls}::{bucket}"
                 category_mesh = context.input_mesh(mesh_key)
+                always_mesh = cls in self.config.always_mesh_classes
+                if category_mesh is None and always_mesh:
+                    # Its own bucket was never reconstructed (no usable crop, or the
+                    # reconstruction failed): wear a sibling bucket's rather than
+                    # fall back to a billboard. Nearest bucket number first, which is
+                    # arbitrary but stable.
+                    for sibling in sorted(class_variants.get(cls, []), key=lambda b: (abs(b - bucket), b)):
+                        sibling_mesh = context.input_mesh(f"category_mesh_{cls}_{sibling}")
+                        if sibling_mesh is not None:
+                            mesh_key = f"category_mesh_{cls}_{sibling}"
+                            category_mesh = sibling_mesh
+                            break
                 # The reconstruction as such, before the card substitutions below
                 # overwrite category_mesh/mesh_key -- the runtime LOD set needs
                 # every representation the instance has, not just the one chosen
@@ -1269,7 +1310,7 @@ class SceneGenerationStage(PipelineStage):
                 )
                 use_mesh = (
                     category_mesh is not None
-                    and rendered_px >= self.config.min_mesh_angular_px
+                    and (always_mesh or rendered_px >= self.config.min_mesh_angular_px)
                 )
                 using_card = False
                 if not use_mesh and card_mesh is not None:
@@ -1385,7 +1426,17 @@ class SceneGenerationStage(PipelineStage):
                         f"{rendered_px:.0f}px)"
                     )
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
-                    mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
+                    if metadata.get("yaw_deg") is not None:
+                        # Painted along a feature (a boat along the bank, see
+                        # distribution_synthesis.features): the yaw puts local +X on
+                        # the edge's tangent, so turn a mesh whose long horizontal
+                        # axis is Z by a further 90 degrees, and either way round.
+                        ext = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                        yaw = float(metadata["yaw_deg"]) + (90.0 if ext[2] > ext[0] else 0.0)
+                        yaw += 180.0 * int(rng.integers(2)) + float(rng.uniform(-8.0, 8.0))
+                        mesh_obj.set_rotation(0.0, yaw % 360.0, 0.0)
+                    else:
+                        mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(scale_x, scale_y, scale_z)
                     mesh_obj.name = mesh_key
                     mesh_obj.source_index = idx
@@ -1605,6 +1656,12 @@ class SceneGenerationStage(PipelineStage):
         if lighting is not None:
             self.log_info("Adding environment lighting to scene")
             scene.lighting = lighting
+
+        # Grass Cover's blade field, when it ran in blades mode (grass_field.py).
+        grass_field = context.input_object("grass_field")
+        if grass_field:
+            scene.grass_field = dict(grass_field)
+            self.log_info(f"Grass field: {grass_field.get('sizeMeters', 0):.0f} m square for client-side blades")
 
         context.add_scene(output_key, scene)
         return context

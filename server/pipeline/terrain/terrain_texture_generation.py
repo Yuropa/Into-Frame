@@ -59,9 +59,12 @@ _BASE_PROMPTS: dict[RegionType, str] = {
         "macro close-up photograph of sharp jagged broken rocks, angular stone fragments, "
         "slate striations and granite micro-crevices"
     ),
+    # What is UNDER the grass, not the grass: the grass itself is geometry (Grass
+    # Cover), and a ground texture with grass painted into it shows as flat grass
+    # under the standing blades -- "grass baked into the ground" (user, 2026-10-16).
     RegionType.VEGETATION: (
-        "overhead macro photograph of dense wild grass blades, green clover leaves, "
-        "tangled lawn moss filaments, individual pine needles"
+        "overhead macro photograph of a meadow floor: dark crumbly soil, a fine litter of "
+        "dry grass stems and seed husks, low moss and tiny clover leaves"
     ),
     RegionType.ROAD: (
         "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
@@ -83,7 +86,7 @@ _BASE_PROMPTS: dict[RegionType, str] = {
 _NEAR_GROUND_PHRASES: dict[RegionType, str] = {
     RegionType.GROUND: "bare earth",
     RegionType.TERRAIN: "stony ground",
-    RegionType.VEGETATION: "meadow",
+    RegionType.VEGETATION: "meadow floor of soil and moss",
     RegionType.ROAD: "paving",
     RegionType.TRAIL: "a dirt footpath",
     RegionType.FOREST: "forest floor",
@@ -95,22 +98,23 @@ _NEAR_GROUND_PHRASES: dict[RegionType, str] = {
 # FLUX.1-dev reads "no boulders" or "a few small stones" as a request for
 # stones and filled the meadow plate with rocks and puddles.
 _NEAR_GROUND_SURFACES: dict[RegionType, str] = {
+    # The floor under the meadow, for the same reason as _BASE_PROMPTS: the grass
+    # stands on this plate as geometry.
     RegionType.VEGETATION: (
-        "a lush subalpine meadow, a continuous dense carpet of fine green grass and low meadow "
-        "plants with a few tiny wildflowers, occasional small patches of bare brown soil, the "
-        "grass so fine it reads as an even texture"
+        "the floor of a subalpine meadow, dark crumbly soil under a fine even litter of dry "
+        "grass stems, low moss and small clover leaves, with patches of bare brown earth"
     ),
     RegionType.FOREST: (
         "an open forest floor, an even carpet of fallen needles, moss and low leafy plants, "
         "fine and continuous"
     ),
     RegionType.GROUND: (
-        "bare earth, fine dry soil and grit with sparse low tufts of grass, even and continuous"
+        "bare earth, fine dry soil and grit with small pebbles, even and continuous"
     ),
     RegionType.TERRAIN: (
         "stony mountain ground, fine gravel and grit with low cushion plants, even and continuous"
     ),
-    RegionType.TRAIL: "a packed-dirt footpath through low grass, fine and even",
+    RegionType.TRAIL: "a packed-dirt footpath of fine soil and grit, fine and even",
     RegionType.ROAD: "weathered asphalt paving, fine and even",
     RegionType.SNOW: "old granular snow, fine and even",
     RegionType.WATER: "a shallow pool over fine silt",
@@ -313,6 +317,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # (full mask there -- this is the only thing keeping it anchored to Pass 1's real-
         # texture content rather than inventing something else entirely).
         reference_strength: float = 0.60,
+        # Region types whose visible cover is placed geometry (grass): their tiles
+        # depict the ground under it, from understorey prompts at understorey_strength.
+        understorey_types: list[str] | None = None,
+        understorey_strength: float = 0.85,
         # Post-process LAB colour nudge toward the Pass-1 (real-texture-grounded) tile.
         color_transfer_strength: float = 0.60,
         # FLUX_SEAMLESS_TEXTURE LoRA strength. Lower than full (1.0) so its seamless-tiling
@@ -391,6 +399,9 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # intrinsic_delight_strength), so the one surface that is lit by the client
         # with a photograph of the sun already in it stops being the odd one out.
         delight_panorama_layer: bool = True,
+        # Publish a delit copy of the object-removed panorama for the treeline strip
+        # and far-field backdrop, at this strength (0 disables).
+        environment_delight_strength: float = 0.75,
         # Where a region's detail tile comes from. "patch": the largest near-field
         # reference patch itself (delit, supersampled, made tileable by a
         # cross-fade with its own half-rolled copy) -- real material, no
@@ -535,6 +546,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.panorama_far_ring_radius_m = float(panorama_far_ring_radius_m)
         self.panorama_far_ring_feather_m = float(panorama_far_ring_feather_m)
         self.delight_panorama_layer = bool(delight_panorama_layer)
+        self.environment_delight_strength = float(environment_delight_strength)
         self.tile_size = tile_size
         self.blend_map_size = blend_map_size
         self.blend_sigma = blend_sigma
@@ -575,6 +587,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.pass1_inpainting_type = pass1_inpainting_type
         self.mask_feather_px = mask_feather_px
         self.reference_strength = reference_strength
+        self.understorey_types = frozenset(
+            str(t).lower() for t in (understorey_types if understorey_types is not None else ["vegetation"])
+        )
+        self.understorey_strength = float(understorey_strength)
         self.color_transfer_strength = color_transfer_strength
         self.lora_scale = lora_scale
         self.use_lora = use_lora
@@ -1029,6 +1045,8 @@ class TerrainTextureGenerationStage(PipelineStage):
         synth_total = sum(synth_weight_maps.values()) + 1e-6
         for label in synth_weight_maps:
             synth_weight_maps[label] = synth_weight_maps[label] / synth_total
+
+        self._publish_delit_environment(context, cfg)
 
         # ── Panorama layer ────────────────────────────────────────────────────
         panorama_terrain = context.input_panorama(ContextKey.PANORAMA_TERRAIN) if cfg.use_panorama_layer else None
@@ -2070,6 +2088,46 @@ class TerrainTextureGenerationStage(PipelineStage):
             patch, albedo, strength=cfg.intrinsic_delight_strength, mask=opaque,
         )
 
+    def _publish_delit_environment(self, context: PipelineContext, cfg: "TerrainTextureGenerationConfiguration") -> None:
+        """PANORAMA_TERRAIN_DELIT: the object-removed panorama with its shading
+        divided out, for the treeline strip and far-field backdrop.
+
+        Those two are textured straight from panorama pixels -- sunlit mountain
+        faces, shadowed gullies, the bright side of every conifer -- and were drawn
+        unlit so that light would not be applied twice. Delit, the client can light
+        them with the same sun as everything in front of them. Sky is excluded from
+        the exposure reference; the gain field is applied everywhere, and the strips
+        mask the sky out themselves."""
+        if cfg.environment_delight_strength <= 0.0 or not cfg.use_intrinsic_delighting:
+            return
+        panorama = context.input_panorama(ContextKey.PANORAMA_TERRAIN)
+        if panorama is None:
+            return
+        image = panorama.image.convert("RGB")
+        work_w = min(image.width, 1536)
+        work = image.resize((work_w, max(1, int(image.height * work_w / image.width))), PIL.Image.LANCZOS)
+        self._init_intrinsics()
+        try:
+            albedo = self._intrinsics.intrinsic_images(
+                Image(work), temp_path=self.temp,
+                resolution=cfg.intrinsic_resolution, agg_num=cfg.intrinsic_agg_num,
+            ).albedo_image()
+        except Exception as exc:
+            self.log_info(f"Environment delighting failed, backdrops stay lit: {exc}")
+            return
+        finally:
+            self._close_intrinsics()
+        reference = np.ones((image.height, image.width), dtype=bool)
+        type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
+        if type_depth is not None and type_depth.depth.shape == reference.shape:
+            reference = type_depth.depth.astype(np.int64) != int(RegionType.SKY)
+        delit = delight_preserving_chroma(
+            image, albedo, strength=cfg.environment_delight_strength, blur_fraction=0.01, mask=reference,
+        )
+        context.add_panorama(ContextKey.PANORAMA_TERRAIN_DELIT, delit)
+        self._save_debug_step(cfg, "environment", "delit_panorama", delit)
+        self.log_info(f"Environment panorama delit at strength {cfg.environment_delight_strength:.2f} for the backdrops")
+
     def _delight_panorama_tile(
         self, tile: PIL.Image.Image, cfg: "TerrainTextureGenerationConfiguration",
     ) -> PIL.Image.Image:
@@ -2302,7 +2360,14 @@ class TerrainTextureGenerationStage(PipelineStage):
                 self._save_debug_step(cfg, debug_label, f"01c_reference_patch_supersampled_{i}", p)
             self._close_supersampler()
 
-        if cfg.describe_material:
+        # A region whose cover is geometry (see understorey_types) is retextured as
+        # what lies under it: its photo patches are grass, so their caption would ask
+        # for grass again, and the repaint has to move further from them.
+        understorey = RegionType(region_val).label in cfg.understorey_types
+        pass2_strength = cfg.understorey_strength if understorey else cfg.reference_strength
+        if understorey:
+            self.log_info(f"{debug_label}: understorey tile -> \"{prompt[:80]}...\" at strength {pass2_strength:.2f}")
+        elif cfg.describe_material:
             material_description = self._describe_material(patches[0])
             if material_description:
                 prompt = self._material_prompt(material_description)
@@ -2324,7 +2389,7 @@ class TerrainTextureGenerationStage(PipelineStage):
             prompt=prompt,
             num_inference_steps=cfg.num_inference_steps,
             guidance_scale=cfg.guidance_scale,
-            strength=cfg.reference_strength,
+            strength=pass2_strength,
             seed=seed,
         )
         self._save_debug_step(cfg, debug_label, "05_pass2_raw", generated)

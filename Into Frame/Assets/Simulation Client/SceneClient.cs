@@ -368,6 +368,21 @@ public class SceneParams
     public SceneObject[]    objects;
     public ExtrinsicsParams extrinsics;
     public SceneLightingData lighting;
+    public GrassFieldData   grassField;   // null/empty when the server built no grass field
+}
+
+// Grass Cover's blade field (server/pipeline/grass_cover/grass_field.py): two image
+// asset keys and the blade parameters. Grown by GrassField.cs on the terrain.
+[Serializable]
+public class GrassFieldData
+{
+    public string density;              // R = density 0..1, G = height fraction
+    public string colour;               // blade colour
+    public float  sizeMeters;
+    public float  maxHeightMeters;
+    public float  tuftsPerSquareMeter;
+    public int    bladesPerTuft;
+    public float  bladeWidthMeters;
 }
 
 [Serializable]

@@ -278,7 +278,12 @@ class FarFieldBackdropStage(PipelineStage):
         # ── texture: the panorama rows the shell uses, alpha = far & not sky ──
         used_rows = rows[valid.any(axis=1)]
         row_min, row_max = int(max(0, used_rows.min() - s)), int(min(H - 1, used_rows.max() + s))
-        rgb = np.asarray(panorama.rgb(), dtype=np.uint8)[row_min:row_max + 1]
+        # Colour from the delit panorama when Terrain Texture Generation made one,
+        # so the client can light this mesh like everything in front of it.
+        colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT)
+        if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
+            colour = panorama
+        rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
         alpha = far[row_min:row_max + 1].astype(np.float32)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
@@ -292,7 +297,15 @@ class FarFieldBackdropStage(PipelineStage):
             COL[valid] / W,
             1.0 - (ROW[valid] - row_min) / max(strip_h - 1, 1),
         ], axis=-1)
-        normals = -vertices / np.linalg.norm(vertices, axis=-1, keepdims=True).clip(1e-6)
+        inward = -vertices / np.linalg.norm(vertices, axis=-1, keepdims=True).clip(1e-6)
+        # Lit by the client, so the normals carry the mountain's shape: the shell's
+        # own surface normals (turned to face the camera), blended with the inward
+        # direction and a little up so depth noise cannot make it blotchy. Purely
+        # inward normals made a backlit range one flat dark sheet.
+        shape = trimesh.Trimesh(vertices=vertices, faces=faces, process=False).vertex_normals
+        shape = np.where((np.sum(shape * inward, axis=-1) < 0)[:, None], -shape, shape)
+        normals = 0.5 * shape + 0.35 * inward + 0.15 * np.array([0.0, 1.0, 0.0])
+        normals /= np.linalg.norm(normals, axis=-1, keepdims=True).clip(1e-6)
 
         material = trimesh.visual.material.PBRMaterial(
             baseColorTexture=texture, metallicFactor=0.0, roughnessFactor=1.0,

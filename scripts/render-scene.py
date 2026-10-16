@@ -555,7 +555,9 @@ class SceneBuilder:
             elif name == "water":
                 mat = material_for(tm, blend=True, color=[0.10, 0.30, 0.45, 0.90], roughness=0.1)
             elif name in ("treeline", "backdrop"):
-                mat = material_for(tm, unlit=True)
+                # Delit by the server and lit by the client (SceneObjectManager's
+                # unlitEnvironment is off); RENDER_UNLIT_ENV=1 for older scenes.
+                mat = material_for(tm, unlit=os.environ.get("RENDER_UNLIT_ENV") == "1")
             else:
                 mat = material_for(tm)
             ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))
@@ -585,8 +587,99 @@ class SceneBuilder:
             )
             ps.add(pyrender.Mesh(primitives=[prim]), pose=gl_pose)
             self._pano_node = None
+        if terrain_pose is not None and not self.args.no_grass:
+            grass = self._grass_field_mesh()
+            if grass is not None:
+                g = to_gl(grass)
+                ps.add(pyrender.Mesh(primitives=[pyrender.Primitive(
+                    positions=np.asarray(g.vertices, dtype=np.float32),
+                    normals=np.asarray(g.vertex_normals, dtype=np.float32),
+                    color_0=grass.metadata["colour"],
+                    indices=np.asarray(g.faces, dtype=np.uint32),
+                    material=pyrender.MetallicRoughnessMaterial(
+                        baseColorFactor=[1, 1, 1, 1], metallicFactor=0.0, roughnessFactor=0.9, doubleSided=True),
+                )]), pose=_MIRROR @ terrain_pose @ _MIRROR)
+                stats["grass_tufts"] = int(grass.metadata["tufts"])
         self._add_sun(ps)
         return ps, stats
+
+    def _grass_field_mesh(self):
+        """The scene's grass field (server/pipeline/grass_cover/grass_field.py) grown
+        the way GrassField.cs grows it -- jittered lattice, kept by density and
+        thinned past near_radius -- as one merged mesh of blade tufts in the terrain's
+        own frame, heights from the height map. Cached across views."""
+        if hasattr(self, "_grass_cache"):
+            return self._grass_cache
+        self._grass_cache = None
+        field = self.scene.get("grassField") or {}
+        if not field.get("density"):
+            return None
+        from pipeline.pipeline_context import ContextKey
+        dens, col = self.image_for(field["density"]), self.image_for(field["colour"])
+        hm_d = self.context.input_depth(ContextKey.HEIGHT_MAP)
+        params = self.context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        if dens is None or col is None or hm_d is None:
+            return None
+        hm = hm_d.depth
+        grid = float(params.get("grid_size_meters", 200.0)); cell = grid / hm.shape[0]
+        d = np.asarray(dens.convert("RGB"), dtype=np.float32) / 255.0
+        c = np.asarray(col.convert("RGB"), dtype=np.float32) / 255.0
+        size = float(field["sizeMeters"]); half = size / 2.0
+        spacing = 1.0 / math.sqrt(max(float(field["tuftsPerSquareMeter"]), 0.01))
+        n = int(math.ceil(size / spacing))
+        rng = np.random.default_rng(12345)
+        ix, iz = np.meshgrid(np.arange(n), np.arange(n))
+        x = -half + (ix + rng.random(ix.shape)) * spacing
+        z = -half + (iz + rng.random(iz.shape)) * spacing
+        x, z = x.ravel(), z.ravel()
+        r = np.hypot(x, z)
+        # Image row 0 is z = -half (grass_field.py writes rows in grid order).
+        pr = np.clip(((z + half) / size * d.shape[0]).astype(int), 0, d.shape[0] - 1)
+        pc = np.clip(((x + half) / size * d.shape[1]).astype(int), 0, d.shape[1] - 1)
+        keep = d[pr, pc, 0] * np.where(r > 10.0, 10.0 / np.maximum(r, 1e-6), 1.0)
+        sel = (r <= half) & (rng.random(len(x)) < keep)
+        x, z, pr, pc = x[sel], z[sel], pr[sel], pc[sel]
+        cap = int(os.environ.get("RENDER_GRASS_MAX", "25000"))
+        if len(x) > cap:
+            idx = rng.choice(len(x), cap, replace=False); x, z, pr, pc = x[idx], z[idx], pr[idx], pc[idx]
+        hr = np.clip(((z + grid / 2) / cell).astype(int), 0, hm.shape[0] - 1)
+        hc = np.clip(((x + grid / 2) / cell).astype(int), 0, hm.shape[1] - 1)
+        y = hm[hr, hc]
+        heights = float(field["maxHeightMeters"]) * d[pr, pc, 1] * (0.8 + 0.4 * rng.random(len(x)))
+        blades = int(field.get("bladesPerTuft", 7)); width = float(field.get("bladeWidthMeters", 0.012))
+        V, F, C = [], [], []
+        seg = 4
+        for k in range(len(x)):
+            h = max(float(heights[k]), 0.04)
+            base_col = c[pr[k], pc[k]] * (0.85 + 0.3 * rng.random())
+            for _ in range(blades if np.hypot(x[k], z[k]) <= 10.0 else min(3, blades)):
+                a = rng.random() * 2 * math.pi
+                face = np.array([math.cos(a), 0.0, math.sin(a)]); side = np.array([-face[2], 0.0, face[0]])
+                root = np.array([x[k], y[k], z[k]]) + face * rng.random() * 0.08 * h
+                lean = (0.1 + 0.35 * rng.random()) * h; bh = (0.6 + 0.4 * rng.random()) * h
+                w = width * h / 0.4 * (0.7 + 0.6 * rng.random())
+                b0 = len(V)
+                for sgi in range(seg + 1):
+                    t = sgi / seg
+                    ctr = root + np.array([0.0, t * bh, 0.0]) + face * lean * t * t
+                    hw = 0.5 * w * (1 - 0.85 * t)
+                    V.append(ctr - side * hw); V.append(ctr + side * hw)
+                    col_t = np.clip(base_col * (0.45 + 0.75 * t), 0, 1)
+                    C.append(col_t); C.append(col_t)
+                for sgi in range(seg):
+                    i0 = b0 + 2 * sgi
+                    F.append((i0, i0 + 2, i0 + 1)); F.append((i0 + 1, i0 + 2, i0 + 3))
+        if not V:
+            return None
+        tm = trimesh.Trimesh(vertices=np.asarray(V), faces=np.asarray(F), process=False)
+        up = np.tile([0.0, 1.0, 0.0], (len(V), 1))
+        tm.vertex_normals = up
+        col4 = np.concatenate([np.asarray(C, dtype=np.float32) ** 2.2, np.ones((len(C), 1), np.float32)], axis=1)
+        tm.metadata["colour"] = col4
+        tm.metadata["tufts"] = len(x)
+        self.log(f"  grass: {len(x)} tufts from the grass field")
+        self._grass_cache = tm
+        return tm
 
     def _terrain_texture(self, tm: trimesh.Trimesh):
         from pipeline.pipeline_context import ContextKey

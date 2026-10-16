@@ -55,11 +55,18 @@ from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
 
 COMPLETE_KEY = "crop_complete_{idx}"
+# A clean, whole view of a rigid object, generated from its completed crop, for
+# the reconstructor only (see ObjectCompletionStage._reference_views).
+REFERENCE_KEY = "crop_reference_{idx}"
 COMPLETION_SUMMARY_KEY = "object_completion_summary"
 
 
 def complete_key(idx: int) -> str:
     return COMPLETE_KEY.format(idx=idx)
+
+
+def reference_key(idx: int) -> str:
+    return REFERENCE_KEY.format(idx=idx)
 
 
 class ObjectCompletionConfiguration(PipelineStageConfiguration):
@@ -88,6 +95,9 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         truncated_edge_fraction: float = 0.3,
         context_background: bool = True,
         background_diff: float = 18.0,
+        reference_view_classes: list[str] | None = None,
+        reference_strength: float = 0.9,
+        reference_candidates: int = 2,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to complete. Default: every placeable object class; never
@@ -138,6 +148,18 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         # A painted hole whose mean absolute difference to the context canvas is
         # under this (0-255) was filled with background, not object, and is dropped.
         self.background_diff = float(background_diff)
+        # Rigid classes reconstructed from a generated reference view: the object
+        # redrawn whole, at eye level from three-quarters, on white, by FLUX.1-dev
+        # img2img from its completed crop. Paris's boats were photographed from a
+        # bridge, steeply from above and packed with people; reconstructing that
+        # view gave a smeared hull. Empty disables.
+        self.reference_view_classes = frozenset(
+            str(c).lower() for c in (reference_view_classes if reference_view_classes is not None
+                                     else ["boat", "ship", "dock", "bridge", "tower", "building",
+                                           "statue", "monument", "car", "truck", "bus"])
+        )
+        self.reference_strength = float(reference_strength)
+        self.reference_candidates = max(1, int(reference_candidates))
 
 
 def build_completion_canvas(
@@ -532,7 +554,8 @@ class ObjectCompletionStage(PipelineStage):
             f"(≥ {cfg.min_occluded_fraction:.0%} of the canvas hidden) will be completed"
         )
         if not jobs:
-            context.add_object(COMPLETION_SUMMARY_KEY, {"completed": 0, "selected": len(chosen)})
+            refs = self._reference_views(context, chosen, metas)
+            context.add_object(COMPLETION_SUMMARY_KEY, {"completed": 0, "selected": len(chosen), "reference_views": refs})
             return context
 
         task = self.create_progress(len(jobs) + 1, "Completing objects…")
@@ -631,14 +654,106 @@ class ObjectCompletionStage(PipelineStage):
         summary = {"selected": len(chosen), "attempted": len(jobs), "completed": written, "rejected": rejected}
         context.add_object(COMPLETION_SUMMARY_KEY, summary)
         self.log_info(f"Object completion: {written} crop(s) completed, {rejected} rejected")
+        summary["reference_views"] = self._reference_views(context, chosen, metas)
+        context.add_object(COMPLETION_SUMMARY_KEY, summary)
         return context
+
+    def _reference_views(self, context: PipelineContext, chosen: list[int], metas: dict[int, dict]) -> int:
+        """crop_reference_{i} for every chosen crop of a reference_view_classes class.
+
+        The completed crop (or the hi-res cutout) is centred on a white canvas and
+        repainted by FLUX.1-dev at reference_strength with the object named and the
+        view asked for. High enough that the prompt sets the viewpoint, low enough
+        that colour and kind carry over; of reference_candidates seeds the one whose
+        cutout's mean colour is nearest the source's is kept."""
+        cfg: ObjectCompletionConfiguration = self.config
+        targets = [i for i in chosen if normalize_category(metas[i].get("class")) in cfg.reference_view_classes]
+        if not targets:
+            return 0
+        from pipeline.segmentation.foreground_segmentation import ForegroundSeg
+        sources: dict[int, PILImage.Image] = {}
+        for idx in targets:
+            img = context.image(complete_key(idx)) or context.input_image(hires_key(idx))
+            if img is not None:
+                sources[idx] = img.image.convert("RGBA")
+        if not sources:
+            return 0
+        self.log_info(f"Reference views for {len(sources)} rigid object(s)")
+        super().clean_up()
+        inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
+        generated: dict[int, list[PILImage.Image]] = {}
+        try:
+            for idx, src in sources.items():
+                m = metas[idx]
+                cls = normalize_category(m.get("class")).replace("_", " ")
+                name = str(m.get("name") or cls)
+                subject = name if name != cls else f"a complete {cls}"
+                prompt = (
+                    f"{subject}, the whole {cls} in frame, seen from the side at eye level, three-quarter view, "
+                    f"isolated on a plain white background, studio product photograph, even soft light, sharp"
+                )
+                size = cfg.canvas_px
+                canvas = PILImage.new("RGB", (size, size), (255, 255, 255))
+                fit = cfg.object_fraction * size / max(src.size)
+                obj = src.resize((max(1, int(src.width * fit)), max(1, int(src.height * fit))), PILImage.LANCZOS)
+                canvas.paste(obj, ((size - obj.width) // 2, (size - obj.height) // 2), obj)
+                full = PILImage.new("L", (size, size), 255)
+                outs = []
+                for k in range(cfg.reference_candidates):
+                    try:
+                        outs.append(inpainter.inpaint(
+                            canvas, full, self.temp, prompt=prompt,
+                            num_inference_steps=cfg.num_inference_steps, guidance_scale=3.5,
+                            strength=cfg.reference_strength, seed=self.seed + 7919 * (k + 1) + idx,
+                        ).convert("RGB"))
+                    except Exception as exc:
+                        self.log_warning(f"  crop_{idx}: reference view failed ({exc})")
+                generated[idx] = outs
+        finally:
+            inpainter.close()
+            super().clean_up()
+
+        written = 0
+        seg = ForegroundSeg(self.preferred_device)
+        try:
+            for idx, outs in generated.items():
+                src = np.asarray(sources[idx], dtype=np.float32)
+                src_rgb = src[..., :3][src[..., 3] > 127]
+                target = src_rgb.mean(0) if len(src_rgb) else None
+                best, best_err = None, None
+                for k, out in enumerate(outs):
+                    res = seg.segment(Image(out))
+                    if res.is_empty():
+                        continue
+                    matte = np.asarray(res.masks[0], dtype=bool)
+                    if matte.mean() < 0.02:
+                        continue
+                    rgb = np.asarray(out, dtype=np.float32)[matte]
+                    err = float(np.abs(rgb.mean(0) - target).mean()) if target is not None else 0.0
+                    if self.temp is not None:
+                        (self.temp / f"crop_{idx}").mkdir(parents=True, exist_ok=True)
+                        out.save(self.temp / f"crop_{idx}" / f"05_reference_{k}.png")
+                    if best_err is None or err < best_err:
+                        alpha = PILImage.fromarray(matte.astype(np.uint8) * 255, "L")
+                        rgba = out.convert("RGBA"); rgba.putalpha(alpha)
+                        best, best_err = rgba.crop(alpha.getbbox()), err
+                if best is not None:
+                    context.add_image(reference_key(idx), Image(best))
+                    written += 1
+                    self.log_info(f"  crop_{idx} ({metas[idx].get('name') or metas[idx].get('class')}): "
+                                  f"reference view kept (colour distance {best_err:.0f})")
+        finally:
+            seg.unload()
+            super().clean_up()
+        return written
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(COMPLETION_SUMMARY_KEY) is not None
 
     def model_names(self) -> list[str]:
         from pipeline.segmentation.foreground_segmentation import ForegroundSeg
-        return InPainting.model_names(InPaintingType.FLUX) + ForegroundSeg.model_names()
+        refs = InPainting.model_names(InPaintingType.FLUX_DEV) if self.config.reference_view_classes else []
+        return InPainting.model_names(InPaintingType.FLUX) + refs + ForegroundSeg.model_names()
 
     def clean_up(self):
         if self._inpainter is not None:

@@ -181,7 +181,12 @@ class TreelineBackdropStage(PipelineStage):
         strip_h = row_max - row_min + 1
 
         # ── Texture: the panorama strip with the runs' silhouette as alpha ─────
-        rgb = np.asarray(panorama.rgb(), dtype=np.uint8)[row_min:row_max + 1]
+        # Colour from the delit panorama when Terrain Texture Generation made one,
+        # so the client can light this mesh like everything in front of it.
+        colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT)
+        if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
+            colour = panorama
+        rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
         alpha = np.zeros((strip_h, W), dtype=np.float32)
         for c in range(W):
             if top[c] >= 0:

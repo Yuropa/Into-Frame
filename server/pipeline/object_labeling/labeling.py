@@ -135,6 +135,13 @@ class ObjectLabelingStage(PipelineStage):
             cls = normalize_category(tag)
             if cls in OBJECT_CATEGORIES or cls in ENVIRONMENT_CATEGORIES:
                 classes[cls.replace("_", " ")] = cls
+                # A named thing ("Eiffel tower") is prompted by its own name as well as
+                # its class. Prompted only as "tower" beside "sky", Grounding DINO gave
+                # the Eiffel Tower's box to sky -- its lattice is mostly sky pixels --
+                # and the scene lost it; the proper noun is a far stronger match.
+                phrase = tag.lower()
+                if cls in OBJECT_CATEGORIES and phrase != cls.replace("_", " "):
+                    classes[phrase] = cls
         for cls in self.config.default_vocabulary:
             if cls in OBJECT_CATEGORIES:
                 classes[cls.replace("_", " ")] = cls
@@ -189,6 +196,7 @@ class ObjectLabelingStage(PipelineStage):
                 labelled.append({
                     "box": [pu0, pv0, pu1 - pu0, pv1 - pv0], "class": cls,
                     "score": float(det["score"]), "origin": "photo", "photo_box": [x, y, w, h],
+                    "name": str(det["label"]).strip().lower(),
                 })
             self.log_info(f"Photograph: {len(labelled)} labelled box(es)")
 
@@ -207,7 +215,8 @@ class ObjectLabelingStage(PipelineStage):
             # Inside the cone the photograph's pass is the authority.
             if photo_img is not None and cone.contains_box(box, cfg.captured_fov_margin_deg):
                 continue
-            labelled.append({"box": box, "class": cls, "score": float(det["score"]), "origin": "panorama", "photo_box": None})
+            labelled.append({"box": box, "class": cls, "score": float(det["score"]), "origin": "panorama",
+                             "photo_box": None, "name": str(det["label"]).strip().lower()})
             pano_boxes += 1
         self.log_info(f"Panorama: {pano_boxes} labelled box(es)" + (" outside the cone" if photo_img is not None else ""))
 
@@ -264,6 +273,9 @@ class ObjectLabelingStage(PipelineStage):
                     **metadata, "class": entry["class"], "confidence": round(entry["score"], 4),
                     "low_confidence": entry["score"] < cfg.confident_score,
                     "label_source": entry["origin"], "label_coverage": round(coverage, 3),
+                    # The detector's own phrase ("eiffel tower"), for prompts that
+                    # need to name the thing rather than its class.
+                    "name": entry.get("name") or entry["class"],
                 }
                 counts[entry["class"]] = counts.get(entry["class"], 0) + 1
             context.add_object(f"metadata_{idx}", new_meta)
@@ -304,7 +316,8 @@ class ObjectLabelingStage(PipelineStage):
                     min_area=cfg.min_area_fraction * native_area, max_area=cfg.max_area_fraction * native_area,
                     source="grounding_dino", labels=[labelled[k]["class"] for k in photo_k],
                     extra=[{"low_confidence": labelled[k]["score"] < cfg.confident_score,
-                            "confidence": round(labelled[k]["score"], 4), "label_source": "photo"} for k in photo_k],
+                            "confidence": round(labelled[k]["score"], 4), "label_source": "photo",
+                            "name": labelled[k].get("name") or labelled[k]["class"]} for k in photo_k],
                     log=self.log_info,
                 )
                 next_idx += n
@@ -330,6 +343,7 @@ class ObjectLabelingStage(PipelineStage):
                         "confidence": round(labelled[k]["score"], 4),
                         "low_confidence": labelled[k]["score"] < cfg.confident_score,
                         "source": "grounding_dino", "label_source": "panorama",
+                        "name": labelled[k].get("name") or labelled[k]["class"],
                         "in_captured_fov": False if cone is not None else True,
                     })
                     next_idx += 1

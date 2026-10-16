@@ -15,6 +15,12 @@ public class SceneObjectManager : MonoBehaviour
     [Header("Prefabs")]
     public GameObject billboardPrefab;
 
+    [Tooltip("Draw the treeline strip and far-field backdrop unlit. Only for scenes whose backdrop textures were not delit by the server.")]
+    public bool unlitEnvironment = false;
+
+    [Tooltip("Material for the instanced grass blades (IntoFrame/GrassBlades). Falls back to Shader.Find, which only works in a build if the shader is in Always Included Shaders.")]
+    public Material grassMaterial;
+
     [Header("Scene")]
     public GameObject sceneRoot;
 
@@ -111,6 +117,14 @@ public class SceneObjectManager : MonoBehaviour
 
         foreach (var obj in init.scene.objects)
             SpawnImmediate(obj);
+
+        // After the terrain's mesh and collider tasks, so the field has a ground.
+        var grass = init.scene.grassField;
+        if (grass != null && !string.IsNullOrEmpty(grass.density) && !string.IsNullOrEmpty(grass.colour))
+        {
+            var capturedGeneration = _queueGeneration;
+            EnqueueTask(() => LoadGrassField(grass, capturedGeneration));
+        }
 
         if (!_isProcessingQueue && _taskQueue.Count > 0)
             StartCoroutine(ProcessQueue());
@@ -611,9 +625,12 @@ public class SceneObjectManager : MonoBehaviour
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
         waterMaterialManager?.RegisterMeshLoaded(container, container.name);
-        // The treeline strip is panorama pixels with their light baked in, like the
-        // backdrop; lit again with quads whose normals face the origin it rendered black.
-        if (container.name.EndsWith("(backdrop)") || container.name.EndsWith("(treeline)"))
+        // The treeline strip and backdrop are textured from the DELIT panorama (the
+        // server divides the photographed shading out) and carry normals for the
+        // client's own sun, so they are lit like everything in front of them. Turn
+        // unlitEnvironment on for a scene built before that, whose textures still
+        // carry their light.
+        if (unlitEnvironment && (container.name.EndsWith("(backdrop)") || container.name.EndsWith("(treeline)")))
             MakeUnlit(container);
     }
 
@@ -711,6 +728,50 @@ public class SceneObjectManager : MonoBehaviour
         collider.convex = false;
 
         Debug.Log($"[SceneObjectManager] Physics mesh '{meshId}' attached as MeshCollider on {container.name}");
+    }
+
+    // ── Grass ──────────────────────────────────────────────────────────────
+
+    private IEnumerator LoadGrassField(GrassFieldData field, int generation)
+    {
+        GameObject terrain = null;
+        foreach (var t in _tracked.Values)
+            if (t.data != null && t.data.name == "terrain") { terrain = t.go; break; }
+        if (terrain == null)
+        {
+            Debug.LogWarning("[SceneObjectManager] Grass field but no terrain object to grow it on");
+            yield break;
+        }
+
+        Texture2D density = null, colour = null;
+        foreach (var key in new[] { field.density, field.colour })
+        {
+            using var req = assetServer().GetTexture(key);
+            yield return req.SendWebRequest();
+            if (generation != _queueGeneration) yield break;
+            if (req.result != UnityWebRequest.Result.Success)
+            {
+                progress?.ReportAssetFailed(key, $"download: {req.error}");
+                yield break;
+            }
+            var tex = DownloadHandlerTexture.GetContent(req);
+            if (key == field.density) density = tex; else colour = tex;
+        }
+
+        var material = grassMaterial;
+        if (material == null)
+        {
+            var shader = Shader.Find("IntoFrame/GrassBlades");
+            if (shader == null)
+            {
+                Debug.LogError("[SceneObjectManager] IntoFrame/GrassBlades shader not found; assign grassMaterial");
+                yield break;
+            }
+            material = new Material(shader) { enableInstancing = true };
+        }
+        var grass = terrain.GetComponent<GrassField>();
+        if (grass == null) grass = terrain.AddComponent<GrassField>();
+        grass.Init(field, density, colour, material);
     }
 
     // ── Texture Loading ────────────────────────────────────────────────────

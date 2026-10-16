@@ -235,6 +235,9 @@ class SimulationServer():
                 keys.append(key)
 
         add(self.scene.skybox)
+        field = getattr(self.scene, "grass_field", None) or {}
+        add(field.get("density"))
+        add(field.get("colour"))
         for obj in self.scene.objects:
             add(obj.texture)
             add(obj.mesh)

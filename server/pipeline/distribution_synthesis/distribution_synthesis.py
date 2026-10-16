@@ -26,6 +26,9 @@ from pipeline.panorama_segmentation.panorama_region_result import (
 from pipeline.object_typing.categories import VEGETATION_CATEGORIES
 from pipeline.object_distribution.object_distribution_result import TypeDistribution
 from pipeline.grass_cover.grass_area import cell_greenness
+from pipeline.distribution_synthesis.features import (
+    FeatureAffinity, feature_fields, learn_affinity, world_to_cell, edge_tangent_yaw, bloom_recall,
+)
 
 _HERE = Path(__file__).resolve().parent
 
@@ -245,8 +248,60 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         cli_timeout_s: float = 120.0,
         pool_across_regions: bool = True,
         exclude_types: list[str] | None = None,
+        class_max_paint_radius_m: dict[str, float] | None = None,
+        class_falloff_exponent: dict[str, float] | None = None,
+        feature_affinity: bool = True,
+        feature_min_kl: float = 0.25,
+        feature_floor: float = 0.1,
+        min_feature_exemplars: int = 6,
+        bloom_classes: list[str] | None = None,
+        bloom_max_boost: float = 6.0,
+        align_to_water_classes: list[str] | None = None,
+        class_paint_regions: dict[str, list[str]] | None = None,
+        feature_exempt_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Paint radius and falloff per class. max_paint_radius_m and
+        # density_falloff_exponent are tuned for ground cover, whose budget has to
+        # stay near the viewer; trees, boats and buildings stand 25-150 m out (Paris's
+        # quay, Rainier's forest edge) and a 30 m cut-off left both scenes empty there.
+        # LODs keep the far instances cheap.
+        self.class_max_paint_radius_m = {
+            str(k).lower(): float(v) for k, v in (class_max_paint_radius_m or {}).items()
+        }
+        self.class_falloff_exponent = {
+            str(k).lower(): float(v) for k, v in (class_falloff_exponent or {}).items()
+        }
+        # See features.py: thin each class's pattern by how its exemplars sit relative
+        # to the water's edge, roads, trails and the forest edge, when one of those
+        # separates them from the background by at least feature_min_kl. The floor is
+        # the acceptance far from the preferred band.
+        self.feature_affinity = bool(feature_affinity)
+        self.feature_min_kl = float(feature_min_kl)
+        self.feature_floor = float(feature_floor)
+        self.min_feature_exemplars = int(min_feature_exemplars)
+        # Ground cover is placed by the photograph's colour (the vegetation weight),
+        # and its exemplars all lie within a few metres of the camera, too close to
+        # learn a feature from: Rainier's flowers "followed" a trail patch beside them.
+        self.feature_exempt_classes = frozenset(
+            str(c).lower() for c in (feature_exempt_classes if feature_exempt_classes is not None
+                                     else ["flower", "plant", "grass_tuft"])
+        )
+        # Small coloured blooms the detector undercounts; their painted density is
+        # scaled by features.bloom_recall, up to bloom_max_boost.
+        self.bloom_classes = frozenset(str(c).lower() for c in (bloom_classes or ["flower"]))
+        self.bloom_max_boost = float(bloom_max_boost)
+        # Region types a class may be painted on, overriding the region its exemplars
+        # were typed with. A boat's box foot lands on whatever the region map shows
+        # under it -- Paris's boats typed forest, ground and other as often as water --
+        # and pooling those would put boats on the quay.
+        self.class_paint_regions = {
+            str(k).lower(): [str(t).lower() for t in v] for k, v in (class_paint_regions or {}).items()
+        }
+        # Painted instances of these get a yaw along the nearest water edge.
+        self.align_to_water_classes = frozenset(
+            str(c).lower() for c in (align_to_water_classes or ["boat", "ship", "dock"])
+        )
         # When any (type, region) group of an object type is under min_exemplars,
         # every group of that type is merged into ONE pooled distribution painted
         # across the union of their paintable regions. The per-region split is the
@@ -527,6 +582,10 @@ class DistributionSynthesisStage(PipelineStage):
         )
 
         object_count = context.input_object(ContextKey.OBJECT_COUNT) or 0
+        cell_m = grid_size_meters / grid_resolution
+        fields = feature_fields(region_map, cell_m) if cfg.feature_affinity else {}
+        if fields:
+            self.log_info(f"Linear features on the grid: {', '.join(sorted(fields))}")
 
         # Per-cell vegetation weight, on the same grid as the region map, for the
         # appearance test applied to vegetation groups below.
@@ -595,6 +654,12 @@ class DistributionSynthesisStage(PipelineStage):
                     continue
                 by_obj_type.setdefault(obj_type, []).append((region_type, dist))
 
+        def _class_paintable(obj_type: str, default: list[int]) -> list[int]:
+            names = cfg.class_paint_regions.get(obj_type)
+            if not names:
+                return default
+            return sorted({int(i) for n in names for i in (_paintable(n) or [])}) or default
+
         for obj_type, members in by_obj_type.items():
             short = [(r, d) for r, d in members if len(d.points) < cfg.min_exemplars]
             if short and cfg.pool_across_regions and len(members) > 1:
@@ -614,7 +679,7 @@ class DistributionSynthesisStage(PipelineStage):
                     bin_count=members[0][1].bin_count, hist=[], pair_count=0,
                     points=points, sizes=sizes, buckets=buckets,
                 )
-                paintable = sorted({idx for r, _ in members for idx in _paintable(r)})
+                paintable = _class_paintable(obj_type, sorted({idx for r, _ in members for idx in _paintable(r)}))
                 self.log_info(
                     f"  {obj_type}: pooled {' + '.join(f'{r} {len(d.points)}' for r, d in members)} "
                     f"-> {len(points)} exemplar(s) painted across {label}"
@@ -629,7 +694,7 @@ class DistributionSynthesisStage(PipelineStage):
                         f"to paint a population, skipping"
                     )
                     continue
-                groups.append((region_type, obj_type, dist, _paintable(region_type)))
+                groups.append((region_type, obj_type, dist, _class_paintable(obj_type, _paintable(region_type))))
         if not groups:
             self.log_info("No non-singleton distributions to paint")
             # Mark complete even though nothing was painted: has_expected_output()
@@ -643,8 +708,11 @@ class DistributionSynthesisStage(PipelineStage):
             return context
 
         rng = np.random.default_rng(self.seed)
-        cell_m = grid_size_meters / grid_resolution
         next_idx = object_count
+        # Per group: (paint radius, falloff exponent, feature affinity or None).
+        group_rules: list[tuple[float, float, "FeatureAffinity | None"]] = []
+        bloom_boxes = self._bloom_boxes(context, object_count) if cfg.bloom_classes else {}
+        panorama_rgb = None
         seed_counter = 0
 
         # Phase 1: build every tile's synthesize_cli job up front — boundary/contour
@@ -658,6 +726,32 @@ class DistributionSynthesisStage(PipelineStage):
         for group_idx, (region_type, obj_type, dist, paintable_idxs) in enumerate(groups):
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
+            paint_radius = cfg.class_max_paint_radius_m.get(obj_type, cfg.max_paint_radius_m)
+            falloff = cfg.class_falloff_exponent.get(obj_type, cfg.density_falloff_exponent)
+            affinity = None
+            if fields and len(exemplar_pts) >= cfg.min_feature_exemplars and obj_type not in cfg.feature_exempt_classes:
+                ex_rows, ex_cols = world_to_cell(exemplar_pts[:, 0], exemplar_pts[:, 1], grid_size_meters, grid_resolution)
+                # Background = the cells these exemplars COULD have been found on:
+                # paintable, and in the band of camera distance they were found in.
+                # Exemplars are bounded by detectability (Rainier's flowers all lie
+                # within 3.3 m of the camera), so against the whole region any feature
+                # that happens to pass near the camera -- the trail there -- looks
+                # like the reason they are there.
+                background = np.isin(region_map, paintable_idxs)
+                rr, cc = np.mgrid[0:grid_resolution, 0:grid_resolution]
+                dist_m = np.hypot((cc + 0.5) * cell_m - grid_size_meters / 2.0,
+                                  (rr + 0.5) * cell_m - grid_size_meters / 2.0)
+                ex_dist = np.hypot(exemplar_pts[:, 0], exemplar_pts[:, 1])
+                band_lo = float(np.percentile(ex_dist, 5)) * 0.9
+                band_hi = float(np.percentile(ex_dist, 95)) * 1.1
+                background &= (dist_m >= band_lo) & (dist_m <= band_hi)
+                if paint_radius > 0:
+                    background &= dist_m <= paint_radius
+                affinity = learn_affinity(fields, ex_rows, ex_cols, background,
+                                          cfg.feature_min_kl, cfg.feature_floor)
+                if affinity is not None:
+                    self.log_info(f"  {obj_type} [{region_type}]: placed by {affinity.describe()}")
+            group_rules.append((paint_radius, falloff, affinity))
             # See min_exemplar_spacing_m -- this floor is what stops a foreground
             # clump's centimetre-scale measured spacing from setting the density
             # for the entire region. It feeds exemplar_domain_target (hence the
@@ -729,6 +823,18 @@ class DistributionSynthesisStage(PipelineStage):
             # Exemplar count over exemplar hull area has none of that dependence: it is
             # a property of the distribution alone, identical for every tile.
             exemplar_density = len(dist.points) / max(_polygon_area(input_boundary), 1e-6)
+            if obj_type in cfg.bloom_classes and bloom_boxes.get(obj_type):
+                if panorama_rgb is None:
+                    pano = context.input_panorama(ContextKey.PANORAMA)
+                    panorama_rgb = np.asarray(pano.rgb()) if pano is not None else np.zeros((1, 1, 3), np.uint8)
+                boost, blobs, detected = bloom_recall(panorama_rgb, bloom_boxes[obj_type],
+                                                      max_boost=cfg.bloom_max_boost)
+                if boost > 1.0:
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: {blobs} bloom-coloured blobs where "
+                        f"{detected} were detected -- painting at {boost:.1f}x the detected density"
+                    )
+                    exemplar_density *= boost
 
             # This group's own full-density radius. The configured value is a FLOOR,
             # raised to where this class was actually observed.
@@ -847,7 +953,7 @@ class DistributionSynthesisStage(PipelineStage):
                         # tile's world-space bbox to the camera at the grid origin.
                         closest = np.minimum(np.maximum(0.0, tile_world_min), tile_world_max)
                         tile_distance = float(np.hypot(*closest))
-                        if cfg.max_paint_radius_m > 0 and tile_distance > cfg.max_paint_radius_m:
+                        if paint_radius > 0 and tile_distance > paint_radius:
                             continue
                         # Same for tiles wholly INSIDE the group's near edge -- every
                         # point they'd produce is rejected below. Farthest corner of the
@@ -881,7 +987,7 @@ class DistributionSynthesisStage(PipelineStage):
                         # expected surviving count is identical to the old behaviour.
                         tile_keep = 1.0
                         if group_radius > 0 and tile_distance > group_radius:
-                            tile_keep = (group_radius / tile_distance) ** cfg.density_falloff_exponent
+                            tile_keep = (group_radius / tile_distance) ** falloff
 
                         # Capped at the tile's own candidate count because that is the
                         # most synthesize_pattern can place anyway (it clamps n_points
@@ -913,7 +1019,9 @@ class DistributionSynthesisStage(PipelineStage):
                         })
 
         # (x, z, width, height, bucket) per painted instance.
-        group_placed: list[list[tuple[float, float, float, float, int]]] = [[] for _ in groups]
+        # (x, z, width, height, bucket, yaw or None) per painted instance.
+        group_placed: list[list[tuple]] = [[] for _ in groups]
+        feature_rejected: dict[int, int] = {}
         # Points the optimizer placed inside a group's near edge, discarded before
         # they reach the scene. Reported so "this group painted fewer than the tile
         # asked for" is attributable rather than mysterious.
@@ -1032,10 +1140,18 @@ class DistributionSynthesisStage(PipelineStage):
                                 appearance_rejected[job["group_idx"]] = appearance_rejected.get(job["group_idx"], 0) + 1
                                 continue
 
+                    job_paint_radius, job_falloff, job_affinity = group_rules[job["group_idx"]]
+                    cell_row = cell_col = None
+                    if job_affinity is not None:
+                        cell_row, cell_col = (int(v) for v in world_to_cell(x, z, grid_size_meters, grid_resolution))
+                        if rng.random() >= job_affinity.accept(float(fields[job_affinity.feature][cell_row, cell_col])):
+                            feature_rejected[job["group_idx"]] = feature_rejected.get(job["group_idx"], 0) + 1
+                            continue
+
                     job_near = job.get("near_radius_m", 0.0)
-                    if cfg.max_paint_radius_m > 0 or job_radius > 0 or job_near > 0:
+                    if job_paint_radius > 0 or job_radius > 0 or job_near > 0:
                         distance = float(math.hypot(x, z))
-                        if cfg.max_paint_radius_m > 0 and distance > cfg.max_paint_radius_m:
+                        if job_paint_radius > 0 and distance > job_paint_radius:
                             continue
                         # Near edge of the observed band -- see group_near_radius. Not a
                         # probability like the falloff below: inside it this class was
@@ -1044,7 +1160,7 @@ class DistributionSynthesisStage(PipelineStage):
                             near_rejected[job["group_idx"]] = near_rejected.get(job["group_idx"], 0) + 1
                             continue
                         if job_radius > 0 and distance > job_radius:
-                            keep_prob = (job_radius / distance) ** cfg.density_falloff_exponent
+                            keep_prob = (job_radius / distance) ** job_falloff
                             # <= 1 by construction: tile_keep is the falloff at the
                             # closest point of this tile, so no point in it can have a
                             # larger one.
@@ -1062,7 +1178,11 @@ class DistributionSynthesisStage(PipelineStage):
                     w, h = dist.sizes[e]
                     bucket = dist.buckets[e] if e < len(dist.buckets) else 0
                     jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))
-                    placed.append((float(x), float(z), w * jitter, h * jitter, int(bucket)))
+                    yaw = None
+                    if job_obj_type in cfg.align_to_water_classes and "water_edge" in fields:
+                        r, c = world_to_cell(x, z, grid_size_meters, grid_resolution)
+                        yaw = edge_tangent_yaw(fields["water_edge"], int(r), int(c))
+                    placed.append((float(x), float(z), w * jitter, h * jitter, int(bucket), yaw))
 
             self.finish_progress(task)
 
@@ -1083,8 +1203,10 @@ class DistributionSynthesisStage(PipelineStage):
                 )
                 placed = [placed[i] for i in sorted(keep.tolist())]
                 group_placed[group_idx] = placed
-            for x, z, w, h, bucket in placed:
+            for x, z, w, h, bucket, yaw in placed:
+                extra = {} if yaw is None else {"yaw_deg": float(yaw)}
                 context.add_object(f"metadata_{next_idx}", {
+                    **extra,
                     "class": obj_type,
                     "synthetic": True,
                     "world_position": [x, 0.0, z],
@@ -1105,6 +1227,8 @@ class DistributionSynthesisStage(PipelineStage):
                    if near_rejected.get(group_idx) else "")
                 + (f" ({appearance_rejected[group_idx]} dropped on unvegetated ground)"
                    if appearance_rejected.get(group_idx) else "")
+                + (f" ({feature_rejected[group_idx]} thinned by feature affinity)"
+                   if feature_rejected.get(group_idx) else "")
             )
             if self.temp is not None:
                 self._write_debug_image(region_map, grid_size_meters, dist.points,
@@ -1140,6 +1264,16 @@ class DistributionSynthesisStage(PipelineStage):
             context.add_object(_RAN_MARKER, True)
         self.log_info(f"Object count {object_count} -> {next_idx} after painting")
         return context
+
+    def _bloom_boxes(self, context: PipelineContext, object_count: int) -> dict[str, list]:
+        """Panorama boxes of the real (not painted) detections of each bloom class."""
+        out: dict[str, list] = {}
+        for idx in range(object_count):
+            m = context.input_object(f"metadata_{idx}") or {}
+            cls = str(m.get("class") or "").lower()
+            if cls in self.config.bloom_classes and not m.get("synthetic") and m.get("box"):
+                out.setdefault(cls, []).append(m["box"])
+        return out
 
     def _write_debug_image(
         self,

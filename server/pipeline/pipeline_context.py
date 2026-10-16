@@ -36,6 +36,10 @@ class ContextKey:
     PANORAMA_DEPTH = "panorama_depth"
     PANORAMA_OBJECT_DEPTH = "panorama_object_depth"
     PANORAMA_TERRAIN = "panorama_terrain"
+    # PANORAMA_TERRAIN with its low-frequency shading divided out, for the meshes
+    # textured straight from it (treeline strip, far-field backdrop) so the client
+    # can light them (TerrainTextureGenerationStage._publish_delit_environment).
+    PANORAMA_TERRAIN_DELIT = "panorama_terrain_delit"
     PANORAMA_FOREGROUND_REMOVED = "panorama_foreground_removed"
     PANORAMA_FOREGROUND_MASK = "panorama_foreground_mask"
     # The occluder-only half of PANORAMA_FOREGROUND_MASK: just the pixels covered

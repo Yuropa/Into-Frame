@@ -15,7 +15,7 @@ from pipeline.object_distribution.object_distribution_result import (
     TypeDistribution,
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
-from pipeline.object_typing.categories import DISTRIBUTABLE_CATEGORIES
+from pipeline.object_typing.categories import DISTRIBUTABLE_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES
 from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
 from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 
@@ -115,10 +115,16 @@ class ObjectDistributionStageConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         bin_count: int = _DEFAULT_BIN_COUNT,
         pcf_cli_path: str | None = None,
+        outpainted_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.bin_count = bin_count
         self.pcf_cli_path = pcf_cli_path
+        # See hires_crops.is_photographed: these classes learn from outpainted
+        # exemplars too, since they are placed from them.
+        self.outpainted_classes = frozenset(
+            outpainted_classes if outpainted_classes is not None else OUTPAINTED_PLACEABLE_CATEGORIES
+        )
 
 
 class ObjectDistributionStage(PipelineStage):
@@ -223,7 +229,7 @@ class ObjectDistributionStage(PipelineStage):
                 # The spatial pattern is learned from what was photographed; an
                 # exemplar from the outpainted region is the generator's pattern,
                 # not the scene's (and usually a copy of a real one).
-                if not is_photographed(metadata, fov_restricted):
+                if not is_photographed(metadata, fov_restricted, self.config.outpainted_classes):
                     unphotographed += 1
                     continue
 

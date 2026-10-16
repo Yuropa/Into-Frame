@@ -30,6 +30,11 @@ _RAN_MARKER = "grass_cover_complete"
 # numbers derived from it is cheaper than keeping (or rebuilding) the array.
 _SUMMARY_KEY = "grass_cover_summary"
 
+# Blades mode (see grass_field.py): the field Scene Generation hands the client.
+GRASS_FIELD_KEY = "grass_field"
+GRASS_FIELD_DENSITY_KEY = "grass_field_density"
+GRASS_FIELD_COLOUR_KEY = "grass_field_colour"
+
 
 def _mesh_key(bucket: int) -> str:
     return f"category_mesh_{GRASS_TUFT_CATEGORY}_{bucket}"
@@ -112,8 +117,21 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         build_near_meshes: bool = True,
         max_near_mesh_faces: int = 4000,
         repair_near_meshes: bool = False,
+        grass_mode: str = "blades",
+        field_px: int = 512,
+        tufts_per_m2: float = 18.0,
+        blades_per_tuft: int = 7,
+        blade_width_m: float = 0.012,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # "blades": publish a grass field (grass_field.py) the client grows instanced
+        # blade tufts from -- dense, on the ground, swaying in the vertex shader.
+        # "cards": the old crossed-card tuft instances.
+        self.grass_mode = str(grass_mode).lower()
+        self.field_px = int(field_px)
+        self.tufts_per_m2 = float(tufts_per_m2)
+        self.blades_per_tuft = int(blades_per_tuft)
+        self.blade_width_m = float(blade_width_m)
         self.max_radius_m = float(max_radius_m)
         # Two gates on whether this scene should have grass AT ALL. Both exist
         # because everything upstream of them answers a narrower question -- "is
@@ -382,6 +400,13 @@ class GrassCoverStage(PipelineStage):
             context.add_object(_RAN_MARKER, True)
             return context
 
+        if cfg.grass_mode == "blades":
+            self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
+            self._publish_field(context, mask, area_stats.get("greenness"), cfg, grid_size_meters)
+            self.finish_progress(task)
+            context.add_object(_RAN_MARKER, True)
+            return context
+
         representatives = self._bucket_exemplars(exemplars, cfg)
         self.log_info(f"Grass variants: {len(representatives)} bucket(s) from {len(exemplars)} candidate patch(es)")
         self.advance_progress(task)
@@ -402,6 +427,44 @@ class GrassCoverStage(PipelineStage):
         self._write_debug(context, mask, grid_size_meters, representatives, placed, area_m2)
         context.add_object(_RAN_MARKER, True)
         return context
+
+    def _publish_field(self, context: PipelineContext, mask: np.ndarray, greenness, cfg, grid_size_meters: float) -> None:
+        from pipeline.grass_cover.grass_field import build_grass_field
+        pano_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U).depth
+        pano_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V).depth
+        sampled = context.input_depth(ContextKey.HEIGHT_MAP_REAL_SAMPLE_MASK).depth
+        # Blade colour from the ORIGINAL panorama: it is the one that shows the grass.
+        # The object-removed panorama (and the delit copy made from it) has the near
+        # meadow replaced by generated ground, the same reason grass_area_mask types
+        # against the original.
+        colour_source = context.input_panorama(ContextKey.PANORAMA)
+        dh, colour, stats = build_grass_field(
+            mask, greenness, pano_u, pano_v, sampled, np.asarray(colour_source.rgb()),
+            grid_size_meters, cfg.max_radius_m, cfg.field_px,
+            cfg.min_cell_greenness, cfg.full_density_greenness, cfg.density_floor_fraction,
+            cfg.tuft_height_jitter, self.seed,
+        )
+        context.add_image(GRASS_FIELD_DENSITY_KEY, Image(dh))
+        context.add_image(GRASS_FIELD_COLOUR_KEY, Image(colour))
+        field = {
+            "density": GRASS_FIELD_DENSITY_KEY,
+            "colour": GRASS_FIELD_COLOUR_KEY,
+            "sizeMeters": 2.0 * cfg.max_radius_m,
+            "maxHeightMeters": cfg.tuft_height_m * (1.0 + cfg.tuft_height_jitter),
+            "tuftsPerSquareMeter": cfg.tufts_per_m2,
+            "bladesPerTuft": cfg.blades_per_tuft,
+            "bladeWidthMeters": cfg.blade_width_m,
+        }
+        context.add_object(GRASS_FIELD_KEY, field)
+        context.add_object(_SUMMARY_KEY, {**(context.object(_SUMMARY_KEY) or {}), "mode": "blades", **stats, **field})
+        if self.temp is not None:
+            dh.save(self.temp / "grass_field_density.png")
+            colour.save(self.temp / "grass_field_colour.png")
+        self.log_info(
+            f"Grass field: {field['sizeMeters']:.0f} m square at {cfg.field_px}px, "
+            f"{stats['covered_fraction']:.0%} covered, mean density {stats['mean_density']:.2f}, "
+            f"{cfg.tufts_per_m2:g} tufts/m2 of {cfg.blades_per_tuft} blades at full density"
+        )
 
     # ── Inputs ────────────────────────────────────────────────────────────────
 

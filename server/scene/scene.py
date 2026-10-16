@@ -17,6 +17,9 @@ class Scene:
         self.objects = []
         self.skybox = ""
         self.lighting = None  # Optional[SceneLighting]
+        # Optional grass field (pipeline/grass_cover/grass_field.py): image asset
+        # keys and blade parameters, in the terrain grid's own frame.
+        self.grass_field = None  # Optional[dict]
 
     def add_object(self, object: Object3D):
         self.objects.append(object)
@@ -36,6 +39,7 @@ class Scene:
             "eyeHeightMeters": self.eye_height_meters,
             "terrainCenterY":  self.terrain_center_y,
             "lighting":       self.lighting.encode() if self.lighting is not None else None,
+            "grassField":     self.grass_field,
         }
 
     @classmethod
@@ -56,4 +60,5 @@ class Scene:
         obj.terrain_center_y  = data.get("terrainCenterY", 0.0)
         lighting_data       = data.get("lighting")
         obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
+        obj.grass_field     = data.get("grassField")
         return obj

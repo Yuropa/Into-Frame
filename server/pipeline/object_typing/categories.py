@@ -24,6 +24,21 @@ VEGETATION_CATEGORIES: Final[frozenset[str]] = frozenset({
     "tree", "forest", "bush", "flower", "plant", GRASS_TUFT_CATEGORY,
 })
 
+# Rigid, man-made things that are always drawn as 3D geometry: they get a
+# reconstruction whatever their size on screen, never a camera-facing billboard,
+# and when their own bucket has no reconstruction they borrow a sibling bucket's.
+# A billboard is a picture that turns to face the viewer; that reads as a plant at
+# a distance but as a cardboard cutout for a boat or a bridge, which the viewer
+# knows has a side. Vegetation keeps its card and billboard LODs.
+ALWAYS_MESH_CATEGORIES: Final[frozenset[str]] = frozenset({
+    "boat", "ship", "dock", "bridge", "building", "tower", "person",
+    "car", "truck", "bus", "motorcycle", "bicycle", "bench", "statue",
+})
+
+# Classes whose detections in the OUTPAINTED part of the panorama are kept (see
+# hires_crops.is_photographed).
+OUTPAINTED_PLACEABLE_CATEGORIES: Final[frozenset[str]] = frozenset({"tree"})
+
 # Structures that SAM2/Grounding DINO frequently fragment into multiple
 # overlapping or adjacent same-category detections that are really one
 # physical object (a wall split at a doorway/gap, a building segmented per
@@ -279,8 +294,15 @@ STATIC_CLUTTER_CATEGORIES: Final[frozenset[str]] = frozenset({
 # VEGETATION_CATEGORIES, since a real detection there is supposed to be a genuinely
 # distinct subject worth its own trajectory, not decorative fill. Keep this set and
 # ANIMATABLE_CATEGORIES disjoint outside VEGETATION_CATEGORIES for that reason.
+#
+# Exception: moored boats and docks. A river bank is lined with them the way a
+# meadow is with flowers, and Paris's quay is empty without them. The tracking
+# concern above no longer applies to painted instances -- VideoObjectExtractionStage
+# skips every synthetic point and MotionClassificationStage marks them stationary --
+# so a painted boat is static fill, placed along the water's edge by the feature
+# affinity in distribution_synthesis/features.py.
 DISTRIBUTABLE_CATEGORIES: Final[frozenset[str]] = (
-    VEGETATION_CATEGORIES | frozenset({"rock"}) | STATIC_CLUTTER_CATEGORIES
+    VEGETATION_CATEGORIES | frozenset({"rock", "boat", "dock"}) | STATIC_CLUTTER_CATEGORIES
 )
 
 # Categories that can plausibly exhibit visible motion worth animating -- either

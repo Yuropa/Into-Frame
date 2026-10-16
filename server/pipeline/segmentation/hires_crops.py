@@ -40,13 +40,22 @@ def hires_key(idx: int) -> str:
     return HIRES_KEY.format(idx=idx)
 
 
-def is_photographed(metadata: Optional[dict], restricted: bool) -> bool:
+def is_photographed(metadata: Optional[dict], restricted: bool, exempt_classes=()) -> bool:
     """Whether a detection may be placed / learned from under the cone policy.
 
     True for anything without the flag (synthetic points, detections made on the
     photo itself, caches from before the flag existed), so turning the policy on
-    never removes objects the cone logic has not actually judged."""
+    never removes objects the cone logic has not actually judged.
+
+    exempt_classes lists classes whose outpainted detections are kept anyway. Trees
+    are the case: the outpainted panorama around the photo is what the viewer sees
+    as the skybox and terrain texture, so its trees are part of the scene, and on
+    the Rainier capture 72 of 74 tree detections were outpainted -- dropping them
+    left the two photographed ones as the only placed trees and the only exemplars
+    Distribution Synthesis had to learn from."""
     if not restricted or not metadata:
+        return True
+    if exempt_classes and str(metadata.get("class") or "").lower() in exempt_classes:
         return True
     return bool(metadata.get("in_captured_fov", True))
 

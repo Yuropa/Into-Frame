@@ -1351,7 +1351,9 @@ stages:
     # as alpha). A "forest" is a band of unresolved canopy, not a set of trees, so
     # it is not scattered as instances (Distribution Synthesis exclude_types) and
     # this is what represents it instead. See pipeline/terrain/treeline_backdrop.py.
-    min_distance_m: 6.0         # nearer canopy is placed as individual tree instances
+    min_distance_m: 40.0        # nearer canopy is placed as individual tree instances (detected,
+                                # outpainted and painted trees, 3D up close); the strip only
+                                # carries the forest beyond. At 6 m it took nearly every tree.
     max_distance_m: 400.0
     min_height_m: 1.0           # a run of vegetation must stand this tall to be canopy. In
                                 # SCENE metres: the calibrated panorama depth puts the
@@ -1673,6 +1675,20 @@ stages:
     # then painted straight across it (337 flowers, 65 plants, 12 trees on the water).
     # Rock is unaffected -- a rock in a stream is real.
     paint_vegetation_in_water: false
+    # Ground-cover radius and falloff above; these classes stand 25-150 m out and
+    # LODs keep the far ones cheap.
+    class_max_paint_radius_m: {tree: 150.0, boat: 150.0, dock: 100.0, bush: 60.0, rock: 60.0}
+    class_falloff_exponent: {tree: 1.0, boat: 0.5, dock: 0.5}
+    # Learned placement relative to the water's edge, roads, trails and the forest
+    # edge (distribution_synthesis/features.py).
+    feature_affinity: true
+    feature_min_kl: 0.25
+    feature_floor: 0.1
+    min_feature_exemplars: 6
+    bloom_classes: [flower]           # density scaled by the detector's measured recall
+    bloom_max_boost: 6.0
+    align_to_water_classes: [boat, dock]
+    class_paint_regions: {boat: [water]}
     # Guard against a CLUMPED group (a few tight patches far apart) demanding a huge
     # exemplar candidate grid: the hull spans the empty gaps while spacing is measured
     # within the clumps, so e.g. three patches of 20 flowers 40 m apart asks for
