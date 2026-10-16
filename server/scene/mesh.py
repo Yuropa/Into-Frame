@@ -333,6 +333,40 @@ class Mesh:
         )
         return Mesh(baked)
 
+    def match_texture_colour(self, reference_rgba: "PILImage.Image", max_gain: float = 2.5) -> "tuple[np.ndarray, np.ndarray] | None":
+        """Scale the base-colour texture per channel so its mean over the surface
+        (sampled at the vertex UVs, so atlas padding does not count) matches the
+        mean of the reference's opaque pixels. Returns (before, after) means, or
+        None when there is no texture or nothing to compare.
+
+        SAM3D/TRELLIS often return a texture far darker or more washed out than
+        the picture they were given (Rainier 2026-10-16: a tree crop averaging
+        (98, 92, 40) came back (46, 46, 22) and rendered black)."""
+        if not self.has_texture:
+            return None
+        from PIL import Image as _PIL
+        ref = np.asarray(reference_rgba.convert("RGBA"), dtype=np.float32)
+        opaque = ref[..., 3] > 127
+        if opaque.sum() < 16:
+            return None
+        target = ref[..., :3][opaque].mean(axis=0)
+        visual = self.mesh.visual
+        material = visual.material
+        attr = "baseColorTexture" if getattr(material, "baseColorTexture", None) is not None else "image"
+        tex = getattr(material, attr)
+        mode = tex.mode
+        arr = np.asarray(tex.convert("RGBA"), dtype=np.float32)
+        h, w = arr.shape[:2]
+        uv = np.asarray(visual.uv, dtype=np.float64)
+        cols = np.clip((uv[:, 0] % 1.0) * (w - 1), 0, w - 1).astype(int)
+        rows = np.clip((1.0 - (uv[:, 1] % 1.0)) * (h - 1), 0, h - 1).astype(int)
+        current = arr[rows, cols, :3].mean(axis=0)
+        gain = np.clip(target / np.maximum(current, 1.0), 1.0 / max_gain, max_gain)
+        arr[..., :3] = np.clip(arr[..., :3] * gain, 0, 255)
+        out = _PIL.fromarray(arr.astype(np.uint8), "RGBA")
+        setattr(material, attr, out if mode == "RGBA" else out.convert(mode))
+        return current, np.clip(current * gain, 0, 255)
+
     def apply_crop_texture(self, image: "PILImage.Image") -> None:
         """Apply image as texture via orthographic projection onto the front face.
 

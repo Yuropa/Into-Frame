@@ -23,7 +23,7 @@ from pipeline.panorama_segmentation.panorama_region_result import (
     colorize_region_type_map,
     paintable_region_types,
 )
-from pipeline.object_typing.categories import VEGETATION_CATEGORIES
+from pipeline.object_typing.categories import ALWAYS_MESH_CATEGORIES, VEGETATION_CATEGORIES
 from pipeline.object_distribution.object_distribution_result import TypeDistribution
 from pipeline.grass_cover.grass_area import cell_greenness
 from pipeline.distribution_synthesis.features import (
@@ -259,6 +259,9 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         align_to_water_classes: list[str] | None = None,
         class_paint_regions: dict[str, list[str]] | None = None,
         feature_exempt_classes: list[str] | None = None,
+        photo_veto_classes: list[str] | None = None,
+        photo_veto_regions: list[str] | None = None,
+        photo_veto_margin_deg: float = 3.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Paint radius and falloff per class. max_paint_radius_m and
@@ -287,6 +290,18 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
             str(c).lower() for c in (feature_exempt_classes if feature_exempt_classes is not None
                                      else ["flower", "plant", "grass_tuft"])
         )
+        # Classes whose exemplars may come from the outpainted ring
+        # (categories.OUTPAINTED_PLACEABLE_CATEGORIES) learn wherever the outpainter
+        # put them -- on Rainier, trees ~10 m from the camera on every side -- and
+        # would paint that into the photographed view, where the photo shows open
+        # meadow. Inside the captured cone the photograph is the ground truth, so a
+        # painted instance of these classes is only kept on photo_veto_regions
+        # (where the photo shows canopy the detector does not split into trees).
+        self.photo_veto_classes = frozenset(
+            str(c).lower() for c in (photo_veto_classes if photo_veto_classes is not None else ["tree"])
+        )
+        self.photo_veto_regions = [str(r).lower() for r in (photo_veto_regions or ["forest"])]
+        self.photo_veto_margin_deg = float(photo_veto_margin_deg)
         # Small coloured blooms the detector undercounts; their painted density is
         # scaled by features.bloom_recall, up to bloom_max_boost.
         self.bloom_classes = frozenset(str(c).lower() for c in (bloom_classes or ["flower"]))
@@ -1032,6 +1047,24 @@ class DistributionSynthesisStage(PipelineStage):
         # Vegetation points discarded because the panorama shows bare/unvegetated
         # ground at that cell -- see _vegetation_weight.
         appearance_rejected: dict[int, int] = {}
+        # See photo_veto_classes.
+        photo_vetoed: dict[int, int] = {}
+        photo_cone = None
+        veto_u0 = veto_u1 = 0.0
+        veto_allowed: set[int] = set()
+        if cfg.photo_veto_classes:
+            from util.captured_cone import captured_cone_from_context
+            # Only the cone's angular extent is used here; the panorama itself is
+            # not always in the context by this stage, so nominal dimensions.
+            photo_cone = captured_cone_from_context(context, 4096, 2048)
+            if photo_cone is not None:
+                margin = cfg.photo_veto_margin_deg / 360.0 * photo_cone.pano_w
+                veto_u0, veto_u1 = photo_cone.u_range[0] - margin, photo_cone.u_range[1] + margin
+                for name in cfg.photo_veto_regions:
+                    try:
+                        veto_allowed.add(int(RegionType.from_label(name)))
+                    except KeyError:
+                        pass
 
         # Set when every tile failed -- see the _RAN_MARKER decision at the end of run().
         total_failure = False
@@ -1140,6 +1173,16 @@ class DistributionSynthesisStage(PipelineStage):
                                 appearance_rejected[job["group_idx"]] = appearance_rejected.get(job["group_idx"], 0) + 1
                                 continue
 
+                    if photo_cone is not None and job_obj_type in cfg.photo_veto_classes:
+                        u = ((math.atan2(x, z) / (2.0 * math.pi) + 0.5) % 1.0) * photo_cone.pano_w
+                        if veto_u0 <= u <= veto_u1:
+                            vr = int((z + grid_size_meters / 2.0) / cell_m)
+                            vc = int((x + grid_size_meters / 2.0) / cell_m)
+                            inside = 0 <= vr < grid_resolution and 0 <= vc < grid_resolution
+                            if not inside or int(region_map[vr, vc]) not in veto_allowed:
+                                photo_vetoed[job["group_idx"]] = photo_vetoed.get(job["group_idx"], 0) + 1
+                                continue
+
                     job_paint_radius, job_falloff, job_affinity = group_rules[job["group_idx"]]
                     cell_row = cell_col = None
                     if job_affinity is not None:
@@ -1186,8 +1229,29 @@ class DistributionSynthesisStage(PipelineStage):
 
             self.finish_progress(task)
 
+        # Rigid things take up room: a boat is a solid hull metres long, and two
+        # painted on the same spot interpenetrate (Paris: three hulls stacked by the
+        # camera). Each keeps a footprint of its own length clear of every other
+        # rigid instance, painted or photographed.
+        rigid_taken: list[tuple[float, float, float]] = [
+            (float(px), float(pz), 0.5 * float(sw))
+            for _, obj_t, d, _ in groups if obj_t in ALWAYS_MESH_CATEGORIES
+            for (px, pz), (sw, _sh) in zip(d.points, d.sizes)
+        ]
+        overlapped: dict[int, int] = {}
+
         for group_idx, (region_type, obj_type, dist, _paintable_idxs) in enumerate(groups):
             placed = group_placed[group_idx]
+            if obj_type in ALWAYS_MESH_CATEGORIES:
+                clear = []
+                for item in placed:
+                    x, z, w = item[0], item[1], item[2]
+                    if any(math.hypot(x - tx, z - tz) < 1.1 * (0.5 * w + tr) for tx, tz, tr in rigid_taken):
+                        overlapped[group_idx] = overlapped.get(group_idx, 0) + 1
+                        continue
+                    rigid_taken.append((x, z, 0.5 * w))
+                    clear.append(item)
+                placed = group_placed[group_idx] = clear
             # Ceiling on the population, applied after synthesis so the thinned
             # result still spans the whole region (see max_instances_per_group).
             # Uniform random decimation preserves the pattern's shape -- dropping a
@@ -1225,6 +1289,10 @@ class DistributionSynthesisStage(PipelineStage):
                 f"  {obj_type} [{region_type}]: painted {len(placed)} instances"
                 + (f" ({near_rejected[group_idx]} dropped inside the near edge)"
                    if near_rejected.get(group_idx) else "")
+                + (f" ({overlapped[group_idx]} dropped overlapping another rigid object)"
+                   if overlapped.get(group_idx) else "")
+                + (f" ({photo_vetoed[group_idx]} vetoed inside the photographed view)"
+                   if photo_vetoed.get(group_idx) else "")
                 + (f" ({appearance_rejected[group_idx]} dropped on unvegetated ground)"
                    if appearance_rejected.get(group_idx) else "")
                 + (f" ({feature_rejected[group_idx]} thinned by feature affinity)"

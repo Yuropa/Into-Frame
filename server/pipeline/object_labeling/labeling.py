@@ -196,9 +196,45 @@ class ObjectLabelingStage(PipelineStage):
                 labelled.append({
                     "box": [pu0, pv0, pu1 - pu0, pv1 - pv0], "class": cls,
                     "score": float(det["score"]), "origin": "photo", "photo_box": [x, y, w, h],
-                    "name": str(det["label"]).strip().lower(),
+                    "name": _phrase(det["label"], phrases),
                 })
-            self.log_info(f"Photograph: {len(labelled)} labelled box(es)")
+            # A second, whole-photo pass at a size the detector takes as one tile.
+            # The detection photo is super-resolved and tiled at 800 px, so anything
+            # taller than a tile is only ever seen truncated and lost: Paris's
+            # Eiffel Tower (0.92 on the whole photo) never got a box, and the only
+            # "eiffel tower" left was a distant spire.
+            whole_scale = min(1.0, 990.0 / max(photo_img.width, photo_img.height))
+            whole = Image(photo_img.rgb().resize(
+                (max(16, int(photo_img.width * whole_scale)), max(16, int(photo_img.height * whole_scale))),
+                PILImage.LANCZOS,
+            ))
+            tiled = list(labelled)
+            extra_boxes = 0
+            for det in sorted(self._detect(whole, phrases, "whole photograph"), key=lambda d: -float(d["score"])):
+                cls = normalize_category(det["label"])
+                if cls not in OBJECT_CATEGORIES:
+                    continue
+                x, y, w, h = (float(v) / whole_scale / factor for v in det["box"])
+                if any(t["class"] == cls and _box_iou(t["photo_box"], [x, y, w, h]) > 0.3 for t in tiled):
+                    continue
+                tiled.append({"class": cls, "photo_box": [x, y, w, h]})
+                pu0, pv0 = cone.photo_to_pano(x, y)
+                pu1, pv1 = cone.photo_to_pano(x + w, y + h)
+                labelled.append({
+                    "box": [pu0, pv0, pu1 - pu0, pv1 - pv0], "class": cls,
+                    "score": float(det["score"]), "origin": "photo", "photo_box": [x, y, w, h],
+                    "name": _phrase(det["label"], phrases),
+                })
+                extra_boxes += 1
+            self.log_info(f"Photograph: {len(labelled)} labelled box(es) ({extra_boxes} from the whole-photo pass)")
+
+        # A named thing exists once: of its boxes only the best stands (Paris's
+        # "eiffel tower" also matched a distant spire at 0.39).
+        best_named: dict[str, float] = {}
+        for b in labelled:
+            if _is_named(b):
+                best_named[b["name"]] = max(best_named.get(b["name"], 0.0), b["score"])
+        labelled = [b for b in labelled if not _is_named(b) or b["score"] >= best_named[b["name"]]]
 
         pano_boxes = 0
         scale = cfg.panorama_detect_scale if photo_img is not None else 1.0
@@ -226,6 +262,7 @@ class ObjectLabelingStage(PipelineStage):
         box_area = np.maximum(box_arr[:, 2] * box_arr[:, 3], 1e-6) if len(labelled) else np.zeros(0)
         # Blob area inside each labelled box, for the "represented" test below.
         covered_by_blobs = np.zeros(len(labelled), dtype=np.float64)
+        claimed: dict[int, list] = {}   # labelled box -> [(blob area, idx)] that took its label
         counts: dict[str, int] = {}
         unlabelled = 0
         debug = []
@@ -268,6 +305,7 @@ class ObjectLabelingStage(PipelineStage):
                 }
             else:
                 _, k, coverage = best
+                claimed.setdefault(k, []).append((total, idx))
                 entry = labelled[k]
                 new_meta = {
                     **metadata, "class": entry["class"], "confidence": round(entry["score"], 4),
@@ -283,6 +321,21 @@ class ObjectLabelingStage(PipelineStage):
                           "coverage": new_meta.get("label_coverage"), "source": new_meta["label_source"]})
             self.advance_progress(task)
         self.finish_progress(task)
+        # A named thing is one object: when its box labelled several blobs (the
+        # Eiffel Tower's body and, separately, a sliver of its first platform),
+        # the largest keeps the label and the rest are left as parts of it.
+        for k, blobs in claimed.items():
+            entry = labelled[k]
+            if len(blobs) < 2 or not _is_named(entry):
+                continue
+            for _, idx in sorted(blobs, reverse=True)[1:]:
+                m = context.object(f"metadata_{idx}") or {}
+                context.add_object(f"metadata_{idx}", {
+                    **m, "class": "indeterminate", "confidence": 0.0, "low_confidence": True,
+                    "label_source": "none", "part_of": entry.get("name"),
+                })
+                counts[entry["class"]] -= 1
+                unlabelled += 1
         self.log_info(
             f"Labelled {object_count - unlabelled}/{object_count} blob(s): "
             + ", ".join(f"{c} {n}" for c, n in sorted(counts.items(), key=lambda kv: -kv[1]))
@@ -294,30 +347,47 @@ class ObjectLabelingStage(PipelineStage):
         added = 0
         if cfg.add_unmatched_boxes and len(labelled):
             represented = covered_by_blobs / box_area
+            # A named thing ("eiffel tower") is its own detection unless a blob took
+            # its label: Paris's tower is a 9x24 px sliver on the skyline, covered by
+            # sky blobs (so "represented") and under the minimum area, and was lost.
+            named = {
+                k for k in range(len(labelled))
+                if k not in claimed and _is_named(labelled[k])
+            }
             unmatched = [
                 k for k in range(len(labelled))
-                if represented[k] < cfg.represented_fraction and labelled[k]["class"] in OBJECT_CATEGORIES
+                if labelled[k]["class"] in OBJECT_CATEGORIES
+                and (represented[k] < cfg.represented_fraction or k in named)
+                # A named box a blob already took is that blob, however little of
+                # its box the blob fills (a lattice tower is mostly sky).
+                and not (k in claimed and _is_named(labelled[k]))
             ]
             photo_k = [k for k in unmatched if labelled[k]["origin"] == "photo"]
             pano_k = [k for k in unmatched if labelled[k]["origin"] == "panorama"]
             if photo_k or pano_k:
                 if self._seg is None:
                     self._seg = ImageSeg(self.preferred_device)
-            if photo_k:
+            native_area = cone.photo_w * cone.photo_h if cone is not None else 0.0
+            # Named things skip the minimum area: a landmark far away is small.
+            for group, min_area in (
+                ([k for k in photo_k if k not in named], cfg.min_area_fraction * native_area),
+                ([k for k in photo_k if k in named], 0.0),
+            ):
+                if not group:
+                    continue
                 boxes = []
-                for k in photo_k:
+                for k in group:
                     x, y, w, h = labelled[k]["photo_box"]
                     boxes.append([int(x * factor), int(y * factor), max(1, int(w * factor)), max(1, int(h * factor))])
                 masks = self._seg.segment_boxes(photo_img, boxes, self.temp)
-                native_area = cone.photo_w * cone.photo_h
                 n, _ = store_photo_masks(
                     context, cone, photo_img.rgba(), factor, masks,
-                    [labelled[k]["score"] for k in photo_k], next_idx,
-                    min_area=cfg.min_area_fraction * native_area, max_area=cfg.max_area_fraction * native_area,
-                    source="grounding_dino", labels=[labelled[k]["class"] for k in photo_k],
+                    [labelled[k]["score"] for k in group], next_idx,
+                    min_area=min_area, max_area=cfg.max_area_fraction * native_area,
+                    source="grounding_dino", labels=[labelled[k]["class"] for k in group],
                     extra=[{"low_confidence": labelled[k]["score"] < cfg.confident_score,
                             "confidence": round(labelled[k]["score"], 4), "label_source": "photo",
-                            "name": labelled[k].get("name") or labelled[k]["class"]} for k in photo_k],
+                            "name": labelled[k].get("name") or labelled[k]["class"]} for k in group],
                     log=self.log_info,
                 )
                 next_idx += n
@@ -334,7 +404,7 @@ class ObjectLabelingStage(PipelineStage):
                 area_ref = min(pano_w * pano_h, 1024 * 1024)
                 for k, crop in zip(pano_k, result.masked_images(pano_img)):
                     x, y, w, h = crop.box
-                    if w * h < cfg.min_area_fraction * area_ref or w * h > cfg.max_area_fraction * area_ref:
+                    if (w * h < cfg.min_area_fraction * area_ref and k not in named) or w * h > cfg.max_area_fraction * area_ref:
                         continue
                     context.add_image(f"crop_{next_idx}", crop.image)
                     context.add_object(f"metadata_{next_idx}", {
@@ -414,3 +484,29 @@ class ObjectLabelingStage(PipelineStage):
             self._seg.close()
             self._seg = None
         super().clean_up()
+
+
+def _box_iou(a, b) -> float:
+    ax1, ay1, bx1, by1 = a[0] + a[2], a[1] + a[3], b[0] + b[2], b[1] + b[3]
+    iw = max(0.0, min(ax1, bx1) - max(a[0], b[0]))
+    ih = max(0.0, min(ay1, by1) - max(a[1], b[1]))
+    inter = iw * ih
+    union = a[2] * a[3] + b[2] * b[3] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _phrase(label: str, phrases: list[str]) -> str:
+    """The vocabulary phrase a detector label names. Grounding DINO joins the
+    tokens of adjacent phrases ("eiffel tower tower"); the longest vocabulary
+    phrase inside the label is the one meant."""
+    label = str(label).strip().lower()
+    inside = [p for p in phrases if p in label]
+    return max(inside, key=len) if inside else label
+
+
+def _is_named(entry: dict) -> bool:
+    """A proper-noun box ("eiffel tower"), not a class word ("tower", "river")."""
+    name = str(entry.get("name") or entry["class"]).replace(" ", "_")
+    return (entry["class"] in OBJECT_CATEGORIES
+            and name not in OBJECT_CATEGORIES and name not in ENVIRONMENT_CATEGORIES
+            and normalize_category(name) != name)

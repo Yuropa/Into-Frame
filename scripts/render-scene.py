@@ -597,7 +597,7 @@ class SceneBuilder:
                     color_0=grass.metadata["colour"],
                     indices=np.asarray(g.faces, dtype=np.uint32),
                     material=pyrender.MetallicRoughnessMaterial(
-                        baseColorFactor=[1, 1, 1, 1], metallicFactor=0.0, roughnessFactor=0.9, doubleSided=True),
+                        baseColorFactor=[1.0, 1.0, 1.0, 1.0], metallicFactor=0.0, roughnessFactor=0.9, doubleSided=True),
                 )]), pose=_MIRROR @ terrain_pose @ _MIRROR)
                 stats["grass_tufts"] = int(grass.metadata["tufts"])
         self._add_sun(ps)
@@ -664,7 +664,7 @@ class SceneBuilder:
                     ctr = root + np.array([0.0, t * bh, 0.0]) + face * lean * t * t
                     hw = 0.5 * w * (1 - 0.85 * t)
                     V.append(ctr - side * hw); V.append(ctr + side * hw)
-                    col_t = np.clip(base_col * (0.45 + 0.75 * t), 0, 1)
+                    col_t = np.clip(base_col * (0.6 + 0.7 * t), 0, 1)  # GrassBlades.shader root 0.6, tip 1.3
                     C.append(col_t); C.append(col_t)
                 for sgi in range(seg):
                     i0 = b0 + 2 * sgi

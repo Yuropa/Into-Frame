@@ -156,7 +156,7 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         self.reference_view_classes = frozenset(
             str(c).lower() for c in (reference_view_classes if reference_view_classes is not None
                                      else ["boat", "ship", "dock", "bridge", "tower", "building",
-                                           "statue", "monument", "car", "truck", "bus"])
+                                           "statue", "monument", "car", "truck", "bus", "flower"])
         )
         self.reference_strength = float(reference_strength)
         self.reference_candidates = max(1, int(reference_candidates))
@@ -678,7 +678,7 @@ class ObjectCompletionStage(PipelineStage):
                 sources[idx] = img.image.convert("RGBA")
         if not sources:
             return 0
-        self.log_info(f"Reference views for {len(sources)} rigid object(s)")
+        self.log_info(f"Reference views for {len(sources)} object(s)")
         super().clean_up()
         inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
         generated: dict[int, list[PILImage.Image]] = {}
@@ -692,6 +692,35 @@ class ObjectCompletionStage(PipelineStage):
                     f"{subject}, the whole {cls} in frame, seen from the side at eye level, three-quarter view, "
                     f"isolated on a plain white background, studio product photograph, even soft light, sharp"
                 )
+                strength = cfg.reference_strength
+                if min(src.size) >= 160:
+                    # A large, clear crop (Paris's tour boat, 235x187 px) is worth
+                    # keeping: at 0.9 it came back a generic rowboat. Lower strength
+                    # keeps its kind and build; the prompt still sets the view.
+                    strength = min(strength, 0.75)
+                if name != cls:
+                    # A named landmark: the name is the whole description. Its crop
+                    # is often a few pixels on the skyline (Paris's Eiffel Tower is
+                    # 9x24 px), which at 0.9 would leave a smudge to follow, so a
+                    # small one is drawn from the name alone.
+                    prompt = (
+                        f"the {name}, the entire structure from its base to its top in frame, "
+                        f"seen from ground level, isolated on a plain white background, "
+                        f"architectural photograph, even soft daylight, sharp detail"
+                    )
+                    if max(src.size) < 96:
+                        strength = 1.0
+                if cls in ("flower", "plant"):
+                    # A flower crop is a few dozen pixels of a clump in a meadow; what
+                    # survives is its bloom colour, so the prompt carries that and asks
+                    # for one whole plant.
+                    bloom = _bloom_colour_name(src)
+                    prompt = (
+                        f"a single {bloom + ' ' if bloom else ''}wildflower plant, one upright stem with "
+                        f"leaves and its blooms, the whole plant from the base of the stem to the top in frame, "
+                        f"seen from the side, isolated on a plain white background, botanical studio "
+                        f"photograph, even soft light, sharp"
+                    )
                 size = cfg.canvas_px
                 canvas = PILImage.new("RGB", (size, size), (255, 255, 255))
                 fit = cfg.object_fraction * size / max(src.size)
@@ -704,7 +733,7 @@ class ObjectCompletionStage(PipelineStage):
                         outs.append(inpainter.inpaint(
                             canvas, full, self.temp, prompt=prompt,
                             num_inference_steps=cfg.num_inference_steps, guidance_scale=3.5,
-                            strength=cfg.reference_strength, seed=self.seed + 7919 * (k + 1) + idx,
+                            strength=strength, seed=self.seed + 7919 * (k + 1) + idx,
                         ).convert("RGB"))
                     except Exception as exc:
                         self.log_warning(f"  crop_{idx}: reference view failed ({exc})")
@@ -763,3 +792,35 @@ class ObjectCompletionStage(PipelineStage):
             self._foreground.unload()
             self._foreground = None
         super().clean_up()
+
+
+_BLOOM_HUES = (
+    (0, "red"), (20, "orange"), (45, "yellow"), (75, "yellow-green"), (160, "white"),
+    (200, "blue"), (250, "violet"), (290, "purple"), (320, "magenta"), (345, "red"),
+)
+
+
+def _bloom_colour_name(rgba: PILImage.Image) -> "str | None":
+    """The colour of a flower crop's blooms: the median hue of its saturated,
+    non-green opaque pixels (or "white" for bright unsaturated ones), as a word."""
+    arr = np.asarray(rgba.convert("RGBA"), dtype=np.float32) / 255.0
+    opaque = arr[..., 3] > 0.5
+    if opaque.sum() < 16:
+        return None
+    hsv = np.asarray(rgba.convert("RGB").convert("HSV"), dtype=np.float32)
+    h, sat, val = hsv[..., 0] * (360.0 / 255.0), hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
+    green = (h > 70) & (h < 170)
+    blooms = opaque & ~green & (sat > 0.35) & (val > 0.3)
+    whites = opaque & (sat < 0.15) & (val > 0.8)
+    if whites.sum() > max(blooms.sum(), 0.03 * opaque.sum()):
+        return "white"
+    if blooms.sum() < 0.03 * opaque.sum():
+        return None
+    # Circular median via the dominant 10-degree bin.
+    hist, edges = np.histogram(h[blooms], bins=36, range=(0, 360))
+    hue = float(edges[int(np.argmax(hist))] + 5.0)
+    name = "red"
+    for start, label in _BLOOM_HUES:
+        if hue >= start and label != "white":
+            name = label
+    return name

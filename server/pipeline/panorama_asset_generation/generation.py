@@ -162,6 +162,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         delight_blur_fraction: float = 0.02,
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
+        match_texture_colour: bool = True,
         far_landmark_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -178,6 +179,8 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
             far_landmark_classes if far_landmark_classes is not None
             else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
         )
+        # See Mesh.match_texture_colour.
+        self.match_texture_colour = bool(match_texture_colour)
         # See hires_crops.is_photographed.
         self.outpainted_classes = frozenset(
             outpainted_classes if outpainted_classes is not None else OUTPAINTED_PLACEABLE_CATEGORIES
@@ -597,11 +600,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # A rigid object reconstructs from its generated reference view when it
             # has one (ObjectCompletionStage._reference_views): whole, at eye level,
             # on white -- the view a single-image reconstructor is built for.
-            if obj_class in self.config.always_mesh_classes:
-                reference = context.input_image(_REFERENCE_KEY.format(idx=idx))
-                if reference is not None:
-                    self.log_info(f"  {mesh_key}: reconstructing from the reference view of crop_{idx}")
-                    crop = reference
+            # Any class Object Completion drew a reference view for (rigid objects,
+            # flowers) is reconstructed from it rather than from its crop.
+            reference = context.input_image(_REFERENCE_KEY.format(idx=idx))
+            if reference is not None:
+                self.log_info(f"  {mesh_key}: reconstructing from the reference view of crop_{idx}")
+                crop = reference
 
             fill_ratio = mask_fill_ratio(crop)
             if fill_ratio is not None and fill_ratio <= 0.0:
@@ -629,6 +633,15 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     # the client ignores COLOR_0, so bake it into a texture.
                     mesh = mesh.bake_vertex_colours()
                 mesh.fit_to_box(1.0, 1.0)
+                if self.config.match_texture_colour:
+                    ref = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop)
+                    matched = mesh.match_texture_colour(ref)
+                    if matched is not None:
+                        before, after = matched
+                        self.log_info(
+                            f"  {mesh_key}: texture mean {np.round(before).astype(int).tolist()} "
+                            f"-> {np.round(after).astype(int).tolist()} to match crop_{idx}"
+                        )
             except Exception as e:
                 # A single degenerate crop (e.g. a near-empty mask the
                 # generator's own preprocessing collapses to nothing)
@@ -1073,8 +1086,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
             bucket = metadata.get("bucket") or 0
             key = (obj_class, int(bucket))
+            # A box touching the panorama's left/right edge is a cut across the wrap
+            # seam: its crop holds one side of the object, stretched (Rainier's
+            # crop_212, the texture of a whole tree bucket's card). Still placed and
+            # pooled, never picked as the picture a mesh or card is made from.
+            on_seam = bool(box is not None and pano_w and (box[0] <= 2 or box[0] + box[2] >= pano_w - 2))
             candidates_by_group.setdefault(key, []).append({
-                "idx": idx, "box": box, "depth": depth, "metadata": metadata,
+                "idx": idx, "box": box, "depth": depth, "metadata": metadata, "on_seam": on_seam,
             })
 
         group_best: dict[tuple[str, int], tuple[int, float, float]] = {}
@@ -1147,7 +1165,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # crop_69 is 1.93, a 5.5x disagreement. With the guard the bucket picks
             # crop_268 (38x128, "a yellow flower that is on a stick"). Across every
             # carded group on that capture this changes only flower::4.
-            undisqualified = [s for s in scored if not s["disqualified"]] or scored
+            undisqualified = [s for s in scored if not s["disqualified"] and not s.get("on_seam")] or scored
             # A crop whose box cannot be a picture of this class (see
             # _MAX_WIDTH_OVER_HEIGHT) is never the card texture; a group with no
             # plausibly-shaped crop gets no card at all and stays on billboards.
@@ -1166,7 +1184,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if not within_threshold:
                 continue  # nothing close enough to mesh -- billboard-only group
 
-            eligible = [s for s in within_threshold if not s["disqualified"]] or within_threshold
+            eligible = (
+                [s for s in within_threshold if not s["disqualified"] and not s.get("on_seam")]
+                or [s for s in within_threshold if not s["disqualified"]]
+                or within_threshold
+            )
 
             # Size gate: a bespoke mesh is only worth generating for a prominent
             # subject. A group whose instances are ALL close-but-tiny (e.g. a bucket

@@ -40,6 +40,7 @@ def build_grass_field(
     height_jitter: float,
     seed: int,
     local_colour_weight: float = 0.35,
+    anchor_u_range: "tuple[float, float] | None" = None,
 ) -> tuple[PILImage.Image, PILImage.Image, dict]:
     res = mask.shape[0]
     cell_m = grid_size_m / res
@@ -82,7 +83,14 @@ def build_grass_field(
     # only partly: the panorama reprojected onto the ground smears radially (one
     # pixel stretched over metres), and a snow patch or a dry streak beside the
     # grass would otherwise colour whole runs of blades.
+    # The median is taken over the cells the PHOTOGRAPH sees when there are
+    # enough of them: the outpainted ring is murkier than the capture (Rainier:
+    # field median (47, 61, 45) against the photo's meadow at about (64, 81, 54)).
     grassy = density > 0.1
+    if anchor_u_range is not None:
+        in_photo = grassy & ok & (u >= anchor_u_range[0]) & (u <= anchor_u_range[1])
+        if in_photo.sum() >= 64:
+            grassy = in_photo
     if grassy.any():
         median = np.median(colour[grassy], axis=0)
         colour = median + local_colour_weight * (colour - median)

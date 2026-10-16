@@ -119,9 +119,9 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         repair_near_meshes: bool = False,
         grass_mode: str = "blades",
         field_px: int = 512,
-        tufts_per_m2: float = 18.0,
-        blades_per_tuft: int = 7,
-        blade_width_m: float = 0.012,
+        tufts_per_m2: float = 36.0,
+        blades_per_tuft: int = 9,
+        blade_width_m: float = 0.016,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # "blades": publish a grass field (grass_field.py) the client grows instanced
@@ -443,6 +443,7 @@ class GrassCoverStage(PipelineStage):
             grid_size_meters, cfg.max_radius_m, cfg.field_px,
             cfg.min_cell_greenness, cfg.full_density_greenness, cfg.density_floor_fraction,
             cfg.tuft_height_jitter, self.seed,
+            anchor_u_range=self._photo_u_range(context),
         )
         context.add_image(GRASS_FIELD_DENSITY_KEY, Image(dh))
         context.add_image(GRASS_FIELD_COLOUR_KEY, Image(colour))
@@ -857,6 +858,17 @@ class GrassCoverStage(PipelineStage):
             PIL.Image.fromarray((mask * 255).astype(np.uint8)).save(self.temp / "grass_area.png")
             for bucket, patch in enumerate(representatives):
                 patch.save(self.temp / f"exemplar_{bucket}.png")
+
+    @staticmethod
+    def _photo_u_range(context) -> "tuple[float, float] | None":
+        """The photographed cone as a [u0, u1] fraction of the panorama's width, or
+        None when the camera intrinsics are not in the context."""
+        from util.captured_cone import captured_cone_from_context
+        cone = captured_cone_from_context(context, 4096, 2048)
+        if cone is None:
+            return None
+        u0, u1 = cone.u_range
+        return u0 / 4096.0, u1 / 4096.0
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(_RAN_MARKER) is True

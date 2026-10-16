@@ -36,6 +36,7 @@ from logging import Logger
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
@@ -67,6 +68,7 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         mcubes_resolution: int = 128,
         max_mesh_faces: int = 8000,
         repair_meshes: bool = False,
+        max_aspect_disagreement: float = 1.6,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to refine. The Zero123 prior was fine-tuned on trees, so by
@@ -85,6 +87,11 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         # Same post-processing as Panorama Asset Generation applies to its meshes.
         self.max_mesh_faces = int(max_mesh_faces)
         self.repair_meshes = bool(repair_meshes)
+        # Tree-D Fusion can collapse a slender conifer into a round lump (Rainier,
+        # 2026-10-16: crops 0.3-0.4 wide:tall came back 0.9-1.0). A result whose
+        # width:height disagrees with the crop's silhouette by more than this factor
+        # is discarded and the Asset Generation mesh kept.
+        self.max_aspect_disagreement = float(max_aspect_disagreement)
 
 
 class TreeMeshGenerationStage(PipelineStage):
@@ -171,6 +178,21 @@ class TreeMeshGenerationStage(PipelineStage):
                         # The client ignores vertex colours; give it a texture.
                         mesh = mesh.bake_vertex_colours()
                     mesh.fit_to_box(1.0, 1.0)
+                    # Tree-D's textures come back dark like SAM3D's (Paris
+                    # 2026-10-16: near-black canopies); match the crop it came from.
+                    matched = mesh.match_texture_colour(pil)
+                    if matched is not None:
+                        self.log_info(f"  {mesh_key}: texture mean {np.round(matched[0]).astype(int).tolist()} "
+                                      f"-> {np.round(matched[1]).astype(int).tolist()}")
+                    crop_aspect = self._silhouette_aspect(pil)
+                    ext = mesh.extents
+                    mesh_aspect = float(max(ext[0], ext[2]) / max(ext[1], 1e-6))
+                    off = max(mesh_aspect, crop_aspect) / max(min(mesh_aspect, crop_aspect), 1e-6)
+                    if off > cfg.max_aspect_disagreement:
+                        raise ValueError(
+                            f"width:height {mesh_aspect:.2f} disagrees with the crop's {crop_aspect:.2f} "
+                            f"by {off:.1f}x (over {cfg.max_aspect_disagreement:.1f}x)"
+                        )
                 except Exception as exc:
                     self.log_warning(f"  {mesh_key}: Tree-D Fusion failed ({exc}); keeping the existing mesh")
                     failed.append(mesh_key)
@@ -195,6 +217,15 @@ class TreeMeshGenerationStage(PipelineStage):
         context.add_object(REFINEMENT_SUMMARY_KEY, {"refined": len(refined), "failed": failed, "keys": refined})
         self.log_info(f"Tree mesh refinement: {len(refined)} mesh(es) replaced, {len(failed)} failed")
         return context
+
+    @staticmethod
+    def _silhouette_aspect(pil) -> float:
+        """Width:height of the crop's opaque silhouette (the whole image if it has none)."""
+        alpha = np.asarray(pil.getchannel("A")) > 127
+        if not alpha.any():
+            return pil.width / max(pil.height, 1)
+        rows, cols = np.where(alpha)
+        return (cols.max() - cols.min() + 1) / max(rows.max() - rows.min() + 1, 1)
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(REFINEMENT_SUMMARY_KEY) is not None

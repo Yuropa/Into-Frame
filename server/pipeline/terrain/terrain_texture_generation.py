@@ -64,7 +64,7 @@ _BASE_PROMPTS: dict[RegionType, str] = {
     # under the standing blades -- "grass baked into the ground" (user, 2026-10-16).
     RegionType.VEGETATION: (
         "overhead macro photograph of a meadow floor: dark crumbly soil, a fine litter of "
-        "dry grass stems and seed husks, low moss and tiny clover leaves"
+        "dry grass stems and seed husks, and patches of low fine-grained moss, no leaves"
     ),
     RegionType.ROAD: (
         "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
@@ -102,7 +102,7 @@ _NEAR_GROUND_SURFACES: dict[RegionType, str] = {
     # stands on this plate as geometry.
     RegionType.VEGETATION: (
         "the floor of a subalpine meadow, dark crumbly soil under a fine even litter of dry "
-        "grass stems, low moss and small clover leaves, with patches of bare brown earth"
+        "grass stems and patches of low fine-grained moss, with bare brown earth between, no leaves"
     ),
     RegionType.FOREST: (
         "an open forest floor, an even carpet of fallen needles, moss and low leafy plants, "

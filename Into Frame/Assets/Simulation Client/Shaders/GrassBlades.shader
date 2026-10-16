@@ -8,8 +8,8 @@ Shader "IntoFrame/GrassBlades"
     // WindField.cs sets for every other swaying thing in the scene.
     Properties
     {
-        _BaseDarkness ("Root Darkness", Range(0, 1)) = 0.45
-        _TipBrightness ("Tip Brightness", Range(0.5, 2)) = 1.2
+        _BaseDarkness ("Root Darkness", Range(0, 1)) = 0.6
+        _TipBrightness ("Tip Brightness", Range(0.5, 2)) = 1.3
         _Translucency ("Translucency", Range(0, 1)) = 0.35
         _SwayStrength ("Sway (m per unit wind at the tip)", Float) = 0.6
         _SwayFrequency ("Sway Frequency", Float) = 2.1
