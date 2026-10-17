@@ -122,6 +122,53 @@ def _plausible_shape(obj_class: "str | None", box) -> bool:
     return (box[2] / box[3]) <= limit
 
 
+# Classes whose crops are the thing itself (a crown of foliage), so their median
+# colour is the class's colour. Not flowers: a flower crop is a patch of meadow
+# around a bloom, and matching to it would turn the bloom green.
+_COLOUR_FROM_PHOTO_CLASSES = {"tree", "bush", "shrub"}
+
+
+def _match_rgba_colour(image: PILImage.Image, target, min_gain: float = 0.4, max_gain: float = 2.0):
+    """Scale an RGBA image per channel so its opaque mean is `target`. Returns
+    (image, mean before), or (image, None) when nothing is opaque."""
+    arr = np.asarray(image.convert("RGBA"), dtype=np.float32)
+    opaque = arr[..., 3] > 127
+    if opaque.sum() < 16:
+        return image, None
+    before = arr[..., :3][opaque].mean(axis=0)
+    gain = np.clip(np.asarray(target, dtype=np.float32) / np.maximum(before, 1.0), min_gain, max_gain)
+    arr[..., :3] = np.clip(arr[..., :3] * gain, 0, 255)
+    return PILImage.fromarray(arr.astype(np.uint8), "RGBA"), before
+
+
+def _trim_ground_patch(image: PILImage.Image, spread: float = 2.5) -> "tuple[PILImage.Image, int]":
+    """Clear the tuft of ground a generated tree stands on (the reference views
+    are "a tree standing alone", drawn on a little mound of grass that a card
+    then carries as a green skirt at its foot). The trunk is the narrowest
+    opaque row in the bottom quarter; rows below it wider than `spread` times
+    that are ground. Returns (image, rows cleared)."""
+    arr = np.asarray(image.convert("RGBA")).copy()
+    opaque = arr[..., 3] > 127
+    rows = np.nonzero(opaque.any(axis=1))[0]
+    if rows.size < 8:
+        return image, 0
+    top, bottom = int(rows[0]), int(rows[-1])
+    widths = opaque.sum(axis=1)
+    lower = np.arange(bottom - (bottom - top) // 4, bottom + 1)
+    lower = lower[widths[lower] > 0]
+    if lower.size == 0:
+        return image, 0
+    trunk_row = int(lower[np.argmin(widths[lower])])
+    trunk = max(int(widths[trunk_row]), 1)
+    cut = bottom
+    while cut > trunk_row and widths[cut] > spread * trunk:
+        cut -= 1
+    if cut >= bottom:
+        return image, 0
+    arr[cut + 1:, :, 3] = 0
+    return PILImage.fromarray(arr, "RGBA"), bottom - cut
+
+
 class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -656,7 +703,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                             raise ValueError(f"{spread:.2f} times as wide as it is tall (a clump, not one plant)")
                 if self.config.match_texture_colour:
                     ref = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop)
-                    matched = mesh.match_texture_colour(ref)
+                    target = (self._photographed_class_colour(context, obj_class)
+                              if obj_class in _COLOUR_FROM_PHOTO_CLASSES else None)
+                    if target is not None:
+                        # The photographed colour of the class, not the one crop's:
+                        # Rainier's tree mesh came from an outpainted, golden-lit
+                        # tree and was matched to khaki.
+                        ref = PILImage.new("RGBA", (8, 8), tuple(int(round(c)) for c in target) + (255,))
+                    matched = mesh.match_texture_colour(ref, min_gain=0.6 if target is not None else 0.85)
                     if matched is not None:
                         before, after = matched
                         self.log_info(
@@ -745,6 +799,22 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
+            if from_reference and obj_class in _COLOUR_FROM_PHOTO_CLASSES:
+                texture, trimmed = _trim_ground_patch(texture)
+                if trimmed:
+                    self.log_info(f"  {key}: trimmed {trimmed} px of ground from under the trunk")
+            if from_reference and self.config.match_texture_colour and obj_class in _COLOUR_FROM_PHOTO_CLASSES:
+                # A generated reference is a catalogue tree in noon light (Rainier's
+                # cards were lime green against the photo's dark firs): bring it to
+                # the colour of the class as photographed.
+                target = self._photographed_class_colour(context, obj_class)
+                if target is not None:
+                    texture, before = _match_rgba_colour(texture, target)
+                    if before is not None:
+                        self.log_info(
+                            f"  {key}: reference colour {np.round(before).astype(int).tolist()} -> "
+                            f"{np.round(target).astype(int).tolist()} (photographed {obj_class} median)"
+                        )
 
             try:
                 # A reference view's card keeps the plant's own proportions and is
@@ -767,6 +837,38 @@ class PanoramaAssetGenerationStage(PipelineStage):
             )
             built += 1
         return built
+
+    def _photographed_class_colour(self, context: PipelineContext, obj_class: str):
+        """Median colour of the class's crops inside the photographed cone (each
+        crop's opaque mean; crops under 200 opaque px or bluer than they are
+        green -- sky through branches -- skipped). None under three crops."""
+        cache = self.__dict__.setdefault("_class_colour_cache", {})
+        if obj_class in cache:
+            return cache[obj_class]
+        means = []
+        for i in range(int(context.input_object(ContextKey.OBJECT_COUNT) or 0)):
+            meta = context.input_object(f"metadata_{i}") or {}
+            if normalize_category(meta.get("class")) != obj_class or not meta.get("in_captured_fov", False):
+                continue
+            if meta.get("synthetic"):
+                continue
+            crop = prefer_hires(context, i)
+            if crop is None:
+                continue
+            pil = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop)
+            arr = np.asarray(pil.convert("RGBA"), dtype=np.float32)
+            opaque = arr[..., 3] > 127
+            if opaque.sum() < 200:
+                continue
+            mean = arr[..., :3][opaque].mean(axis=0)
+            if obj_class in VEGETATION_CATEGORIES and mean[2] > mean[1]:
+                continue
+            means.append(mean)
+        target = np.median(np.stack(means), axis=0) if len(means) >= 3 else None
+        cache[obj_class] = target
+        if target is not None:
+            self.log_info(f"  photographed {obj_class} colour {np.round(target).astype(int).tolist()} from {len(means)} crop(s)")
+        return target
 
     def _source_crop(self, context: PipelineContext, idx: int):
         """The best pixels available for crop `idx`: the hi-res cut from the photo

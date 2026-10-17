@@ -58,6 +58,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         lod_billboard_screen_fraction: float = 0.003,
         lod_exempt_classes: list[str] | None = None,
         water_allowed_classes: list[str] | None = None,
+        water_only_classes: list[str] | None = None,
+        water_draft_fraction: float = 0.15,
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
         far_landmark_classes: list[str] | None = None,
@@ -113,6 +115,14 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
             water_allowed_classes if water_allowed_classes is not None
             else ["boat", "animal", "person", "rock", "bird"]
         )
+        # Classes that float: a painted instance whose snap lands on ground is
+        # dropped (Paris: boats standing on the quay 5-11 m from the river), and
+        # one on water sits water_draft_fraction of its height below the surface.
+        # Detections are kept wherever they land; they are evidence.
+        self.water_only_classes = frozenset(
+            water_only_classes if water_only_classes is not None else ["boat", "ship"]
+        )
+        self.water_draft_fraction = water_draft_fraction
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
@@ -707,6 +717,7 @@ class SceneGenerationStage(PipelineStage):
         snap_counts = {"mesh": 0, "height_map": 0, "unsnapped": 0}
         last_hit = {"water": False}
         dropped_in_water: dict[str, int] = {}
+        dropped_off_water: dict[str, int] = {}
         unsnapped_examples: list[str] = []
 
         # Category meshes refused for an instance by mesh_instance_scale, per mesh key.
@@ -810,6 +821,17 @@ class SceneGenerationStage(PipelineStage):
             # case nothing is skipped and this behaves exactly as it used to.
             background_rejected: set[int] = set(context.input_object("background_rejected") or [])
             background_skipped = 0
+            # Real length of each category mesh whose source crop Object Completion
+            # typed (a 35 m tour boat, a 4 m rowing boat). A boat's detection is
+            # often a piece of it -- Paris's tour boat was cut into a bow-on strip
+            # and its stern, placed 12 m long -- and painted boats inherit those
+            # sizes.
+            object_kinds = context.input_object("object_kinds") or {}
+            kind_length_m: dict[str, float] = {}
+            for key, src in (context.input_object("mesh_sources") or {}).items():
+                kind = object_kinds.get(str(src.get("idx")))
+                if kind and kind.get("length_m"):
+                    kind_length_m[key] = float(kind["length_m"])
             # Cone policy from the detection stages (see hires_crops.is_photographed).
             fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
             unphotographed_skipped = 0
@@ -1225,6 +1247,10 @@ class SceneGenerationStage(PipelineStage):
                     # on cells the lake now covers: nothing grows on a water surface.
                     dropped_in_water[cls] = dropped_in_water.get(cls, 0) + 1
                     continue
+                on_water = terrain_y is not None and last_hit["water"]
+                if cls in self.config.water_only_classes and not on_water and (metadata or {}).get("synthetic"):
+                    dropped_off_water[cls] = dropped_off_water.get(cls, 0) + 1
+                    continue
 
                 if terrain_y is None and len(unsnapped_examples) < 5:
                     unsnapped_examples.append(
@@ -1407,7 +1433,7 @@ class SceneGenerationStage(PipelineStage):
                     mesh_scale, mesh_rejection, mesh_gate = mesh_instance_scale(
                         mesh_extents, width, height,
                         min_height_fraction=self.config.min_mesh_height_fraction,
-                        by_length=cls in ("boat", "ship", "car", "truck", "bus"),
+                        by_length=cls in ("boat", "ship", "car", "truck", "bus") or mesh_key in kind_length_m,
                         # A landmark moved out along its ray is meant to be big.
                         max_size_m=(1.2 * max(width, height)) if landmark_ground_y is not None else None,
                     )
@@ -1491,9 +1517,28 @@ class SceneGenerationStage(PipelineStage):
                             mesh_geometry, mesh_key, cls, card_extents, idx, scale_y
                         )
                     else:
+                        if mesh_key in kind_length_m:
+                            # Within 0.7-1.4x of its kind's length: the detection
+                            # still sets one tour boat apart from another, but not
+                            # a fragment's size. After the gates, which bound a
+                            # reconstruction by its detection (25 m) and would
+                            # refuse a real-size tour boat.
+                            length = mesh_scale * float(max(mesh_extents[0], mesh_extents[2]))
+                            prior = kind_length_m[mesh_key]
+                            if length > 1e-6:
+                                mesh_scale *= float(np.clip(length, 0.7 * prior, 1.4 * prior)) / length
+                            # And no taller than a fifth of that length: a river boat
+                            # is long and low, but its reference view can come back
+                            # a three-deck ferry (Paris), 15 m tall at 35 m long.
+                            tall = mesh_scale * float(mesh_extents[1])
+                            if tall > 0.2 * prior:
+                                mesh_scale *= 0.2 * prior / tall
                         scale_x = scale_y = scale_z = mesh_scale
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * scale_y
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
+                    if on_water and cls in self.config.water_only_classes:
+                        mesh_place_y -= self.config.water_draft_fraction * float(
+                            category_mesh.mesh.bounds[1][1] - category_mesh.mesh.bounds[0][1]) * scale_y
                     self.log_info(
                         f"Creating {'card' if using_card else 'mesh'} for {idx} "
                         f"({cls}, bucket {bucket}, {camera_distance:.1f}m, "
@@ -1600,6 +1645,11 @@ class SceneGenerationStage(PipelineStage):
                     level(f"    no ground under object {example}")
             elif snapped:
                 self.log_info(f"Terrain snap: all {snapped} placed object(s) hit a ground mesh")
+        if dropped_off_water:
+            self.log_info(
+                "Dropped painted off the water: "
+                + ", ".join(f"{n} {c}" for c, n in sorted(dropped_off_water.items(), key=lambda kv: -kv[1]))
+            )
         if dropped_in_water:
             self.log_info(
                 "Dropped on the water surface: "
@@ -1746,6 +1796,11 @@ class SceneGenerationStage(PipelineStage):
             backdrop = Object3D.mesh(ContextKey.FAR_FIELD_BACKDROP, x=0.0, y=0.0, z=0.0)
             backdrop.set_rotation(*ground_rotation)
             backdrop.name = "backdrop"
+            # FarFieldBackdropStage textures it with the photographed light unless
+            # configured `lit`; then it must not be lit a second time.
+            from pipeline.terrain.far_field_backdrop import FAR_FIELD_SUMMARY_KEY
+            far_summary = context.input_object(FAR_FIELD_SUMMARY_KEY) or {}
+            backdrop.unlit = not bool(far_summary.get("lit", True))
             scene.add_object(backdrop)
 
         lighting = context.input_lighting(ContextKey.LIGHTING)

@@ -557,9 +557,9 @@ class SceneBuilder:
             elif name == "water":
                 mat = material_for(tm, blend=True, color=[0.10, 0.30, 0.45, 0.90], roughness=0.1)
             elif name in ("treeline", "backdrop"):
-                # Delit by the server and lit by the client (SceneObjectManager's
-                # unlitEnvironment is off); RENDER_UNLIT_ENV=1 for older scenes.
-                mat = material_for(tm, unlit=os.environ.get("RENDER_UNLIT_ENV") == "1")
+                # Lit unless the scene object says it carries its photographed
+                # light (SceneObject.unlit); RENDER_UNLIT_ENV=1 for older scenes.
+                mat = material_for(tm, unlit=bool(o.get("unlit")) or os.environ.get("RENDER_UNLIT_ENV") == "1")
             else:
                 mat = material_for(tm)
             ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))

@@ -124,6 +124,14 @@ class TreelineBackdropStage(PipelineStage):
             orig_forest = np.rint(self._fit(orig_type.depth, H, W, order=0)).astype(np.int32) == int(RegionType.FOREST)
             removed = np.asarray(removal.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
             restored = orig_forest & removed & ~vegetation
+            # Only canopy that was far on the original panorama: near trees the
+            # removal took are placed as objects, and restored at a treeline
+            # depth a tree 12 m away stands as a 70 m slab (Rainier: removed
+            # canopy median 12 m; Paris's far bank 99 m).
+            obj_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
+            if obj_depth is not None:
+                od = self._fit(obj_depth.depth, H, W, order=1)
+                restored &= np.isfinite(od) & (od >= cfg.min_distance_m)
             if restored.any():
                 fill = float(cfg.min_distance_m + 0.9 * (min(cfg.max_distance_m, 100.0) - cfg.min_distance_m))
                 ok = np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= cfg.max_distance_m)
@@ -211,12 +219,15 @@ class TreelineBackdropStage(PipelineStage):
         rgb = np.asarray(colour.rgb(), dtype=np.uint8)
         if restored.any() and original is not None and (original.width, original.height) == (W, H):
             rgb = np.where(restored[..., None], np.asarray(original.rgb(), dtype=np.uint8), rgb)
+        rgb = self._match_cone_colour(context, rgb, vegetation, W, H)
+        canopy_luma = float(rgb[vegetation].reshape(-1, 3).astype(np.float64).mean()) if vegetation.any() else 0.0
         rgb = rgb[row_min:row_max + 1]
         alpha = np.zeros((strip_h, W), dtype=np.float32)
         for c in range(W):
             if top[c] >= 0:
                 alpha[top[c] - row_min:bottom[c] - row_min + 1, c] = 1.0
         alpha *= vegetation[row_min:row_max + 1].astype(np.float32)
+        alpha = self._drop_fragments(alpha, rgb, canopy_luma)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
         texture = PILImage.fromarray(
@@ -315,6 +326,74 @@ class TreelineBackdropStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    def _match_cone_colour(self, context: PipelineContext, rgb: np.ndarray, forest: np.ndarray,
+                           W: int, H: int) -> np.ndarray:
+        """Canopy outside the photographed cone, coloured like the canopy inside it.
+
+        Outside the cone the panorama is outpainted, and its trees drift: Rainier's
+        came out golden-khaki beside the photo's dark firs, a band of autumn
+        across half the horizon. A per-channel gain (0.35-1.6) brings the
+        outpainted FOREST pixels' mean to the photographed ones'."""
+        from util.captured_cone import captured_cone_from_context
+        cone = captured_cone_from_context(context, W, H)
+        if cone is None:
+            return rgb
+        u0, u1 = cone.u_range
+        v0, v1 = cone.v_range
+        cols = np.arange(W)
+        in_cols = (cols >= u0) & (cols < u1)
+        rows = np.arange(H)
+        in_cone = in_cols[None, :] & ((rows >= v0) & (rows < v1))[:, None]
+        ref = forest & in_cone
+        out = forest & ~in_cols[None, :]
+        if ref.sum() < 2000 or out.sum() < 2000:
+            return rgb
+        target = rgb[ref].reshape(-1, 3).astype(np.float64).mean(0)
+        source = rgb[out].reshape(-1, 3).astype(np.float64).mean(0)
+        gain = np.clip(target / np.maximum(source, 1.0), 0.35, 1.6)
+        self.log_info(
+            f"Treeline backdrop: outpainted canopy {source.round().astype(int).tolist()} -> photographed "
+            f"{target.round().astype(int).tolist()} (gain {gain.round(2).tolist()})")
+        rgb = rgb.copy()
+        rgb[out] = np.clip(rgb[out].astype(np.float64) * gain, 0, 255).astype(np.uint8)
+        return rgb
+
+    @staticmethod
+    def _drop_fragments(alpha: np.ndarray, rgb: np.ndarray, canopy_luma: float,
+                        min_share: float = 0.03, min_luma_ratio: float = 0.5) -> np.ndarray:
+        """Squat or boxy scraps of canopy (a strip of shadowed ground, a trunk cut
+        off by the run test) stood as dark slabs on the horizon (Rainier). A
+        component under min_share of the canopy goes when it is wider than tall
+        or fills over 75% of its box, and any component filling over 80%; a conifer is tall and pointed (fill ~0.5),
+        and a broadleaf treeline is one large band. A component darker than
+        min_luma_ratio of the panorama's canopy goes too: Rainier's shadowed
+        forest came through the delit panorama as a streaked near-black block
+        ([14,16,10] against canopy [34,39,27]) over the photographed hills."""
+        from scipy.ndimage import label, find_objects
+        labels, n = label(alpha > 0.5)
+        if n == 0:
+            return alpha
+        sizes = np.bincount(labels.ravel(), minlength=n + 1)
+        total = float(sizes[1:].sum())
+        drop = np.zeros(n + 1, dtype=bool)
+        for k, sl in enumerate(find_objects(labels), start=1):
+            if sl is None:
+                continue
+            h, w = sl[0].stop - sl[0].start, sl[1].stop - sl[1].start
+            fill = sizes[k] / float(max(h * w, 1))
+            if sizes[k] < min_share * total and (h < 1.2 * w or fill > 0.75):
+                drop[k] = True
+            # A filled box is never a canopy silhouette, whatever its share: once
+            # near trees stopped being restored, Rainier's shadow block (fill 0.90)
+            # was 11% of what was left.
+            if fill > 0.8:
+                drop[k] = True
+            if canopy_luma > 0:
+                mask = labels[sl] == k
+                if float(rgb[sl][mask].astype(np.float64).mean()) < min_luma_ratio * canopy_luma:
+                    drop[k] = True
+        return np.where(drop[labels], 0.0, alpha).astype(alpha.dtype)
 
     @staticmethod
     def _fit(array: np.ndarray, H: int, W: int, order: int) -> np.ndarray:

@@ -17,6 +17,8 @@ public class SceneObjectManager : MonoBehaviour
 
     [Tooltip("Draw the treeline strip and far-field backdrop unlit. Only for scenes whose backdrop textures were not delit by the server.")]
     public bool unlitEnvironment = false;
+    // Containers whose scene object asked to be drawn unlit (SceneObject.unlit).
+    readonly HashSet<GameObject> _unlitContainers = new HashSet<GameObject>();
 
     [Tooltip("Material for the instanced grass blades (IntoFrame/GrassBlades). Falls back to Shader.Find, which only works in a build if the shader is in Always Included Shaders.")]
     public Material grassMaterial;
@@ -104,6 +106,7 @@ public class SceneObjectManager : MonoBehaviour
         foreach (var t in _tracked.Values)
             if (t.go != null) Destroy(t.go);
         _tracked.Clear();
+        _unlitContainers.Clear();
 
         // Only after every instance is destroyed: disposing a GltfImport destroys the
         // meshes/textures it created, which the instances were still referencing.
@@ -421,6 +424,7 @@ public class SceneObjectManager : MonoBehaviour
             targetRot = ToQuat(data.rotation),
         };
 
+        if (data.unlit) _unlitContainers.Add(container);
         var capturedContainer = container;
         var capturedMesh = data.mesh;
         var capturedGeneration = _queueGeneration;
@@ -630,7 +634,8 @@ public class SceneObjectManager : MonoBehaviour
         // client's own sun, so they are lit like everything in front of them. Turn
         // unlitEnvironment on for a scene built before that, whose textures still
         // carry their light.
-        if (unlitEnvironment && (container.name.EndsWith("(backdrop)") || container.name.EndsWith("(treeline)")))
+        if (_unlitContainers.Contains(container)
+            || (unlitEnvironment && (container.name.EndsWith("(backdrop)") || container.name.EndsWith("(treeline)"))))
             MakeUnlit(container);
     }
 

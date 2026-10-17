@@ -307,9 +307,12 @@ stages:
 
   - name: Panorama Regions
     stage: PanoramaRegionStage
-    nadir_cutoff_deg: -55.0 # degrees elevation: rows at/below this (the tripod/rig, heavily
+    nadir_cutoff_deg: -80.0 # degrees elevation: rows at/below this (the tripod/rig, heavily
                             # warped by the equirectangular projection) are discarded from
                             # SegFormer's raw output and replaced by the reliable ring above.
+                            # Was -55 for equirect tiling; the perspective views below see
+                            # the nadir properly, and at -55 the per-column fill stamped
+                            # rectangular blocks of the band's labels across every capture.
     nadir_band_deg: 15.0    # degrees of ring immediately above the cutoff used for the
                             # per-column majority vote that replaces the excluded band.
     # ADE20K semantic model and how the panorama is presented to it. mask2former is
@@ -321,6 +324,12 @@ stages:
     # called the whole near-field ground "water". The hero photograph is one more
     # view inside its cone, at photo_weight times a rendered view's weight.
     model: mask2former
+    # Mask2Former calls gravel and dirt paths "water" (Rainier: the trail and the
+    # gravel round the camera, 21% of the panorama); SegFormer over the same views
+    # calls them path/road and the pond still water. Water needs both to agree.
+    # Measured over the six cached captures: Rainier water 15% -> 3% (pond kept,
+    # trail now TRAIL), Paris/Shark Fin/sea captures lose <1-8% of their water.
+    water_check_model: segformer
     view_count: 8
     view_fov_deg: 90.0
     view_size_px: 768
@@ -363,9 +372,15 @@ stages:
 
   - name: Panorama Regions (Terrain)
     stage: PanoramaRegionStage
-    nadir_cutoff_deg: -55.0
+    nadir_cutoff_deg: -80.0
     nadir_band_deg: 15.0
     model: mask2former
+    # Mask2Former calls gravel and dirt paths "water" (Rainier: the trail and the
+    # gravel round the camera, 21% of the panorama); SegFormer over the same views
+    # calls them path/road and the pond still water. Water needs both to agree.
+    # Measured over the six cached captures: Rainier water 15% -> 3% (pond kept,
+    # trail now TRAIL), Paris/Shark Fin/sea captures lose <1-8% of their water.
+    water_check_model: segformer
     view_count: 8
     view_fov_deg: 90.0
     view_size_px: 768

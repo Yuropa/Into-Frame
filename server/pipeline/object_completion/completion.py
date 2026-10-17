@@ -59,6 +59,50 @@ COMPLETE_KEY = "crop_complete_{idx}"
 # the reconstructor only (see ObjectCompletionStage._reference_views).
 REFERENCE_KEY = "crop_reference_{idx}"
 COMPLETION_SUMMARY_KEY = "object_completion_summary"
+# {str(idx): {"class", "kind", "length_m"}} for every crop _object_kinds typed.
+# Scene Generation scales a mesh reconstructed from one of these crops to its
+# kind's real length (mesh_sources says which crop a mesh came from).
+OBJECT_KINDS_KEY = "object_kinds"
+
+# What CLIP chooses between for a class's reference view: (kind, CLIP text,
+# what the prompt asks for, typical length in metres or None). A class name
+# alone summons a generic subject, and the crop's caption follows what is
+# visible rather than what it is: Paris's tour boat seen from the bridge,
+# "a boat full of people", came back a rowing boat with men standing in it,
+# its stern a fishing trawler, and a moored houseboat (labelled dock) a
+# wooden jetty with a dinghy.
+_KIND_VOCAB: dict[str, list[tuple[str, str, str, float | None]]] = {
+    "tree": [
+        ("conifer", "a photo of conifer trees: pine, fir or spruce",
+         "conifer tree with a straight trunk, dense dark green needles", None),
+        ("broadleaf", "a photo of broadleaf deciduous trees", "broadleaf deciduous tree", None),
+    ],
+    "boat": [
+        ("tour boat", "a photo of a large river sightseeing tour boat",
+         "large river sightseeing tour boat: a long flat-bottomed hull, a low glass-roofed "
+         "passenger cabin and an open upper deck with rows of seats", 35.0),
+        ("barge", "a photo of a long river barge or houseboat moored at a quay",
+         "long low river barge: a long steel hull with a cabin along its deck and a small "
+         "wheelhouse at the stern", 30.0),
+        ("motorboat", "a photo of a small motorboat", "small motorboat with a windscreen", 6.0),
+        ("sailboat", "a photo of a sailing boat with a mast", "sailing yacht with a single mast", 10.0),
+        ("rowing boat", "a photo of a small wooden rowing boat", "small wooden rowing boat", 4.0),
+        ("fishing boat", "a photo of a fishing boat at sea", "fishing boat with a wheelhouse", 15.0),
+    ],
+    "dock": [
+        ("houseboat", "a photo of a houseboat moored along a river quay",
+         "long low river houseboat: a long steel hull with a cabin along its deck, potted "
+         "plants on the roof", 30.0),
+        ("pier", "a photo of a wooden pier or jetty on posts", "wooden pier on posts", None),
+        ("pontoon", "a photo of a floating pontoon landing stage",
+         "floating pontoon landing stage with railings", 15.0),
+    ],
+}
+# How much the photograph's own read of the kind counts against the crop's
+# (log-probabilities added), when the photograph is sure (>= 0.85). At 0.5 a
+# fragment of Paris's tour boat (its stern, crop 0.93 rowing boat) beat the
+# photo's 0.99 tour boat and came back a wooden dinghy.
+_KIND_PHOTO_WEIGHT: dict[str, float] = {}
 
 
 def complete_key(idx: int) -> str:
@@ -685,6 +729,11 @@ class ObjectCompletionStage(PipelineStage):
         self.log_info(f"Reference views for {len(sources)} object(s)")
         super().clean_up()
         descriptions = self._describe_crops(sources, metas, context)
+        kinds = self._object_kinds(sources, metas, context)
+        context.add_object(OBJECT_KINDS_KEY, {
+            str(idx): {"class": normalize_category(metas[idx].get("class")), "kind": k[0], "length_m": k[2]}
+            for idx, k in kinds.items()
+        })
         inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
         generated: dict[int, list[PILImage.Image]] = {}
         try:
@@ -704,6 +753,22 @@ class ObjectCompletionStage(PipelineStage):
                     f"The whole {cls} in frame, seen from the side at eye level, three-quarter view, "
                     f"isolated on a plain white background, realistic photograph, even soft daylight, sharp"
                 )
+                if cls in ("boat", "ship", "dock", "car", "truck", "bus"):
+                    # Nobody aboard: people drawn in become part of the mesh and
+                    # are scaled with the hull (Paris: rowers 4 m tall).
+                    if idx in kinds:
+                        # The kind replaces the caption, which describes what was
+                        # visible ("a boat full of people") rather than the vessel.
+                        noun = kinds[idx][0]
+                        prompt = (
+                            f"a real full-size {kinds[idx][1]}, empty with nobody aboard. "
+                            f"The whole {noun} in frame from end to end, seen from the side at eye level, "
+                            f"three-quarter view, isolated on a plain white background, realistic "
+                            f"photograph, even soft daylight, sharp"
+                        )
+                    else:
+                        prompt = prompt.replace(f"The whole {cls} in frame",
+                                                f"Empty with nobody aboard. The whole {cls} in frame")
                 strength = cfg.reference_strength
                 if min(src.size) >= 160:
                     # A large, clear crop (Paris's tour boat, 235x187 px) is worth
@@ -750,8 +815,14 @@ class ObjectCompletionStage(PipelineStage):
                         "pine", "fir", "spruce", "conifer", "evergreen", "cedar", "larch", "hemlock", "cypress"))
                     broadleaf = any(w in (described or "").lower() for w in (
                         "leaf", "leaves", "leafy", "oak", "maple", "willow", "plane", "broccoli", "round", "deciduous"))
-                    kind = ("conifer tree with a straight trunk" if conifer
-                            else "broadleaf deciduous tree" if broadleaf else "tree")
+                    # Otherwise CLIP's read of the crop and the photograph: a blurry
+                    # Rainier fir captioned "a tree is" was drawn as a park oak.
+                    if not conifer and not broadleaf:
+                        conifer = kinds.get(idx, ("",))[0] == "conifer"
+                        broadleaf = kinds.get(idx, ("",))[0] == "broadleaf"
+                    tree_text = {k[0]: k[2] for k in _KIND_VOCAB["tree"]}
+                    kind = (tree_text["conifer"] if conifer
+                            else tree_text["broadleaf"] if broadleaf else "tree")
                     prompt = (
                         f"a single whole {kind}, the entire tree from the base of the trunk to the top "
                         f"of the crown in frame, standing alone, seen from the side at eye level, isolated "
@@ -835,6 +906,60 @@ class ObjectCompletionStage(PipelineStage):
             clip.close()
             super().clean_up()
         return written
+
+    def _object_kinds(self, sources: dict[int, PILImage.Image], metas: dict[int, dict],
+                      context: PipelineContext) -> dict[int, tuple[str, str, float | None]]:
+        """{idx: (kind, prompt text, typical length m)} for each crop of a
+        _KIND_VOCAB class that CLIP types with confidence. The crop and the whole
+        photograph are both asked (a crop is often a smudge of foliage or a piece
+        of a hull; the scene says which forest or which river it is)."""
+        todo = {idx: src for idx, src in sources.items()
+                if normalize_category(metas[idx].get("class")) in _KIND_VOCAB}
+        if not todo:
+            return {}
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+            from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
+            processor = CLIPProcessor.from_pretrained(ImageClipClassifier.MODEL_NAME)
+            model = CLIPModel.from_pretrained(ImageClipClassifier.MODEL_NAME).to(self.preferred_device).eval()
+        except Exception as exc:
+            self.log_warning(f"object kind: CLIP unavailable ({exc})")
+            return {}
+        photo = context.input_image(ContextKey.INPUT)
+        kinds: dict[int, tuple[str, str, float | None]] = {}
+        try:
+            for cls in sorted({normalize_category(metas[i].get("class")) for i in todo}):
+                vocab = _KIND_VOCAB[cls]
+                members = [i for i in todo if normalize_category(metas[i].get("class")) == cls]
+                images = [_on_white(todo[i]) for i in members]
+                if photo is not None:
+                    images.append(photo.image.convert("RGB"))
+                with torch.no_grad():
+                    inputs = processor(text=[v[1] for v in vocab], images=images,
+                                       return_tensors="pt", padding=True).to(self.preferred_device)
+                    logp = model(**inputs).logits_per_image.float().log_softmax(-1).cpu().numpy()
+                scene = logp[-1] if photo is not None else np.zeros(len(vocab))
+                # An unsure photograph says nothing (Paris: 0.66 conifer, a skyline
+                # and a river, would have tipped its plane trees into firs).
+                weight = _KIND_PHOTO_WEIGHT.get(cls, 1.0) if np.exp(scene.max()) >= 0.85 else 0.0
+                # Two kinds need a clear call (Paris's photo is 0.66 conifer); among
+                # six, a plurality is already a read.
+                min_p = 0.75 if len(vocab) == 2 else 0.4
+                for k, idx in enumerate(members):
+                    joint = logp[k] + weight * scene
+                    p = np.exp(joint - joint.max()); p /= p.sum()
+                    best = int(np.argmax(p))
+                    if p[best] >= min_p:
+                        kinds[idx] = (vocab[best][0], vocab[best][2], vocab[best][3])
+                    self.log_info(
+                        f"  crop_{idx} ({cls}): crop {vocab[int(np.argmax(logp[k]))][0]} "
+                        f"{np.exp(logp[k].max()):.2f}, scene {vocab[int(np.argmax(scene))][0]} "
+                        f"{np.exp(scene.max()):.2f} -> {kinds[idx][0] if idx in kinds else 'unsure'} ({p[best]:.2f})")
+        finally:
+            del model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        return kinds
 
     def _describe_crops(self, sources: dict[int, PILImage.Image], metas: dict[int, dict], context: PipelineContext) -> dict[int, str]:
         """A short BLIP description of each unnamed, non-flower crop big enough to

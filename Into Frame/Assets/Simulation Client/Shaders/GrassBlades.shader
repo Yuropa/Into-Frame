@@ -13,6 +13,9 @@ Shader "IntoFrame/GrassBlades"
         _Translucency ("Translucency", Range(0, 1)) = 0.35
         _SwayStrength ("Sway (m per unit wind at the tip)", Float) = 0.6
         _SwayFrequency ("Sway Frequency", Float) = 2.1
+        // 1 on GrassField's far-tier material: the mesh is one quad, turned to the
+        // camera and cut into blades here, standing in for a patch of tufts.
+        _Card ("Card (far tier)", Float) = 0
     }
 
     SubShader
@@ -48,6 +51,7 @@ Shader "IntoFrame/GrassBlades"
                 float _Translucency;
                 float _SwayStrength;
                 float _SwayFrequency;
+                float _Card;
             CBUFFER_END
 
             UNITY_INSTANCING_BUFFER_START(GrassProps)
@@ -78,6 +82,7 @@ Shader "IntoFrame/GrassBlades"
                 float3 normalWS   : TEXCOORD1;
                 float  height     : TEXCOORD2;
                 float  fogFactor  : TEXCOORD3;
+                float2 uv         : TEXCOORD4;
                 UNITY_VERTEX_INPUT_INSTANCE_ID
                 UNITY_VERTEX_OUTPUT_STEREO
             };
@@ -106,6 +111,19 @@ Shader "IntoFrame/GrassBlades"
                 float3 rootWS = TransformObjectToWorld(float3(0, 0, 0));
                 float3 posWS  = TransformObjectToWorld(v.positionOS.xyz);
                 float  h      = saturate(v.uv.y);
+                float3 cardFacing = float3(0, 0, 0);
+                if (_Card > 0.5)
+                {
+                    // Cylindrical billboard: the quad's x axis turned square to the
+                    // camera about the vertical, keeping the instance's scale.
+                    float sx = length(float3(UNITY_MATRIX_M._m00, UNITY_MATRIX_M._m10, UNITY_MATRIX_M._m20));
+                    float sy = length(float3(UNITY_MATRIX_M._m01, UNITY_MATRIX_M._m11, UNITY_MATRIX_M._m21));
+                    float3 toCam = _WorldSpaceCameraPos - rootWS;
+                    toCam.y = 0;
+                    cardFacing = normalize(toCam + float3(1e-4, 0, 0));
+                    float3 right = float3(cardFacing.z, 0, -cardFacing.x);
+                    posWS = rootWS + right * (v.positionOS.x * sx) + float3(0, 1, 0) * (v.positionOS.y * sy);
+                }
 
                 float2 dir = _WindDirXZ.xy;
                 float strength = _WindBaseStrength + _WindGustStrength * GustPulse(rootWS.xz);
@@ -122,16 +140,38 @@ Shader "IntoFrame/GrassBlades"
                 o.positionCS = TransformWorldToHClip(posWS);
                 // Soften toward up: a blade is too thin for its own normal to read,
                 // and the meadow as a whole should shade like a surface.
-                float3 n = TransformObjectToWorldNormal(v.normalOS);
+                float3 n = _Card > 0.5 ? cardFacing : TransformObjectToWorldNormal(v.normalOS);
                 o.normalWS = normalize(lerp(n, float3(0, 1, 0), 0.55));
                 o.height = h;
+                o.uv = v.uv;
                 o.fogFactor = ComputeFogFactor(o.positionCS.z);
                 return o;
+            }
+
+            // Blades drawn in the card's UV square: tapering, leaning strips of
+            // varied height, the same shape BuildTuftMesh makes in geometry.
+            float CardBlades(float2 uv)
+            {
+                float m = 0.0;
+                [unroll] for (int k = 0; k < 9; k++)
+                {
+                    float r1 = frac(sin(k * 12.9898 + 1.0) * 43758.5453);
+                    float r2 = frac(sin(k * 78.233 + 2.0) * 43758.5453);
+                    float r3 = frac(sin(k * 39.425 + 3.0) * 43758.5453);
+                    float bh = 0.55 + 0.45 * r2;
+                    float y = uv.y / bh;
+                    float cx = (k + 0.5) / 9.0 + (r1 - 0.5) * 0.08 + (r3 - 0.5) * 0.5 * y * y;
+                    float hw = 0.05 * (1.0 - 0.9 * saturate(y));
+                    m = max(m, (y <= 1.0 && abs(uv.x - cx) < hw) ? 1.0 : 0.0);
+                }
+                return m;
             }
 
             half4 Frag(Varyings i, bool frontFace : SV_IsFrontFace) : SV_Target
             {
                 UNITY_SETUP_INSTANCE_ID(i);
+                if (_Card > 0.5)
+                    clip(CardBlades(i.uv) - 0.5);
                 float3 colour = UNITY_ACCESS_INSTANCED_PROP(GrassProps, _GrassColor).rgb;
                 float3 albedo = colour * lerp(_BaseDarkness, _TipBrightness, i.height);
 

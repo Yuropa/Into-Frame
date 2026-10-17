@@ -25,12 +25,18 @@ public class GrassField : MonoBehaviour
     // Beyond this the 3-blade tuft is drawn instead of the full one, and tufts are
     // thinned as (nearRadius / distance), so the budget stays near the viewer.
     public float nearRadius = 10f;
+    // Beyond this each tuft is one camera-facing quad cut into blades by the
+    // shader (GrassBlades _Card): two triangles instead of a tuft's dozens. A card
+    // is wider than a tuft, so cards are thinned by cardKeep on top of the falloff.
+    public float cardRadius = 25f;
+    public float cardWidth = 1.5f;   // x the tuft height: a 0.25 m tuft card is 0.38 m wide
+    [Range(0f, 1f)] public float cardKeep = 0.35f;
     public int maxTufts = 40000;
 
     GrassFieldData _data;
     Texture2D _density, _colour;
-    Material _material;
-    Mesh _nearMesh, _farMesh;
+    Material _material, _cardMaterial;
+    Mesh _nearMesh, _farMesh, _cardMesh;
     bool _built;
 
     class Batch
@@ -40,7 +46,7 @@ public class GrassField : MonoBehaviour
         public int count;
         public MaterialPropertyBlock props;
         public Bounds bounds;
-        public bool near;
+        public int tier;               // 0 full tuft, 1 3-blade tuft, 2 card
     }
     readonly List<Batch> _batches = new List<Batch>();
 
@@ -55,6 +61,14 @@ public class GrassField : MonoBehaviour
         float unitWidth = data.bladeWidthMeters / 0.4f;
         _nearMesh = BuildTuftMesh(Mathf.Max(1, data.bladesPerTuft), unitWidth, 11);
         _farMesh = BuildTuftMesh(Mathf.Max(1, Mathf.Min(3, data.bladesPerTuft)), unitWidth * 1.6f, 23);
+        _cardMesh = BuildCardMesh(cardWidth);
+        _cardMaterial = new Material(material) { name = material.name + " (card)" };
+        _cardMaterial.SetFloat("_Card", 1f);
+    }
+
+    void OnDestroy()
+    {
+        if (_cardMaterial != null) Destroy(_cardMaterial);
     }
 
     void Update()
@@ -75,14 +89,14 @@ public class GrassField : MonoBehaviour
         }
         foreach (var b in _batches)
         {
-            var rp = new RenderParams(_material)
+            var rp = new RenderParams(b.tier == 2 ? _cardMaterial : _material)
             {
                 worldBounds = b.bounds,
                 matProps = b.props,
                 shadowCastingMode = ShadowCastingMode.Off,
                 receiveShadows = true,
             };
-            Graphics.RenderMeshInstanced(rp, b.near ? _nearMesh : _farMesh, 0, b.matrices, b.count);
+            Graphics.RenderMeshInstanced(rp, b.tier == 0 ? _nearMesh : b.tier == 1 ? _farMesh : _cardMesh, 0, b.matrices, b.count);
         }
     }
 
@@ -98,8 +112,8 @@ public class GrassField : MonoBehaviour
         int dw = _density.width, dh = _density.height;
         int cw = _colour.width, ch = _colour.height;
 
-        // tile key -> (matrices, colours) for near / far
-        var tiles = new Dictionary<long, (List<Matrix4x4> m, List<Vector4> c, bool near)>();
+        // tile key -> (matrices, colours) per tier
+        var tiles = new Dictionary<long, (List<Matrix4x4> m, List<Vector4> c, int tier)>();
         int placed = 0;
         Vector3 up = transform.up;
         // Candidates first, nearest kept when over budget: filling the lattice row
@@ -119,6 +133,7 @@ public class GrassField : MonoBehaviour
             float density = Sample(dens, dw, dh, u, v).r / 255f;
             float keep = density;
             if (r > nearRadius) keep *= nearRadius / r;
+            if (r > cardRadius) keep *= cardKeep;
             if (rng.NextDouble() >= keep) continue;
             candidates.Add(new Vector3(x, z, r));
         }
@@ -143,12 +158,12 @@ public class GrassField : MonoBehaviour
             float jitter = 0.85f + 0.3f * (float)rng.NextDouble();
             Color lin = new Color(c.r / 255f * jitter, c.g / 255f * jitter, c.b / 255f * jitter).linear;
 
-            bool near = r <= nearRadius;
-            long key = ((long)Mathf.FloorToInt((x + half) / TileMeters) << 33)
-                     | ((long)Mathf.FloorToInt((z + half) / TileMeters) << 1) | (near ? 1L : 0L);
+            int tier = r <= nearRadius ? 0 : r <= cardRadius ? 1 : 2;
+            long key = ((long)Mathf.FloorToInt((x + half) / TileMeters) << 34)
+                     | ((long)Mathf.FloorToInt((z + half) / TileMeters) << 2) | (long)tier;
             if (!tiles.TryGetValue(key, out var t))
             {
-                t = (new List<Matrix4x4>(), new List<Vector4>(), near);
+                t = (new List<Matrix4x4>(), new List<Vector4>(), tier);
                 tiles[key] = t;
             }
             t.m.Add(m);
@@ -167,7 +182,7 @@ public class GrassField : MonoBehaviour
                     matrices = new Matrix4x4[count],
                     count = count,
                     props = new MaterialPropertyBlock(),
-                    near = t.near,
+                    tier = t.tier,
                 };
                 var colours = new Vector4[count];
                 for (int k = 0; k < count; k++)
@@ -179,7 +194,9 @@ public class GrassField : MonoBehaviour
                 _batches.Add(b);
             }
         }
-        Debug.Log($"[GrassField] {placed} tufts in {_batches.Count} batch(es) over a {size:F0} m field");
+        int cards = 0;
+        foreach (var b in _batches) if (b.tier == 2) cards += b.count;
+        Debug.Log($"[GrassField] {placed} tufts ({cards} as cards beyond {cardRadius:F0} m) in {_batches.Count} batch(es) over a {size:F0} m field");
     }
 
     void RefreshWorld()
@@ -204,6 +221,23 @@ public class GrassField : MonoBehaviour
         int x = Mathf.Clamp(Mathf.FloorToInt(u * w), 0, w - 1);
         int y = Mathf.Clamp(Mathf.FloorToInt(v * h), 0, h - 1);
         return px[y * w + x];
+    }
+
+    /// <summary>
+    /// The far tier's card: one upright quad, unit height, `width` wide, rooted at
+    /// the origin. GrassBlades turns it to the camera and cuts the blades.
+    /// </summary>
+    static Mesh BuildCardMesh(float width)
+    {
+        float hw = width / 2f;
+        var mesh = new Mesh { name = "GrassCard" };
+        mesh.SetVertices(new List<Vector3> { new Vector3(-hw, 0f, 0f), new Vector3(hw, 0f, 0f), new Vector3(-hw, 1f, 0f), new Vector3(hw, 1f, 0f) });
+        mesh.SetNormals(new List<Vector3> { Vector3.back, Vector3.back, Vector3.back, Vector3.back });
+        mesh.SetUVs(0, new List<Vector2> { new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(0f, 1f), new Vector2(1f, 1f) });
+        mesh.SetTriangles(new[] { 0, 2, 1, 1, 2, 3 }, 0);
+        // Turned to the camera in the vertex shader: bounds must hold any yaw.
+        mesh.bounds = new Bounds(new Vector3(0f, 0.5f, 0f), new Vector3(width, 1f, width));
+        return mesh;
     }
 
     /// <summary>

@@ -22,6 +22,9 @@ class Object3D():
         # mesh. Empty (the default, and every non-terrain mesh today) -> no
         # collider is attached, same as before this field existed.
         self.physics_mesh = ""
+        # Drawn without scene lighting: the texture already carries the light it
+        # was photographed in (the far-field backdrop). False -> lit as usual.
+        self.unlit = False
         self.name = ""
         self.position = vec3()
         self.rotation = vec3()
@@ -124,6 +127,8 @@ class Object3D():
             data["physicsMesh"] = self.physics_mesh
         if self.lods:
             data["lods"] = self.lods
+        if self.unlit:
+            data["unlit"] = True
         return data
 
     @classmethod
@@ -166,4 +171,5 @@ class Object3D():
         obj.physics = data.get("physics")
         obj.physics_mesh = data.get("physicsMesh", "")
         obj.lods = list(data.get("lods") or [])
+        obj.unlit = bool(data.get("unlit", False))
         return obj

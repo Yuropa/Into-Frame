@@ -1,3 +1,4 @@
+import logging
 import numpy as np
 from scipy.ndimage import map_coordinates, gaussian_filter, binary_dilation, distance_transform_edt
 from scipy.spatial import Delaunay
@@ -51,6 +52,90 @@ def _prune_small_water(water: np.ndarray, *, grid_size_meters: float, min_area_m
     return water & ~np.isin(labels, too_small)
 
 
+
+# Shore types of a built riverside (quays, promenades, moored barges) against
+# natural ones (a cliff, a meadow, a forest). Measured shore rings (0-8 m):
+# Paris's Seine is ground/other/built 0.96-0.99, Shark Fin's sea terrain 0.86-1.0.
+_QUAY_SHORE_TYPES = (RegionType.GROUND, RegionType.BUILT, RegionType.OTHER, RegionType.ROAD)
+
+
+def _quay_walls(
+    hm: np.ndarray, water: np.ndarray, region: np.ndarray, grid_size_meters: float, z_far: float,
+    *, min_area_m2: float = 1000.0, min_built_fraction: float = 0.7, min_rise_m: float = 1.5,
+    max_rise_m: float = 8.0, reach_m: float = 8.0, feather_m: float = 4.0,
+    min_island_m2: float = 300.0, min_finger_m: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, list[str]]:
+    """Stand a built shore up as a wall: (height grid, extra vertex xz, report).
+
+    Depth reconstruction rounds a quay wall into a ramp. On Paris the Seine's
+    banks rose ~3 m over 15 m of slope running down under the water, with the
+    photographed walls and the barges moored against them smeared across it.
+    For a water body whose shore is built ground rising min_rise_m within 15 m,
+    the land within reach_m of the water is raised to the bank's height (p50 of
+    the 8-15 m ring) and feathered back over feather_m; vertex pairs straddling
+    the shoreline make the step a wall rather than one Poisson spacing of slope.
+    The panorama UV of the raised cells is re-projected (they moved), so the
+    wall faces take the wall's pixels.
+    """
+    from scipy.ndimage import label as _label
+    h, w = hm.shape
+    cell = grid_size_meters / max(w, 1)
+    labels, count = _label(water, structure=np.ones((3, 3), dtype=bool))
+    # Islands of land inside the water (a pier's shadow, the nadir patch under a
+    # bridge camera) are left as they are: raised, they stood as 4 m pillars.
+    # Thin fingers of land (ragged segmentation joining an islet to the bridge
+    # band) are opened away first, on a quarter-resolution grid for speed.
+    from scipy.ndimage import binary_opening
+    f = 4
+    r = max(1, int(round(min_finger_m / (cell * f))))
+    yy, xx = np.mgrid[-r:r + 1, -r:r + 1]
+    opened = binary_opening(~water[::f, ::f], structure=(xx * xx + yy * yy) <= r * r)
+    opened = np.repeat(np.repeat(opened, f, 0), f, 1)[:h, :w]
+    land_labels, land_count = _label(~water & opened)
+    land_area = np.bincount(land_labels.ravel(), minlength=land_count + 1) * cell * cell
+    mainland = (land_labels > 0) & (land_area[land_labels] >= min_island_m2)
+    out = hm
+    extra: list[np.ndarray] = []
+    report: list[str] = []
+    for component in range(1, count + 1):
+        body = labels == component
+        area = float(body.sum()) * cell * cell
+        if area < min_area_m2:
+            continue
+        dist = distance_transform_edt(~body) * cell
+        land = ~water & np.isfinite(hm)
+        near = land & (dist <= 8.0)
+        if near.sum() < 64:
+            continue
+        built = float(np.isin(region[near].astype(np.int16), [int(t) for t in _QUAY_SHORE_TYPES]).mean())
+        level = float(np.percentile(hm[land & (dist <= 3 * cell)], 25)) if (land & (dist <= 3 * cell)).any() else None
+        ring = land & (dist > 8.0) & (dist <= 15.0)
+        if level is None or ring.sum() < 64:
+            continue
+        rise = float(np.percentile(hm[ring], 50)) - level
+        if built < min_built_fraction or rise < min_rise_m:
+            continue
+        rise = min(rise, max_rise_m)
+        top = level + rise
+        target = top - np.clip((dist - reach_m) / max(feather_m, 1e-6), 0.0, None) * rise
+        raise_mask = land & mainland & (dist <= reach_m + feather_m)
+        if out is hm:
+            out = hm.copy()
+        out[raise_mask] = np.maximum(out[raise_mask], target[raise_mask])
+        # Vertex pairs a few cells either side of the shoreline, ~1 m apart.
+        inner = distance_transform_edt(body) * cell
+        for sel in (body & (inner > 0.15) & (inner <= 0.3), land & mainland & (dist > 0.15) & (dist <= 0.3)):
+            rows, cols = np.nonzero(sel)
+            if rows.size == 0:
+                continue
+            x = cols / (w - 1) * grid_size_meters - grid_size_meters / 2.0
+            z = rows / (h - 1) * (2.0 * z_far) - z_far
+            _, keep = np.unique(np.stack([np.floor(x), np.floor(z)], 1), axis=0, return_index=True)
+            extra.append(np.stack([x[keep], z[keep]], 1))
+        report.append(f"{area:.0f} m2 body: shore {built:.2f} built, rises {rise:.1f} m -> quay wall to {top:.2f} m")
+    xz = np.concatenate(extra) if extra else np.zeros((0, 2))
+    return out, xz, report
+
 class TerrainMeshGenerator:
     @staticmethod
     def generate(
@@ -81,6 +166,7 @@ class TerrainMeshGenerator:
         pano_uv_v: Optional[Depth] = None,
         sample_height_map: Optional[Depth] = None,
         pano_uv_max_height_drift_m: float = 0.5,
+        quay_walls: bool = True,
     ) -> tuple[Mesh, Optional[Mesh], Optional[np.ndarray]]:
         """
         Build a variable-density terrain mesh from a height map using Poisson
@@ -154,6 +240,9 @@ class TerrainMeshGenerator:
         z_far  = z_far if z_far is not None else grid_size_meters / 2.0
         x_half = grid_size_meters / 2.0
         hm     = height_map.depth  # (H, W) float32
+        # Water levels are read from the shore as reconstructed, before any quay
+        # wall raises it (a raised ring would float the water to the wall top).
+        hm_level = hm
 
         # ── Poisson disc sampling ─────────────────────────────────────────
         all_xz = TerrainMeshGenerator._poisson_disc_xz(
@@ -164,6 +253,17 @@ class TerrainMeshGenerator:
             n_boundary=n_boundary,
             seed=noise_seed,
         )
+        quay_report: list[str] = []
+        if quay_walls and region_map is not None and region_map.depth.shape == hm.shape:
+            quay_water = _prune_small_water(
+                region_map.depth.astype(np.int16) == int(RegionType.WATER),
+                grid_size_meters=grid_size_meters, min_area_m2=min_water_area_m2,
+            )
+            hm, quay_xz, quay_report = _quay_walls(hm, quay_water, region_map.depth, grid_size_meters, z_far)
+            if len(quay_xz):
+                all_xz = np.concatenate([all_xz, quay_xz.astype(all_xz.dtype)])
+            for line in quay_report:
+                logging.getLogger(__name__).info(line)
         all_xz = np.unique(np.round(all_xz, 4), axis=0)
 
         X_pos = all_xz[:, 0].astype(np.float32)
@@ -317,7 +417,7 @@ class TerrainMeshGenerator:
                 # Both are the same (H, W) top-down convention, so a water cell in
                 # one indexes the same ground in the other.
                 water_Y = TerrainMeshGenerator._level_water(
-                    water_grid, hm, is_water, Y_pos, row_rm, col_rm,
+                    water_grid, hm_level, is_water, Y_pos, row_rm, col_rm,
                     water_level_percentile,
                 )
                 # Distance to the nearest dry cell, in metres, as a 0..1 ramp over

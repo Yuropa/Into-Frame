@@ -445,6 +445,9 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         view_pitches_deg: list[float] | None = None,
         use_photo: bool = True,
         photo_weight: float = 2.0,
+        # Second model consulted on WATER pixels only (see the server's
+        # _check_water): a pixel stays water only where it agrees. "" disables.
+        water_check_model: str = "",
         nadir_cutoff_deg: float = -55.0,
         nadir_band_deg: float = 15.0,
         removed_area_ring_fraction: float = 0.7,
@@ -472,6 +475,7 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         self.view_pitches_deg = [float(p) for p in (view_pitches_deg or [50.0, 0.0, -50.0])]
         self.use_photo = bool(use_photo)
         self.photo_weight = float(photo_weight)
+        self.water_check_model = str(water_check_model or "")
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_band_deg = nadir_band_deg
         # Object-removed areas take their surroundings' type when one type holds
@@ -618,6 +622,7 @@ class PanoramaRegionStage(PipelineStage):
             views={
                 "count": cfg.view_count, "fov_deg": cfg.view_fov_deg, "size_px": cfg.view_size_px,
                 "pitches_deg": cfg.view_pitches_deg, "photo_weight": cfg.photo_weight,
+                "water_check_model": cfg.water_check_model,
             },
         )
         self.advance_progress(task)

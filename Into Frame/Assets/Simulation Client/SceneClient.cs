@@ -289,6 +289,9 @@ public class SceneObject
     // `mesh` above -- e.g. the terrain's coarse geometry-only collision proxy.
     // Empty -> no collider is attached.
     public string physicsMesh;
+    // Draw without scene lighting: the texture carries its photographed light
+    // (the far-field backdrop). Absent -> false, lit as usual.
+    public bool unlit;
     public string name;
     public Vec3   position;
     public Vec3   rotation;

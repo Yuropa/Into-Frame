@@ -91,6 +91,11 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
+        # False: textured with the panorama's own (photographed) light and drawn
+        # unlit. Relighting the delit far field with the client's sun through
+        # normals estimated from km-scale depth made Rainier's summit bright and
+        # blotchy where the photo has it in soft evening light.
+        lit: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Depth-map value beyond which a pixel belongs to the backdrop. 0 = the
@@ -122,6 +127,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.skirt = bool(skirt)
         self.skirt_start_fraction = float(skirt_start_fraction)
         self.skirt_sky_below_deg = float(skirt_sky_below_deg)
+        self.lit = bool(lit)
 
 
 class FarFieldBackdropStage(PipelineStage):
@@ -380,7 +386,7 @@ class FarFieldBackdropStage(PipelineStage):
         row_min, row_max = int(max(0, used_rows.min() - s)), int(min(H - 1, used_rows.max() + s))
         # Colour from the delit panorama when Terrain Texture Generation made one,
         # so the client can light this mesh like everything in front of it.
-        colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT)
+        colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT) if cfg.lit else None
         if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
             colour = panorama
         rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
@@ -426,6 +432,7 @@ class FarFieldBackdropStage(PipelineStage):
             "metric_depth_max": round(float(d_far.max()), 1),
             "radius_max": round(float(np.linalg.norm(vertices, axis=-1).max()), 1),
             "strip_rows": [row_min, row_max],
+            "lit": cfg.lit,
         }
         context.add_object(FAR_FIELD_SUMMARY_KEY, summary)
         self.log_info(

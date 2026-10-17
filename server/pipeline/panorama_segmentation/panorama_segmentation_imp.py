@@ -326,20 +326,27 @@ class PanoramaSegmentationServer(RemoteServer):
         self.model_name = None
         self.processor = None
         self.model = None
+        self._loaded: dict[str, tuple] = {}
 
     def _load(self, model_name: str) -> None:
         if self.model is not None and self.model_name == model_name:
             return
-        model_id = _MODEL_IDS.get(model_name, model_name)
-        if model_name == "mask2former":
-            from transformers import Mask2FormerForUniversalSegmentation
-            self.processor = AutoImageProcessor.from_pretrained(model_id)
-            self.model = Mask2FormerForUniversalSegmentation.from_pretrained(model_id)
-        else:
-            self.processor = SegformerImageProcessor.from_pretrained(model_id)
-            self.model = SegformerForSemanticSegmentation.from_pretrained(model_id)
-        self.model.to(self.device)
-        self.model.eval()
+        loaded = getattr(self, "_loaded", None)
+        if loaded is None:
+            loaded = self._loaded = {}
+        if model_name not in loaded:
+            model_id = _MODEL_IDS.get(model_name, model_name)
+            if model_name == "mask2former":
+                from transformers import Mask2FormerForUniversalSegmentation
+                processor = AutoImageProcessor.from_pretrained(model_id)
+                model = Mask2FormerForUniversalSegmentation.from_pretrained(model_id)
+            else:
+                processor = SegformerImageProcessor.from_pretrained(model_id)
+                model = SegformerForSemanticSegmentation.from_pretrained(model_id)
+            model.to(self.device)
+            model.eval()
+            loaded[model_name] = (processor, model)
+        self.processor, self.model = loaded[model_name]
         self.model_name = model_name
 
     def perform(self, action: str, temp_path: Path, input: Any) -> Any:
@@ -395,6 +402,12 @@ class PanoramaSegmentationServer(RemoteServer):
             label, conf, runnerup, runnerup_conf = self._segment_tiles(image)
         else:
             label, conf, runnerup, runnerup_conf = self._segment_views(image, photo, photo_hfov_deg, views)
+            check = views.get("water_check_model")
+            if check and check != model_name:
+                label, conf, runnerup, runnerup_conf = self._check_water(
+                    image, photo, photo_hfov_deg, views, check, model_name,
+                    label, conf, runnerup, runnerup_conf,
+                )
         self.report_progress(0.95, "Done")
         id2label = self.model.config.id2label
         return {
@@ -491,6 +504,41 @@ class PanoramaSegmentationServer(RemoteServer):
         if acc.overflow:
             self.report_progress(0.92, f"view blending: {acc.overflow} class sighting(s) past the ceiling were dropped")
         return out
+
+    def _check_water(self, image, photo, photo_hfov_deg, views, check_model, model_name,
+                     label, conf, runnerup, runnerup_conf):
+        """Second opinion on water only. Mask2Former reads gravel and packed-dirt
+        paths as water: on Rainier the gravel ring round the camera and the trail
+        to the pond were 21% of the panorama as WATER, and reached the render as a
+        murky sheet underfoot with no trail. SegFormer, over the same views, calls
+        that ground "path"/"road" and the pond beside it still "water". So a pixel
+        stays water only where the check model agrees; elsewhere the check model's
+        own label replaces it, with water kept as the runner-up."""
+        water_names = {"water", "sea", "river", "lake", "swimming pool", "waterfall", "fountain"}
+        id2label = self.model.config.id2label
+        water_ids = np.array([int(k) for k, v in id2label.items() if str(v).lower() in water_names], dtype=np.int16)
+        is_water = np.isin(label, water_ids)
+        if not is_water.any():
+            return label, conf, runnerup, runnerup_conf
+        self._load(check_model)
+        c_label, c_conf, _, _ = self._segment_views(image, photo, photo_hfov_deg, views)
+        self._load(model_name)
+        veto = is_water & ~np.isin(c_label, water_ids)
+        # What one model takes for water and the other for "road" is loose gravel or
+        # packed dirt, not a paved road: Rainier's gravel ring would otherwise be
+        # textured as asphalt in a meadow.
+        name_to_id = {str(v).lower(): int(k) for k, v in id2label.items()}
+        if "road" in name_to_id and "path" in name_to_id:
+            c_label = np.where(veto & (c_label == name_to_id["road"]), np.int16(name_to_id["path"]), c_label)
+        self.report_progress(
+            0.9, f"water check ({check_model}): {int(veto.sum())} of {int(is_water.sum())} water px not water",
+        )
+        return (
+            np.where(veto, c_label, label).astype(label.dtype),
+            np.where(veto, c_conf, conf).astype(conf.dtype),
+            np.where(veto, label, runnerup).astype(runnerup.dtype),
+            np.where(veto, conf, runnerup_conf).astype(runnerup_conf.dtype),
+        )
 
     def _segment_tiles(self, image: Image.Image):
         """The original strategy: overlapping equirect tiles at the model's native size."""
