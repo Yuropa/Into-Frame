@@ -447,6 +447,7 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         photo_weight: float = 2.0,
         nadir_cutoff_deg: float = -55.0,
         nadir_band_deg: float = 15.0,
+        removed_area_ring_fraction: float = 0.7,
         confidence_margin_threshold: float = 0.2,
         water_reference_type_map: str | None = None,
         # Snow-mislabelled-as-water rejection -- see _reject_snow_water for the
@@ -473,6 +474,9 @@ class PanoramaRegionConfiguration(PipelineStageConfiguration):
         self.photo_weight = float(photo_weight)
         self.nadir_cutoff_deg = nadir_cutoff_deg
         self.nadir_band_deg = nadir_band_deg
+        # Object-removed areas take their surroundings' type when one type holds
+        # this share of the ring around them (terrain panorama only; 0 disables).
+        self.removed_area_ring_fraction = float(removed_area_ring_fraction)
         # Context key of another already-computed region type map to sanity-check
         # this one's WATER calls against -- see _reject_unreferenced_water. Only
         # meaningful for a pass over a DERIVED panorama (the terrain-scoped run over
@@ -688,6 +692,21 @@ class PanoramaRegionStage(PipelineStage):
             resolved_type_idx_map, cfg.nadir_cutoff_deg, cfg.nadir_band_deg
         )
         context.add_panorama_regions(regions_key, result)
+        # Only for the object-removed panorama: an area ObjectClear repainted is
+        # typed from whatever it painted, and a poor repaint leaves a ghost of the
+        # object (Paris: the tour boat's outline typed GROUND/OTHER/SKY in the
+        # middle of the river, which stood up as a strip of land in the water).
+        # Each removed area takes the type of its surroundings when one type
+        # clearly dominates the ring around it.
+        if input_key == ContextKey.PANORAMA_TERRAIN and cfg.removed_area_ring_fraction > 0:
+            occluder = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
+            if occluder is not None:
+                resolved_type_idx_map, retyped = _retype_removed_areas(
+                    resolved_type_idx_map, occluder, cfg.removed_area_ring_fraction,
+                    _removed_object_masks(context),
+                )
+                if retyped:
+                    self.log_info(f"Removed-object areas: {retyped} px retyped to their surroundings' type")
         context.add_depth(type_map_key, resolved_type_idx_map.astype(np.float32))
         context.add_depth(type_map_raw_key, seg.type_idx_map.astype(np.float32))
         context.add_depth(confidence_key, seg.confidence_map)
@@ -763,3 +782,92 @@ class PanoramaRegionStage(PipelineStage):
             self._client.close()
             self._client = None
         super().clean_up()
+
+
+def _removed_object_masks(context) -> list:
+    """(x0, y0, mask) per rigid or built object Panorama Foreground Inpainting
+    removed, in panorama pixels (its own class lists and box/crop convention)."""
+    # Not vegetation: ObjectClear repaints the ground or canopy behind a tree
+    # well, and a skyline tree's ring is mostly sky, so retyping it from the ring
+    # cut the Rainier treeline (FOREST -> SKY 21k px). Boats, vehicles and
+    # buildings are what it leaves ghosts of.
+    from pipeline.panorama_foreground_inpainting.generation import (
+        _FOREGROUND_STRUCTURE_CATEGORIES, _FOREGROUND_RIGID_CATEGORIES,
+    )
+    removed = _FOREGROUND_STRUCTURE_CATEGORIES | _FOREGROUND_RIGID_CATEGORIES
+    out = []
+    for idx in range(int(context.input_object(ContextKey.OBJECT_COUNT) or 0)):
+        meta = context.input_object(f"metadata_{idx}") or {}
+        if meta.get("class") not in removed and not meta.get("part_of"):
+            continue
+        box = meta.get("box")
+        crop = context.input_image(f"crop_{idx}")
+        if not box or crop is None or crop.image.mode != "RGBA":
+            continue
+        alpha = np.asarray(crop.image.getchannel("A")) > 127
+        if alpha.any():
+            out.append((int(round(box[0])), int(round(box[1])), alpha))
+    return out
+
+
+def _retype_removed_areas(
+    type_map: np.ndarray, occluder_image, min_fraction: float, objects: "list | None" = None,
+) -> "tuple[np.ndarray, int]":
+    """Give each removed object's area the type of the ring around it when one
+    type holds at least min_fraction of that ring. Judged per object (the union
+    mask joins the Seine's tour boat to the whole far bank), and only where the
+    occluder mask says the pixels were repainted. Objects against mixed
+    surroundings (a tower half sky, half trees) keep their own typing."""
+    from PIL import Image as PILImage
+    from scipy.ndimage import binary_dilation
+    H, W = type_map.shape
+    mask = np.asarray(occluder_image.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
+    if not mask.any() or not objects:
+        return type_map, 0
+    out = type_map.copy()
+    retyped = 0
+    # The removal mask is the crops closed and dilated (Panorama Foreground
+    # Inpainting's closing + mask_dilation_px), so an object's repainted area
+    # reaches well past its crop: grow into the mask within `grow` px of it.
+    grow = 40
+    pad = grow + 12
+    for x0, y0, alpha in objects:
+        h, w = alpha.shape
+        ya, yb = max(0, y0 - pad), min(H, y0 + h + pad)
+        if yb <= ya:
+            continue
+        cols = (np.arange(x0 - pad, x0 + w + pad)) % W
+        rows = np.arange(ya, yb)
+        local = np.zeros((len(rows), len(cols)), dtype=bool)
+        # Paste the crop's alpha into the padded window.
+        ys = np.arange(h) + y0
+        keep = (ys >= ya) & (ys < yb)
+        local[(ys[keep] - ya)[:, None], (np.arange(w) + pad)[None, :]] = alpha[keep]
+        mwin = mask[np.ix_(rows, cols)]
+        area = binary_dilation(local, iterations=grow) & mwin
+        ring = binary_dilation(area, iterations=6) & ~mwin
+        if ring.sum() < 20 or not area.any():
+            continue
+        twin = out[np.ix_(rows, cols)]
+        orig = type_map[np.ix_(rows, cols)]
+        values, counts = np.unique(orig[ring], return_counts=True)
+        top = int(np.argmax(counts))
+        # The ring above the object and the ring below it must agree: a boat in
+        # the river has water on all sides, while a strip along a bank (Paris's
+        # far quay, boxed 787 px wide as "bridge"/"dock"/"boat") has trees above
+        # and water below, and retyping it drowned the far bank's treeline.
+        ys = np.nonzero(area)[0]
+        mid = 0.5 * (ys.min() + ys.max())
+        rr = np.arange(len(rows))[:, None]
+        halves_agree = True
+        for half in (ring & (rr < mid), ring & (rr >= mid)):
+            if half.sum() >= 10:
+                hv, hc = np.unique(orig[half], return_counts=True)
+                share = hc[hv == values[top]].sum() / hc.sum() if (hv == values[top]).any() else 0.0
+                halves_agree &= share >= min_fraction
+        if halves_agree and counts[top] / counts.sum() >= min_fraction:
+            change = area & (twin != values[top])
+            twin[change] = values[top]
+            out[np.ix_(rows, cols)] = twin
+            retyped += int(change.sum())
+    return out, retyped

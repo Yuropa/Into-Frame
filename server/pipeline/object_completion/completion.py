@@ -97,7 +97,8 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         background_diff: float = 18.0,
         reference_view_classes: list[str] | None = None,
         reference_strength: float = 0.9,
-        reference_candidates: int = 2,
+        reference_candidates: int = 3,
+        min_describe_px: int = 48,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to complete. Default: every placeable object class; never
@@ -156,10 +157,13 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         self.reference_view_classes = frozenset(
             str(c).lower() for c in (reference_view_classes if reference_view_classes is not None
                                      else ["boat", "ship", "dock", "bridge", "tower", "building",
-                                           "statue", "monument", "car", "truck", "bus", "flower"])
+                                           "statue", "monument", "car", "truck", "bus", "flower", "tree"])
         )
         self.reference_strength = float(reference_strength)
         self.reference_candidates = max(1, int(reference_candidates))
+        # Crops at least this large (longest side, px) are described by Florence-2
+        # for the reference-view prompt; smaller ones are too few pixels to read.
+        self.min_describe_px = int(min_describe_px)
 
 
 def build_completion_canvas(
@@ -680,6 +684,7 @@ class ObjectCompletionStage(PipelineStage):
             return 0
         self.log_info(f"Reference views for {len(sources)} object(s)")
         super().clean_up()
+        descriptions = self._describe_crops(sources, metas, context)
         inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
         generated: dict[int, list[PILImage.Image]] = {}
         try:
@@ -688,9 +693,16 @@ class ObjectCompletionStage(PipelineStage):
                 cls = normalize_category(m.get("class")).replace("_", " ")
                 name = str(m.get("name") or cls)
                 subject = name if name != cls else f"a complete {cls}"
+                # Florence-2's description of the crop itself, so the model draws
+                # THIS boat (an open-top tour boat full of tourists) rather than the
+                # generic one the class name alone summons (Paris: a tug towing a
+                # toy sailboat, a landing craft). "Real, full-size" and a plain
+                # photograph rather than a studio product shot, which drew toys.
+                described = descriptions.get(idx)
                 prompt = (
-                    f"{subject}, the whole {cls} in frame, seen from the side at eye level, three-quarter view, "
-                    f"isolated on a plain white background, studio product photograph, even soft light, sharp"
+                    f"a real full-size {cls}{': ' + described if described else ''}. "
+                    f"The whole {cls} in frame, seen from the side at eye level, three-quarter view, "
+                    f"isolated on a plain white background, realistic photograph, even soft daylight, sharp"
                 )
                 strength = cfg.reference_strength
                 if min(src.size) >= 160:
@@ -698,6 +710,12 @@ class ObjectCompletionStage(PipelineStage):
                     # keeping: at 0.9 it came back a generic rowboat. Lower strength
                     # keeps its kind and build; the prompt still sets the view.
                     strength = min(strength, 0.75)
+                if cls in ("boat", "ship", "car", "truck", "bus") and src.height > 1.2 * src.width:
+                    # A hull or a body seen end-on or from above (Paris's crop_19,
+                    # 39x131 px from the bridge): img2img keeps that steep tilt
+                    # whatever view the prompt asks for. Drawn from the
+                    # description alone, the prompt sets the side view.
+                    strength = 1.0
                 if name != cls:
                     # A named landmark: the name is the whole description. Its crop
                     # is often a few pixels on the skyline (Paris's Eiffel Tower is
@@ -721,6 +739,25 @@ class ObjectCompletionStage(PipelineStage):
                         f"seen from the side, isolated on a plain white background, botanical studio "
                         f"photograph, even soft light, sharp"
                     )
+                if cls == "tree":
+                    # A tree crop is often a piece of one -- branches filling the
+                    # box, cut by the frame or a neighbour (Rainier's tree cards
+                    # were rectangles of needles that stood as dark pillars). The
+                    # card and the mesh need the whole tree with its outline.
+                    # The caption only decides conifer or broadleaf: taken whole,
+                    # "a tree with a shape of a head of broccoli" drew broccoli.
+                    conifer = any(w in (described or "").lower() for w in (
+                        "pine", "fir", "spruce", "conifer", "evergreen", "cedar", "larch", "hemlock", "cypress"))
+                    broadleaf = any(w in (described or "").lower() for w in (
+                        "leaf", "leaves", "leafy", "oak", "maple", "willow", "plane", "broccoli", "round", "deciduous"))
+                    kind = ("conifer tree with a straight trunk" if conifer
+                            else "broadleaf deciduous tree" if broadleaf else "tree")
+                    prompt = (
+                        f"a single whole {kind}, the entire tree from the base of the trunk to the top "
+                        f"of the crown in frame, standing alone, seen from the side at eye level, isolated "
+                        f"on a plain white background, realistic photograph, even soft daylight, sharp"
+                    )
+                    strength = max(strength, 0.95)
                 size = cfg.canvas_px
                 canvas = PILImage.new("RGB", (size, size), (255, 255, 255))
                 fit = cfg.object_fraction * size / max(src.size)
@@ -744,12 +781,14 @@ class ObjectCompletionStage(PipelineStage):
 
         written = 0
         seg = ForegroundSeg(self.preferred_device)
+        clip = _ClipImageSimilarity(self.preferred_device)
         try:
             for idx, outs in generated.items():
                 src = np.asarray(sources[idx], dtype=np.float32)
                 src_rgb = src[..., :3][src[..., 3] > 127]
                 target = src_rgb.mean(0) if len(src_rgb) else None
-                best, best_err = None, None
+                src_embed = clip.embed(_on_white(sources[idx]))
+                best, best_err, best_score = None, None, None
                 for k, out in enumerate(outs):
                     res = seg.segment(Image(out))
                     if res.is_empty():
@@ -769,19 +808,92 @@ class ObjectCompletionStage(PipelineStage):
                     if self.temp is not None:
                         (self.temp / f"crop_{idx}").mkdir(parents=True, exist_ok=True)
                         out.save(self.temp / f"crop_{idx}" / f"05_reference_{k}.png")
-                    if best_err is None or err < best_err:
-                        alpha = PILImage.fromarray(matte.astype(np.uint8) * 255, "L")
-                        rgba = out.convert("RGBA"); rgba.putalpha(alpha)
-                        best, best_err = rgba.crop(alpha.getbbox()), err
+                    alpha = PILImage.fromarray(matte.astype(np.uint8) * 255, "L")
+                    rgba = out.convert("RGBA"); rgba.putalpha(alpha)
+                    rgba = rgba.crop(alpha.getbbox())
+                    if normalize_category(metas[idx].get("class")) in ("flower", "plant") and rgba.width > 0.8 * rgba.height:
+                        # One upright plant is taller than wide; a wide matte is a
+                        # macro of a bloom or a clump (Rainier: a lupine drawn as a
+                        # crocus head that stood a metre wide in the meadow).
+                        self.log_info(f"  crop_{idx}: reference candidate {k} is wider than a single plant, skipped")
+                        continue
+                    # Which candidate still looks like the photographed object:
+                    # CLIP image similarity first (kind and build), the mean
+                    # colour as a small tie-break. Colour alone kept a tug for
+                    # a tour boat because both were white.
+                    sim = clip.similarity(src_embed, clip.embed(_on_white(rgba))) if src_embed is not None else 0.0
+                    score = sim - 0.002 * err
+                    if best_score is None or score > best_score:
+                        best, best_err, best_score = rgba, err, score
                 if best is not None:
                     context.add_image(reference_key(idx), Image(best))
                     written += 1
                     self.log_info(f"  crop_{idx} ({metas[idx].get('name') or metas[idx].get('class')}): "
-                                  f"reference view kept (colour distance {best_err:.0f})")
+                                  f"reference view kept (score {best_score:.3f}, colour distance {best_err:.0f})")
         finally:
             seg.unload()
+            clip.close()
             super().clean_up()
         return written
+
+    def _describe_crops(self, sources: dict[int, PILImage.Image], metas: dict[int, dict], context: PipelineContext) -> dict[int, str]:
+        """A short BLIP description of each unnamed, non-flower crop big enough to
+        read (min_describe_px), for the reference-view prompt: conditioned on
+        "a photograph of a {class}" (Paris: "a boat full of people on a river",
+        "a boat with a lot of windows"), with where-it-is phrases dropped so the
+        generator does not paint the river onto the white canvas. Florence-2's
+        remote code produces token soup with this transformers version."""
+        cfg: ObjectCompletionConfiguration = self.config
+        todo = {
+            idx: src for idx, src in sources.items()
+            # A named landmark is described by its name; every other crop's
+            # "name" is just its class.
+            if str(metas[idx].get("name") or "").replace("_", " ")
+            in ("", normalize_category(metas[idx].get("class")).replace("_", " "))
+            and normalize_category(metas[idx].get("class")) not in ("flower", "plant")
+            and max(src.size) >= cfg.min_describe_px
+        }
+        if not todo:
+            return {}
+        from pipeline.captioning.image_captioning import ImageCaptioning, CaptioningModel
+        out: dict[int, str] = {}
+        # The photograph's own caption describes its subject better than a crop
+        # can ("boat on the river with tourists ..." against BLIP's "a boat with a
+        # ladder" for Paris's tour boat, which came back a sailing ship). For the
+        # largest crop of a class the caption names, its phrase about that class,
+        # without the where-it-is parts, leads the description.
+        caption = str(context.input_object(ContextKey.INPUT_CAPTION) or "").lower()
+        hero: dict[str, int] = {}
+        for idx, src in todo.items():
+            cls = normalize_category(metas[idx].get("class")).replace("_", " ")
+            if cls in caption and (cls not in hero or src.width * src.height > todo[hero[cls]].width * todo[hero[cls]].height):
+                hero[cls] = idx
+        captioner = None
+        try:
+            captioner = ImageCaptioning(self.preferred_device, CaptioningModel.BLIP)
+            for idx, src in todo.items():
+                scale = 384 / max(src.size)
+                big = src.resize((max(1, int(src.width * scale)), max(1, int(src.height * scale))), PILImage.LANCZOS)
+                # Florence-2's vision tower asserts a square feature map.
+                square = PILImage.new("RGBA", (384, 384), (255, 255, 255, 255))
+                square.alpha_composite(big.convert("RGBA"), ((384 - big.width) // 2, (384 - big.height) // 2))
+                cls = normalize_category(metas[idx].get("class")).replace("_", " ")
+                lead = f"a photograph of a {cls}"
+                text = captioner.caption(Image(square), prompt=lead).strip()
+                text = _short_description(_drop_setting(text[len("a photograph of "):] if text.lower().startswith("a photograph of ") else text))
+                if hero.get(cls) == idx:
+                    phrase = _caption_phrase(caption, cls)
+                    if phrase:
+                        text = f"{phrase}, {text}" if text else phrase
+                if text:
+                    out[idx] = text
+                    self.log_info(f"  crop_{idx}: described as \"{text}\"")
+        except Exception as exc:
+            self.log_warning(f"Crop descriptions unavailable ({exc}); reference views use the class name")
+        finally:
+            if captioner is not None:
+                captioner.close()
+        return out
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(COMPLETION_SUMMARY_KEY) is not None
@@ -831,3 +943,81 @@ def _bloom_colour_name(rgba: PILImage.Image) -> "str | None":
         if hue >= start and label != "white":
             name = label
     return name
+
+
+def _on_white(rgba: PILImage.Image) -> PILImage.Image:
+    """An RGBA cutout composited on white, as RGB."""
+    rgba = rgba.convert("RGBA")
+    bg = PILImage.new("RGBA", rgba.size, (255, 255, 255, 255))
+    bg.alpha_composite(rgba)
+    return bg.convert("RGB")
+
+
+def _caption_phrase(caption: str, cls: str) -> str:
+    """The caption's words about `cls`: from the class word on, with where-it-is
+    phrases ("on the river", "in front of the eiffel tower") removed and only
+    "with ..." / "full of ..." detail kept ("boat with tourists")."""
+    import re
+    at = caption.find(cls)
+    if at < 0:
+        return ""
+    tail = caption[at:]
+    tail = re.sub(r"\s+(in front of|on top of|next to|near|behind|on|in|at|by|under|over|along)\s+(the|a|an)\s+[\w\s]*?(?=\s+(with|full of|carrying)\b|$)",
+                  "", tail)
+    tail = re.split(r"\s+(in front of|on top of|next to|near|behind|on|in|at|by|under|over|along)\s+(the|a|an)\s+", tail)[0]
+    return tail.strip(" ,.")
+
+
+def _drop_setting(text: str) -> str:
+    """Cut a caption's trailing where-it-is phrase ("... floating in the water",
+    "... on a river"): the reference view is the object alone on white."""
+    import re
+    return re.sub(r"\s+(floating|sitting|parked|docked|on top of|on an?|on the|in an?|in the|next to|near)\b.*$", "",
+                  text, flags=re.I).strip()
+
+
+def _short_description(text: str, max_words: int = 40) -> str:
+    """Florence-2's detailed caption trimmed for a prompt: no "The image shows",
+    nothing about the background or the image itself, at most two sentences."""
+    import re
+    text = (text or "").strip()
+    text = re.sub(r"^(the image (shows|is)|in this image,? (we can see|there is)|this is)\s+", "", text, flags=re.I)
+    sentences = [t.strip() for t in re.split(r"(?<=[.!?])\s+", text) if t.strip()]
+    keep = [t for t in sentences if not re.search(r"\b(background|image|picture|photo|blurr?ed)\b", t, re.I)]
+    words = " ".join(keep[:2]).split()
+    return " ".join(words[:max_words]).rstrip(".,; ")
+
+
+class _ClipImageSimilarity:
+    """CLIP ViT-B/32 image embeddings (the checkpoint Object Typing already uses)."""
+
+    def __init__(self, device):
+        self.model = None
+        try:
+            from transformers import CLIPModel, CLIPProcessor
+            from pipeline.object_typing.image_clip_classifier import ImageClipClassifier
+            self.device = device
+            self.processor = CLIPProcessor.from_pretrained(ImageClipClassifier.MODEL_NAME)
+            self.model = CLIPModel.from_pretrained(ImageClipClassifier.MODEL_NAME).to(device).eval()
+        except Exception:
+            self.model = None
+
+    def embed(self, image: PILImage.Image):
+        if self.model is None:
+            return None
+        with torch.no_grad():
+            inputs = self.processor(images=image.convert("RGB"), return_tensors="pt").to(self.device)
+            f = self.model.get_image_features(**inputs)
+            if not isinstance(f, torch.Tensor):
+                f = f.pooler_output if hasattr(f, "pooler_output") else f[0]
+            return (f / f.norm(dim=-1, keepdim=True))[0].float().cpu()
+
+    def similarity(self, a, b) -> float:
+        if a is None or b is None:
+            return 0.0
+        return float((a * b).sum())
+
+    def close(self):
+        self.model = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

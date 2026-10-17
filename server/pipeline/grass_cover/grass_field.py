@@ -41,6 +41,8 @@ def build_grass_field(
     seed: int,
     local_colour_weight: float = 0.35,
     anchor_u_range: "tuple[float, float] | None" = None,
+    prior_mask: "np.ndarray | None" = None,
+    anchor_colour: "np.ndarray | None" = None,
 ) -> tuple[PILImage.Image, PILImage.Image, dict]:
     res = mask.shape[0]
     cell_m = grid_size_m / res
@@ -91,9 +93,36 @@ def build_grass_field(
         in_photo = grassy & ok & (u >= anchor_u_range[0]) & (u <= anchor_u_range[1])
         if in_photo.sum() >= 64:
             grassy = in_photo
+            # The nearest few metres of it: the meadow the viewer stands in, not
+            # the shaded one 20 m off (Rainier: (62, 81, 40) at the photo's foot,
+            # (41, 56, 41) across the mid meadow in evening shade).
+            fr = np.hypot(*np.meshgrid(t, t, indexing="ij"))
+            r_near = float(np.percentile(fr[in_photo], 5.0))
+            near = in_photo & (fr <= r_near + 4.0)
+            if near.sum() >= 64:
+                grassy = near
     if grassy.any():
-        median = np.median(colour[grassy], axis=0)
-        colour = median + local_colour_weight * (colour - median)
+        # The meadow's lit green, not its plain median: a flowering meadow's
+        # median is pulled down and toward blue by the shadowed stems and the
+        # blooms between the blades (Rainier: (48, 61, 43) against the photo's
+        # green-dominant (62, 81, 40) and its sunlit blades near (74, 92, 51)).
+        # Green-dominant cells only, then the 55-75th percentile brightness band.
+        pick = colour[grassy]
+        green = (pick[:, 1] > pick[:, 0]) & (pick[:, 1] > pick[:, 2])
+        if green.sum() >= 32:
+            pick = pick[green]
+        lum = pick.mean(axis=1)
+        lo, hi = np.percentile(lum, [55.0, 75.0])
+        band = pick[(lum >= lo) & (lum <= hi)]
+        median = np.median(band if len(band) else pick, axis=0)
+        if anchor_colour is not None:
+            median = np.asarray(anchor_colour, dtype=np.float32)
+        weight = np.full(colour.shape[:2], local_colour_weight, dtype=np.float32)
+        if prior_mask is not None:
+            # Cells that follow the photo's near ground (grass_area) show the
+            # generator's ground, not grass: they take the anchor colour alone.
+            weight *= 1.0 - gaussian_filter(sample(prior_mask.astype(np.float32), order=0), sigma=2.0)
+        colour = median + weight[..., None] * (colour - median)
 
     density_height = np.stack([density, height, np.zeros_like(density)], axis=-1)
     dh_img = PILImage.fromarray((density_height * 255).round().astype(np.uint8), "RGB")
@@ -103,3 +132,20 @@ def build_grass_field(
         "mean_density": round(float(density.mean()), 3),
     }
     return dh_img, colour_img, stats
+
+
+def photo_meadow_colour(photo_rgb: np.ndarray, bottom_fraction: float = 0.3) -> "np.ndarray | None":
+    """The sunlit green of the meadow at the photograph's foot: green-dominant
+    pixels of its bottom rows, their 55-75th percentile brightness band. The
+    ground the viewer stands in, read from the one image that really shows it
+    (the panorama's matching rows blend into generated ground)."""
+    a = np.asarray(photo_rgb, dtype=np.float32)[..., :3]
+    b = a[int(a.shape[0] * (1.0 - bottom_fraction)):].reshape(-1, 3)
+    green = (b[:, 1] > b[:, 0]) & (b[:, 1] > b[:, 2])
+    if green.mean() < 0.3:
+        return None
+    g = b[green]
+    lum = g.mean(axis=1)
+    lo, hi = np.percentile(lum, [55.0, 75.0])
+    band = g[(lum >= lo) & (lum <= hi)]
+    return np.median(band if len(band) else g, axis=0)

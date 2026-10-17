@@ -232,6 +232,10 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_instances_per_group: int = 12000,
         min_exemplars: int = 8,
         min_vegetation_greenness: float = 0.02,
+        appearance_exempt_classes: list[str] | None = None,
+        affinity_renormalise_max: float = 6.0,
+        near_prior_radius_m: float = 8.0,
+        class_density_scale: dict | None = None,
         full_vegetation_greenness: float = 0.15,
         vegetation_floor_fraction: float = 0.15,
         paint_vegetation_in_water: bool = False,
@@ -374,6 +378,12 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # floor weight, at or above the second full density. Set full <= min to paint
         # on region type alone, as before.
         self.min_vegetation_greenness = float(min_vegetation_greenness)
+        self.appearance_exempt_classes = frozenset(appearance_exempt_classes or ("tree",))
+        # Ceiling on the density raise that compensates feature-affinity thinning
+        # (1 disables it); see run.
+        self.affinity_renormalise_max = float(affinity_renormalise_max)
+        self.near_prior_radius_m = float(near_prior_radius_m)
+        self.class_density_scale = {str(k): float(v) for k, v in (class_density_scale or {}).items()}
         self.full_vegetation_greenness = float(full_vegetation_greenness)
         self.vegetation_floor_fraction = float(vegetation_floor_fraction)
         # Whether vegetation may be painted into RegionType.WATER. Off: the region map
@@ -556,13 +566,60 @@ class DistributionSynthesisStage(PipelineStage):
         height, width = rgb.shape[:2]
         row = np.zeros(u.shape, dtype=np.intp)
         col = np.zeros(u.shape, dtype=np.intp)
-        row[valid] = np.clip((v[valid] * (height - 1)).astype(np.intp), 0, height - 1)
+        # HEIGHT_MAP_PANO_V is pre-flipped (v = 1 at the zenith, see grass_area's
+        # pano_v note): row = v * H read the mirror latitude, so ground cells were
+        # judged by the sky and mountain above the horizon (Paris 2-10 m from the
+        # camera: sky blue (123, 174, 239) instead of the quay (209, 180, 141)).
+        row[valid] = np.clip(((1.0 - v[valid]) * (height - 1)).astype(np.intp), 0, height - 1)
         col[valid] = np.clip((u[valid] * (width - 1)).astype(np.intp), 0, width - 1)
         greenness = cell_greenness(rgb, row, col, valid)
+        # Bloom-coloured cells: saturated and not green-dominant (paintbrush red,
+        # lupine purple, lily yellow). A dense flower bed is exactly where excess
+        # green is lowest, so for flowers these count as planted ground; snow,
+        # rock and gravel are unsaturated and still fail.
+        px = rgb[row, col]
+        sat = px.max(axis=-1) - px.min(axis=-1)
+        green_dom = (px[..., 1] >= px[..., 0]) & (px[..., 1] >= px[..., 2])
+        self._bloom_cells = valid & (sat >= 60.0) & ~green_dom
 
         span = self.config.full_vegetation_greenness - self.config.min_vegetation_greenness
         weight = (greenness - self.config.min_vegetation_greenness) / span
         weight = np.clip(weight, self.config.vegetation_floor_fraction, 1.0)
+
+        # Near the viewer, ground the photograph did not see follows the ground it
+        # did (see grass_area.grass_area_mask: the generator ringed Rainier's camera
+        # with a grey path the photo's meadow never had).
+        from util.captured_cone import captured_cone_from_context
+        cone = captured_cone_from_context(context, width, height)
+        if cone is not None and self.config.near_prior_radius_m > 0:
+            u0, u1 = (x / width for x in cone.u_range)
+            v0, v1 = (y / height for y in cone.v_range)
+            res = u.shape[0]
+            grid_m = float((context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}).get("grid_size_meters", 200.0))
+            axis = (np.arange(res) + 0.5) / res * grid_m - grid_m / 2.0
+            zz, xx = np.meshgrid(axis, axis, indexing="ij")
+            radius_m = np.hypot(xx, zz)
+            in_photo = valid & (u >= u0) & (u <= u1) & (1.0 - v >= v0) & (1.0 - v <= v1)
+            # The viewer stands in the NEAREST ground the photo shows: Rainier's
+            # first 3 m are the flower meadow (greenness 0.20), 3-16 m the snow
+            # patch and gravel beyond it (0.05).
+            ref = in_photo & (radius_m <= self.config.near_prior_radius_m)
+            if int(ref.sum()) >= 50:
+                r_near = float(np.percentile(radius_m[ref], 5.0))
+                tight = ref & (radius_m <= r_near + 2.0)
+                if int(tight.sum()) >= 50:
+                    ref = tight
+            if int(ref.sum()) >= 50:
+                target = (radius_m <= self.config.near_prior_radius_m) & ~in_photo
+                weight = np.where(target, max(float(np.median(weight[ref])), 0.0), weight)
+                bloom_fraction = float(self._bloom_cells[ref].mean())
+                if bloom_fraction >= 0.05:
+                    self._bloom_cells = self._bloom_cells | target
+                self.log_info(
+                    f"  near the viewer: {int(target.sum())} cells outside the photograph follow its "
+                    f"near ground (weight {float(np.median(weight[ref])):.2f}, blooms {bloom_fraction:.0%})"
+                )
+
         # A cell with no trustworthy UV has no observation behind it either way;
         # cell_greenness marks those -inf, and clipping would have floored them.
         weight[~valid] = 1.0
@@ -772,6 +829,22 @@ class DistributionSynthesisStage(PipelineStage):
                                           cfg.feature_min_kl, cfg.feature_floor)
                 if affinity is not None:
                     self.log_info(f"  {obj_type} [{region_type}]: placed by {affinity.describe()}")
+            # The affinity says WHERE in the region the class lives, not how many
+            # there are: thinning by it alone lowered the count by the mean
+            # acceptance (Paris: the quay's trees, whose hull density already
+            # averages over the river they line, lost 76 of ~120 points to it). The
+            # density is raised by the inverse of the mean acceptance over the
+            # same background, so the thinning redistributes the population.
+            renorm = 1.0
+            if affinity is not None and cfg.affinity_renormalise_max > 1.0:
+                vals = fields[affinity.feature][background]
+                if vals.size:
+                    from pipeline.distribution_synthesis.features import _EDGES
+                    b = np.clip(np.searchsorted(_EDGES, vals, side="right") - 1, 0, len(affinity.ratio) - 1)
+                    mean_accept = float(np.mean(affinity.ratio[b]))
+                    renorm = float(np.clip(1.0 / max(mean_accept, 1e-3), 1.0, cfg.affinity_renormalise_max))
+                    self.log_info(f"  {obj_type} [{region_type}]: affinity keeps {mean_accept:.0%} on average, "
+                                  f"density x{renorm:.2f}")
             group_rules.append((paint_radius, falloff, affinity))
             # See min_exemplar_spacing_m -- this floor is what stops a foreground
             # clump's centimetre-scale measured spacing from setting the density
@@ -843,7 +916,11 @@ class DistributionSynthesisStage(PipelineStage):
             #
             # Exemplar count over exemplar hull area has none of that dependence: it is
             # a property of the distribution alone, identical for every tile.
-            exemplar_density = len(dist.points) / max(_polygon_area(input_boundary), 1e-6)
+            exemplar_density = len(dist.points) / max(_polygon_area(input_boundary), 1e-6) * renorm
+            # Classes the detector under-counts in the photo itself: a row of
+            # canopies merges into a few tree boxes (Paris's quay: "not nearly
+            # enough trees"), as a flower bed does into a few bloom boxes.
+            exemplar_density *= float(cfg.class_density_scale.get(obj_type, 1.0))
             if obj_type in cfg.bloom_classes and bloom_boxes.get(obj_type):
                 if panorama_rgb is None:
                     pano = context.input_panorama(ContextKey.PANORAMA)
@@ -1191,11 +1268,21 @@ class DistributionSynthesisStage(PipelineStage):
                     # of the synthesized pattern rather than a differently-shaped one.
                     # Non-vegetation distributables (rock) are left alone -- a rock in
                     # scree is not green and has no business being tested for it.
-                    if vegetation_weight is not None and job_obj_type in VEGETATION_CATEGORIES:
+                    # Trees are exempt: a canopy stands above the ground it grows from,
+                    # and a city's trees grow from paving (Paris: 23 of the quay's
+                    # plane trees dropped "on unvegetated ground", 13 painted in all).
+                    if (
+                        vegetation_weight is not None and job_obj_type in VEGETATION_CATEGORIES
+                        and job_obj_type not in cfg.appearance_exempt_classes
+                    ):
                         cell_col = int((x + grid_size_meters / 2.0) / cell_m)
                         cell_row = int((z + grid_size_meters / 2.0) / cell_m)
                         if 0 <= cell_row < grid_resolution and 0 <= cell_col < grid_resolution:
-                            if rng.random() >= float(vegetation_weight[cell_row, cell_col]):
+                            weight = float(vegetation_weight[cell_row, cell_col])
+                            bloom_cells = getattr(self, "_bloom_cells", None)
+                            if job_obj_type in cfg.bloom_classes and bloom_cells is not None and bloom_cells[cell_row, cell_col]:
+                                weight = 1.0
+                            if rng.random() >= weight:
                                 appearance_rejected[job["group_idx"]] = appearance_rejected.get(job["group_idx"], 0) + 1
                                 continue
 

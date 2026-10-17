@@ -61,6 +61,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
         far_landmark_classes: list[str] | None = None,
+        landmark_distance_fraction: float = 0.75,
+        borrow_mesh_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
@@ -73,6 +75,12 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # really is taller than 25 m, and placed at the depth clamp its size is
         # angular extent x that distance -- right on screen, which is what matters
         # for something that far away.
+        # Named landmarks are placed at this fraction of the far clip plane (0 = where
+        # the depth map put them); see run.
+        self.landmark_distance_fraction = float(landmark_distance_fraction)
+        # Non-always-mesh classes that also wear a sibling bucket's mesh when their
+        # own has none (see run).
+        self.borrow_mesh_classes = frozenset(borrow_mesh_classes if borrow_mesh_classes is not None else ["tree"])
         self.far_landmark_classes = frozenset(
             far_landmark_classes if far_landmark_classes is not None
             else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
@@ -384,8 +392,17 @@ def mesh_instance_scale(
     width: float,
     height: float,
     min_height_fraction: float = _MIN_MESH_HEIGHT_FRACTION,
+    by_length: bool = False,
+    max_size_m: "float | None" = None,
 ) -> tuple[float, str | None, str | None]:
     """Uniform scale that renders `mesh_extents` at the instance's detected size.
+
+    by_length: a long, low body (a hull, a vehicle) is scaled so its horizontal
+    length matches the detection's larger side, which is its length whichever way
+    it was seen (from a bridge above, Paris's boats are taller than wide in the
+    photo); scaled by height they came out with hulls as tall as they are long.
+    max_size_m: the rendered-size backstop for this instance (a named landmark is
+    meant to be 150 m tall); None = _MAX_OBJECT_SIZE_M.
 
     Returns (scale, rejection_reason, gate). A non-None reason means this mesh does
     not describe this detection and the caller should billboard the instance instead
@@ -491,6 +508,9 @@ def mesh_instance_scale(
             )
 
     scale = float(height) / extent_y
+    if by_length and max(extent_x, extent_z) > extent_y:
+        scale = float(max(width, height)) / max(extent_x, extent_z)
+    size_limit = float(max_size_m) if max_size_m else _MAX_OBJECT_SIZE_M
 
     # Backstop on the RENDERED size. _MAX_OBJECT_SIZE_M above culls on the detected
     # box, which is the wrong quantity for this failure and always passes it: the
@@ -500,10 +520,10 @@ def mesh_instance_scale(
     # This is also what bounds the height gate's relaxation: a low-profile mesh scaled
     # by a small extent_y arrives here at a large scale, and this is where it stops.
     rendered_max = scale * extent_max
-    if rendered_max > _MAX_OBJECT_SIZE_M:
+    if rendered_max > size_limit:
         return scale, (
             f"would render {rendered_max:.1f} m across at {scale:.1f}x, "
-            f"over the {_MAX_OBJECT_SIZE_M:.0f} m limit"
+            f"over the {size_limit:.0f} m limit"
         ), "rendered_size"
 
     return scale, None, None
@@ -912,6 +932,12 @@ class SceneGenerationStage(PipelineStage):
             occ_y_low = np.zeros(object_count, dtype=np.float64)
             occ_y_high = np.zeros(object_count, dtype=np.float64)
             occ_n = 0
+            # Rigid reconstructions (always-mesh classes) by their placed model's own
+            # horizontal reach. The footprint test above uses the detection's width,
+            # and a boat seen bow-on is a fraction of the hull its model is scaled to
+            # (Paris: painted boats stacked inside the tour boat's hull).
+            rigid_placed: list[tuple[float, float, float, str]] = []
+            rejected_rigid = 0
             rejected_overlap = 0
             rejected_overlap_by_class: dict[str, int] = {}
             rejected_examples: list[str] = []
@@ -969,6 +995,8 @@ class SceneGenerationStage(PipelineStage):
                     ext = card_mesh.mesh.bounds[1] - card_mesh.mesh.bounds[0]
                     sx = float(width) / (float(ext[0]) or 1.0)
                     sy = float(height) / (float(ext[1]) or 1.0)
+                    if abs((float(ext[0]) or 1.0) / (float(ext[1]) or 1.0) - 1.0) > 0.05:
+                        sx = sy  # authored at its picture's aspect (see crossed_card_mesh)
                     origin_y = terrain_y - float(card_mesh.mesh.bounds[0][1]) * sy
                     levels.append(("mesh", card_key, (sx, sy, sx), origin_y,
                                    self.config.lod_card_screen_fraction))
@@ -1134,6 +1162,36 @@ class SceneGenerationStage(PipelineStage):
                         width *= scale_factor
                         height *= scale_factor
 
+                # A named landmark (the Eiffel Tower) is kilometres away, but the
+                # depth map's ceiling put it at the grid's edge: a 30 m tower standing
+                # in the river at 100 m, which a viewer walks up to. Pushed out along
+                # its own ray toward the far clip and scaled with the distance, it
+                # covers the same pixels from the capture point and keeps its place
+                # behind the far bank. It stands at the ground height it was snapped
+                # to before the move (the grid has no ground out there).
+                landmark_ground_y = None
+                if (
+                    self.config.landmark_distance_fraction > 0
+                    and not metadata.get("synthetic") and metadata.get("name")
+                    and cls in self.config.far_landmark_classes
+                ):
+                    offset = np.array(position, dtype=float) - camera_position
+                    d_old = float(np.hypot(offset[0], offset[2]))
+                    target = self.config.landmark_distance_fraction * float(scene.far_clip_plane)
+                    if d_old > 1e-3 and target > 1.2 * d_old:
+                        k = target / d_old
+                        landmark_ground_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
+                        position = (
+                            float(camera_position[0] + offset[0] * k), float(position[1]),
+                            float(camera_position[2] + offset[2] * k),
+                        )
+                        width *= k
+                        height *= k
+                        self.log_info(
+                            f"Landmark {idx} ({metadata.get('name')}): moved from {d_old:.0f} m to "
+                            f"{target:.0f} m along its ray, now {height:.0f} m tall"
+                        )
+
                 # Snap the object's base to the terrain surface. The Y offset that
                 # lands the *bottom* of the object on the terrain depends on the
                 # object's actual placed vertical extent, which differs between the
@@ -1154,7 +1212,11 @@ class SceneGenerationStage(PipelineStage):
                 # still hits the mesh, it samples the wrong patch of terrain relief.
                 # ground_y_at handles that, and takes the highest of the base terrain
                 # and every formation standing on it.
-                terrain_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
+                if landmark_ground_y is not None:
+                    terrain_y = landmark_ground_y
+                    last_hit["water"] = False
+                else:
+                    terrain_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
                 if (
                     terrain_y is not None and last_hit["water"]
                     and cls not in self.config.water_allowed_classes
@@ -1256,7 +1318,12 @@ class SceneGenerationStage(PipelineStage):
                 pool_key = f"{cls}::{bucket}"
                 category_mesh = context.input_mesh(mesh_key)
                 always_mesh = cls in self.config.always_mesh_classes
-                if category_mesh is None and always_mesh:
+                # Trees too: a bucket whose reconstruction failed its checks is
+                # left with a card cut from its crop, and a tree crop is often a
+                # piece of one (Rainier: rectangles of needles standing as dark
+                # pillars). A sibling bucket's accepted tree, with its card, reads
+                # far better.
+                if category_mesh is None and (always_mesh or cls in self.config.borrow_mesh_classes):
                     # Its own bucket was never reconstructed (no usable crop, or the
                     # reconstruction failed): wear a sibling bucket's rather than
                     # fall back to a billboard. Nearest bucket number first, which is
@@ -1340,6 +1407,9 @@ class SceneGenerationStage(PipelineStage):
                     mesh_scale, mesh_rejection, mesh_gate = mesh_instance_scale(
                         mesh_extents, width, height,
                         min_height_fraction=self.config.min_mesh_height_fraction,
+                        by_length=cls in ("boat", "ship", "car", "truck", "bus"),
+                        # A landmark moved out along its ray is meant to be big.
+                        max_size_m=(1.2 * max(width, height)) if landmark_ground_y is not None else None,
                     )
 
                     record = _mesh_geometry_record(
@@ -1413,6 +1483,10 @@ class SceneGenerationStage(PipelineStage):
                         vertical = float(card_extents[1]) or 1.0
                         scale_x = scale_z = float(width) / horizontal
                         scale_y = float(height) / vertical
+                        if abs(horizontal / vertical - 1.0) > 0.05:
+                            # A card authored at its picture's own aspect (a
+                            # reference view, see crossed_card_mesh) keeps it.
+                            scale_x = scale_z = scale_y
                         _mesh_geometry_record(
                             mesh_geometry, mesh_key, cls, card_extents, idx, scale_y
                         )
@@ -1438,6 +1512,23 @@ class SceneGenerationStage(PipelineStage):
                     else:
                         mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(scale_x, scale_y, scale_z)
+                    if always_mesh and not using_card:
+                        ext = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                        reach = 0.5 * max(float(ext[0]), float(ext[2])) * float(scale_x)
+                        # Painted instances yield to anything placed; a detection
+                        # yields to a stronger one of its own class -- the detector
+                        # boxed Paris's tour boat three times (hull, deck, crowd),
+                        # and all three were placed in one spot.
+                        synthetic = bool(metadata.get("synthetic"))
+                        if any(
+                            math.hypot(position[0] - rx, position[2] - rz) < reach + rr
+                            and (synthetic or rc == cls)
+                            for rx, rz, rr, rc in rigid_placed
+                        ):
+                            rejected_rigid += 1
+                            self.advance_progress(generation_task)
+                            continue
+                        rigid_placed.append((float(position[0]), float(position[2]), reach, cls))
                     mesh_obj.name = mesh_key
                     mesh_obj.source_index = idx
                     mesh_obj.lods = runtime_lods(
@@ -1527,6 +1618,11 @@ class SceneGenerationStage(PipelineStage):
                     f"from the outpainted part of the panorama"
                 )
 
+            if rejected_rigid:
+                self.log_info(
+                    f"Rigid overlap: dropped {rejected_rigid} object(s) inside another "
+                    f"rigid model's reach ({len(rigid_placed)} kept)"
+                )
             if rejected_overlap:
                 self.log_info(
                     f"Overlap rejection: dropped {rejected_overlap} object(s) landing inside "

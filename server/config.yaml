@@ -1679,6 +1679,7 @@ stages:
     # LODs keep the far ones cheap.
     class_max_paint_radius_m: {tree: 150.0, boat: 150.0, dock: 100.0, bush: 60.0, rock: 60.0}
     class_falloff_exponent: {tree: 1.0, boat: 0.5, dock: 0.5}
+    class_density_scale: {tree: 2.0}  # detector recall: a row of canopies is boxed as a few trees
     # Learned placement relative to the water's edge, roads, trails and the forest
     # edge (distribution_synthesis/features.py).
     feature_affinity: true
@@ -2079,6 +2080,9 @@ stages:
 
   - name: Tree Mesh Refinement
     stage: TreeMeshGenerationStage
+    enabled: false              # 2026-10-17: every Tree-D result on Rainier failed its aspect or class
+                                # check (~8 min per tree); trees now reconstruct from a whole-tree
+                                # reference view (Object Completion) instead
     # Re-reconstructs the tree-like category meshes with Tree-D Fusion (Magic123 +
     # a Zero123 fine-tuned on trees) from the same delit/completed crop Asset
     # Generation used, and publishes the result under the same

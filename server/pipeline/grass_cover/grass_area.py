@@ -128,6 +128,8 @@ def grass_area_mask(
     close_radius_cells: int = 9,
     min_component_cells: int = 64,
     stats: "dict | None" = None,
+    photo_box: "tuple[float, float, float, float] | None" = None,
+    near_prior_radius_m: float = 8.0,
 ) -> np.ndarray:
     """Boolean (grid_resolution, grid_resolution) mask of cells that should carry grass.
 
@@ -213,6 +215,40 @@ def grass_area_mask(
         # Only a SAMPLED cell has a real measurement behind it. An unsampled cell
         # reads -inf from cell_greenness, which would make this a veto on "no data"
         # -- the opposite of what the nadir fill below is for.
+        # The ground around the viewer is mostly NOT the photograph: only the
+        # front sixth of the panorama is, and the generator fills the rest of the
+        # near field however it likes (Rainier: a grey gravel path in a ring round
+        # the camera, while the photo stands in a flower meadow). Within
+        # near_prior_radius_m, cells the photo did not see take the photo's own
+        # verdict on its near ground: if that is mostly grass, so are they, at
+        # the photo's median greenness. Water keeps its own type.
+        if photo_box is not None and near_prior_radius_m > 0:
+            u0, u1, v0, v1 = photo_box
+            radius_m = _radius_grid(resolution, grid_size_meters)
+            row_frac = 1.0 - pano_v
+            in_photo = sampled & (pano_u >= u0) & (pano_u <= u1) & (row_frac >= v0) & (row_frac <= v1)
+            grass_typed = np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
+            # The NEAREST ground the photo shows is what the viewer stands in
+            # (Rainier: meadow for the first 3 m, then snow and gravel).
+            ref = in_photo & grass_typed & (radius_m <= near_prior_radius_m)
+            if int(ref.sum()) >= 50:
+                r_near = float(np.percentile(radius_m[ref], 5.0))
+                tight = ref & (radius_m <= r_near + 2.0)
+                if int(tight.sum()) >= 50:
+                    ref = tight
+            if int(ref.sum()) >= 50:
+                passing = ref & (greenness >= min_cell_greenness)
+                pass_fraction = float(passing.sum()) / float(ref.sum())
+                if pass_fraction >= 0.5:
+                    target = (radius_m <= near_prior_radius_m) & ~in_photo & (cell_type != int(RegionType.WATER))
+                    greenness = np.where(target, float(np.median(greenness[passing])), greenness)
+                    cell_type = np.where(target, int(RegionType.VEGETATION), cell_type).astype(np.int16)
+                    sampled = sampled | target
+                    mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
+                    if stats is not None:
+                        stats["near_prior_cells"] = int(target.sum())
+                        stats["near_prior_mask"] = target
+                        stats["near_prior_pass_fraction"] = round(pass_fraction, 2)
         vetoed_cells = sampled & (greenness < min_cell_greenness)
         if stats is not None:
             stats["colour_vetoed_cells"] = int((mask & vetoed_cells).sum())

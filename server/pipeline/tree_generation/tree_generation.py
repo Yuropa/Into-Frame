@@ -69,6 +69,7 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         max_mesh_faces: int = 8000,
         repair_meshes: bool = False,
         max_aspect_disagreement: float = 1.6,
+        min_class_likeness: float = 0.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to refine. The Zero123 prior was fine-tuned on trees, so by
@@ -92,6 +93,8 @@ class TreeMeshGenerationConfiguration(PipelineStageConfiguration):
         # width:height disagrees with the crop's silhouette by more than this factor
         # is discarded and the Asset Generation mesh kept.
         self.max_aspect_disagreement = float(max_aspect_disagreement)
+        # CLIP class-likeness floor for Tree-D's output (scene.mesh_check); 0 disables.
+        self.min_class_likeness = float(min_class_likeness)
 
 
 class TreeMeshGenerationStage(PipelineStage):
@@ -193,6 +196,9 @@ class TreeMeshGenerationStage(PipelineStage):
                             f"width:height {mesh_aspect:.2f} disagrees with the crop's {crop_aspect:.2f} "
                             f"by {off:.1f}x (over {cfg.max_aspect_disagreement:.1f}x)"
                         )
+                    # Rainier 2026-10-17: a flat yellow sheet passed the aspect test.
+                    from pipeline.panorama_asset_generation.generation import _check_class_likeness
+                    _check_class_likeness(mesh, "tree", cfg.min_class_likeness, self.log_info, mesh_key)
                 except Exception as exc:
                     self.log_warning(f"  {mesh_key}: Tree-D Fusion failed ({exc}); keeping the existing mesh")
                     failed.append(mesh_key)

@@ -208,6 +208,9 @@ class ImageCaptioning:
                 pixel_values=inputs["pixel_values"],
                 max_new_tokens=256,
                 num_beams=3,
+                # Florence-2's remote code indexes the past key/values as a tuple;
+                # newer transformers pass an EncoderDecoderCache object instead.
+                use_cache=False,
             )
 
         raw = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]

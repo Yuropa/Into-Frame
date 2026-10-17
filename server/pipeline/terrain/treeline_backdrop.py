@@ -108,6 +108,28 @@ class TreelineBackdropStage(PipelineStage):
         type_map = self._fit(type_depth.depth, H, W, order=0)
         depth = self._fit(depth_depth.depth, H, W, order=1)
         vegetation = np.rint(type_map).astype(np.int32) == int(RegionType.FOREST)
+
+        # Canopy the object removal took away. Far trees are detected as objects
+        # and removed from the terrain panorama like near ones, and where
+        # ObjectClear repaints them as sky or stone the ribbon loses them: Paris's
+        # far bank was 16.8k px of FOREST on the photo and 3.9k on the terrain
+        # panorama, and stood as a bare grey quay. A distant treeline is backdrop,
+        # not a placed object, so where the removal mask covers canopy the original
+        # panorama's typing and colour are used, at the treeline's own depth band.
+        restored = np.zeros_like(vegetation)
+        orig_type = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        removal = context.input_image(ContextKey.PANORAMA_FOREGROUND_MASK)
+        original = context.input_panorama(ContextKey.PANORAMA)
+        if orig_type is not None and removal is not None and original is not None:
+            orig_forest = np.rint(self._fit(orig_type.depth, H, W, order=0)).astype(np.int32) == int(RegionType.FOREST)
+            removed = np.asarray(removal.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
+            restored = orig_forest & removed & ~vegetation
+            if restored.any():
+                fill = float(cfg.min_distance_m + 0.9 * (min(cfg.max_distance_m, 100.0) - cfg.min_distance_m))
+                ok = np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= cfg.max_distance_m)
+                depth = np.where(restored & ~ok, fill, depth)
+                vegetation = vegetation | restored
+                self.log_info(f"Treeline backdrop: {int(restored.sum())} px of canopy restored where objects were removed")
         self.advance_progress(task)
 
         # ── Per column: the tallest upright run of far vegetation ──────────────
@@ -186,7 +208,10 @@ class TreelineBackdropStage(PipelineStage):
         colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT)
         if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
             colour = panorama
-        rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
+        rgb = np.asarray(colour.rgb(), dtype=np.uint8)
+        if restored.any() and original is not None and (original.width, original.height) == (W, H):
+            rgb = np.where(restored[..., None], np.asarray(original.rgb(), dtype=np.uint8), rgb)
+        rgb = rgb[row_min:row_max + 1]
         alpha = np.zeros((strip_h, W), dtype=np.float32)
         for c in range(W):
             if top[c] >= 0:

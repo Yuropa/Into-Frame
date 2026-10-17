@@ -88,6 +88,9 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         feather_px: float = 3.0,
         texture_max_width: int = 4096,
         min_faces: int = 50,
+        skirt: bool = True,
+        skirt_start_fraction: float = 0.9,
+        skirt_sky_below_deg: float = 1.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Depth-map value beyond which a pixel belongs to the backdrop. 0 = the
@@ -115,6 +118,10 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.feather_px = float(feather_px)
         self.texture_max_width = int(texture_max_width)
         self.min_faces = int(min_faces)
+        # Extend the ground from the grid's edge out to the shell (see run).
+        self.skirt = bool(skirt)
+        self.skirt_start_fraction = float(skirt_start_fraction)
+        self.skirt_sky_below_deg = float(skirt_sky_below_deg)
 
 
 class FarFieldBackdropStage(PipelineStage):
@@ -219,6 +226,19 @@ class FarFieldBackdropStage(PipelineStage):
                 depth = np.where(gained & ~(np.isfinite(depth) & (depth > start_m)), depth_max, depth)
                 far |= gained
                 self.log_info(f"Far-field backdrop: closed {int(gained.sum())} sky-typed px inside far structures")
+        # A structure that became a 3D object (the Eiffel Tower, a far building)
+        # stands in the scene as its own mesh; ObjectClear leaves a faint ghost of
+        # it in the object-removed panorama, and the shell would carry that ghost
+        # as a flat stepped silhouette right behind the model. Sky- and built-typed
+        # pixels under the occluder mask are left off the shell.
+        occluder = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
+        if occluder is not None and type_depth is not None and far.any():
+            occ = np.asarray(occluder.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
+            types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+            ghost = far & occ & np.isin(types_full, [int(RegionType.SKY), int(RegionType.BUILT)])
+            if ghost.any():
+                far &= ~ghost
+                self.log_info(f"Far-field backdrop: {int(ghost.sum())} px of removed objects left to their 3D models")
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
@@ -242,7 +262,81 @@ class FarFieldBackdropStage(PipelineStage):
         # reach 1.41x the half-size) would pierce the near terrain; the grid owns
         # that ground.
         inside_grid = (np.abs(X) < grid_half) & (np.abs(Z) < grid_half)
-        valid = far_grid & ~inside_grid
+        shell = far_grid & ~inside_grid
+
+        # ── ground skirt: the ground between the grid's edge and the shell ───
+        # From a raised camera (Paris, 12 m up on a bridge) a ray a few degrees
+        # below the horizon meets the ground hundreds of metres out, past the
+        # grid's edge and short of the far shell, and nothing was there: the
+        # skybox showed through as a sky-blue band between the river and the far
+        # bank. Below-horizon pixels that are neither sky nor shell get a vertex
+        # where their ray meets the ground at the grid edge's own height (per
+        # azimuth), no farther out than the shell's foot in that column.
+        skirt_full = np.zeros((H, W), dtype=bool)
+        X2, Y2, Z2 = X.copy(), Y.copy(), Z.copy()
+        skirt = np.zeros_like(shell)
+        grounded = np.zeros_like(shell)
+        edge_y = self._edge_heights(context, grid_half, cols, W)
+        if cfg.skirt and edge_y is not None:
+            # Below the horizon nothing is sky: the distant water reflecting it is
+            # typed SKY and punched holes in the skirt.
+            sky_below = np.radians(cfg.skirt_sky_below_deg)
+            not_sky_grid = ~sky[np.ix_(rows, cols_w)] if sky is not None else np.ones_like(shell)
+            not_sky_grid = not_sky_grid | (LAT < -sky_below)
+            tan_down = np.tan(-LAT)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                t_hit = np.where((LAT < 0) & (edge_y[None, :] < 0), -edge_y[None, :] / tan_down, np.inf)
+            hx, hz = t_hit * np.sin(LON), t_hit * np.cos(LON)
+            # Past the grid's inscribed circle rather than its square: the water
+            # sheet ends on a circle, and the skirt sits under any terrain that
+            # is higher, so overlapping the square's corners costs nothing.
+            beyond = np.hypot(hx, hz) >= cfg.skirt_start_fraction * grid_half
+            # The shell's foot: the nearest horizontal radius of its vertices per column.
+            horiz = r * np.cos(LAT)
+            # A far vertex below the horizon whose ray meets the ground first is
+            # pulled in to the ground: the built structures moved to the shell
+            # whole (a far bank's quays) otherwise hang a wall 20-30 m below the
+            # water at 350 m, which the skirt in front of it cannot join.
+            grounded = far_grid & np.isfinite(t_hit) & (t_hit < horiz)
+            horiz = np.where(grounded, t_hit, horiz)
+            shell = shell & ~(grounded & (horiz < cfg.skirt_start_fraction * grid_half))
+            rg = horiz / np.cos(LAT)
+            X = np.where(grounded, rg * np.cos(LAT) * np.sin(LON), X)
+            Y = np.where(grounded, rg * np.sin(LAT), Y)
+            Z = np.where(grounded, rg * np.cos(LAT) * np.cos(LON), Z)
+            X2, Y2, Z2 = X.copy(), Y.copy(), Z.copy()
+            # Far vertices dropped for standing inside the grid count too, or the
+            # skirt runs out under them and the quads joining it to the shell
+            # fail the silhouette test.
+            foot = np.where(far_grid, horiz, np.inf).min(axis=0)
+            foot = np.where(np.isfinite(foot), foot, cfg.far_m)
+            foot = np.maximum(foot, cfg.skirt_start_fraction * grid_half)
+            skirt = (LAT < 0) & np.isfinite(t_hit) & beyond & not_sky_grid & ~shell
+            t = np.minimum(t_hit, foot[None, :])
+            rr = t / np.cos(LAT)
+            X2 = np.where(skirt, rr * np.cos(LAT) * np.sin(LON), X)
+            Y2 = np.where(skirt, rr * np.sin(LAT), Y)
+            Z2 = np.where(skirt, rr * np.cos(LAT) * np.cos(LON), Z)
+            # Full-resolution alpha for the strip: the same test per pixel, with
+            # each pixel's column taking its vertex column's edge height.
+            if skirt.any():
+                prow = np.arange(H)
+                plat = (0.5 - prow / H) * np.pi
+                pcol = np.minimum(np.arange(W) // s, len(cols) - 1)
+                pedge = edge_y[pcol]
+                plon = (np.arange(W) / W - 0.5) * 2.0 * np.pi
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    pt = np.where((plat[:, None] < 0) & (pedge[None, :] < 0), -pedge[None, :] / np.tan(-plat)[:, None], np.inf)
+                pbeyond = pt >= cfg.skirt_start_fraction * grid_half
+                skirt_full = np.isfinite(pt) & pbeyond & ~far
+                if sky is not None:
+                    skirt_full &= ~sky | (plat < -sky_below)[:, None]
+            self.log_info(
+                f"Far-field backdrop: ground skirt of {int(skirt.sum())} vertices "
+                f"(edge height {float(np.median(edge_y)):.1f} m) between the grid's edge and the shell"
+            )
+        valid = shell | skirt
+        X, Y, Z = X2, Y2, Z2
 
         nr, nc = len(rows), len(cols)
         vid = np.full((nr, nc), -1, dtype=np.int64)
@@ -261,7 +355,13 @@ class FarFieldBackdropStage(PipelineStage):
         faces = []
         for i in range(nr - 1):
             v00, v01, v10, v11 = vid[i, :-1], vid[i, 1:], vid[i + 1, :-1], vid[i + 1, 1:]
-            d00, d01, d10, d11 = d_grid[i, :-1], d_grid[i, 1:], d_grid[i + 1, :-1], d_grid[i + 1, 1:]
+            moved = skirt | grounded
+            sk = moved[i, :-1] | moved[i, 1:] | moved[i + 1, :-1] | moved[i + 1, 1:]
+            dg = np.where(sk[None, :], np.stack([
+                np.sqrt(X[i] ** 2 + Y[i] ** 2 + Z[i] ** 2)[:-1], np.sqrt(X[i] ** 2 + Y[i] ** 2 + Z[i] ** 2)[1:],
+                np.sqrt(X[i + 1] ** 2 + Y[i + 1] ** 2 + Z[i + 1] ** 2)[:-1], np.sqrt(X[i + 1] ** 2 + Y[i + 1] ** 2 + Z[i + 1] ** 2)[1:],
+            ]), np.stack([d_grid[i, :-1], d_grid[i, 1:], d_grid[i + 1, :-1], d_grid[i + 1, 1:]]))
+            d00, d01, d10, d11 = dg
             t1 = (v00 >= 0) & (v10 >= 0) & (v11 >= 0) & ratio_ok(d00, d10) & ratio_ok(d10, d11) & ratio_ok(d00, d11)
             t2 = (v00 >= 0) & (v11 >= 0) & (v01 >= 0) & ratio_ok(d00, d11) & ratio_ok(d11, d01) & ratio_ok(d00, d01)
             # Winding so the front face looks toward the camera at the origin.
@@ -284,7 +384,7 @@ class FarFieldBackdropStage(PipelineStage):
         if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
             colour = panorama
         rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
-        alpha = far[row_min:row_max + 1].astype(np.float32)
+        alpha = (far | skirt_full)[row_min:row_max + 1].astype(np.float32)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
         texture = PILImage.fromarray(np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA")
@@ -317,7 +417,7 @@ class FarFieldBackdropStage(PipelineStage):
         )
         context.add_mesh(ContextKey.FAR_FIELD_BACKDROP, Mesh(tm))
 
-        d_far = d_grid[valid]
+        d_far = d_grid[shell] if shell.any() else np.array([0.0])
         summary = {
             "faces": int(faces.shape[0]), "vertices": int(vertices.shape[0]),
             "start_m": round(start_m, 1), "start_radius_m": round(start_radius, 1),
@@ -338,11 +438,45 @@ class FarFieldBackdropStage(PipelineStage):
         if self.temp is not None:
             texture.save(self.temp / "far_field_strip.png")
             preview = np.asarray(panorama.rgb(), dtype=np.uint8).copy()
+            preview[skirt_full] = (preview[skirt_full] * 0.5 + np.array([0, 128, 255]) * 0.5).astype(np.uint8)
             preview[far] = (preview[far] * 0.5 + np.array([255, 128, 0]) * 0.5).astype(np.uint8)
             PILImage.fromarray(preview).resize((W // 4, H // 4)).save(self.temp / "far_field_overlay.png")
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    def _edge_heights(self, context: PipelineContext, grid_half: float, cols: np.ndarray, W: int) -> "np.ndarray | None":
+        """Ground height (camera-relative Y) at the terrain grid's edge along each
+        vertex column's azimuth: the highest of the terrain and water surfaces in
+        the outer 5% of the grid, binned by azimuth and filled around the circle."""
+        pts = []
+        for key in (ContextKey.TERRAIN_MESH, ContextKey.WATER_MESH):
+            m = context.input_mesh(key)
+            if m is not None:
+                pts.append(np.asarray(m.mesh.vertices, dtype=np.float64))
+        if not pts:
+            return None
+        v = np.concatenate(pts, axis=0)
+        edge = np.maximum(np.abs(v[:, 0]), np.abs(v[:, 2])) >= 0.95 * grid_half
+        if edge.sum() < 16:
+            return None
+        v = v[edge]
+        bins = 180
+        az = np.arctan2(v[:, 0], v[:, 2])  # lon: X = sin(lon), Z = cos(lon)
+        b = ((az + np.pi) / (2 * np.pi) * bins).astype(int) % bins
+        heights = np.full(bins, np.nan)
+        for k in range(bins):
+            sel = v[b == k, 1]
+            if sel.size:
+                heights[k] = np.percentile(sel, 90)
+        if np.isnan(heights).all():
+            return None
+        idx = np.arange(bins)
+        ok = ~np.isnan(heights)
+        heights = np.interp(idx, idx[ok], heights[ok], period=bins)
+        lon = (cols / W - 0.5) * 2.0 * np.pi
+        cb = ((lon + np.pi) / (2 * np.pi) * bins).astype(int) % bins
+        return heights[cb]
 
     @staticmethod
     def _fit(array: np.ndarray, H: int, W: int, order: int) -> np.ndarray:

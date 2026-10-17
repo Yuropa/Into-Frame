@@ -163,6 +163,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
         match_texture_colour: bool = True,
+        min_class_likeness: float = 0.5,
         far_landmark_classes: list[str] | None = None,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -181,6 +182,9 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         )
         # See Mesh.match_texture_colour.
         self.match_texture_colour = bool(match_texture_colour)
+        # Vegetation meshes that rendered do not look like their class to CLIP
+        # (scene.mesh_check) fall back to the card/billboard; 0 disables.
+        self.min_class_likeness = float(min_class_likeness)
         # See hires_crops.is_photographed.
         self.outpainted_classes = frozenset(
             outpainted_classes if outpainted_classes is not None else OUTPAINTED_PLACEABLE_CATEGORIES
@@ -641,6 +645,15 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     boxy = _axis_aligned_fraction(mesh)
                     if boxy > 0.6:
                         raise ValueError(f"{boxy:.0%} of its surface is axis-aligned faces (a box, not a plant)")
+                    _check_class_likeness(mesh, obj_class, self.config.min_class_likeness, self.log_info, mesh_key)
+                    if obj_class == "flower":
+                        # One upright plant is taller than it is wide; Rainier's
+                        # flower_2 came back a 1 x 1 x 1.2 cluster of buds that
+                        # stood in the meadow like a pile of grey rocks.
+                        ext = mesh.extents
+                        spread = float(max(ext[0], ext[2]) / max(ext[1], 1e-6))
+                        if spread > 0.8:
+                            raise ValueError(f"{spread:.2f} times as wide as it is tall (a clump, not one plant)")
                 if self.config.match_texture_colour:
                     ref = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop)
                     matched = mesh.match_texture_colour(ref)
@@ -708,12 +721,39 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 self.log_info(f"  {key}: no plausibly-shaped crop to texture a card with, skipping")
                 continue
             crop = context.image(_delit_key(source)) or self._source_crop(context, source)
+            # A plant's crop is a patch of meadow around a bloom (Rainier's
+            # paintbrush card was 66% opaque, a green strip 91%: slabs in the
+            # scene). Its generated reference view is the whole plant cut out on
+            # white, which is what a card needs.
+            from_reference = False
+            if obj_class in VEGETATION_CATEGORIES:
+                # Its own pool first, then any reference view of the class: a crop
+                # card of a tree carries the sky between its branches (Rainier's
+                # far trees stood as blue-grey cones).
+                same_class = [
+                    i for i in range(int(context.input_object(ContextKey.OBJECT_COUNT) or 0))
+                    if (context.input_object(f"metadata_{i}") or {}).get("class") == obj_class
+                ]
+                for candidate in [source] + [i for i in pool if i != source] + [i for i in same_class if i not in pool and i != source]:
+                    ref = context.input_image(_REFERENCE_KEY.format(idx=candidate))
+                    if ref is not None and obj_class == "flower" and ref.image.width > 0.8 * ref.image.height:
+                        ref = None  # a bloom macro or a clump, not one plant (see Object Completion)
+                    if ref is not None:
+                        crop, source, from_reference = ref, candidate, True
+                        self.log_info(f"  {key}: card from the reference view of crop_{candidate}")
+                        break
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
 
             try:
-                mesh = crossed_card_mesh(texture, plane_count=self.config.card_planes)
+                # A reference view's card keeps the plant's own proportions and is
+                # scaled by height alone (SceneGenerationStage): stretched to a
+                # bloom's detection box, a tall paintbrush became a pink block.
+                mesh = crossed_card_mesh(
+                    texture, plane_count=self.config.card_planes,
+                    aspect=(texture.width / max(texture.height, 1)) if from_reference else None,
+                )
             except Exception as e:
                 # One unusable crop costs one group its card, not the whole stage its
                 # cards -- that group simply falls back to a billboard as before.
@@ -1505,6 +1545,22 @@ def _crop_too_dark(crop, min_mean: float = 30.0) -> bool:
     if opaque.sum() < 16:
         return False
     return float(arr[..., :3][opaque].mean()) < min_mean
+
+
+def _check_class_likeness(mesh, cls: str, threshold: float, log, label: str) -> None:
+    """Raise when a rendered mesh does not look like its class to CLIP (see
+    scene.mesh_check); a check that cannot run is not a rejection."""
+    if threshold <= 0:
+        return
+    try:
+        from scene.mesh_check import class_likeness
+        score = class_likeness(mesh.mesh, cls)
+    except Exception as exc:
+        log(f"  {label}: class-likeness check unavailable ({exc})")
+        return
+    log(f"  {label}: looks like a {cls} with p={score:.2f}")
+    if score < threshold:
+        raise ValueError(f"rendered, it does not look like a {cls} (p={score:.2f} < {threshold:.2f})")
 
 
 def _axis_aligned_fraction(mesh) -> float:

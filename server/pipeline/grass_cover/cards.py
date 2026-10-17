@@ -122,7 +122,7 @@ def apply_tuft_silhouette(
     return PILImage.fromarray(rgba, "RGBA")
 
 
-def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:
+def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3, aspect: "float | None" = None) -> Mesh:
     """A unit-height crossed-card mesh carrying `texture` on every plane.
 
     The mesh is built with its base at y=0 and its top at y=1, spanning
@@ -152,7 +152,11 @@ def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3) -> Mesh:
 
     for plane in range(plane_count):
         yaw = np.pi * plane / plane_count
-        dx, dz = float(np.cos(yaw)) * 0.5, float(np.sin(yaw)) * 0.5
+        # aspect (width / height): the card keeps its picture's own proportions
+        # (a generated reference view of a whole plant) instead of being a unit
+        # square scaled per axis to a detection box.
+        half_w = 0.5 * (float(aspect) if aspect else 1.0)
+        dx, dz = float(np.cos(yaw)) * half_w, float(np.sin(yaw)) * half_w
         base = len(vertices)
 
         # Corner order: bottom-left, bottom-right, top-right, top-left.

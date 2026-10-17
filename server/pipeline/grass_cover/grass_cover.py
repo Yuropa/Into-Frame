@@ -111,7 +111,8 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         exemplar_candidates: int = 12,
         exemplar_patch_size: int = 384,
         card_planes: int = 3,
-        tuft_height_m: float = 0.35,
+        tuft_height_m: float = 0.25,
+        near_prior_radius_m: float = 8.0,
         tuft_height_jitter: float = 0.3,
         generator_type: str = "SAM3D",
         build_near_meshes: bool = True,
@@ -120,8 +121,8 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         grass_mode: str = "blades",
         field_px: int = 512,
         tufts_per_m2: float = 36.0,
-        blades_per_tuft: int = 9,
-        blade_width_m: float = 0.016,
+        blades_per_tuft: int = 14,
+        blade_width_m: float = 0.007,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # "blades": publish a grass field (grass_field.py) the client grows instanced
@@ -224,6 +225,9 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         self.exemplar_patch_size = int(exemplar_patch_size)
         self.card_planes = int(card_planes)
         self.tuft_height_m = float(tuft_height_m)
+        # Radius around the viewer within which ground the photo did not see
+        # follows the photo's own near ground (grass_area.grass_area_mask).
+        self.near_prior_radius_m = float(near_prior_radius_m)
         self.tuft_height_jitter = float(tuft_height_jitter)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         # Near-LOD reconstructed meshes are the expensive half of this stage
@@ -335,7 +339,14 @@ class GrassCoverStage(PipelineStage):
             panorama_rgb=np.asarray(panorama.rgb()) if panorama is not None else None,
             min_cell_greenness=cfg.min_cell_greenness,
             stats=area_stats,
+            photo_box=self._photo_box(context),
+            near_prior_radius_m=cfg.near_prior_radius_m,
         )
+        if area_stats.get("near_prior_cells"):
+            self.log_info(
+                f"Grass near the viewer: {area_stats['near_prior_cells']} cells outside the photograph "
+                f"follow its near ground ({area_stats['near_prior_pass_fraction']:.0%} grass)"
+            )
         area_m2 = area_square_meters(mask, grid_size_meters)
         self.log_info(
             f"Grass area: {area_m2:.0f} m2 within {cfg.max_radius_m:.0f} m "
@@ -402,7 +413,8 @@ class GrassCoverStage(PipelineStage):
 
         if cfg.grass_mode == "blades":
             self._write_debug(context, mask, grid_size_meters, [], 0, area_m2)
-            self._publish_field(context, mask, area_stats.get("greenness"), cfg, grid_size_meters)
+            self._publish_field(context, mask, area_stats.get("greenness"), cfg, grid_size_meters,
+                                prior_mask=area_stats.get("near_prior_mask"))
             self.finish_progress(task)
             context.add_object(_RAN_MARKER, True)
             return context
@@ -428,7 +440,8 @@ class GrassCoverStage(PipelineStage):
         context.add_object(_RAN_MARKER, True)
         return context
 
-    def _publish_field(self, context: PipelineContext, mask: np.ndarray, greenness, cfg, grid_size_meters: float) -> None:
+    def _publish_field(self, context: PipelineContext, mask: np.ndarray, greenness, cfg, grid_size_meters: float,
+                       prior_mask: "np.ndarray | None" = None) -> None:
         from pipeline.grass_cover.grass_field import build_grass_field
         pano_u = context.input_depth(ContextKey.HEIGHT_MAP_PANO_U).depth
         pano_v = context.input_depth(ContextKey.HEIGHT_MAP_PANO_V).depth
@@ -438,12 +451,19 @@ class GrassCoverStage(PipelineStage):
         # meadow replaced by generated ground, the same reason grass_area_mask types
         # against the original.
         colour_source = context.input_panorama(ContextKey.PANORAMA)
+        from pipeline.grass_cover.grass_field import photo_meadow_colour
+        photo = context.input_image(ContextKey.INPUT)
+        anchor = photo_meadow_colour(np.asarray(photo.rgb())) if photo is not None else None
+        if anchor is not None:
+            self.log_info(f"Grass colour anchored on the photograph's foreground meadow {tuple(int(c) for c in anchor)}")
         dh, colour, stats = build_grass_field(
             mask, greenness, pano_u, pano_v, sampled, np.asarray(colour_source.rgb()),
             grid_size_meters, cfg.max_radius_m, cfg.field_px,
             cfg.min_cell_greenness, cfg.full_density_greenness, cfg.density_floor_fraction,
             cfg.tuft_height_jitter, self.seed,
             anchor_u_range=self._photo_u_range(context),
+            prior_mask=prior_mask,
+            anchor_colour=anchor,
         )
         context.add_image(GRASS_FIELD_DENSITY_KEY, Image(dh))
         context.add_image(GRASS_FIELD_COLOUR_KEY, Image(colour))
@@ -858,6 +878,18 @@ class GrassCoverStage(PipelineStage):
             PIL.Image.fromarray((mask * 255).astype(np.uint8)).save(self.temp / "grass_area.png")
             for bucket, patch in enumerate(representatives):
                 patch.save(self.temp / f"exemplar_{bucket}.png")
+
+    @staticmethod
+    def _photo_box(context) -> "tuple[float, float, float, float] | None":
+        """The photographed cone as (u0, u1, v0, v1) fractions of the panorama,
+        v measured from the top row."""
+        from util.captured_cone import captured_cone_from_context
+        cone = captured_cone_from_context(context, 4096, 2048)
+        if cone is None:
+            return None
+        u0, u1 = cone.u_range
+        v0, v1 = cone.v_range
+        return u0 / 4096.0, u1 / 4096.0, v0 / 2048.0, v1 / 2048.0
 
     @staticmethod
     def _photo_u_range(context) -> "tuple[float, float] | None":

@@ -526,6 +526,8 @@ class SceneBuilder:
             name = str(o.get("name") or "")
             if not (name in env_names or name.startswith("formation")):
                 continue
+            if self.args.env_exclude and self.args.env_exclude in name:
+                continue
             key = o.get("mesh")
             tm = self.trimesh_for(key) if key else None
             if tm is None:
@@ -894,6 +896,7 @@ def main() -> int:
     ap.add_argument("--material", type=Path, default=None, help="use this saved splat_material directory instead of the run's")
     ap.add_argument("--only", default="", help="render only placed objects whose name contains this (environment meshes always render)")
     ap.add_argument("--exclude", default="", help="skip placed objects whose name contains this")
+    ap.add_argument("--env-exclude", default=None, help="skip environment meshes (terrain/water/treeline/backdrop/formation_N) whose name contains this")
     ap.add_argument("--sun-scale", type=float, default=2.0, help="directional light intensity per unit of the scene's sun intensity")
     ap.add_argument("--ambient", type=float, default=0.45, help="ambient as a fraction of the sky's mean colour")
     ap.add_argument("--exposure", type=float, default=1.0)

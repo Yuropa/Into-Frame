@@ -102,8 +102,12 @@ public class GrassField : MonoBehaviour
         var tiles = new Dictionary<long, (List<Matrix4x4> m, List<Vector4> c, bool near)>();
         int placed = 0;
         Vector3 up = transform.up;
-        for (int iz = 0; iz < n && placed < maxTufts; iz++)
-        for (int ix = 0; ix < n && placed < maxTufts; ix++)
+        // Candidates first, nearest kept when over budget: filling the lattice row
+        // by row stopped at maxTufts wherever the rows had reached, so a dense
+        // meadow lost its far side -- the side the photograph looks at.
+        var candidates = new List<Vector3>();
+        for (int iz = 0; iz < n; iz++)
+        for (int ix = 0; ix < n; ix++)
         {
             float x = -half + (ix + (float)rng.NextDouble()) * spacing;
             float z = -half + (iz + (float)rng.NextDouble()) * spacing;
@@ -112,11 +116,20 @@ public class GrassField : MonoBehaviour
             // Image row 0 is z = -half (grass_field.py); Unity textures start at the
             // bottom row, so a PNG's first row is the texture's last.
             float u = (x + half) / size, v = 1f - (z + half) / size;
-            Color32 d = Sample(dens, dw, dh, u, v);
-            float density = d.r / 255f;
+            float density = Sample(dens, dw, dh, u, v).r / 255f;
             float keep = density;
             if (r > nearRadius) keep *= nearRadius / r;
             if (rng.NextDouble() >= keep) continue;
+            candidates.Add(new Vector3(x, z, r));
+        }
+        if (candidates.Count > maxTufts)
+            candidates.Sort((a, b) => a.z.CompareTo(b.z));
+        foreach (var cand in candidates)
+        {
+            if (placed >= maxTufts) break;
+            float x = cand.x, z = cand.y, r = cand.z;
+            float u = (x + half) / size, v = 1f - (z + half) / size;
+            Color32 d = Sample(dens, dw, dh, u, v);
 
             Vector3 above = transform.TransformPoint(new Vector3(x, 0f, z)) + up * 200f;
             if (!terrainCollider.Raycast(new Ray(above, -up), out RaycastHit hit, 1000f)) continue;

@@ -31,6 +31,13 @@ _FOREGROUND_STRUCTURE_CATEGORIES = frozenset({
     "lighthouse", "gazebo", "fountain", "wind_turbine", "bridge", "dock",
 })
 
+# Rigid objects that always stand in the scene as their own 3D model
+# (object_typing.categories.ALWAYS_MESH_CATEGORIES) and are big enough to be one
+# coherent crop. Left in the terrain plate, a boat was painted flat onto the
+# water under its own model (Paris: the tour boat and its crowd, seen again
+# from behind).
+_FOREGROUND_RIGID_CATEGORIES = frozenset({"boat", "ship", "car", "truck", "bus"})
+
 
 class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     """
@@ -363,6 +370,11 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
             if (
                 object_class not in _FOREGROUND_VEGETATION_CATEGORIES
                 and object_class not in _FOREGROUND_STRUCTURE_CATEGORIES
+                and object_class not in _FOREGROUND_RIGID_CATEGORIES
+                # Folded into a carrier or a named landmark by Object Labeling
+                # (the crowd aboard a boat, a fragment of the tower): it goes
+                # with the object it is part of.
+                and not metadata.get("part_of")
             ):
                 continue
 
