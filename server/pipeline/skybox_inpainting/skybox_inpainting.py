@@ -171,6 +171,106 @@ def _sky_prompt(time_label: str, cloudiness: float = 0.0) -> str:
     )
 
 
+def _sky_structure(source_arr: np.ndarray, sky_mask: np.ndarray, cone_cols: "tuple[int, int] | None" = None) -> float:
+    """Fraction of the photographed sky (above the horizon, inside the cone when
+    known) more than 25 levels off its row's median colour: clouds of any colour.
+    _cloudiness counts bright unsaturated pixels only, and read Shark Fin's sunset
+    cirrus -- orange and pink -- as 3% cloud. Measured: Rainier's clear sky 0.024,
+    Paris 0.19, Shark Fin 0.20."""
+    h, w = source_arr.shape[:2]
+    scope = np.ones(w, dtype=bool)
+    if cone_cols is not None:
+        scope = np.zeros(w, dtype=bool)
+        scope[max(cone_cols[0], 0):min(cone_cols[1], w)] = True
+    m = sky_mask & scope[None, :] & (np.arange(h)[:, None] < h // 2)
+    src = source_arr.astype(np.float32)
+    off, total = 0, 0
+    for y in np.flatnonzero(m.sum(axis=1) > 50):
+        px = src[y][m[y]]
+        dev = np.abs(px - np.median(px, axis=0)).max(axis=1)
+        off += int((dev > 25).sum())
+        total += px.shape[0]
+    return off / total if total else 0.0
+
+
+def _clear_sky(source_arr: np.ndarray, sky_mask: np.ndarray, sun_row: int, sun_col: int,
+               cone_cols: "tuple[int, int] | None" = None, n_sun_bins: int = 36) -> np.ndarray:
+    """A cloudless sky from the photographed one: colour by elevation, plus sun glow.
+
+    Each row takes the median colour of its sky pixels (smoothed over rows); rows
+    below the lowest sky row hold the horizon colour, so wherever the scene's
+    geometry fails to cover the old skyline it shows haze rather than whatever a
+    generator put behind the mountain (FLUX turned Rainier's buried treeline and
+    mountain silhouette into cloud banks, which stood behind the rendered mountain
+    as cumulus in a cloudless photograph). The residual against that profile,
+    binned by angle from the sun, adds the glow above the horizon.
+
+    The profile comes from the photographed columns (cone_cols) when they hold
+    enough sky, and only from blue-dominant pixels: the terrain panorama's sky
+    mask also covers snowfields and the haze ObjectClear leaves where trees were,
+    which turned the horizon colour beige."""
+    from scipy.ndimage import gaussian_filter1d
+    h, w = source_arr.shape[:2]
+    src = source_arr.astype(np.float64)
+    rows = np.full((h, 3), np.nan)
+    min_count = max(8, w // 200)
+    blue = sky_mask & (src[..., 2] >= src[..., 0])
+    scope = np.ones(w, dtype=bool)
+    if cone_cols is not None:
+        c0, c1 = cone_cols
+        cone = np.zeros(w, dtype=bool)
+        cone[max(c0, 0):min(c1, w)] = True
+        if blue[:, cone].sum() >= 50 * min_count:
+            scope = cone
+    profile_px = blue & scope[None, :]
+    counts = profile_px.sum(axis=1)
+    # Above the horizon and a real share of the row: below it the mask's stray
+    # "sky" is water reflection and snow, and a row of three pixels is noise.
+    need = max(min_count, int(scope.sum()) // 20)
+    for r in np.flatnonzero((counts >= need) & (np.arange(h) < h // 2)):
+        rows[r] = np.median(src[r][profile_px[r]], axis=0)
+    valid = np.flatnonzero(~np.isnan(rows[:, 0]))
+    if valid.size == 0:
+        return np.broadcast_to(np.array([135, 206, 235], np.uint8), source_arr.shape).copy()
+    for c in range(3):
+        rows[:, c] = np.interp(np.arange(h), valid, rows[valid, c])
+    rows[valid[-1]:] = rows[valid[-1]]  # below the lowest sky row: horizon haze
+    rows[: valid[0]] = rows[valid[0]]
+    # Smoothed hard enough that where the measured rows stop (the photo's sky meets
+    # the mountain) there is no step.
+    rows = gaussian_filter1d(rows, sigma=max(4.0, h / 30.0), axis=0, mode="nearest")
+    model = np.broadcast_to(rows[:, None, :], (h, w, 3)).copy()
+
+    # Sun glow: what the elevation profile misses, by angle from the sun.
+    el = (0.5 - np.arange(h, dtype=np.float64)[:, None] / h) * np.pi
+    az = (np.arange(w, dtype=np.float64)[None, :] / w) * 2.0 * np.pi
+    sun_el, sun_az = (0.5 - sun_row / h) * np.pi, (sun_col / w) * 2.0 * np.pi
+    dot = (np.cos(el) * np.cos(az) * np.cos(sun_el) * np.cos(sun_az)
+           + np.cos(el) * np.sin(az) * np.cos(sun_el) * np.sin(sun_az)
+           + np.sin(el) * np.sin(sun_el))
+    angle = np.arccos(np.clip(dot, -1, 1))
+    b = np.clip((angle / np.pi * n_sun_bins).astype(int), 0, n_sun_bins - 1)
+    resid = np.zeros((n_sun_bins, 3))
+    # Only rows the profile measured: nearer the horizon the mask's "sky" is haze
+    # and snow, which came out as blotches of glow along it.
+    upper = blue & (np.arange(h)[:, None] <= valid[-1])
+    for i in range(n_sun_bins):
+        sel = upper & (b == i)
+        if sel.sum() >= min_count:
+            resid[i] = np.median(src[sel] - model[sel], axis=0)
+    resid = gaussian_filter1d(resid, sigma=1.5, axis=0, mode="nearest")
+    # Glow brightens; a negative residual is the profile's own spread, not shade.
+    # Interpolated between bin centres so it carries no rings.
+    centres = (np.arange(n_sun_bins) + 0.5) * np.pi / n_sun_bins
+    # Glow is a halo: beyond 45 deg of the sun a positive residual is horizon haze
+    # at some other azimuth (Rainier: blotches 140 deg round from the sun).
+    resid *= (np.clip(1.0 - centres / np.radians(45.0), 0.0, 1.0) ** 2)[:, None]
+    above = np.clip((h // 2 - np.arange(h, dtype=np.float64)) / max(h / 90.0, 1.0), 0.0, 1.0)[:, None]
+    for c in range(3):
+        model[..., c] += above * np.interp(angle, centres, np.maximum(resid[:, c], 0.0))
+    return model.clip(0, 255).astype(np.uint8)
+
+
 def _build_gradient_sky(
     source_arr: np.ndarray,
     sky_mask: np.ndarray,
@@ -260,8 +360,15 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         strength: float = 0.85,
         close_sky_wrap_seam: bool = True,
         wrap_seam_band_px: int = 512,
+        # Under this fraction of cloud in the photographed sky, the sky is built
+        # from the photo's own colours (_clear_sky) instead of generated.
+        clear_sky_max_cloud: float = 0.05,
+        clear_sky_max_structure: float = 0.08,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        self.clear_sky_max_cloud = float(clear_sky_max_cloud)
+        # ... and under this fraction of it off its row's colour (_sky_structure).
+        self.clear_sky_max_structure = float(clear_sky_max_structure)
         self.guidance_scale = guidance_scale
         self.strength = strength
         # Force column 0 and column W-1 to match exactly after the generative seam
@@ -446,15 +553,6 @@ class SkyboxInpaintingStage(PipelineStage):
 
         self.advance_progress(task)
 
-        # --- Pass 2: FLUX detail over the whole panorama ---
-        # Full-canvas mask — see the class docstring for why this replaced the old
-        # non-sky-only fill mask (it was the source of a cloud-ridge artifact tracing
-        # the buried mountain silhouette).
-        full_mask_arr = np.ones((h, w), dtype=bool)
-        fill_mask_pil = PILImage.fromarray((full_mask_arr * 255).astype(np.uint8), mode="L")
-
-        # Lead with the FLUX_DEV_PANORAMA_LORA_2 trigger sequence so the LoRA activates its
-        # spherical/HDRI generation mode instead of its base perspective-photo bias.
         cone_cols = None
         try:
             from util.captured_cone import captured_cone_from_context
@@ -466,6 +564,58 @@ class SkyboxInpaintingStage(PipelineStage):
             cone_cols = None
         cloudiness = _cloudiness(source_arr, sky_mask, cone_cols)
         self.log_info(f"Photographed sky: {cloudiness:.0%} cloud")
+
+        structure = _sky_structure(source_arr, sky_mask, cone_cols)
+        self.log_info(f"Photographed sky structure: {structure:.1%} of it off its row's colour")
+        if cloudiness < self.config.clear_sky_max_cloud and structure < self.config.clear_sky_max_structure:
+            # A clear photographed sky: nothing for a generator to add, and what it
+            # adds is cloud banks along the buried skyline (see _clear_sky).
+            # The model alone, not composited over the terrain panorama's sky: that
+            # carries ghosts of the removed trees and the faded mountain.
+            result_pil = PILImage.fromarray(_clear_sky(source_arr, sky_mask, sun_row, sun_col, cone_cols))
+            self.log_info("Clear sky: elevation profile + sun glow from the photographed sky, no FLUX pass")
+            self.advance_progress(task)
+        else:
+            result_pil = self._flux_sky(context, gradient_composite, source_arr, sky_mask, cloudiness,
+                                        time_label, task, h, w)
+
+        # --- Pass 4: close whatever step Pass 3 left, in closed form ---
+        # Pass 3 is a generative fill and has no continuity constraint, so it
+        # closes the seam only as well as it happens to -- and nothing checked.
+        # It did not: this stage's own stored output for the Paris capture has an
+        # 11.53-level step at the wrap column against a 0.145 median
+        # adjacent-column difference over the whole sky, i.e. the hard vertical
+        # line Pass 3 exists to remove, still there and 80x the surrounding
+        # variation. Pass 3 is still what invents cloud STRUCTURE across the
+        # join; this makes the join itself exact afterwards. See close_wrap_seam.
+        if self.config.close_sky_wrap_seam:
+            result_pil = close_wrap_seam(
+                result_pil,
+                band_px=self.config.wrap_seam_band_px,
+                log_fn=self.log_info,
+                label="sky wrap",
+            )
+
+        if self.output is not None:
+            result_pil.save(self.output / "panorama_sky.png")
+
+        context.add_panorama(output_key, Panorama(result_pil))
+
+        self.advance_progress(task)
+        self.finish_progress(task)
+        return context
+
+    def _flux_sky(self, context, gradient_composite, source_arr, sky_mask, cloudiness, time_label, task, h, w):
+        """Passes 2-3: FLUX detail over the whole panorama, then the wrap seam."""
+        # --- Pass 2: FLUX detail over the whole panorama ---
+        # Full-canvas mask — see the class docstring for why this replaced the old
+        # non-sky-only fill mask (it was the source of a cloud-ridge artifact tracing
+        # the buried mountain silhouette).
+        full_mask_arr = np.ones((h, w), dtype=bool)
+        fill_mask_pil = PILImage.fromarray((full_mask_arr * 255).astype(np.uint8), mode="L")
+
+        # Lead with the FLUX_DEV_PANORAMA_LORA_2 trigger sequence so the LoRA activates its
+        # spherical/HDRI generation mode instead of its base perspective-photo bias.
         prompt = lora_prompt_prefix(PanoramaLoraType.FLUX_DEV_PANORAMA_LORA_2) + _sky_prompt(time_label, cloudiness)
         self.log_info(f"FLUX prompt: {prompt!r}")
 
@@ -572,31 +722,7 @@ class SkyboxInpaintingStage(PipelineStage):
         )
         flux.close()
 
-        # --- Pass 4: close whatever step Pass 3 left, in closed form ---
-        # Pass 3 is a generative fill and has no continuity constraint, so it
-        # closes the seam only as well as it happens to -- and nothing checked.
-        # It did not: this stage's own stored output for the Paris capture has an
-        # 11.53-level step at the wrap column against a 0.145 median
-        # adjacent-column difference over the whole sky, i.e. the hard vertical
-        # line Pass 3 exists to remove, still there and 80x the surrounding
-        # variation. Pass 3 is still what invents cloud STRUCTURE across the
-        # join; this makes the join itself exact afterwards. See close_wrap_seam.
-        if self.config.close_sky_wrap_seam:
-            result_pil = close_wrap_seam(
-                result_pil,
-                band_px=self.config.wrap_seam_band_px,
-                log_fn=self.log_info,
-                label="sky wrap",
-            )
-
-        if self.output is not None:
-            result_pil.save(self.output / "panorama_sky.png")
-
-        context.add_panorama(output_key, Panorama(result_pil))
-
-        self.advance_progress(task)
-        self.finish_progress(task)
-        return context
+        return result_pil
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return (

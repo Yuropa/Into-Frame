@@ -277,6 +277,12 @@ stages:
     mask_dilation_px: 15
     guidance_scale: 2.5
     num_inference_steps: 30
+    # Occluders whose median raw depth is past this fraction of the depth model's
+    # range stay in the terrain plate as backdrop (Scene Generation skips them).
+    # Paris: far-bank trees 55-86, moored barges 52-83, bridges 48-62, the Eiffel
+    # Tower 100; the tour boat 16, the near-left trees 38-46. Rainier keeps 7 trees.
+    keep_far_objects: true
+    far_depth_fraction: 0.5
 
   - name: Panorama LoRA Correction
     stage: PanoramaLoraCorrectionStage
@@ -1704,6 +1710,12 @@ stages:
     bloom_classes: [flower]           # density scaled by the detector's measured recall
     bloom_max_boost: 6.0
     align_to_water_classes: [boat, dock]
+    moor_fraction: {boat: 0.6, dock: 1.0}   # share moved onto the water moor_offset_m off the bank
+    moor_offset_m: 4.0
+    # Painted instances of these are vetoed inside the photographed view (trees
+    # only where the photo shows forest): the photograph already shows its boats,
+    # and painted ones there sat on top of the far bank's moored barges.
+    photo_veto_classes: [tree, boat, dock]
     class_paint_regions: {boat: [water]}
     # Guard against a CLUMPED group (a few tight patches far apart) demanding a huge
     # exemplar candidate grid: the hull spans the empty gaps while spacing is measured
@@ -2348,6 +2360,7 @@ stages:
     # IS for clients without LOD support.
     runtime_lods: true
     lod_mesh_screen_fraction: 0.06
+    card_preferred_classes: [flower, tree]   # the card replaces the reconstruction whenever the group has one: a tree card is its reference view (needles, colour), the mesh a faceted dark cone
     lod_card_screen_fraction: 0.025
     lod_billboard_screen_fraction: 0.003
     lod_exempt_classes:

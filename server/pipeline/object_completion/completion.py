@@ -98,6 +98,16 @@ _KIND_VOCAB: dict[str, list[tuple[str, str, str, float | None]]] = {
          "floating pontoon landing stage with railings", 15.0),
     ],
 }
+# Length over height of each kind's whole silhouette, side on. The reference
+# prompt asks for it and a candidate far squatter than it is dropped: from an
+# end-on crop, at "three-quarter view", Paris's tour boat came back a boxy
+# three-deck ferry (aspect 1.3) and was placed 9 m long once its height was capped.
+_KIND_ASPECT: dict[str, float] = {
+    "tour boat": 6.0, "barge": 6.0, "houseboat": 5.0, "pontoon": 4.0,
+    "motorboat": 3.0, "rowing boat": 4.0, "fishing boat": 2.5, "sailboat": 0.9,
+}
+_KIND_MIN_ASPECT_FRACTION = 0.55
+
 # How much the photograph's own read of the kind counts against the crop's
 # (log-probabilities added), when the photograph is sure (>= 0.85). At 0.5 a
 # fragment of Paris's tour boat (its stern, crop 0.93 rowing boat) beat the
@@ -731,7 +741,8 @@ class ObjectCompletionStage(PipelineStage):
         descriptions = self._describe_crops(sources, metas, context)
         kinds = self._object_kinds(sources, metas, context)
         context.add_object(OBJECT_KINDS_KEY, {
-            str(idx): {"class": normalize_category(metas[idx].get("class")), "kind": k[0], "length_m": k[2]}
+            str(idx): {"class": normalize_category(metas[idx].get("class")), "kind": k[0], "length_m": k[2],
+                       "height_m": (k[2] / _KIND_ASPECT[k[0]]) if k[2] and k[0] in _KIND_ASPECT else None}
             for idx, k in kinds.items()
         })
         inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
@@ -760,10 +771,14 @@ class ObjectCompletionStage(PipelineStage):
                         # The kind replaces the caption, which describes what was
                         # visible ("a boat full of people") rather than the vessel.
                         noun = kinds[idx][0]
+                        aspect = _KIND_ASPECT.get(noun)
+                        view = ("three-quarter view" if not aspect or aspect < 2 else
+                                f"seen broadside in profile, the full length from bow to stern, about "
+                                f"{aspect:.0f} times as long as it is tall")
                         prompt = (
                             f"a real full-size {kinds[idx][1]}, empty with nobody aboard. "
                             f"The whole {noun} in frame from end to end, seen from the side at eye level, "
-                            f"three-quarter view, isolated on a plain white background, realistic "
+                            f"{view}, isolated on a plain white background, realistic "
                             f"photograph, even soft daylight, sharp"
                         )
                     else:
@@ -781,6 +796,11 @@ class ObjectCompletionStage(PipelineStage):
                     # whatever view the prompt asks for. Drawn from the
                     # description alone, the prompt sets the side view.
                     strength = 1.0
+                if idx in kinds and (_KIND_ASPECT.get(kinds[idx][0]) or 0) >= 2:
+                    # A long hull's profile comes from the prompt: at 0.75 the crop's
+                    # end-on, from-above build survived as a boxy ferry. The crop
+                    # still lends its colours.
+                    strength = max(strength, 0.92)
                 if name != cls:
                     # A named landmark: the name is the whole description. Its crop
                     # is often a few pixels on the skyline (Paris's Eiffel Tower is
@@ -800,7 +820,8 @@ class ObjectCompletionStage(PipelineStage):
                     bloom = _bloom_colour_name(src)
                     prompt = (
                         f"a single {bloom + ' ' if bloom else ''}wildflower plant, one upright stem with "
-                        f"leaves and its blooms, the whole plant from the base of the stem to the top in frame, "
+                        f"leaves and its blooms, the whole plant from the base of the stem to the top in frame "
+                        f"with empty white space on every side, "
                         f"seen from the side, isolated on a plain white background, botanical studio "
                         f"photograph, even soft light, sharp"
                     )
@@ -825,7 +846,8 @@ class ObjectCompletionStage(PipelineStage):
                             else tree_text["broadleaf"] if broadleaf else "tree")
                     prompt = (
                         f"a single whole {kind}, the entire tree from the base of the trunk to the top "
-                        f"of the crown in frame, standing alone, seen from the side at eye level, isolated "
+                        f"of the crown in frame with empty white space on every side, standing alone, seen from "
+                        f"the side at eye level, isolated "
                         f"on a plain white background, realistic photograph, even soft daylight, sharp"
                     )
                     strength = max(strength, 0.95)
@@ -860,6 +882,8 @@ class ObjectCompletionStage(PipelineStage):
                 target = src_rgb.mean(0) if len(src_rgb) else None
                 src_embed = clip.embed(_on_white(sources[idx]))
                 best, best_err, best_score = None, None, None
+                want_aspect = _KIND_ASPECT.get(kinds[idx][0]) if idx in kinds else None
+                squat_best, squat_aspect = None, -1.0
                 for k, out in enumerate(outs):
                     res = seg.segment(Image(out))
                     if res.is_empty():
@@ -870,9 +894,14 @@ class ObjectCompletionStage(PipelineStage):
                     # The object was drawn isolated on white; a matte running along
                     # the canvas edge is background the model painted in (Rainier's
                     # paintbrush came back on a grey slab and meshed as boxes).
-                    edge = np.concatenate([matte[:3].ravel(), matte[-3:].ravel(), matte[:, :3].ravel(), matte[:, -3:].ravel()])
-                    if edge.mean() > 0.05:
-                        self.log_info(f"  crop_{idx}: reference candidate {k} runs into the canvas edge, skipped")
+                    # Per side: averaged over the whole border, a paintbrush cut
+                    # down its right side (74% of that side) and across its base
+                    # passed, and stood as a rectangle of foliage on its card.
+                    sides = (matte[:3].any(0).mean(), matte[-3:].any(0).mean(),
+                             matte[:, :3].any(1).mean(), matte[:, -3:].any(1).mean())
+                    if max(sides) > 0.03:
+                        self.log_info(f"  crop_{idx}: reference candidate {k} runs into the canvas edge "
+                                      f"({max(sides):.0%} of a side), skipped")
                         continue
                     rgb = np.asarray(out, dtype=np.float32)[matte]
                     err = float(np.abs(rgb.mean(0) - target).mean()) if target is not None else 0.0
@@ -882,12 +911,28 @@ class ObjectCompletionStage(PipelineStage):
                     alpha = PILImage.fromarray(matte.astype(np.uint8) * 255, "L")
                     rgba = out.convert("RGBA"); rgba.putalpha(alpha)
                     rgba = rgba.crop(alpha.getbbox())
+                    if normalize_category(metas[idx].get("class")) in ("flower", "plant"):
+                        # The bloom colour is what identifies a meadow flower; FLUX
+                        # drew Rainier's red paintbrush ("a single red wildflower")
+                        # yellow, and the red bucket's cards came out yellow.
+                        want, got = _bloom_colour_name(sources[idx]), _bloom_colour_name(rgba)
+                        if not bloom_colours_agree(want, got):
+                            self.log_info(f"  crop_{idx}: reference candidate {k} blooms {got}, the crop {want}, skipped")
+                            continue
                     if normalize_category(metas[idx].get("class")) in ("flower", "plant") and rgba.width > 0.8 * rgba.height:
                         # One upright plant is taller than wide; a wide matte is a
                         # macro of a bloom or a clump (Rainier: a lupine drawn as a
                         # crocus head that stood a metre wide in the meadow).
                         self.log_info(f"  crop_{idx}: reference candidate {k} is wider than a single plant, skipped")
                         continue
+                    if want_aspect and want_aspect >= 2:
+                        aspect = rgba.width / max(rgba.height, 1)
+                        if aspect < _KIND_MIN_ASPECT_FRACTION * want_aspect:
+                            self.log_info(f"  crop_{idx}: reference candidate {k} is {aspect:.1f}:1, a "
+                                          f"{kinds[idx][0]} is about {want_aspect:.0f}:1, skipped")
+                            if aspect > squat_aspect:
+                                squat_best, squat_aspect = rgba, aspect
+                            continue
                     # Which candidate still looks like the photographed object:
                     # CLIP image similarity first (kind and build), the mean
                     # colour as a small tie-break. Colour alone kept a tug for
@@ -896,6 +941,12 @@ class ObjectCompletionStage(PipelineStage):
                     score = sim - 0.002 * err
                     if best_score is None or score > best_score:
                         best, best_err, best_score = rgba, err, score
+                if best is None and squat_best is not None:
+                    # Every candidate too squat: the longest one beats none (the mesh
+                    # would otherwise come from the end-on crop itself).
+                    best, best_err, best_score = squat_best, 0.0, 0.0
+                    self.log_info(f"  crop_{idx}: no candidate near {want_aspect:.0f}:1, keeping the "
+                                  f"longest ({squat_aspect:.1f}:1)")
                 if best is not None:
                     context.add_image(reference_key(idx), Image(best))
                     written += 1
@@ -1042,6 +1093,55 @@ _BLOOM_HUES = (
     (0, "red"), (20, "orange"), (45, "yellow"), (75, "yellow-green"), (160, "white"),
     (200, "blue"), (250, "violet"), (290, "purple"), (320, "magenta"), (345, "red"),
 )
+
+
+_BLOOM_FAMILY = {
+    "red": "red", "magenta": "red", "orange": "warm", "yellow": "warm", "yellow-green": "warm",
+    "blue": "blue", "violet": "blue", "purple": "blue", "white": "white",
+}
+
+
+def bloom_colours_agree(a: "str | None", b: "str | None") -> bool:
+    """Two bloom colour names in the same family (red/magenta, orange/yellow,
+    blue/violet/purple, white), or either unknown."""
+    if not a or not b:
+        return True
+    return _BLOOM_FAMILY.get(a, a) == _BLOOM_FAMILY.get(b, b)
+
+
+def _bloom_mask_and_hue(rgba: PILImage.Image):
+    """(bloom mask, HSV array) as _bloom_colour_name reads them."""
+    arr = np.asarray(rgba.convert("RGBA"), dtype=np.float32) / 255.0
+    hsv = np.asarray(rgba.convert("RGB").convert("HSV"), dtype=np.float32)
+    h, sat, val = hsv[..., 0] * (360.0 / 255.0), hsv[..., 1] / 255.0, hsv[..., 2] / 255.0
+    blooms = (arr[..., 3] > 0.5) & ~((h > 70) & (h < 170)) & (sat > 0.35) & (val > 0.3)
+    return blooms, hsv
+
+
+def bloom_hue(images: "list[PILImage.Image]") -> "float | None":
+    """Dominant bloom hue (degrees) over a set of flower crops."""
+    hues = []
+    for im in images:
+        blooms, hsv = _bloom_mask_and_hue(im)
+        hues.append(hsv[..., 0][blooms] * (360.0 / 255.0))
+    hues = np.concatenate(hues) if hues else np.zeros(0)
+    if hues.size < 16:
+        return None
+    hist, edges = np.histogram(hues, bins=36, range=(0, 360))
+    return float(edges[int(np.argmax(hist))] + 5.0)
+
+
+def recolour_blooms(rgba: PILImage.Image, hue_deg: float) -> PILImage.Image:
+    """A flower cutout with its bloom pixels turned to `hue_deg`, leaves and
+    stems untouched: a borrowed reference for a group none was drawn for in its
+    own colour (FLUX would not draw Rainier's red paintbrush red)."""
+    blooms, hsv = _bloom_mask_and_hue(rgba)
+    out = hsv.copy()
+    out[..., 0][blooms] = (hue_deg % 360.0) * (255.0 / 360.0)
+    rgb = PILImage.fromarray(out.clip(0, 255).astype(np.uint8), "HSV").convert("RGB")
+    result = rgb.convert("RGBA")
+    result.putalpha(rgba.convert("RGBA").getchannel("A"))
+    return result
 
 
 def _bloom_colour_name(rgba: PILImage.Image) -> "str | None":

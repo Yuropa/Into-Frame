@@ -56,8 +56,25 @@ class RecognizeAnythingStage(PipelineStage):
                 self.temp,
                 on_progress=self.make_progress_callback(task),
             )
-            self.log_info(f"Recognized tags: {result.tags}")
-            context.add_object(output_key, result.tags)
+            tags = [t.strip() for t in str(result.tags).split("|") if t.strip()]
+            # The photograph too, when the source is the panorama: a regenerated
+            # Paris panorama tagged "boat | harbor | river ..." with no tower or
+            # bridge, and the Eiffel Tower dropped out of the vocabulary, the
+            # labels and the scene. The photo is what the scene must contain.
+            photo = context.input_image(ContextKey.INPUT)
+            if photo is not None and input_key != ContextKey.INPUT:
+                try:
+                    photo_tags = self._recognize.recognize(photo.image.convert("RGB"), self.temp).tags
+                    extra = [t.strip() for t in str(photo_tags).split("|")
+                             if t.strip() and t.strip() not in tags]
+                    if extra:
+                        self.log_info(f"Photograph adds tags: {' | '.join(extra)}")
+                        tags += extra
+                except Exception as exc:
+                    self.log_warning(f"Photograph tagging failed ({exc}); panorama tags only")
+            joined = " | ".join(tags)
+            self.log_info(f"Recognized tags: {joined}")
+            context.add_object(output_key, joined)
         else:
             self.log_warning("No input image — skipping recognition")
 

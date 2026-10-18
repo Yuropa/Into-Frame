@@ -122,6 +122,62 @@ def apply_tuft_silhouette(
     return PILImage.fromarray(rgba, "RGBA")
 
 
+def reference_cut_side(rgba: PILImage.Image, side_max: float = 0.15, bottom_max: float = 0.35) -> "str | None":
+    """The side along which a cut-out plant runs straight off its picture, or None.
+
+    `rgba` is a reference view cropped to its matte's box, so a whole plant only
+    touches each side at a few points; a picture cut by the canvas leaves a
+    straight opaque run instead (Rainier's paintbrush: 74% of its right side,
+    90% of its base, a rectangle of foliage on the card). The base gets more
+    room for a spreading clump; a trunk or stem is a few percent."""
+    a = np.asarray(rgba.convert("RGBA"))[..., 3] > 127
+    if a.shape[0] < 8 or a.shape[1] < 8:
+        return None
+    fractions = {"left": a[:, 0].mean(), "right": a[:, -1].mean(), "top": a[0].mean(), "bottom": a[-1].mean()}
+    for side, frac in fractions.items():
+        if frac > (bottom_max if side == "bottom" else side_max):
+            return side
+    return None
+
+
+def defringe_rgba(texture: PILImage.Image, passes: int = 2, light_margin: float = 20.0) -> PILImage.Image:
+    """A cutout ready for filtered sampling: light fringe removed, colour bled out.
+
+    Cards are cut from pictures on white, and two things put a white outline on
+    them in the scene. The matte's outermost pixels are part background (lighter
+    than the plant just inside them), and the transparent texels keep the white
+    canvas, which bilinear filtering and mipmaps blend into every edge texel. An
+    edge pixel clearly lighter than the interior next to it is dropped (up to
+    `passes` deep, so a thin stem of a different colour survives), then every
+    transparent texel takes the colour of the nearest opaque one. The outermost
+    texel ring is cleared."""
+    from scipy.ndimage import binary_erosion, distance_transform_edt
+    rgba = np.asarray(texture.convert("RGBA")).copy()
+    alpha = rgba[..., 3] > 127
+    if alpha.sum() < 16:
+        return texture.convert("RGBA")
+    rgb = rgba[..., :3].astype(np.float32)
+    lum = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    for _ in range(passes):
+        interior = binary_erosion(alpha, iterations=2)
+        if not interior.any():
+            break
+        edge = alpha & ~binary_erosion(alpha)
+        _, (iy, ix) = distance_transform_edt(~interior, return_indices=True)
+        lighter = edge & (lum - lum[iy, ix] > light_margin)
+        if not lighter.any():
+            break
+        alpha &= ~lighter
+    # A transparent 1 px border: under repeat wrapping, filtering pulls an opaque
+    # edge onto the opposite side as a hairline along the card's outline.
+    alpha[0, :] = alpha[-1, :] = False
+    alpha[:, 0] = alpha[:, -1] = False
+    _, (iy, ix) = distance_transform_edt(~alpha, return_indices=True)
+    rgba[..., :3] = np.where(alpha[..., None], rgba[..., :3], rgba[iy, ix, :3])
+    rgba[..., 3] = np.where(alpha, np.maximum(rgba[..., 3], 128), 0)
+    return PILImage.fromarray(rgba, "RGBA")
+
+
 def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3, aspect: "float | None" = None) -> Mesh:
     """A unit-height crossed-card mesh carrying `texture` on every plane.
 
@@ -192,7 +248,7 @@ def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3, aspect: "fl
         faces.append((base + 3, base + 2, base + 0))
 
     material = trimesh.visual.material.PBRMaterial(
-        baseColorTexture=texture.convert("RGBA"),
+        baseColorTexture=defringe_rgba(texture),
         # Grass is matte; the shared vegetation look elsewhere in the scene uses
         # the same near-zero smoothness (see _LAYER_SMOOTHNESS for the terrain's
         # own vegetation layer).

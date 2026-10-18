@@ -445,6 +445,8 @@ class TerrainMeshStage(PipelineStage):
             sample_height_map=context.input_depth_from(ContextKey.HEIGHT_MAP, "Height Map"),
             pano_uv_max_height_drift_m=cfg.pano_uv_max_height_drift_m,
         )
+        if water_mesh is not None:
+            self._colour_water_from_photo(context, water_mesh)
         if uv_folds_fixed:
             total_faces = len(mesh.mesh.faces) if mesh is not None else 0
             self.log_info(
@@ -599,6 +601,50 @@ class TerrainMeshStage(PipelineStage):
 
         self.finish_progress(task)
         return context
+
+    def _colour_water_from_photo(self, context: PipelineContext, water_mesh) -> None:
+        """The water sheet's base colour from the photographed water: the median of
+        the original panorama's WATER pixels inside the photographed cone, a little
+        darker (the client's water shader adds sky reflection and specular on top),
+        as glTF's linear baseColorFactor. The fixed blue (0.10, 0.30, 0.45) read as
+        a swimming pool against Paris's teal-green Seine. Unity's WaterSurface reads
+        it back (WaterMaterialManager)."""
+        from util.captured_cone import captured_cone_from_context
+        from pipeline.panorama_segmentation.panorama_region_result import RegionType
+        pano = context.input_panorama(ContextKey.PANORAMA)
+        types = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+        if pano is None or types is None:
+            return
+        rgb = np.asarray(pano.rgb(), dtype=np.float32)
+        H, W = rgb.shape[:2]
+        t = types.depth
+        if t.shape != (H, W):
+            rows = (np.arange(H) * t.shape[0]) // H
+            cols = (np.arange(W) * t.shape[1]) // W
+            t = t[rows][:, cols]
+        water = np.rint(t).astype(np.int64) == int(RegionType.WATER)
+        cone = captured_cone_from_context(context, W, H)
+        if cone is not None:
+            (u0, u1), (v0, v1) = cone.u_range, cone.v_range
+            inside = np.zeros_like(water)
+            inside[int(v0):int(v1), int(u0):int(u1)] = True
+            if (water & inside).sum() >= 500:
+                water &= inside
+        if water.sum() < 500:
+            return
+        # The nearer half of it: far water is mostly reflected sky (Shark Fin's
+        # sunset sea came out mauve, [137, 104, 108], against a teal shore break).
+        rows = np.flatnonzero(water.any(axis=1))
+        near = water & (np.arange(H)[:, None] >= (rows[0] + rows[-1]) // 2)
+        if near.sum() >= 500:
+            water = near
+        srgb = np.median(rgb[water], axis=0) / 255.0
+        linear = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
+        material = water_mesh.mesh.visual.material
+        alpha = float(np.asarray(material.baseColorFactor, dtype=np.float64).ravel()[3]) / (
+            255.0 if np.asarray(material.baseColorFactor).dtype.kind in "ui" else 1.0)
+        material.baseColorFactor = [float(linear[0]), float(linear[1]), float(linear[2]), alpha]
+        self.log_info(f"Water colour from the photograph: sRGB {np.round(srgb * 255).astype(int).tolist()}")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, _, output_key = self._resolved_keys()

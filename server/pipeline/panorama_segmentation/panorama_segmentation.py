@@ -315,6 +315,7 @@ def _reject_snow_water(
     min_snow_fraction: float,
     min_ground_runnerup_fraction: float,
     cone_mask: "np.ndarray | None" = None,
+    colour_only_max_saturation: float = 0.23,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
     Reclassify WATER regions that are really SNOW, per connected component.
@@ -405,7 +406,18 @@ def _reject_snow_water(
         comp_mask = labels == component
         snow_fraction = float(snow_like[comp_mask].mean())
         ground_fraction = float(np.isin(runnerup_type_idx_map[comp_mask], groundish).mean())
-        if snow_fraction >= min_snow_fraction and ground_fraction >= min_ground_runnerup_fraction:
+        # When the runner-up is itself water ("lake" behind "water"), it says
+        # nothing, and colour has to carry the call alone -- so it must be
+        # achromatic as a whole, not just in its brightest pixels. The full rerun
+        # of Rainier (2026-10-18) put its snowfields at runner-up WATER 0.78/0.67,
+        # median saturation 0.20/0.17; real water in the sample set sits at 0.27
+        # (Shark Fin's sunset ocean), 0.32 (the Seine), 0.38.
+        water_runnerup = float((runnerup_type_idx_map[comp_mask] == water).mean())
+        achromatic = float(np.median(saturation[comp_mask])) < colour_only_max_saturation
+        if snow_fraction >= min_snow_fraction and (
+            ground_fraction >= min_ground_runnerup_fraction
+            or (water_runnerup >= 0.5 and achromatic)
+        ):
             corrected[comp_mask] = fallback[comp_mask].astype(corrected.dtype)
             rejected |= comp_mask
 
@@ -875,4 +887,31 @@ def _retype_removed_areas(
             twin[change] = values[top]
             out[np.ix_(rows, cols)] = twin
             retyped += int(change.sum())
+
+    # Islands of ghost: whatever is left non-water inside the repainted area and
+    # walled in by water is water. Per object, a boat detected in pieces fails the
+    # halves test on the piece reaching the far bank (Paris's full rerun: 3.8k px
+    # of the tour boat's ghost typed GROUND, a hole in the water sheet showing the
+    # ghost on the backdrop through it).
+    from scipy.ndimage import label as _label
+    water = int(RegionType.WATER)
+    # Whole non-water components (a ghost spills past the mask's edge), mostly
+    # inside the repainted area; small ones only -- the land itself is one too.
+    ghost_labels, n_ghost = _label(out != water)
+    sizes = np.bincount(ghost_labels.ravel(), minlength=n_ghost + 1)
+    in_mask = np.bincount(ghost_labels[mask].ravel(), minlength=n_ghost + 1)
+    for k in range(1, n_ghost + 1):
+        if sizes[k] > 0.01 * H * W or in_mask[k] < 0.5 * sizes[k]:
+            continue
+        comp = ghost_labels == k
+        ys, xs = np.nonzero(comp)
+        y0, y1 = max(ys.min() - 3, 0), min(ys.max() + 4, H)
+        x0, x1 = max(xs.min() - 3, 0), min(xs.max() + 4, W)
+        local = comp[y0:y1, x0:x1]
+        ring = binary_dilation(local, iterations=3) & ~local
+        if ring.sum() < 20:
+            continue
+        if float((out[y0:y1, x0:x1][ring] == water).mean()) >= 0.9:
+            out[y0:y1, x0:x1][local] = water
+            retyped += int(local.sum())
     return out, retyped

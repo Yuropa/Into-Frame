@@ -34,6 +34,23 @@ public class WaterMaterialManager : MonoBehaviour
         var mat = GetWaterMaterial();
         if (mat == null) return;
 
+        // The server colours the sheet from the photographed water (TerrainMeshStage.
+        // _colour_water_from_photo); carry that base colour over, keeping the
+        // shader's own alpha. glTFast exposes glTF's baseColorFactor as "baseColorFactor"
+        // (its own shaders) or "_BaseColor" (URP Lit).
+        foreach (var r in go.GetComponentsInChildren<Renderer>())
+        {
+            var baked = r.sharedMaterial;
+            if (baked == null) continue;
+            string prop = baked.HasProperty("baseColorFactor") ? "baseColorFactor"
+                        : baked.HasProperty("_BaseColor") ? "_BaseColor" : null;
+            if (prop == null) continue;
+            var c = baked.GetColor(prop);
+            var current = mat.GetColor("_BaseColor");
+            mat.SetColor("_BaseColor", new Color(c.r, c.g, c.b, current.a));
+            break;
+        }
+
         foreach (var r in go.GetComponentsInChildren<Renderer>())
             r.sharedMaterial = mat;
     }

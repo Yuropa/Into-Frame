@@ -149,7 +149,8 @@ def bloom_recall(
     small coloured blooms, measured inside the panorama area its detections span.
 
     Blooms are the saturated, non-green pixels of a meadow; each connected run of
-    them is one bloom (or a few touching ones, which makes this an undercount). The
+    them is one bloom (or a few touching ones, which makes this an undercount, so
+    the bloom area over a detection's typical bloom area counts too). The
     detector found `detections` of them in the same area, so blobs / detections is
     its recall, and the painted density -- learned from the detections -- is short
     by that factor. Clamped to [1, max_boost]."""
@@ -176,6 +177,18 @@ def bloom_recall(
     # A bloom's coloured part is a fraction of its box; ignore specks far smaller.
     min_area = max(4.0, 0.05 * float(np.median(b[:, 2] * b[:, 3])))
     blobs = int((areas >= min_area).sum())
+    # Touching blooms merge into one blob, so in a dense meadow the blob count
+    # stalls (Rainier: 135 blobs where the photo shows hundreds). The bloom area
+    # over a detected bloom's own typical area does not: 130k px / 319 px = 409.
+    per_det = []
+    for bx, by, bw, bh in b:
+        ys, xs = int(max(by - y0, 0)), int(max(bx - x0, 0))
+        ye, xe = int(min(by + bh - y0, y1 - y0)), int(min(bx + bw - x0, x1 - x0))
+        if ye > ys and xe > xs:
+            per_det.append(int(bloom[ys:ye, xs:xe].sum()))
+    per_det = np.asarray([v for v in per_det if v > 0], dtype=np.float64)
+    if per_det.size >= 3:
+        blobs = max(blobs, int(float(areas[areas >= min_area].sum()) / float(np.median(per_det))))
     cx, cy = b[:, 0] + b[:, 2] / 2, b[:, 1] + b[:, 3] / 2
     detections = int(((cx >= x0) & (cx < x1) & (cy >= y0) & (cy < y1)).sum())
     if detections == 0:

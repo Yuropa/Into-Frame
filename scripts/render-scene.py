@@ -481,7 +481,7 @@ class SceneBuilder:
                 stats["instances"] += 1
                 continue
             if kind == "mesh" and o.get("mesh"):
-                instances.setdefault(("mesh", o["mesh"]), []).append(transform(pos, rot, scl))
+                instances.setdefault(("mesh_unlit" if o.get("unlit") else "mesh", o["mesh"]), []).append(transform(pos, rot, scl))
                 stats["instances"] += 1
             elif o.get("texture"):
                 pose = transform(pos, (0.0, yaw_to_face(pos, camera_pos), 0.0), (scl[0], scl[1], 1.0))
@@ -491,12 +491,12 @@ class SceneBuilder:
                 stats["skipped"] += 1
 
         for (kind, key), poses in instances.items():
-            if kind == "mesh":
+            if kind in ("mesh", "mesh_unlit"):
                 tm = self.trimesh_for(key)
                 if tm is None:
                     stats["skipped"] += len(poses)
                     continue
-                mat = material_for(tm)
+                mat = material_for(tm, unlit=kind == "mesh_unlit")
                 geom = to_gl(tm)
                 smooth = False
                 if key.endswith("_card"):
@@ -555,7 +555,15 @@ class SceneBuilder:
                     self._pano_node = (pano_tm, pano_mat, _MIRROR @ pose @ _MIRROR)
                 self._plate_nodes = [(t, m, _MIRROR @ pose @ _MIRROR) for t, m in getattr(self, "_plate_passes", [])]
             elif name == "water":
-                mat = material_for(tm, blend=True, color=[0.10, 0.30, 0.45, 0.90], roughness=0.1)
+                # The sheet's own colour (the server takes it from the photographed
+                # water, TerrainMeshStage._colour_water_from_photo), as Unity does.
+                colour = [0.10, 0.30, 0.45, 0.90]
+                factor = getattr(getattr(tm.visual, "material", None), "baseColorFactor", None)
+                if factor is not None:
+                    f = np.asarray(factor, dtype=np.float64).ravel()
+                    colour = list(f / 255.0 if f.max() > 1.0 else f)
+                    colour[3] = 0.90
+                mat = material_for(tm, blend=True, color=colour, roughness=0.1)
             elif name in ("treeline", "backdrop"):
                 # Lit unless the scene object says it carries its photographed
                 # light (SceneObject.unlit); RENDER_UNLIT_ENV=1 for older scenes.
@@ -901,6 +909,7 @@ def main() -> int:
     ap.add_argument("--ambient", type=float, default=0.45, help="ambient as a fraction of the sky's mean colour")
     ap.add_argument("--exposure", type=float, default=1.0)
     ap.add_argument("--no-shadows", action="store_true")
+    ap.add_argument("--save-depth", action="store_true", help="also write <view>_depth.npy (metres, 0 where only sky)")
     ap.add_argument("--pano-uv", choices=["baked", "analytic"], default="baked",
                     help="terrain panorama layer through the mesh's baked TEXCOORD_1 (what Unity samples) or the analytic projection")
     args = ap.parse_args()
@@ -961,6 +970,8 @@ def main() -> int:
             colour = np.where((depth <= 0.0)[..., None], bg, colour)
         img = PILImage.fromarray(colour, "RGB")
         img.save(out / f"{view}.png")
+        if args.save_depth:
+            np.save(out / f"{view}_depth.npy", depth.astype(np.float16))
         results[view] = img
         log(f"{view}: {stats} in {time.time() - t1:.1f} s -> {out / f'{view}.png'}")
 

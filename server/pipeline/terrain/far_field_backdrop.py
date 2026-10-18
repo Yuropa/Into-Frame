@@ -86,7 +86,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         stride_px: int = 8,
         max_depth_ratio: float = 1.8,
         feather_px: float = 3.0,
-        texture_max_width: int = 4096,
+        texture_max_width: int = 8192,
         min_faces: int = 50,
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
@@ -245,6 +245,29 @@ class FarFieldBackdropStage(PipelineStage):
             if ghost.any():
                 far &= ~ghost
                 self.log_info(f"Far-field backdrop: {int(ghost.sum())} px of removed objects left to their 3D models")
+        # A named landmark kept in the plate (Panorama Foreground Inpainting's
+        # backdrop_kept) is placed by Scene Generation as a card cut from the
+        # photograph; on the shell's stride grid it was a column of stepped blocks
+        # (the Eiffel Tower's top), so its pixels are left off here.
+        landmark = self._kept_landmark_mask(context, W, H)
+        if landmark is not None and far.any():
+            # Not dilated: the card covers only what its matte does (the Eiffel
+            # Tower's from the first platform up), and the shell keeps the rest; a
+            # dilated cut left a white band of sky between the two.
+            # Sky and built only: the trees in front of its base stay on the shell
+            # (cut with them, a white band stood under the Eiffel Tower).
+            if type_depth is not None:
+                types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+                landmark &= np.isin(types_full, [int(RegionType.SKY), int(RegionType.BUILT)])
+            # The shell drops every face along a cut, so its last rows under the card
+            # are kept: it runs on behind the card's lower edge instead of stopping
+            # a grid cell short of it.
+            rows_hit = np.flatnonzero(landmark.any(axis=1))
+            if rows_hit.size:
+                landmark[max(rows_hit[-1] - 2 * cfg.stride_px, 0):, :] = False
+            if (far & landmark).any():
+                self.log_info(f"Far-field backdrop: {int((far & landmark).sum())} px of kept landmarks left to their cards")
+                far &= ~landmark
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
@@ -393,7 +416,12 @@ class FarFieldBackdropStage(PipelineStage):
         alpha = (far | skirt_full)[row_min:row_max + 1].astype(np.float32)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
-        texture = PILImage.fromarray(np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA")
+        # At the photograph's resolution where it was photographed (see
+        # util.captured_cone.sharpen_strip): Rainier's snowfields were blocky.
+        from util.captured_cone import sharpen_strip
+        texture = sharpen_strip(context, panorama, rgb, alpha, row_min, cfg.texture_max_width)
+        if texture is None:
+            texture = PILImage.fromarray(np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA")
         if texture.width > cfg.texture_max_width:
             scale = cfg.texture_max_width / texture.width
             texture = texture.resize((cfg.texture_max_width, max(1, int(texture.height * scale))), PILImage.LANCZOS)
@@ -451,6 +479,30 @@ class FarFieldBackdropStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    @staticmethod
+    def _kept_landmark_mask(context: PipelineContext, W: int, H: int) -> "np.ndarray | None":
+        """Panorama pixels of named landmarks left in the terrain plate (the same
+        rule as SceneGenerationStage's landmark cards), or None."""
+        kept = context.input_object("backdrop_kept") or []
+        pano = context.input_panorama(ContextKey.PANORAMA)
+        if not kept or pano is None:
+            return None
+        landmark_classes = {"tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"}
+        pw, ph = pano.width, pano.height
+        mask = np.zeros((H, W), dtype=bool)
+        for idx in kept:
+            meta = context.input_object(f"metadata_{idx}") or {}
+            crop = context.input_image(f"crop_{idx}")
+            if not meta.get("name") or meta.get("class") not in landmark_classes or crop is None or not meta.get("box"):
+                continue
+            a = np.asarray(crop.image.convert("RGBA").getchannel("A")) > 127
+            x, y = int(round(meta["box"][0])), int(round(meta["box"][1]))
+            ry, rx = np.nonzero(a)
+            rows = np.clip(((y + ry) * H) // ph, 0, H - 1)
+            cols = (((x + rx) % pw) * W) // pw
+            mask[rows, cols] = True
+        return mask if mask.any() else None
 
     def _edge_heights(self, context: PipelineContext, grid_half: float, cols: np.ndarray, W: int) -> "np.ndarray | None":
         """Ground height (camera-relative Y) at the terrain grid's edge along each

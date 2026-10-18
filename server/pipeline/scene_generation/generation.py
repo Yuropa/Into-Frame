@@ -53,6 +53,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         overlap_min_separation_overrides: dict[str, float] | None = None,
         overlap_exempt_classes: list[str] | None = None,
         runtime_lods: bool = True,
+        card_preferred_classes: "list[str] | None" = None,
         lod_mesh_screen_fraction: float = 0.12,
         lod_card_screen_fraction: float = 0.025,
         lod_billboard_screen_fraction: float = 0.003,
@@ -101,6 +102,10 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # while the instance fills at least that fraction of the screen height, and
         # the last one's value is the cull threshold (0 = never culled).
         self.runtime_lods = bool(runtime_lods)
+        # Classes whose card stands in for their reconstruction whenever both
+        # exist: a wildflower's card is its reference view at full resolution,
+        # while TRELLIS made Rainier's flowers leafy stalks with specks of bloom.
+        self.card_preferred_classes = frozenset(str(c).lower() for c in (card_preferred_classes or []))
         self.lod_mesh_screen_fraction = float(lod_mesh_screen_fraction)
         self.lod_card_screen_fraction = float(lod_card_screen_fraction)
         self.lod_billboard_screen_fraction = float(lod_billboard_screen_fraction)
@@ -821,6 +826,11 @@ class SceneGenerationStage(PipelineStage):
             # case nothing is skipped and this behaves exactly as it used to.
             background_rejected: set[int] = set(context.input_object("background_rejected") or [])
             background_skipped = 0
+            # Occluders Panorama Foreground Inpainting left in the terrain plate
+            # because they stand at the depth model's far clamp: the treeline and
+            # far-field backdrop already show them as photographed.
+            backdrop_kept: set[int] = set(context.input_object("backdrop_kept") or [])
+            backdrop_skipped = 0
             # Real length of each category mesh whose source crop Object Completion
             # typed (a 35 m tour boat, a 4 m rowing boat). A boat's detection is
             # often a piece of it -- Paris's tour boat was cut into a bow-on strip
@@ -828,10 +838,13 @@ class SceneGenerationStage(PipelineStage):
             # sizes.
             object_kinds = context.input_object("object_kinds") or {}
             kind_length_m: dict[str, float] = {}
+            kind_height_m: dict[str, float] = {}
             for key, src in (context.input_object("mesh_sources") or {}).items():
                 kind = object_kinds.get(str(src.get("idx")))
                 if kind and kind.get("length_m"):
                     kind_length_m[key] = float(kind["length_m"])
+                if kind and kind.get("height_m"):
+                    kind_height_m[key] = float(kind["height_m"])
             # Cone policy from the detection stages (see hires_crops.is_photographed).
             fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
             unphotographed_skipped = 0
@@ -1025,8 +1038,12 @@ class SceneGenerationStage(PipelineStage):
                 # A rigid object keeps its geometry at every distance (see
                 # ALWAYS_MESH_CATEGORIES); with no billboard level the mesh level
                 # carries the cull threshold instead.
+                # A card-preferred class keeps its card to the cull: its billboard is
+                # the photo crop, whose matte around a meadow flower is the meadow
+                # (Rainier: flat yellow rectangles at 20-40 m).
                 chosen = (
-                    None if cls in self.config.always_mesh_classes and levels
+                    None if (cls in self.config.always_mesh_classes
+                             or (cls in self.config.card_preferred_classes and card_mesh is not None)) and levels
                     else billboard_texture_key(idx, cls, pool_key, metadata)
                 )
                 if chosen is not None:
@@ -1077,6 +1094,18 @@ class SceneGenerationStage(PipelineStage):
                     # about a guess, and usually a duplicate of something real.
                     # Synthesis fills that ground from the photographed exemplars.
                     unphotographed_skipped += 1
+                    self.advance_progress(generation_task)
+                    continue
+
+                # A named landmark kept in the plate stands as a card cut from the
+                # photograph instead (the shell grid turned the Eiffel Tower's top
+                # into stepped blocks); the far backdrop leaves its pixels out.
+                landmark_card = (
+                    idx in backdrop_kept and bool(metadata.get("name"))
+                    and cls in self.config.far_landmark_classes
+                )
+                if idx in backdrop_kept and not landmark_card:
+                    backdrop_skipped += 1
                     self.advance_progress(generation_task)
                     continue
 
@@ -1380,6 +1409,16 @@ class SceneGenerationStage(PipelineStage):
                 # as before.
                 card_mesh_key = f"{mesh_key}_card"
                 card_mesh = context.input_mesh(card_mesh_key)
+                if card_mesh is not None and cls in self.config.card_preferred_classes:
+                    category_mesh = recon_mesh = None
+                landmark_rows = None
+                if landmark_card:
+                    built = self._landmark_card(context, idx)
+                    if built is not None:
+                        card_mesh_key, card_mesh, landmark_rows = built
+                        category_mesh = recon_mesh = None
+                    else:
+                        landmark_card = False
 
                 # Bake-time projected-size LOD: mesh if this instance renders big
                 # enough to resolve AND its bucket actually has one (a bucket only
@@ -1527,15 +1566,30 @@ class SceneGenerationStage(PipelineStage):
                             prior = kind_length_m[mesh_key]
                             if length > 1e-6:
                                 mesh_scale *= float(np.clip(length, 0.7 * prior, 1.4 * prior)) / length
-                            # And no taller than a fifth of that length: a river boat
-                            # is long and low, but its reference view can come back
-                            # a three-deck ferry (Paris), 15 m tall at 35 m long.
+                            # And no taller than its kind (1.4x length / aspect, or a
+                            # fifth of its length for kinds published without a
+                            # height): a river boat is long and low, but its reference
+                            # view can come back a three-deck ferry (Paris), 15 m tall
+                            # at 35 m long.
+                            cap = 1.4 * kind_height_m[mesh_key] if mesh_key in kind_height_m else 0.2 * prior
                             tall = mesh_scale * float(mesh_extents[1])
-                            if tall > 0.2 * prior:
-                                mesh_scale *= 0.2 * prior / tall
+                            if tall > cap:
+                                mesh_scale *= cap / tall
                         scale_x = scale_y = scale_z = mesh_scale
                     mesh_min_y = float(category_mesh.mesh.bounds[0][1]) * scale_y
                     mesh_place_y = terrain_y - mesh_min_y if terrain_y is not None else position[1]
+                    if landmark_rows is not None:
+                        # Spans exactly the rows the photograph shows it over, at its
+                        # distance: its base is behind the far bank's trees, and
+                        # snapped to the ground the visible part came out low and short.
+                        pano_h = float(context.input_panorama(ContextKey.PANORAMA).height)
+                        dist = float(np.hypot(position[0] - camera_position[0], position[2] - camera_position[2]))
+                        lat_top, lat_bottom = ((0.5 - r / pano_h) * np.pi for r in landmark_rows)
+                        y_top = float(camera_position[1]) + dist * float(np.tan(lat_top))
+                        y_bottom = float(camera_position[1]) + dist * float(np.tan(lat_bottom))
+                        vertical = float(category_mesh.mesh.bounds[1][1] - category_mesh.mesh.bounds[0][1]) or 1.0
+                        scale_x = scale_y = scale_z = (y_top - y_bottom) / vertical
+                        mesh_place_y = y_bottom - float(category_mesh.mesh.bounds[0][1]) * scale_y
                     if on_water and cls in self.config.water_only_classes:
                         mesh_place_y -= self.config.water_draft_fraction * float(
                             category_mesh.mesh.bounds[1][1] - category_mesh.mesh.bounds[0][1]) * scale_y
@@ -1545,7 +1599,15 @@ class SceneGenerationStage(PipelineStage):
                         f"{rendered_px:.0f}px)"
                     )
                     mesh_obj = Object3D.mesh(mesh_key, x=position[0], y=mesh_place_y, z=position[2])
-                    if metadata.get("yaw_deg") is not None:
+                    if landmark_card:
+                        # Square to the capture camera: the card's picture is the
+                        # photograph's view of it. Local +Z points away from the
+                        # camera, so the picture reads unmirrored (see cards.py).
+                        away = np.array(position, dtype=float) - camera_position
+                        mesh_obj.set_rotation(0.0, float(np.degrees(np.arctan2(away[0], away[2]))) % 360.0, 0.0)
+                        # The photograph's own pixels, lit already.
+                        mesh_obj.unlit = True
+                    elif metadata.get("yaw_deg") is not None:
                         # Painted along a feature (a boat along the bank, see
                         # distribution_synthesis.features): the yaw puts local +X on
                         # the edge's tangent, so turn a mesh whose long horizontal
@@ -1656,6 +1718,8 @@ class SceneGenerationStage(PipelineStage):
                 + ", ".join(f"{n} {c}" for c, n in sorted(dropped_in_water.items(), key=lambda kv: -kv[1]))
             )
 
+            if backdrop_skipped:
+                self.log_info(f"Backdrop: skipped {backdrop_skipped} detection(s) left in the terrain plate at the far clamp")
             if background_skipped:
                 self.log_info(
                     f"Background rejection: skipped {background_skipped} detection(s) "
@@ -1874,6 +1938,34 @@ class SceneGenerationStage(PipelineStage):
                 }, indent=2))
             except Exception as e:
                 self.log_warning(f"Could not write mesh_geometry_debug.json: {e}")
+
+    def _landmark_card(self, context: PipelineContext, idx: int):
+        """(key, mesh, (top_row, bottom_row)): one plane carrying the photograph's own
+        cutout of landmark `idx` (its hi-res crop, matte as alpha), at the cutout's
+        aspect, and the panorama rows the cutout spans. None when there is no
+        usable crop."""
+        from pipeline.segmentation.hires_crops import prefer_hires
+        from pipeline.grass_cover.cards import crossed_card_mesh
+        crop = prefer_hires(context, idx)
+        if crop is None:
+            return None
+        rgba = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop).convert("RGBA")
+        bbox = rgba.getchannel("A").point(lambda a: 255 if a > 127 else 0).getbbox()
+        if bbox is None:
+            return None
+        # Panorama rows of the cutout's top and bottom: the crop spans its box.
+        meta = context.input_object(f"metadata_{idx}") or {}
+        box = meta.get("box")
+        rows = None
+        if box:
+            sy = float(box[3]) / max(rgba.height, 1)
+            rows = (float(box[1]) + bbox[1] * sy, float(box[1]) + bbox[3] * sy)
+        rgba = rgba.crop(bbox)
+        key = f"landmark_card_{idx}"
+        mesh = crossed_card_mesh(rgba, plane_count=1, aspect=rgba.width / max(rgba.height, 1))
+        context.add_mesh(key, mesh)
+        self.log_info(f"Landmark {idx}: card from the photograph ({rgba.width}x{rgba.height} px)")
+        return key, mesh, rows
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, _, _, _, _, output_key = self._resolved_keys()

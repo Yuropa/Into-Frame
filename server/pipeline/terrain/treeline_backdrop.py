@@ -61,8 +61,10 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         bin_px: int = 16,
         min_bin_fill: float = 0.5,
         min_bins: int = 4,
+        min_group_bins: int = 3,
+        max_bin_depth_jump: float = 0.12,
         feather_px: float = 2.0,
-        texture_max_width: int = 4096,
+        texture_max_width: int = 8192,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Canopy closer than this is placed as individual instances by the object
@@ -81,6 +83,10 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         self.min_bin_fill = float(min_bin_fill)
         # Fewer qualifying bins than this and the band is noise, not a treeline.
         self.min_bins = int(min_bins)
+        # Contiguous runs of fewer bins than this are dropped (lone trees).
+        self.min_group_bins = int(min_group_bins)
+        # Neighbouring bins further apart in depth than this fraction are not one run.
+        self.max_bin_depth_jump = float(max_bin_depth_jump)
         # Gaussian blur on the alpha so the silhouette is not a pixel staircase.
         self.feather_px = float(feather_px)
         self.texture_max_width = int(texture_max_width)
@@ -196,6 +202,28 @@ class TreelineBackdropStage(PipelineStage):
                 "bottom": float(np.percentile(bottom[c0:c1][have], 75)),
                 "depth": float(np.median(col_depth[c0:c1][have])),
             })
+        # A treeline is a band: a run of one or two bins is a lone tree or a clump,
+        # which the tree instances carry. Stood up as quads it folded (Rainier's
+        # full rerun: two bins at the photo's centre ramping 62 -> 45 m drew a dark
+        # V in front of the forest).
+        if cfg.min_group_bins > 1:
+            b = 0
+            while b < n_bins:
+                if bins[b] is None:
+                    b += 1
+                    continue
+                e = b
+                # A band's depth changes smoothly; a jump between neighbours is a
+                # different thing (Rainier's lone trees zigzagged 49-57-44 m and
+                # folded into a dark V), so it ends the run.
+                while (e + 1 < n_bins and bins[e + 1] is not None
+                       and abs(bins[e + 1]["depth"] - bins[e]["depth"])
+                       <= cfg.max_bin_depth_jump * min(bins[e + 1]["depth"], bins[e]["depth"])):
+                    e += 1
+                if e - b + 1 < cfg.min_group_bins:
+                    for k in range(b, e + 1):
+                        bins[k] = None
+                b = e + 1
         found = [b for b in bins if b is not None]
         if len(found) < cfg.min_bins:
             self.log_info(
@@ -230,9 +258,14 @@ class TreelineBackdropStage(PipelineStage):
         alpha = self._drop_fragments(alpha, rgb, canopy_luma)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
-        texture = PILImage.fromarray(
-            np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA"
-        )
+        # At the photograph's resolution where it was photographed (see
+        # util.captured_cone.sharpen_strip): Paris's far bank was a 127 px strip.
+        from util.captured_cone import sharpen_strip
+        texture = sharpen_strip(context, panorama, rgb, alpha, row_min, cfg.texture_max_width)
+        if texture is None:
+            texture = PILImage.fromarray(
+                np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA"
+            )
         if texture.width > cfg.texture_max_width:
             scale = cfg.texture_max_width / texture.width
             texture = texture.resize(
@@ -369,7 +402,8 @@ class TreelineBackdropStage(PipelineStage):
         and a broadleaf treeline is one large band. A component darker than
         min_luma_ratio of the panorama's canopy goes too: Rainier's shadowed
         forest came through the delit panorama as a streaked near-black block
-        ([14,16,10] against canopy [34,39,27]) over the photographed hills."""
+        ([14,16,10] against canopy [34,39,27]) over the photographed hills; and
+        one bluer than green, which is not canopy at all."""
         from scipy.ndimage import label, find_objects
         labels, n = label(alpha > 0.5)
         if n == 0:
@@ -389,10 +423,14 @@ class TreelineBackdropStage(PipelineStage):
             # was 11% of what was left.
             if fill > 0.8:
                 drop[k] = True
-            if canopy_luma > 0:
-                mask = labels[sl] == k
-                if float(rgb[sl][mask].astype(np.float64).mean()) < min_luma_ratio * canopy_luma:
-                    drop[k] = True
+            mask = labels[sl] == k
+            mean = rgb[sl][mask].astype(np.float64).mean(axis=0)
+            if canopy_luma > 0 and float(mean.mean()) < min_luma_ratio * canopy_luma:
+                drop[k] = True
+            # Canopy is never bluer than it is green: Rainier kept a navy pillar of
+            # shadowed sky-lit something in front of the photographed treeline.
+            if mean[2] > 1.05 * mean[1]:
+                drop[k] = True
         return np.where(drop[labels], 0.0, alpha).astype(alpha.dtype)
 
     @staticmethod

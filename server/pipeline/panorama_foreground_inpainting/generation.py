@@ -39,6 +39,9 @@ _FOREGROUND_STRUCTURE_CATEGORIES = frozenset({
 _FOREGROUND_RIGID_CATEGORIES = frozenset({"boat", "ship", "car", "truck", "bus"})
 
 
+# Indices of occluder crops left in the terrain plate as backdrop (see keep_far_objects).
+BACKDROP_KEPT_KEY = "backdrop_kept"
+
 class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
     """
     Stage-specific config for PanoramaForegroundInpaintingStage.
@@ -130,9 +133,21 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         guidance_scale: float = 2.5,
         num_inference_steps: int = 30,
         supersample_result: bool = True,
+        # Occluders the depth model could not range -- median depth within
+        # far_depth_fraction of the map's own maximum, where it saturates -- are
+        # backdrop, not objects in front of the terrain: Paris's far bank (trees,
+        # bridge, moored barges, the Eiffel Tower) all read the 100 m clamp, and
+        # removing them had ObjectClear paint a ghost ferry and haze over the far
+        # end of the river. They stay in the terrain plate, for the treeline and
+        # far-field backdrop to show as photographed, and are published as
+        # BACKDROP_KEPT_KEY so Scene Generation does not place them a second time.
+        keep_far_objects: bool = True,
+        far_depth_fraction: float = 0.95,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.keep_far_objects = bool(keep_far_objects)
+        self.far_depth_fraction = float(far_depth_fraction)
         self.remove_near_field = bool(remove_near_field)
         self.foreground_distance_m = foreground_distance_m
         self.min_region_area_px = min_region_area_px
@@ -198,6 +213,7 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         if depth is None and self.config.remove_near_field:
             self.log_warning("No depth in context; the near-field sweep is unavailable, removing classified occluders only")
 
+        self._depth_for_mask = depth.depth if depth is not None else None
         if depth is None and not self.config.remove_near_field and self._extracted_object_mask(context, h, w) is None:
             self.log_info("No occluder crops to remove, keeping the panorama as the terrain plate")
             terrain_pil = original_pil
@@ -226,6 +242,11 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                             near_mask &= ~np.isin(labeled, small_labels)
 
             extracted_mask = self._extracted_object_mask(context, h, w)
+            kept = getattr(self, "_kept_far", [])
+            context.add_object(BACKDROP_KEPT_KEY, kept)
+            if kept:
+                self.log_info(f"Kept {len(kept)} occluder(s) at the depth model's far clamp in the terrain plate "
+                              f"(backdrop, not removed): {', '.join(sorted(set(self._kept_names)))}")
             if extracted_mask is not None:
                 near_mask = near_mask | extracted_mask
 
@@ -364,6 +385,13 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
 
         mask = np.zeros((pano_h, pano_w), dtype=bool)
         found = False
+        self._kept_far, self._kept_names = [], []
+        depth = getattr(self, "_depth_for_mask", None) if self.config.keep_far_objects else None
+        far_depth = None
+        if depth is not None:
+            finite = depth[np.isfinite(depth)]
+            if finite.size:
+                far_depth = self.config.far_depth_fraction * float(finite.max())
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
             object_class = metadata.get("class")
@@ -395,6 +423,16 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
             # see util/instance_merge.py) still pastes into the right place.
             cols = (x + np.arange(cw)) % pano_w
             rows = np.arange(y0, y1)
+            if far_depth is not None:
+                dh, dw = depth.shape
+                ry, rx = np.nonzero(crop_mask[y0 - y: y1 - y, :])
+                if ry.size:
+                    d = depth[(rows[ry] * dh) // pano_h, (cols[rx] * dw) // pano_w]
+                    d = d[np.isfinite(d)]
+                    if d.size and float(np.median(d)) >= far_depth:
+                        self._kept_far.append(idx)
+                        self._kept_names.append(str(metadata.get("name") or object_class))
+                        continue
             mask[np.ix_(rows, cols)] |= crop_mask[y0 - y: y1 - y, :]
             found = True
 

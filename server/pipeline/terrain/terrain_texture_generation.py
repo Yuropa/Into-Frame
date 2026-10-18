@@ -228,6 +228,10 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # non-square texture is not a problem. Native resolution is used as-is
         # whenever it's already under this cap.
         panorama_layer_max_resolution: int = 4096,
+        # The panorama layer is upscaled to carry the input photograph at its own
+        # resolution inside the photographed cone, with the photo's pixels inlaid
+        # there (util.captured_cone.inlay_photo), up to this width; 0 disables.
+        panorama_inlay_max_width: int = 8192,
         # Columns at each end over which the panorama layer's left/right edge
         # mismatch is spread so the two match exactly -- see
         # util.seam_repair.close_wrap_seam. This layer is equirect=True and wraps the
@@ -570,6 +574,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.panorama_upright_falloff_radius_m = panorama_upright_falloff_radius_m
         self.horizon_fade_deg = horizon_fade_deg
         self.panorama_layer_max_resolution = panorama_layer_max_resolution
+        self.panorama_inlay_max_width = int(panorama_inlay_max_width)
         self.wrap_seam_band_px = int(wrap_seam_band_px)
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
@@ -1066,6 +1071,7 @@ class TerrainTextureGenerationStage(PipelineStage):
                 panorama_terrain, cfg.panorama_layer_max_resolution,
                 band_px=cfg.wrap_seam_band_px, log_fn=self.log_info,
             )
+            pano_tile = self._inlay_photo(context, pano_tile, cfg)
             pano_tile = self._delight_panorama_tile(pano_tile, cfg)
             # The ORIGINAL-photo typing, not the terrain-scoped one, because this has
             # to describe the pixels this layer actually paints. _ground_colour_panorama
@@ -2054,7 +2060,18 @@ class TerrainTextureGenerationStage(PipelineStage):
         except Exception as exc:
             self.log_info(f"Material captioning failed, falling back to generic prompt: {exc}")
             return None
-        return text.rstrip(". ") or None
+        text = text.rstrip(". ")
+        # Florence-2 in this environment can return token soup ("produce Lol produce
+        # Hand ... hooked hooked hooked", Paris 2026-10-18) that then became the
+        # forest tile's FLUX prompt. A material description is a short phrase of
+        # plain words; anything else falls back to the generic prompt.
+        words = text.split()
+        if (not text or len(words) > 40 or not text.isascii()
+                or len(set(w.lower() for w in words)) < 0.5 * len(words)):
+            if text:
+                self.log_info(f"Material caption rejected as noise ({len(words)} words), generic prompt instead")
+            return None
+        return text
 
     def _delight_patch(
         self,
@@ -2127,6 +2144,30 @@ class TerrainTextureGenerationStage(PipelineStage):
         context.add_panorama(ContextKey.PANORAMA_TERRAIN_DELIT, delit)
         self._save_debug_step(cfg, "environment", "delit_panorama", delit)
         self.log_info(f"Environment panorama delit at strength {cfg.environment_delight_strength:.2f} for the backdrops")
+
+    def _inlay_photo(self, context: PipelineContext, tile: PIL.Image.Image,
+                     cfg: "TerrainTextureGenerationConfiguration") -> PIL.Image.Image:
+        """The panorama layer carrying the photograph at its own resolution in the
+        photographed cone. The panorama embeds the photo at about half its
+        resolution (Rainier 1.84x, Paris 1.91x), which put blocky snow on the
+        mountain from the capture camera. Photo pixels go everywhere in the cone
+        but under real occluders, the same split _ground_colour_panorama uses."""
+        from util.captured_cone import captured_cone_from_context, inlay_photo
+        if cfg.panorama_inlay_max_width <= tile.width:
+            return tile
+        photo = context.input_image(ContextKey.INPUT)
+        cone = captured_cone_from_context(context, tile.width, tile.height)
+        if photo is None or cone is None or cone.scale_gain() <= 1.05:
+            return tile
+        keep = None
+        occluder = (context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
+                    or context.input_image(ContextKey.PANORAMA_FOREGROUND_MASK))
+        if occluder is not None:
+            keep = np.asarray(occluder.image.convert("L").resize(tile.size, PIL.Image.NEAREST)) <= 127
+        out = inlay_photo(tile, photo.image, cone, keep=keep, max_width=cfg.panorama_inlay_max_width)
+        self.log_info(f"Panorama layer: photo inlaid at {out.width}x{out.height} "
+                      f"({cone.scale_gain():.2f}x the panorama inside the cone)")
+        return out
 
     def _delight_panorama_tile(
         self, tile: PIL.Image.Image, cfg: "TerrainTextureGenerationConfiguration",

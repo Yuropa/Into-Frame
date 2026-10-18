@@ -11,7 +11,7 @@ from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
     VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY, ALWAYS_MESH_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES,
 )
-from pipeline.grass_cover.cards import crossed_card_mesh
+from pipeline.grass_cover.cards import crossed_card_mesh, reference_cut_side
 from util.lod_metrics import angular_height_px_from_box
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
@@ -788,14 +788,46 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     i for i in range(int(context.input_object(ContextKey.OBJECT_COUNT) or 0))
                     if (context.input_object(f"metadata_{i}") or {}).get("class") == obj_class
                 ]
+                # The group's own bloom colour: a borrowed reference must match it
+                # (Rainier's red paintbrush bucket took a yellow flower's card).
+                from pipeline.object_completion.completion import _bloom_colour_name, bloom_colours_agree
+                from collections import Counter
+                group_colours = Counter(
+                    c for c in (_bloom_colour_name(img.image.convert("RGBA")) for img in
+                                (context.input_image(f"crop_{i}") for i in pool) if img is not None) if c
+                ) if obj_class == "flower" else Counter()
+                group_colour = group_colours.most_common(1)[0][0] if group_colours else None
+                borrowable = None
                 for candidate in [source] + [i for i in pool if i != source] + [i for i in same_class if i not in pool and i != source]:
                     ref = context.input_image(_REFERENCE_KEY.format(idx=candidate))
+                    if ref is not None and group_colour is not None:
+                        ref_colour = _bloom_colour_name(ref.rgba() if hasattr(ref, "rgba") else ref.image)
+                        if not bloom_colours_agree(group_colour, ref_colour):
+                            if borrowable is None and ref.image.width <= 0.8 * ref.image.height:
+                                borrowable = (candidate, ref)
+                            ref = None
                     if ref is not None and obj_class == "flower" and ref.image.width > 0.8 * ref.image.height:
                         ref = None  # a bloom macro or a clump, not one plant (see Object Completion)
+                    if ref is not None:
+                        cut = reference_cut_side(ref.rgba() if hasattr(ref, "rgba") else ref.image)
+                        if cut is not None:
+                            self.log_info(f"  {key}: reference view of crop_{candidate} is cut along its {cut} side, skipped")
+                            ref = None
                     if ref is not None:
                         crop, source, from_reference = ref, candidate, True
                         self.log_info(f"  {key}: card from the reference view of crop_{candidate}")
                         break
+                if not from_reference and borrowable is not None:
+                    # No reference in the group's colour: another flower's, its
+                    # blooms turned to the group's hue, beats the meadow-patch crop.
+                    from pipeline.object_completion.completion import bloom_hue, recolour_blooms
+                    hue = bloom_hue([img.image.convert("RGBA") for img in
+                                     (context.input_image(f"crop_{i}") for i in pool) if img is not None])
+                    if hue is not None:
+                        b_idx, b_ref = borrowable
+                        crop = UtilImage(recolour_blooms(b_ref.rgba() if hasattr(b_ref, "rgba") else b_ref.image, hue))
+                        source, from_reference = b_idx, True
+                        self.log_info(f"  {key}: reference of crop_{b_idx} with its blooms recoloured to {group_colour} ({hue:.0f} deg)")
             if crop is None:
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop

@@ -267,6 +267,9 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         photo_veto_regions: list[str] | None = None,
         photo_veto_margin_deg: float = 3.0,
         treeline_margin_m: float = 8.0,
+        moor_fraction: dict[str, float] | None = None,
+        moor_offset_m: float = 4.0,
+        moor_reach_m: float = 40.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Paint radius and falloff per class. max_paint_radius_m and
@@ -323,6 +326,14 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.class_paint_regions = {
             str(k).lower(): [str(t).lower() for t in v] for k, v in (class_paint_regions or {}).items()
         }
+        # Share of each class's painted instances moored: moved onto the water
+        # moor_offset_m off the nearest bank (and, with the yaw below, lying along
+        # it). Paris's photo has barges and houseboats in a row along both quays;
+        # painted by affinity alone they clumped mid-channel by the tour boat.
+        self.moor_fraction = {str(k).lower(): float(v) for k, v in (moor_fraction or {}).items()}
+        self.moor_offset_m = float(moor_offset_m)
+        # A point on land further than this from the water is not moored.
+        self.moor_reach_m = float(moor_reach_m)
         # Painted instances of these get a yaw along the nearest water edge.
         self.align_to_water_classes = frozenset(
             str(c).lower() for c in (align_to_water_classes or ["boat", "ship", "dock"])
@@ -662,6 +673,14 @@ class DistributionSynthesisStage(PipelineStage):
         object_count = context.input_object(ContextKey.OBJECT_COUNT) or 0
         cell_m = grid_size_meters / grid_resolution
         fields = feature_fields(region_map, cell_m) if cfg.feature_affinity else {}
+        if cfg.moor_fraction and "water_edge" not in fields:
+            fields.update({k: v for k, v in feature_fields(region_map, cell_m).items() if k == "water_edge"})
+        moor_grad = None
+        if cfg.moor_fraction and "water_edge" in fields:
+            gz, gx = np.gradient(fields["water_edge"].astype(np.float64))
+            norm = np.maximum(np.hypot(gz, gx), 1e-6)
+            moor_grad = (gz / norm, gx / norm)
+        moored: dict[str, int] = {}
         if fields:
             self.log_info(f"Linear features on the grid: {', '.join(sorted(fields))}")
 
@@ -1341,6 +1360,22 @@ class DistributionSynthesisStage(PipelineStage):
                     w, h = dist.sizes[e]
                     bucket = dist.buckets[e] if e < len(dist.buckets) else 0
                     jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))
+                    if moor_grad is not None and rng.random() < cfg.moor_fraction.get(job_obj_type, 0.0):
+                        r, c = (int(v) for v in world_to_cell(x, z, grid_size_meters, grid_resolution))
+                        d = float(fields["water_edge"][r, c])
+                        # Within reach of a bank from either side: houseboats paint on
+                        # the quay (Paris docks were typed ground) and go onto the water.
+                        if d < cfg.moor_reach_m:
+                            # Down the field's gradient to -moor_offset_m: toward the
+                            # nearest bank from mid-channel, off it from the shallows
+                            # or the quay.
+                            step = d + cfg.moor_offset_m
+                            nx = float(x) - step * float(moor_grad[1][r, c])
+                            nz = float(z) - step * float(moor_grad[0][r, c])
+                            nr, nc = (int(v) for v in world_to_cell(nx, nz, grid_size_meters, grid_resolution))
+                            if fields["water_edge"][nr, nc] < 0:
+                                x, z = nx, nz
+                                moored[job_obj_type] = moored.get(job_obj_type, 0) + 1
                     yaw = None
                     if job_obj_type in cfg.align_to_water_classes and "water_edge" in fields:
                         r, c = world_to_cell(x, z, grid_size_meters, grid_resolution)
@@ -1348,6 +1383,9 @@ class DistributionSynthesisStage(PipelineStage):
                     placed.append((float(x), float(z), w * jitter, h * jitter, int(bucket), yaw))
 
             self.finish_progress(task)
+
+        if moored:
+            self.log_info("Moored along the bank: " + ", ".join(f"{n} {c}" for c, n in sorted(moored.items())))
 
         # Rigid things take up room: a boat is a solid hull metres long, and two
         # painted on the same spot interpenetrate (Paris: three hulls stacked by the
