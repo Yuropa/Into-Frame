@@ -903,6 +903,18 @@ class ObjectCompletionStage(PipelineStage):
                         self.log_info(f"  crop_{idx}: reference candidate {k} runs into the canvas edge "
                                       f"({max(sides):.0%} of a side), skipped")
                         continue
+                    if normalize_category(metas[idx].get("class")) in ("flower", "plant"):
+                        # A plant cut out of a white canvas is mostly air. A matte
+                        # that fills its box is the patch of ground the model
+                        # painted under it (Rainier's crop_92 came back on a slab
+                        # of grey gravel, 69% full, and 89 of its cards stood in
+                        # the meadow as grey boxes).
+                        ys, xs = np.nonzero(matte)
+                        fill = float(matte[ys.min():ys.max() + 1, xs.min():xs.max() + 1].mean())
+                        if fill > 0.5:
+                            self.log_info(f"  crop_{idx}: reference candidate {k} fills {fill:.0%} of its box, "
+                                          "a painted background rather than one plant, skipped")
+                            continue
                     rgb = np.asarray(out, dtype=np.float32)[matte]
                     err = float(np.abs(rgb.mean(0) - target).mean()) if target is not None else 0.0
                     if self.temp is not None:
@@ -948,6 +960,9 @@ class ObjectCompletionStage(PipelineStage):
                     self.log_info(f"  crop_{idx}: no candidate near {want_aspect:.0f}:1, keeping the "
                                   f"longest ({squat_aspect:.1f}:1)")
                 if best is not None:
+                    best, cleared = drop_white_fragments(best)
+                    if cleared:
+                        self.log_info(f"  crop_{idx}: cleared {cleared} px of white canvas kept by the matte")
                     context.add_image(reference_key(idx), Image(best))
                     written += 1
                     self.log_info(f"  crop_{idx} ({metas[idx].get('name') or metas[idx].get('class')}): "
@@ -1168,6 +1183,32 @@ def _bloom_colour_name(rgba: PILImage.Image) -> "str | None":
         if hue >= start and label != "white":
             name = label
     return name
+
+
+def drop_white_fragments(rgba: PILImage.Image, white: int = 235, fraction: float = 0.7) -> "tuple[PILImage.Image, int]":
+    """Clear opaque connected pieces that are mostly near-white: the canvas the
+    subject was drawn on, kept by the matte as a separate shape (Rainier's
+    thistle came with a white blob above it that stood in the meadow as a
+    slab). A white petal on a green stem is one piece with the stem and stays.
+    Returns (image, pixels cleared)."""
+    from scipy.ndimage import label
+    arr = np.asarray(rgba.convert("RGBA")).copy()
+    opaque = arr[..., 3] > 127
+    if not opaque.any():
+        return rgba, 0
+    near_white = arr[..., :3].min(axis=2) >= white
+    labels, n = label(opaque, structure=np.ones((3, 3), dtype=int))
+    cleared = 0
+    for i in range(1, n + 1):
+        piece = labels == i
+        if near_white[piece].mean() > fraction:
+            arr[piece, 3] = 0
+            cleared += int(piece.sum())
+    if not cleared:
+        return rgba, 0
+    out = PILImage.fromarray(arr, "RGBA")
+    bbox = out.getchannel("A").getbbox()
+    return (out.crop(bbox) if bbox else out), cleared
 
 
 def _on_white(rgba: PILImage.Image) -> PILImage.Image:

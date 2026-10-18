@@ -150,6 +150,86 @@ def _cloudiness(source_arr: np.ndarray, sky_mask: np.ndarray, cone_cols: "tuple[
     return float(cloud[scope].mean()) if scope.any() else 0.0
 
 
+def _flatten_horizon(image: PILImage.Image, band_deg: float = 15.0, dark_levels: float = 15.0,
+                     foot_deg: float = 1.5, below_deg: float = 0.5, fade_deg: float = 2.5,
+                     ) -> "tuple[PILImage.Image, float]":
+    """Take invented landscape out of the horizon band of a generated sky.
+
+    FLUX paints land on the skyline however the prompt forbids it (Paris: a
+    mountain range and islands, seen through gaps in the far bank). Land is
+    darker than the sky above it and stands on the horizon: within `band_deg`
+    above the horizon, every connected patch more than `dark_levels` (luma)
+    darker than the sky just above the band at its own azimuth AND reaching
+    down into the `foot_deg` above the horizon is land, and is filled across
+    from the sky either side of it. The reference is per column, not a row
+    median, because a sunset row is bright toward the sun and dark away from
+    it (Shark Fin). The last `fade_deg` above the horizon fade to the row's
+    smoothed haze, which takes the hazy foot of a range the test let through,
+    and from `below_deg` under the horizon everything is that haze: that sky
+    only shows through gaps in the terrain. Returns (image, fraction of the
+    band above the horizon replaced)."""
+    from scipy.ndimage import binary_dilation, binary_fill_holes, gaussian_filter, gaussian_filter1d, label
+    arr = np.asarray(image.convert("RGB"), dtype=np.float32)
+    h, w = arr.shape[:2]
+    horizon = h // 2
+    px_per_deg = h / 180.0
+    top = max(0, int(horizon - band_deg * px_per_deg))
+    foot = max(top, int(horizon - foot_deg * px_per_deg))
+    below = min(h, int(horizon + below_deg * px_per_deg))
+    fade0 = max(top, int(horizon - fade_deg * px_per_deg))
+    band = arr[top:]
+    weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    luma = band @ weights
+    # The sky just above the band, smoothed along the row (circular).
+    ref_rows = arr[max(0, top - int(2 * px_per_deg)):top + 1] @ weights
+    ref = gaussian_filter1d(ref_rows.mean(axis=0), sigma=1.5 * px_per_deg, mode="wrap")
+    off = luma < ref[None, :] - dark_levels
+    off[below - top:] = False
+    # Rows are a circle: label with the seam doubled so a patch across it is one.
+    doubled = np.concatenate([off, off], axis=1)
+    labels, n = label(doubled, structure=np.ones((3, 3), dtype=int))
+    land = np.zeros_like(off)
+    if n:
+        touching = np.unique(labels[foot - top:below - top])
+        touching = touching[touching > 0]
+        if touching.size:
+            sel = np.isin(labels, touching)
+            land = binary_fill_holes(sel[:, :w] | sel[:, w:])
+    land[below - top:] = True
+    replaced = float(land[:horizon - top].mean())
+    # Fill each land span from the sky either side of it along its row, so the
+    # glow and gradient of that row carry across; a row with no sky left takes
+    # the fill of the row above it.
+    grow = binary_dilation(land, iterations=3)
+    fill = band.copy()
+    cols = np.arange(w)
+    for r in range(band.shape[0]):
+        sky = ~grow[r]
+        if sky.all():
+            continue
+        if sky.sum() < 8:
+            fill[r] = fill[r - 1] if r else np.median(band[r], axis=0)
+            continue
+        xs = np.flatnonzero(sky)
+        for c in range(3):
+            fill[r, :, c] = np.interp(cols, xs, band[r, xs, c], period=w)
+    # Rows interpolated on their own streak across a wide range (Paris's spanned
+    # 77 deg): smooth the fill in both directions before it goes under the mask.
+    fill = gaussian_filter(fill, sigma=(1.0 * px_per_deg, 1.0 * px_per_deg, 0), mode=("nearest", "wrap", "nearest"))
+    mask = gaussian_filter(grow.astype(np.float32), sigma=2.0)[..., None]
+    out_band = band * (1 - mask) + fill * mask
+    # The fade to haze: each of the lowest rows toward its own smoothed self.
+    haze = gaussian_filter1d(out_band, sigma=3.0 * px_per_deg, axis=1, mode="wrap")
+    ramp = np.zeros(band.shape[0], dtype=np.float32)
+    if horizon > fade0:
+        ramp[fade0 - top:horizon - top] = np.linspace(0.0, 1.0, horizon - fade0, dtype=np.float32)
+    ramp[horizon - top:] = 1.0
+    out_band = out_band * (1 - ramp[:, None, None]) + haze * ramp[:, None, None]
+    out = arr.copy()
+    out[top:] = out_band
+    return PILImage.fromarray(np.clip(out, 0, 255).astype(np.uint8), "RGB"), replaced
+
+
 def _sky_prompt(time_label: str, cloudiness: float = 0.0) -> str:
     # The prompt used to ask for cumulus and cirrus whatever the photograph
     # showed, and at strength 0.85 FLUX obliged: a clear saturated-blue Rainier
@@ -722,6 +802,12 @@ class SkyboxInpaintingStage(PipelineStage):
         )
         flux.close()
 
+        # FLUX paints land at the horizon however the prompt forbids it (Paris:
+        # a mountainous island on the skyline, seen through gaps in the far
+        # bank). The band at the horizon is haze in any real sky.
+        result_pil, flattened = _flatten_horizon(result_pil)
+        if flattened:
+            self.log_info(f"Horizon band: replaced {flattened:.1%} of it (land or dark structure) with the row's own haze")
         return result_pil
 
     def has_expected_output(self, context: PipelineContext) -> bool:

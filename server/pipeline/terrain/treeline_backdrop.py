@@ -63,6 +63,7 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         min_bins: int = 4,
         min_group_bins: int = 3,
         max_bin_depth_jump: float = 0.12,
+        max_base_elevation_deg: float = 8.0,
         feather_px: float = 2.0,
         texture_max_width: int = 8192,
     ):
@@ -87,6 +88,12 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         self.min_group_bins = int(min_group_bins)
         # Neighbouring bins further apart in depth than this fraction are not one run.
         self.max_bin_depth_jump = float(max_bin_depth_jump)
+        # A treeline stands on the ground: a run whose bottom row sits higher
+        # above the terrain under it than this floats (Rainier: the near trees'
+        # crowns, read at the far depth, hung as black blobs 16 m up in the sky).
+        # Measured against the terrain mesh, not the horizon: Rainier's meadow
+        # climbs toward the mountain and its whole treeline stands 3-8 deg up.
+        self.max_base_elevation_deg = float(max_base_elevation_deg)
         # Gaussian blur on the alpha so the silhouette is not a pixel staircase.
         self.feather_px = float(feather_px)
         self.texture_max_width = int(texture_max_width)
@@ -159,6 +166,10 @@ class TreelineBackdropStage(PipelineStage):
         top = np.full(W, -1, dtype=np.int32)
         bottom = np.full(W, -1, dtype=np.int32)
         col_depth = np.full(W, np.nan, dtype=np.float32)
+        floating = 0
+        ground = self._ground_sampler(context)
+        max_float = math.radians(cfg.max_base_elevation_deg)
+        lift: list[tuple[float, float, float]] = []
         for c in range(W):
             rows = np.flatnonzero(far[:, c])
             if rows.size < 2:
@@ -181,10 +192,30 @@ class TreelineBackdropStage(PipelineStage):
                 height_m = (run[-1] - run[0] + 1) * row_angle * median
                 if height_m < cfg.min_height_m:
                     continue
+                base_lat = (H / 2.0 - run[-1]) * row_angle
+                ground_lat = 0.0
+                if ground is not None:
+                    lon = (c / W - 0.5) * 2.0 * math.pi
+                    horiz = median * math.cos(base_lat)
+                    ground_lat = math.atan2(ground(horiz * math.sin(lon), horiz * math.cos(lon)), horiz)
+                lift.append((math.degrees(base_lat), math.degrees(ground_lat), median))
+                if base_lat - ground_lat > max_float:
+                    floating += 1
+                    continue
                 if best is None or height_m > best[2]:
                     best = (int(run[0]), int(run[-1]), height_m, median)
             if best is not None:
                 top[c], bottom[c], col_depth[c] = best[0], best[1], best[3]
+        if lift:
+            arr = np.asarray(lift)
+            q = lambda a: "/".join(f"{x:.1f}" for x in np.percentile(a, [10, 50, 90]))
+            self.log_info(
+                f"Treeline backdrop: {len(lift)} candidate run(s): base {q(arr[:, 0])} deg, ground under it "
+                f"{q(arr[:, 1])} deg, lift {q(arr[:, 0] - arr[:, 1])} deg (p10/p50/p90), depth {q(arr[:, 2])} m"
+            )
+        if floating:
+            self.log_info(f"Treeline backdrop: {floating} column run(s) floating more than "
+                          f"{cfg.max_base_elevation_deg:g} deg above the ground under them dropped")
         self.advance_progress(task)
 
         # ── Per azimuth bin: one quad ──────────────────────────────────────────
@@ -391,6 +422,31 @@ class TreelineBackdropStage(PipelineStage):
         rgb = rgb.copy()
         rgb[out] = np.clip(rgb[out].astype(np.float64) * gain, 0, 255).astype(np.uint8)
         return rgb
+
+    @staticmethod
+    def _ground_sampler(context: PipelineContext):
+        """Camera-relative ground height at a world (x, z): the nearest terrain
+        mesh vertex (the water sheet where there is no terrain). None without a
+        terrain mesh, in which case the ground is taken as the horizon."""
+        pts = []
+        for key in (ContextKey.TERRAIN_MESH, ContextKey.WATER_MESH):
+            m = context.input_mesh(key)
+            if m is not None:
+                pts.append(np.asarray(m.mesh.vertices, dtype=np.float64))
+        if not pts:
+            return None
+        v = np.concatenate(pts, axis=0)
+        if v.shape[0] < 16:
+            return None
+        from scipy.spatial import cKDTree
+        tree = cKDTree(v[:, [0, 2]])
+        ys = v[:, 1]
+
+        def sample(x: float, z: float) -> float:
+            _, i = tree.query((x, z))
+            return float(ys[i])
+
+        return sample
 
     @staticmethod
     def _drop_fragments(alpha: np.ndarray, rgb: np.ndarray, canopy_luma: float,

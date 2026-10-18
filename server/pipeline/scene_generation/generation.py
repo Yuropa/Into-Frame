@@ -25,7 +25,9 @@ from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_REST
 from util.lod_metrics import angular_height_px
 from scene.scene import Scene
 from scene.object import Object3D
+import re
 import numpy as np
+from PIL import Image as PILImage
 
 
 class SceneGenerationConfiguration(PipelineStageConfiguration):
@@ -598,6 +600,68 @@ def _mesh_geometry_record(
     return record
 
 
+def _extend_landmark_top(rgba, box, panorama, max_fraction: float = 0.3, sky_levels: float = 36.0,
+                         slack_px: int = 3):
+    """Grow a landmark's cutout upward past its detection box to take in a spire
+    the box stopped short of (Paris: the Eiffel Tower's antenna). Rows above the
+    box in the panorama are scanned up from the matte's top: pixels that differ
+    from the sky there by more than `sky_levels` and sit within `slack_px` of
+    the previous row's span are kept, until a row keeps nothing. Returns
+    (rgba, box, rows added), the box raised to cover the growth."""
+    if panorama is None or not box or rgba is None:
+        return rgba, box, 0
+    try:
+        pano = np.asarray(panorama.rgb(), dtype=np.float32)
+    except Exception:
+        return rgba, box, 0
+    ph, pw = pano.shape[:2]
+    x, y, w, h = (float(v) for v in box)
+    if h < 8 or w < 2:
+        return rgba, box, 0
+    top = int(round(y)); x0 = int(round(x)); x1 = int(round(x + w))
+    extra = int(round(h * max_fraction))
+    if top <= 0 or extra < 2:
+        return rgba, box, 0
+    y0 = max(0, top - extra)
+    cols = np.arange(x0, x1) % pw
+    region = pano[y0:top][:, cols]                         # rows above the box
+    sky = np.median(np.concatenate([region[:, :2], region[:, -2:]], axis=1).reshape(-1, 3), axis=0)
+    solid = np.abs(region - sky).mean(axis=2) > sky_levels
+    # The matte's span along its own top row, in panorama columns.
+    a = np.asarray(rgba.getchannel("A")) > 127
+    rows = np.flatnonzero(a.any(axis=1))
+    if rows.size == 0:
+        return rgba, box, 0
+    sx = w / max(rgba.width, 1)
+    span_cols = np.flatnonzero(a[rows[0]])
+    lo, hi = int(span_cols[0] * sx), int(span_cols[-1] * sx)
+    kept = np.zeros_like(solid)
+    for r in range(solid.shape[0] - 1, -1, -1):           # upward from the box top
+        lo_r, hi_r = max(0, lo - slack_px), min(solid.shape[1] - 1, hi + slack_px)
+        row = np.flatnonzero(solid[r, lo_r:hi_r + 1]) + lo_r
+        if row.size == 0:
+            break
+        kept[r, row] = True
+        lo, hi = int(row[0]), int(row[-1])
+    grown_rows = np.flatnonzero(kept.any(axis=1))
+    if grown_rows.size == 0:
+        return rgba, box, 0
+    first = int(grown_rows[0])
+    grown = solid.shape[0] - first
+    # Compose: the panorama rows, scaled to the crop's resolution, above the crop.
+    scale_y = rgba.height / h
+    new_h = int(round(grown * scale_y))
+    if new_h < 1:
+        return rgba, box, 0
+    strip_rgb = PILImage.fromarray(np.clip(region[first:], 0, 255).astype(np.uint8), "RGB").resize((rgba.width, new_h), PILImage.LANCZOS)
+    strip_a = PILImage.fromarray((kept[first:] * 255).astype(np.uint8), "L").resize((rgba.width, new_h), PILImage.BILINEAR)
+    strip = strip_rgb.convert("RGBA"); strip.putalpha(strip_a)
+    out = PILImage.new("RGBA", (rgba.width, rgba.height + new_h), (0, 0, 0, 0))
+    out.paste(strip, (0, 0)); out.paste(rgba, (0, new_h))
+    new_box = [x, y - grown, w, h + grown]
+    return out, new_box, grown
+
+
 class SceneGenerationStage(PipelineStage):
     """
     Assembles the final 3D scene by unprojecting each detected object's bounding box
@@ -1064,6 +1128,11 @@ class SceneGenerationStage(PipelineStage):
                     })
                 return lods
 
+            def class_card_keys(cls: str, max_bucket: int = 32) -> list[str]:
+                """Every published card of the class, for a bucket with none of its own."""
+                return [k for k in (f"category_mesh_{cls}_{b}_card" for b in range(max_bucket))
+                        if context.input_mesh(k) is not None]
+
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in placement_order:
                 metadata = context.input_object(f"metadata_{idx}") or {}
@@ -1409,6 +1478,19 @@ class SceneGenerationStage(PipelineStage):
                 # as before.
                 card_mesh_key = f"{mesh_key}_card"
                 card_mesh = context.input_mesh(card_mesh_key)
+                if card_mesh is None and cls in self.config.card_preferred_classes and not landmark_card:
+                    # This bucket has no card: another bucket of the class lends
+                    # its own before the instance can fall to a crop billboard,
+                    # which for a flower is a rectangle of meadow (Rainier's
+                    # bucket 3 stood as grey slabs at 25 m).
+                    for other_key in class_card_keys(cls):
+                        card_mesh_key, card_mesh = other_key, context.input_mesh(other_key)
+                        self.log_info(f"Object {idx} ({cls}): {mesh_key} has no card, using {other_key}")
+                        break
+                    if card_mesh is None:
+                        self.log_info(f"Skipping {cls} object {idx}: no card for {mesh_key} or any {cls} bucket")
+                        self.advance_progress(generation_task)
+                        continue
                 if card_mesh is not None and cls in self.config.card_preferred_classes:
                     category_mesh = recon_mesh = None
                 landmark_rows = None
@@ -1950,12 +2032,15 @@ class SceneGenerationStage(PipelineStage):
         if crop is None:
             return None
         rgba = crop.rgba() if hasattr(crop, "rgba") else getattr(crop, "image", crop).convert("RGBA")
+        meta = context.input_object(f"metadata_{idx}") or {}
+        box = meta.get("box")
+        rgba, box, grown = _extend_landmark_top(rgba, box, context.input_panorama(ContextKey.PANORAMA))
+        if grown:
+            self.log_info(f"Landmark {idx}: matte extended {grown} panorama rows up to the top of its spire")
         bbox = rgba.getchannel("A").point(lambda a: 255 if a > 127 else 0).getbbox()
         if bbox is None:
             return None
         # Panorama rows of the cutout's top and bottom: the crop spans its box.
-        meta = context.input_object(f"metadata_{idx}") or {}
-        box = meta.get("box")
         rows = None
         if box:
             sy = float(box[3]) / max(rgba.height, 1)

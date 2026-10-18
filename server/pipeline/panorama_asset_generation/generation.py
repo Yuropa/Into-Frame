@@ -115,6 +115,16 @@ _MAX_WIDTH_OVER_HEIGHT: dict[str, float] = {
 }
 
 
+def _opaque_fraction(image) -> float:
+    """Share of an RGBA image's bounding box that is opaque."""
+    rgba = image.rgba() if hasattr(image, "rgba") else getattr(image, "image", image).convert("RGBA")
+    a = np.asarray(rgba.getchannel("A")) > 127
+    if not a.any():
+        return 0.0
+    rows = np.flatnonzero(a.any(axis=1)); cols = np.flatnonzero(a.any(axis=0))
+    return float(a[rows[0]:rows[-1] + 1, cols[0]:cols[-1] + 1].mean())
+
+
 def _plausible_shape(obj_class: "str | None", box) -> bool:
     limit = _MAX_WIDTH_OVER_HEIGHT.get(obj_class or "")
     if limit is None or not box or box[3] <= 0:
@@ -771,10 +781,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
             # No plausibly-shaped crop in this group (see _plausible_shape): no card.
             # The group keeps its billboard pool.
             source = card_sources.get(pool_key)
-            if source is None:
+            if source is None and obj_class not in VEGETATION_CATEGORIES:
                 self.log_info(f"  {key}: no plausibly-shaped crop to texture a card with, skipping")
                 continue
-            crop = context.image(_delit_key(source)) or self._source_crop(context, source)
+            # A plant group with no plausibly-shaped crop still gets a card from a
+            # reference view (its own or a borrowed, recoloured one): without one
+            # its instances fall back to crop billboards, and a flower crop's
+            # billboard is a rectangle of meadow (Rainier's bucket 3).
+            crop = (context.image(_delit_key(source)) or self._source_crop(context, source)) if source is not None else None
             # A plant's crop is a patch of meadow around a bloom (Rainier's
             # paintbrush card was 66% opaque, a green strip 91%: slabs in the
             # scene). Its generated reference view is the whole plant cut out on
@@ -798,8 +812,15 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 ) if obj_class == "flower" else Counter()
                 group_colour = group_colours.most_common(1)[0][0] if group_colours else None
                 borrowable = None
-                for candidate in [source] + [i for i in pool if i != source] + [i for i in same_class if i not in pool and i != source]:
+                for candidate in ([source] if source is not None else []) + [i for i in pool if i != source] + [i for i in same_class if i not in pool and i != source]:
                     ref = context.input_image(_REFERENCE_KEY.format(idx=candidate))
+                    if ref is not None and _opaque_fraction(ref) > 0.5:
+                        # A plant cut out of a white canvas is mostly air; a
+                        # matte this full is the canvas the model painted in
+                        # (crop_92's gravel: grey boxes across the meadow).
+                        self.log_info(f"  {key}: reference view of crop_{candidate} is {_opaque_fraction(ref):.0%} opaque, "
+                                      "a painted background, skipped")
+                        ref = None
                     if ref is not None and group_colour is not None:
                         ref_colour = _bloom_colour_name(ref.rgba() if hasattr(ref, "rgba") else ref.image)
                         if not bloom_colours_agree(group_colour, ref_colour):
@@ -814,8 +835,13 @@ class PanoramaAssetGenerationStage(PipelineStage):
                             self.log_info(f"  {key}: reference view of crop_{candidate} is cut along its {cut} side, skipped")
                             ref = None
                     if ref is not None:
-                        crop, source, from_reference = ref, candidate, True
-                        self.log_info(f"  {key}: card from the reference view of crop_{candidate}")
+                        # References written before Object Completion cleared these.
+                        from pipeline.object_completion.completion import drop_white_fragments
+                        cleaned, cleared = drop_white_fragments(ref.rgba() if hasattr(ref, "rgba") else ref.image)
+                        crop = UtilImage(cleaned) if cleared else ref
+                        source, from_reference = candidate, True
+                        self.log_info(f"  {key}: card from the reference view of crop_{candidate}"
+                                      + (f" ({cleared} px of white canvas cleared)" if cleared else ""))
                         break
                 if not from_reference and borrowable is not None:
                     # No reference in the group's colour: another flower's, its
@@ -829,6 +855,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
                         source, from_reference = b_idx, True
                         self.log_info(f"  {key}: reference of crop_{b_idx} with its blooms recoloured to {group_colour} ({hue:.0f} deg)")
             if crop is None:
+                self.log_info(f"  {key}: no crop or reference view to texture a card with, skipping")
                 continue
             texture = crop.rgba() if hasattr(crop, "rgba") else crop
             if from_reference and obj_class in _COLOUR_FROM_PHOTO_CLASSES:

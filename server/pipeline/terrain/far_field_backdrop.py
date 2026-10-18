@@ -91,6 +91,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
+        horizon_water_deg: float = 5.0,
         # False: textured with the panorama's own (photographed) light and drawn
         # unlit. Relighting the delit far field with the client's sun through
         # normals estimated from km-scale depth made Rainier's summit bright and
@@ -127,6 +128,9 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.skirt = bool(skirt)
         self.skirt_start_fraction = float(skirt_start_fraction)
         self.skirt_sky_below_deg = float(skirt_sky_below_deg)
+        # Water the panorama shows at or above the geometric horizon, up to this
+        # many degrees, goes to the shell whatever its depth (see run).
+        self.horizon_water_deg = float(horizon_water_deg)
         self.lit = bool(lit)
 
 
@@ -216,6 +220,26 @@ class FarFieldBackdropStage(PipelineStage):
                         f"Far-field backdrop: {touching.size} built structure(s) reach the far band; "
                         f"{int(whole.sum())} px of them moved to the shell whole"
                     )
+        # Water at or above the geometric horizon goes to the shell whatever its
+        # depth. A flat water plane never rises above the horizon, so the water
+        # mesh cannot show those rows; on Shark Fin the panorama's sea horizon sat
+        # 3 deg above the camera's, the saturated top of the sea stood on the
+        # shell and the 1.5 deg of sea under it (depth 400 m) fell through to the
+        # skybox, so the far sea floated as bars over a strip of sky.
+        if type_depth is not None and cfg.horizon_water_deg > 0:
+            types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+            top = max(0, H // 2 - int(round(np.radians(cfg.horizon_water_deg) * H / np.pi)))
+            water_up = types_full == int(RegionType.WATER)
+            water_up[:top] = False
+            water_up[H // 2 + 1:] = False
+            gained = water_up & ~far
+            if gained.any():
+                depth = np.where(gained, depth_max, depth)
+                far |= gained
+                self.log_info(
+                    f"Far-field backdrop: {int(gained.sum())} px of water at or above the horizon "
+                    f"moved to the shell (a water plane cannot reach above it)"
+                )
         # Bridge the sky-typed gaps inside a far structure. The Eiffel Tower's
         # lattice is typed half SKY, so per-pixel it is a cloud of specks the
         # stride-8 grid and the silhouette rule reduce to nothing; closed over
