@@ -249,7 +249,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_exemplar_candidates: int = 4000,
         synthesize_cli_path: str | None = None,
         max_workers: int | None = None,
-        cli_timeout_s: float = 120.0,
+        cli_timeout_s: float = 180.0,
         pool_across_regions: bool = True,
         exclude_types: list[str] | None = None,
         class_max_paint_radius_m: dict[str, float] | None = None,
@@ -260,6 +260,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         min_feature_exemplars: int = 6,
         bloom_classes: list[str] | None = None,
         bloom_max_boost: float = 6.0,
+        bloom_max_density_m2: float = 12.0,
         align_to_water_classes: list[str] | None = None,
         class_paint_regions: dict[str, list[str]] | None = None,
         feature_exempt_classes: list[str] | None = None,
@@ -319,6 +320,10 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # scaled by features.bloom_recall, up to bloom_max_boost.
         self.bloom_classes = frozenset(str(c).lower() for c in (bloom_classes or ["flower"]))
         self.bloom_max_boost = float(bloom_max_boost)
+        # Ceiling on a bloom class's full density after the recall boost: the near
+        # core density times the boost can run past what half-metre cards can show
+        # without becoming a solid wall (Rainier: 7.3/m² x 4.5 = 33/m²).
+        self.bloom_max_density_m2 = float(bloom_max_density_m2)
         # Region types a class may be painted on, overriding the region its exemplars
         # were typed with. A boat's box foot lands on whatever the region map shows
         # under it -- Paris's boats typed forest, ground and other as often as water --
@@ -820,10 +825,39 @@ class DistributionSynthesisStage(PipelineStage):
         # and the RNG draws for size/jitter — hence the final output for a given seed —
         # are unaffected by parallelizing.
         jobs: list[dict] = []
+        # Per-group appearance weights. The generic map says how green a cell is;
+        # a bloom class is judged against the ground its OWN detections stand on
+        # (see below), so it gets a rescaled copy.
+        group_weight: dict[int, np.ndarray] = {}
+
         for group_idx, (region_type, obj_type, dist, paintable_idxs) in enumerate(groups):
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
             paint_radius = cfg.class_max_paint_radius_m.get(obj_type, cfg.max_paint_radius_m)
+            if (
+                vegetation_weight is not None and obj_type in cfg.bloom_classes
+                and len(exemplar_pts) >= 5
+            ):
+                # A flower bed is where excess green is LOWEST: the blooms are not
+                # green and the leaves between them are shaded. Judged on the
+                # generic ramp, Rainier's own paintbrush meadow scored 0.42 and
+                # three quarters of the painted carpet was dropped "on unvegetated
+                # ground". Ground as green as the ground the detections stand on
+                # is planted ground for this class; snow, gravel and rock (at the
+                # floor) still fail at the same rate.
+                ex_rows, ex_cols = world_to_cell(exemplar_pts[:, 0], exemplar_pts[:, 1], grid_size_meters, grid_resolution)
+                ex_rows = np.clip(np.asarray(ex_rows, dtype=np.intp), 0, grid_resolution - 1)
+                ex_cols = np.clip(np.asarray(ex_cols, dtype=np.intp), 0, grid_resolution - 1)
+                under = vegetation_weight[ex_rows, ex_cols]
+                w_ref = float(np.median(under))
+                if cfg.vegetation_floor_fraction < w_ref < 1.0:
+                    group_weight[group_idx] = np.clip(
+                        vegetation_weight / w_ref, cfg.vegetation_floor_fraction, 1.0
+                    ).astype(np.float32)
+                    self.log_info(
+                        f"  {obj_type} [{region_type}]: the photographed {obj_type}s stand on ground of "
+                        f"weight {w_ref:.2f} — ground at least that green counts as planted for them"
+                    )
             falloff = cfg.class_falloff_exponent.get(obj_type, cfg.density_falloff_exponent)
             affinity = None
             if fields and len(exemplar_pts) >= cfg.min_feature_exemplars and obj_type not in cfg.feature_exempt_classes:
@@ -940,6 +974,27 @@ class DistributionSynthesisStage(PipelineStage):
             # canopies merges into a few tree boxes (Paris's quay: "not nearly
             # enough trees"), as a flower bed does into a few bloom boxes.
             exemplar_density *= float(cfg.class_density_scale.get(obj_type, 1.0))
+            if obj_type in cfg.bloom_classes and len(exemplar_pts) >= 8:
+                # A flower bed resolves into detections only in the nearest metres;
+                # the few seed heads picked out further off stretch the hull across
+                # ground the detector could not count (Rainier: 41 flowers, median
+                # 1.8 m from the camera, hull 47 m² because of four at 9-12 m —
+                # 0.9/m² where the meadow at the viewer's feet is 7/m²). Take the
+                # density of the near core, the band the viewer actually stands in.
+                core_r = float(np.percentile(np.linalg.norm(exemplar_pts, axis=1), 75.0))
+                core = exemplar_pts[np.linalg.norm(exemplar_pts, axis=1) <= core_r]
+                if len(core) >= 5:
+                    try:
+                        core_area = float(ConvexHull(core).volume)
+                    except Exception:
+                        core_area = 0.0
+                    if core_area >= 1.0 and len(core) / core_area > exemplar_density:
+                        self.log_info(
+                            f"  {obj_type} [{region_type}]: {len(core)} of {len(exemplar_pts)} exemplars within "
+                            f"{core_r:.1f} m over {core_area:.1f} m² — density {exemplar_density:.2f} -> "
+                            f"{len(core) / core_area:.2f}/m² from that near core"
+                        )
+                        exemplar_density = len(core) / core_area
             if obj_type in cfg.bloom_classes and bloom_boxes.get(obj_type):
                 if panorama_rgb is None:
                     pano = context.input_panorama(ContextKey.PANORAMA)
@@ -952,6 +1007,16 @@ class DistributionSynthesisStage(PipelineStage):
                         f"{detected} were detected -- painting at {boost:.1f}x the detected density"
                     )
                     exemplar_density *= boost
+            if obj_type in cfg.bloom_classes and cfg.bloom_max_density_m2 > 0 and exemplar_density > cfg.bloom_max_density_m2:
+                self.log_info(
+                    f"  {obj_type} [{region_type}]: {exemplar_density:.1f}/m² capped at "
+                    f"bloom_max_density_m2={cfg.bloom_max_density_m2:.1f}"
+                )
+                exemplar_density = cfg.bloom_max_density_m2
+            self.log_info(
+                f"  {obj_type} [{region_type}]: {len(dist.points)} exemplar(s) over "
+                f"{_polygon_area(input_boundary):.1f} m² — painting {exemplar_density:.2f}/m² at full density"
+            )
 
             # This group's own full-density radius. The configured value is a FLOOR,
             # raised to where this class was actually observed.
@@ -1197,6 +1262,17 @@ class DistributionSynthesisStage(PipelineStage):
                 f"Painting {len(jobs)} tile(s) across {len(groups)} group(s) "
                 f"using up to {max_workers} concurrent synthesize_cli worker(s)…"
             )
+            for group_idx, (region_type, obj_type, _dist, _p) in enumerate(groups):
+                mine = [j for j in jobs if j["group_idx"] == group_idx]
+                if not mine:
+                    continue
+                area = sum(_polygon_area(j["output_boundary"]) for j in mine)
+                asked = sum(int(j["n_points"]) for j in mine)
+                capped = sum(1 for j in mine if int(j["n_points"]) >= cfg.max_candidates_per_tile)
+                self.log_info(
+                    f"  {obj_type} [{region_type}]: {len(mine)} tile(s) over {area:.0f} m² asking for "
+                    f"{asked} point(s)" + (f", {capped} at the {cfg.max_candidates_per_tile}-point tile cap" if capped else "")
+                )
             task = self.create_progress(len(jobs), "Painting distributions…")
 
             # Phase 2: run every tile's synthesize_cli call concurrently — each is an
@@ -1297,7 +1373,7 @@ class DistributionSynthesisStage(PipelineStage):
                         cell_col = int((x + grid_size_meters / 2.0) / cell_m)
                         cell_row = int((z + grid_size_meters / 2.0) / cell_m)
                         if 0 <= cell_row < grid_resolution and 0 <= cell_col < grid_resolution:
-                            weight = float(vegetation_weight[cell_row, cell_col])
+                            weight = float(group_weight.get(job["group_idx"], vegetation_weight)[cell_row, cell_col])
                             bloom_cells = getattr(self, "_bloom_cells", None)
                             if job_obj_type in cfg.bloom_classes and bloom_cells is not None and bloom_cells[cell_row, cell_col]:
                                 weight = 1.0

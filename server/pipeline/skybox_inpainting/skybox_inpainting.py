@@ -251,6 +251,45 @@ def _sky_prompt(time_label: str, cloudiness: float = 0.0) -> str:
     )
 
 
+def _match_sky_to_photo(result: np.ndarray, source_arr: np.ndarray, sky_mask: np.ndarray,
+                        cone_cols: "tuple[int, int] | None", max_gain: float = 1.6,
+                        min_gain: float = 0.6) -> "tuple[np.ndarray, np.ndarray | None]":
+    """Per-row colour gain that brings the generated sky's tone to the
+    photographed sky's, row by row, keeping the generated cloud structure.
+
+    FLUX follows the panorama's sky, and the outpainted sky around the photo
+    drifts from the photographed one (Shark Fin's generated dusk ran 30 levels
+    darker than the photo's at 19 deg up). For each row above the horizon with
+    enough photographed sky inside the captured cone, the gain is the ratio of
+    the photo's median sky colour to the result's median over the same columns;
+    rows the photo does not reach hold the nearest measured gain, and the whole
+    profile is smoothed over rows. Returns (matched image, per-row gain or None)."""
+    from scipy.ndimage import gaussian_filter1d
+    h, w = sky_mask.shape
+    src = source_arr.astype(np.float64)
+    out = result.astype(np.float64)
+    c0, c1 = (0, w) if cone_cols is None else (max(int(cone_cols[0]), 0), min(int(cone_cols[1]), w))
+    if c1 - c0 < 16:
+        return result, None
+    need = max(8, (c1 - c0) // 10)
+    gains = np.full((h, 3), np.nan)
+    for r in range(h // 2):
+        sel = sky_mask[r, c0:c1]
+        if int(sel.sum()) < need:
+            continue
+        photo = np.median(src[r, c0:c1][sel], axis=0)
+        gen = np.median(out[r, c0:c1][sel], axis=0)
+        gains[r] = np.clip((photo + 1.0) / (gen + 1.0), min_gain, max_gain)
+    valid = np.flatnonzero(~np.isnan(gains[:, 0]))
+    if valid.size < max(8, h // 100):
+        return result, None
+    for c in range(3):
+        gains[:, c] = np.interp(np.arange(h), valid, gains[valid, c])
+    gains = gaussian_filter1d(gains, sigma=max(4.0, h / 40.0), axis=0, mode="nearest")
+    matched = (out * gains[:, None, :]).clip(0, 255).astype(np.uint8)
+    return matched, gains
+
+
 def _sky_structure(source_arr: np.ndarray, sky_mask: np.ndarray, cone_cols: "tuple[int, int] | None" = None) -> float:
     """Fraction of the photographed sky (above the horizon, inside the cone when
     known) more than 25 levels off its row's median colour: clouds of any colour.
@@ -658,6 +697,15 @@ class SkyboxInpaintingStage(PipelineStage):
         else:
             result_pil = self._flux_sky(context, gradient_composite, source_arr, sky_mask, cloudiness,
                                         time_label, task, h, w)
+            matched, gains = _match_sky_to_photo(np.asarray(result_pil.convert("RGB")), source_arr, sky_mask, cone_cols)
+            if gains is not None:
+                mean_gain = gains[: h // 2].mean(axis=0)
+                self.log_info(
+                    "Generated sky matched to the photographed sky row by row: mean gain "
+                    f"R {mean_gain[0]:.2f} G {mean_gain[1]:.2f} B {mean_gain[2]:.2f}, "
+                    f"range {gains[: h // 2].min():.2f}-{gains[: h // 2].max():.2f}"
+                )
+                result_pil = PILImage.fromarray(matched)
 
         # --- Pass 4: close whatever step Pass 3 left, in closed form ---
         # Pass 3 is a generative fill and has no continuity constraint, so it

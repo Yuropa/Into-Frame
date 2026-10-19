@@ -112,7 +112,8 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         exemplar_patch_size: int = 384,
         card_planes: int = 3,
         tuft_height_m: float = 0.25,
-        near_prior_radius_m: float = 8.0,
+        near_prior_radius_m: float = 25.0,
+        near_prior_band_m: float = 5.0,
         tuft_height_jitter: float = 0.3,
         generator_type: str = "SAM3D",
         build_near_meshes: bool = True,
@@ -228,6 +229,7 @@ class GrassCoverConfiguration(PipelineStageConfiguration):
         # Radius around the viewer within which ground the photo did not see
         # follows the photo's own near ground (grass_area.grass_area_mask).
         self.near_prior_radius_m = float(near_prior_radius_m)
+        self.near_prior_band_m = float(near_prior_band_m)
         self.tuft_height_jitter = float(tuft_height_jitter)
         self.generator_type = ModelGeneratorType[generator_type.upper()]
         # Near-LOD reconstructed meshes are the expensive half of this stage
@@ -341,11 +343,13 @@ class GrassCoverStage(PipelineStage):
             stats=area_stats,
             photo_box=self._photo_box(context),
             near_prior_radius_m=cfg.near_prior_radius_m,
+            near_prior_band_m=cfg.near_prior_band_m,
         )
         if area_stats.get("near_prior_cells"):
             self.log_info(
                 f"Grass near the viewer: {area_stats['near_prior_cells']} cells outside the photograph "
-                f"follow its near ground ({area_stats['near_prior_pass_fraction']:.0%} grass)"
+                f"follow its ground at the same distance ({area_stats.get('near_prior_bands', 1)} band(s), "
+                f"{area_stats['near_prior_pass_fraction']:.0%} grass)"
             )
         area_m2 = area_square_meters(mask, grid_size_meters)
         self.log_info(

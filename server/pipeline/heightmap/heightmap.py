@@ -52,6 +52,9 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
+        level_ground_to_camera: bool = True,
+        level_ground_ring_m: tuple[float, float] = (6.0, 12.0),
+        level_ground_tolerance_m: float = 0.15,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.grid_size_meters = grid_size_meters
@@ -187,6 +190,16 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # test can't catch. 0 disables. See
         # HeightMapGenerator._despike_cells and _build_certainty.
         self.single_sample_blur_sigma = single_sample_blur_sigma
+        # When the camera height is the configured prior rather than measured from
+        # the photograph, it means "the viewer's eye is this far above the ground
+        # they stand on". The nadir disc is diffused from the ground just outside
+        # it, so the map is shifted so that ring (level_ground_ring_m, the nearest
+        # measured ground past the disc) sits at -camera_height. On Rainier the
+        # ring sat at -0.4 m under a 1.0 m camera: the eye was 0.4 m off the
+        # ground and knee-high flowers 1.5 m away reached the horizon.
+        self.level_ground_to_camera = bool(level_ground_to_camera)
+        self.level_ground_ring_m = (float(level_ground_ring_m[0]), float(level_ground_ring_m[1]))
+        self.level_ground_tolerance_m = float(level_ground_tolerance_m)
         # Equirectangular mode only: certainty multiplier for cells whose
         # ground validity came from PANORAMA_REGION_AMBIGUOUS_MASK -- pixels
         # PanoramaRegionStage resolved from an uncorroborated ambiguous label
@@ -233,7 +246,8 @@ class HeightMapStage(PipelineStage):
         cfg: HeightMapConfiguration = self.config
         # Measured from the photo by Panorama Depth Calibration when it could be
         # (see CAMERA_HEIGHT_KEY); the configured height otherwise.
-        camera_height = float((context.input_object(CAMERA_HEIGHT_KEY) or {}).get("meters") or cfg.camera_height_meters)
+        camera_estimate = context.input_object(CAMERA_HEIGHT_KEY) or {}
+        camera_height = float(camera_estimate.get("meters") or cfg.camera_height_meters)
 
         task = self.create_progress(3, "Height Map…")
 
@@ -344,6 +358,27 @@ class HeightMapStage(PipelineStage):
             debug_dir=self.temp,
         )
         self.advance_progress(task)
+
+        if cfg.level_ground_to_camera and camera_estimate.get("source") != "photo":
+            r0, r1 = cfg.level_ground_ring_m
+            n = cfg.grid_resolution
+            axis = (np.arange(n, dtype=np.float32) + 0.5) / n * cfg.grid_size_meters - cfg.grid_size_meters / 2.0
+            zz, xx = np.meshgrid(axis, axis, indexing="ij")
+            rr = np.hypot(xx, zz)
+            ring = (rr >= r0) & (rr <= r1) & np.isfinite(height_array)
+            if int(ring.sum()) >= 100:
+                ring_y = float(np.median(height_array[ring]))
+                shift = -camera_height - ring_y
+                if abs(shift) > cfg.level_ground_tolerance_m:
+                    height_array = np.where(np.isfinite(height_array), height_array + shift, height_array).astype(height_array.dtype)
+                    self.log_info(
+                        f"Ground {r0:.0f}-{r1:.0f} m from the camera sat {ring_y:+.2f} m under a "
+                        f"{camera_height:.2f} m camera ({camera_estimate.get('source', 'config')}); "
+                        f"whole map shifted {shift:+.2f} m so the viewer stands at eye height above it"
+                    )
+                else:
+                    self.log_info(f"Ground {r0:.0f}-{r1:.0f} m from the camera sits {ring_y:+.2f} m, within "
+                                  f"{cfg.level_ground_tolerance_m:.2f} m of the {camera_height:.2f} m camera")
 
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)

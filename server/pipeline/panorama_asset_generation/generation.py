@@ -812,12 +812,16 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 ) if obj_class == "flower" else Counter()
                 group_colour = group_colours.most_common(1)[0][0] if group_colours else None
                 borrowable = None
+                # A plant cut out of a white canvas is mostly air, so a matte over
+                # half full is the canvas the model painted in (crop_92's gravel:
+                # grey boxes across the meadow). A tree's crown fills most of its
+                # box by nature (Paris's bank trees ran 51% and lost their whole-
+                # tree references to blurry crop cards), so only a near-rectangle
+                # is a painted background there.
+                max_opaque = 0.5 if obj_class in ("flower", "plant") else 0.9
                 for candidate in ([source] if source is not None else []) + [i for i in pool if i != source] + [i for i in same_class if i not in pool and i != source]:
                     ref = context.input_image(_REFERENCE_KEY.format(idx=candidate))
-                    if ref is not None and _opaque_fraction(ref) > 0.5:
-                        # A plant cut out of a white canvas is mostly air; a
-                        # matte this full is the canvas the model painted in
-                        # (crop_92's gravel: grey boxes across the meadow).
+                    if ref is not None and _opaque_fraction(ref) > max_opaque:
                         self.log_info(f"  {key}: reference view of crop_{candidate} is {_opaque_fraction(ref):.0%} opaque, "
                                       "a painted background, skipped")
                         ref = None

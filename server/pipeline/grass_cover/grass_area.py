@@ -130,6 +130,7 @@ def grass_area_mask(
     stats: "dict | None" = None,
     photo_box: "tuple[float, float, float, float] | None" = None,
     near_prior_radius_m: float = 8.0,
+    near_prior_band_m: float = 5.0,
 ) -> np.ndarray:
     """Boolean (grid_resolution, grid_resolution) mask of cells that should carry grass.
 
@@ -228,27 +229,40 @@ def grass_area_mask(
             row_frac = 1.0 - pano_v
             in_photo = sampled & (pano_u >= u0) & (pano_u <= u1) & (row_frac >= v0) & (row_frac <= v1)
             grass_typed = np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
-            # The NEAREST ground the photo shows is what the viewer stands in
-            # (Rainier: meadow for the first 3 m, then snow and gravel).
-            ref = in_photo & grass_typed & (radius_m <= near_prior_radius_m)
-            if int(ref.sum()) >= 50:
-                r_near = float(np.percentile(radius_m[ref], 5.0))
-                tight = ref & (radius_m <= r_near + 2.0)
-                if int(tight.sum()) >= 50:
-                    ref = tight
-            if int(ref.sum()) >= 50:
-                passing = ref & (greenness >= min_cell_greenness)
-                pass_fraction = float(passing.sum()) / float(ref.sum())
-                if pass_fraction >= 0.5:
-                    target = (radius_m <= near_prior_radius_m) & ~in_photo & (cell_type != int(RegionType.WATER))
-                    greenness = np.where(target, float(np.median(greenness[passing])), greenness)
-                    cell_type = np.where(target, int(RegionType.VEGETATION), cell_type).astype(np.int16)
-                    sampled = sampled | target
-                    mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
-                    if stats is not None:
-                        stats["near_prior_cells"] = int(target.sum())
-                        stats["near_prior_mask"] = target
-                        stats["near_prior_pass_fraction"] = round(pass_fraction, 2)
+            # Band by band out to near_prior_radius_m: the photo's verdict at each
+            # distance is what the generated ground at that distance should match
+            # (Rainier: meadow for 25 m in the photo, a conifer ring and forest
+            # floor from 8 m out in the outpainting, so an 8 m prior left the
+            # meadow behind the viewer bare). A band follows the photo only when
+            # the photo's ground there is mostly grass-typed AND mostly green.
+            band = max(float(near_prior_band_m), 1.0)
+            prior_mask = np.zeros_like(sampled)
+            fractions: list[float] = []
+            a = 0.0
+            while a < near_prior_radius_m:
+                b = min(a + band, near_prior_radius_m)
+                in_band = (radius_m >= a) & (radius_m < b)
+                seen = in_photo & in_band
+                if int(seen.sum()) >= 50:
+                    ref = seen & grass_typed
+                    share = float(ref.sum()) / float(seen.sum())
+                    passing = ref & (greenness >= min_cell_greenness)
+                    pass_fraction = float(passing.sum()) / float(max(ref.sum(), 1))
+                    if share >= 0.5 and pass_fraction >= 0.5 and int(passing.sum()) >= 25:
+                        target = in_band & ~in_photo & (cell_type != int(RegionType.WATER))
+                        greenness = np.where(target, float(np.median(greenness[passing])), greenness)
+                        cell_type = np.where(target, int(RegionType.VEGETATION), cell_type).astype(np.int16)
+                        sampled = sampled | target
+                        prior_mask |= target
+                        fractions.append(share * pass_fraction)
+                a = b
+            if prior_mask.any():
+                mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
+                if stats is not None:
+                    stats["near_prior_cells"] = int(prior_mask.sum())
+                    stats["near_prior_mask"] = prior_mask
+                    stats["near_prior_pass_fraction"] = round(float(np.mean(fractions)), 2)
+                    stats["near_prior_bands"] = len(fractions)
         vetoed_cells = sampled & (greenness < min_cell_greenness)
         if stats is not None:
             stats["colour_vetoed_cells"] = int((mask & vetoed_cells).sum())

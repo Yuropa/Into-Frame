@@ -638,13 +638,29 @@ class TerrainMeshStage(PipelineStage):
         near = water & (np.arange(H)[:, None] >= (rows[0] + rows[-1]) // 2)
         if near.sum() >= 500:
             water = near
-        srgb = np.median(rgb[water], axis=0) / 255.0
+        # Water's own colour is cool-hued: blue or green at least as strong as
+        # red. Foam and the sky's reflection are what make a sea warm, and the
+        # client's shader lays that reflection back on top. The plain median left
+        # Shark Fin's sunset sea mauve twice over (sRGB [126, 98, 108] under a
+        # mauve reflection) and the darker half of it was wet sand ([70, 52, 54]);
+        # its cool pixels, 8% of the surf zone, are the dark teal [23, 36, 36].
+        # Paris's Seine is cool throughout and reads the same either way.
+        px = rgb[water]
+        cool = (px[:, 2] >= px[:, 0]) & (px[:, 1] >= 0.95 * px[:, 0])
+        if cool.sum() >= 250:
+            srgb = np.median(px[cool], axis=0) / 255.0
+            how = f"the cool-hued {cool.mean():.0%} of its near water"
+        else:
+            luma = px @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+            darker = px[luma <= np.median(luma)]
+            srgb = np.median(darker if len(darker) >= 250 else px, axis=0) / 255.0
+            how = "darker half of its near water, none of it cool-hued"
         linear = np.where(srgb <= 0.04045, srgb / 12.92, ((srgb + 0.055) / 1.055) ** 2.4)
         material = water_mesh.mesh.visual.material
         alpha = float(np.asarray(material.baseColorFactor, dtype=np.float64).ravel()[3]) / (
             255.0 if np.asarray(material.baseColorFactor).dtype.kind in "ui" else 1.0)
         material.baseColorFactor = [float(linear[0]), float(linear[1]), float(linear[2]), alpha]
-        self.log_info(f"Water colour from the photograph: sRGB {np.round(srgb * 255).astype(int).tolist()}")
+        self.log_info(f"Water colour from the photograph ({how}): sRGB {np.round(srgb * 255).astype(int).tolist()}")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, _, output_key = self._resolved_keys()

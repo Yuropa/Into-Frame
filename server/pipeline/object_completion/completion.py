@@ -819,8 +819,9 @@ class ObjectCompletionStage(PipelineStage):
                     # for one whole plant.
                     bloom = _bloom_colour_name(src)
                     prompt = (
-                        f"a single {bloom + ' ' if bloom else ''}wildflower plant, one upright stem with "
-                        f"leaves and its blooms, the whole plant from the base of the stem to the top in frame "
+                        f"a single {bloom + ' ' if bloom else ''}alpine meadow wildflower plant, one slender "
+                        f"upright stem with small narrow leaves and a spike or cluster of small blooms, "
+                        f"the whole plant from the base of the stem to the top in frame "
                         f"with empty white space on every side, "
                         f"seen from the side, isolated on a plain white background, botanical studio "
                         f"photograph, even soft light, sharp"

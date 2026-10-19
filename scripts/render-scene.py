@@ -526,7 +526,7 @@ class SceneBuilder:
             name = str(o.get("name") or "")
             if not (name in env_names or name.startswith("formation")):
                 continue
-            if self.args.env_exclude and self.args.env_exclude in name:
+            if self.args.env_exclude and any(sub and sub in name for sub in self.args.env_exclude.split(",")):
                 continue
             key = o.get("mesh")
             tm = self.trimesh_for(key) if key else None

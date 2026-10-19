@@ -91,6 +91,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
+        skirt_min_depth_fraction: float = 0.5,
         horizon_water_deg: float = 5.0,
         # False: textured with the panorama's own (photographed) light and drawn
         # unlit. Relighting the delit far field with the client's sun through
@@ -128,6 +129,12 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.skirt = bool(skirt)
         self.skirt_start_fraction = float(skirt_start_fraction)
         self.skirt_sky_below_deg = float(skirt_sky_below_deg)
+        # A skirt pixel is drawn where its ray meets the ground plane, 90-650 m
+        # out; one the depth map measured much nearer than that is near content
+        # (Shark Fin: the surf at a sea stack's foot, 50 m away, copied onto the
+        # skirt behind the stack as photo rectangles). Kept only when its depth
+        # is at least this fraction of the distance it would be drawn at.
+        self.skirt_min_depth_fraction = float(skirt_min_depth_fraction)
         # Water the panorama shows at or above the geometric horizon, up to this
         # many degrees, goes to the shell whatever its depth (see run).
         self.horizon_water_deg = float(horizon_water_deg)
@@ -366,6 +373,14 @@ class FarFieldBackdropStage(PipelineStage):
             foot = np.maximum(foot, cfg.skirt_start_fraction * grid_half)
             skirt = (LAT < 0) & np.isfinite(t_hit) & beyond & not_sky_grid & ~shell
             t = np.minimum(t_hit, foot[None, :])
+            if cfg.skirt_min_depth_fraction > 0:
+                near_content = skirt & np.isfinite(d_grid) & (d_grid < cfg.skirt_min_depth_fraction * t)
+                if near_content.any():
+                    self.log_info(
+                        f"Far-field backdrop: {int(near_content.sum())} skirt vertex(es) measured nearer than "
+                        f"{cfg.skirt_min_depth_fraction:.0%} of their drawn distance left off (near content)"
+                    )
+                    skirt &= ~near_content
             rr = t / np.cos(LAT)
             X2 = np.where(skirt, rr * np.cos(LAT) * np.sin(LON), X)
             Y2 = np.where(skirt, rr * np.sin(LAT), Y)

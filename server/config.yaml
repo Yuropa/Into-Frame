@@ -1725,7 +1725,7 @@ stages:
     # by raising the effective spacing (keeping both candidate grids at equal
     # points-per-area, which the count inference depends on), not by clamping.
     max_exemplar_candidates: 4000    # 0 disables
-    cli_timeout_s: 120.0             # per-tile wall-clock budget for synthesize_cli.
+    cli_timeout_s: 180.0             # per-tile wall-clock budget for synthesize_cli.
                                       # Profiled on the Rainier capture at the settings above:
                                       # cost per tile is ~1s of fixed O(candidates²) precompute
                                       # plus a term growing as roughly n_points^2.3 -- 41 pts
