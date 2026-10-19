@@ -457,7 +457,7 @@ class ObjectCompletionStage(PipelineStage):
         PX, PY = np.meshgrid(px, py)
         # CapturedCone.photo_to_pano, vectorised, onto the terrain panorama's grid.
         lon = (PX / cone.photo_w - 0.5) * cone.hfov_deg
-        lat = (PY / cone.photo_h - 0.5) * cone.vfov_deg
+        lat = (PY / cone.photo_h - 0.5) * cone.vfov_deg + cone.pitch_deg
         arr = np.asarray(terrain_pano.image.convert("RGB"), dtype=np.float32)
         cols = np.mod((lon / 360.0 + 0.5) * arr.shape[1], arr.shape[1])
         rows = np.clip((lat / 180.0 + 0.5) * arr.shape[0], 0, arr.shape[0] - 1)

@@ -16,7 +16,7 @@ from pipeline.object_distribution.object_distribution_result import (
 )
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from pipeline.object_typing.categories import DISTRIBUTABLE_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES
-from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect
+from pipeline.scene_generation.projection import unproject_bbox, unproject_bbox_equirect, class_height_range
 from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
 
 _MIN_POINTS = 2
@@ -238,6 +238,8 @@ class ObjectDistributionStage(PipelineStage):
                     unprojected = unproject_bbox_equirect(
                         box, panorama.width, panorama.height,
                         pano_depth=panorama_depth, extrinsics=extrinsics,
+                        height_range_m=class_height_range(obj_type),
+                        max_distance_m=0.475 * float(grid_size_meters),
                     )
                 elif depth is not None and input_image is not None and intrinsics is not None:
                     unprojected = unproject_bbox(

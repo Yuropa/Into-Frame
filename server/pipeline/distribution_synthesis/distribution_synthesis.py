@@ -244,6 +244,8 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         density_radius_percentile: float = 75.0,
         density_near_percentile: float = 10.0,
         min_near_radius_m: float = 1.5,
+        class_near_edge_classes: list[str] | None = None,
+        class_min_distance_m: dict | None = None,
         density_falloff_exponent: float = 2.0,
         max_paint_radius_m: float = 30.0,
         max_exemplar_candidates: int = 4000,
@@ -260,7 +262,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         min_feature_exemplars: int = 6,
         bloom_classes: list[str] | None = None,
         bloom_max_boost: float = 6.0,
-        bloom_max_density_m2: float = 12.0,
+        bloom_max_density_m2: float = 18.0,
         align_to_water_classes: list[str] | None = None,
         class_paint_regions: dict[str, list[str]] | None = None,
         feature_exempt_classes: list[str] | None = None,
@@ -441,6 +443,18 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # bare ring around the viewer's feet. Only a class genuinely absent from
         # the near field (a treeline) clears it.
         self.min_near_radius_m = float(min_near_radius_m)
+        # Rigid classes whose near edge is measured over EVERY group of the class,
+        # not per region: Paris's boats were observed no nearer than 46 m on the
+        # water, but the one "boat [ground]" group (quay-side detections) had a
+        # near edge of its own and painted a 16 m boat 12 m from the bridge the
+        # viewer stands on, under their feet. class_min_distance_m is a hard floor
+        # on top: a painted boat is never nearer than this whatever was observed.
+        self.class_near_edge_classes = frozenset(
+            str(c).lower() for c in (class_near_edge_classes if class_near_edge_classes is not None
+                                     else ["boat", "ship", "car", "bus", "truck", "vehicle"])
+        )
+        self.class_min_distance_m = {str(k).lower(): float(v) for k, v in
+                                     (class_min_distance_m if class_min_distance_m is not None else {"boat": 20.0}).items()}
         self.density_falloff_exponent = density_falloff_exponent
         self.max_paint_radius_m = max_paint_radius_m
         # Ceiling on the exemplar candidate grid, enforced by RAISING the effective
@@ -830,6 +844,18 @@ class DistributionSynthesisStage(PipelineStage):
         # (see below), so it gets a rescaled copy.
         group_weight: dict[int, np.ndarray] = {}
 
+        # Near edge per CLASS (see class_near_edge_classes): the p10 distance of
+        # every photographed exemplar of the class, whatever region it stood on.
+        class_near_edge: dict[str, float] = {}
+        if cfg.density_near_percentile > 0:
+            by_class: dict[str, list[float]] = {}
+            for _rt, _cls, _dist, _p in groups:
+                if _cls in cfg.class_near_edge_classes and len(_dist.points):
+                    by_class.setdefault(_cls, []).extend(
+                        np.linalg.norm(np.asarray(_dist.points, dtype=np.float64), axis=1).tolist())
+            for _cls, dists in by_class.items():
+                class_near_edge[_cls] = float(np.percentile(dists, cfg.density_near_percentile))
+
         for group_idx, (region_type, obj_type, dist, paintable_idxs) in enumerate(groups):
 
             exemplar_pts = np.asarray(dist.points, dtype=np.float64)
@@ -1082,6 +1108,15 @@ class DistributionSynthesisStage(PipelineStage):
                         )
                     else:
                         group_near_radius = 0.0
+
+            class_floor = max(class_near_edge.get(obj_type, 0.0), cfg.class_min_distance_m.get(obj_type, 0.0))
+            if class_floor > group_near_radius:
+                self.log_info(
+                    f"  {obj_type} [{region_type}]: near edge raised {group_near_radius:.1f} m -> "
+                    f"{class_floor:.1f} m (the class as a whole was observed no nearer"
+                    + (f", floor {cfg.class_min_distance_m[obj_type]:.0f} m)" if obj_type in cfg.class_min_distance_m else ")")
+                )
+                group_near_radius = class_floor
 
             # Tile side length in grid cells: pick a tile candidate resolution (points
             # per side) and space those points at the exemplar's own nearest-neighbour
@@ -1449,7 +1484,12 @@ class DistributionSynthesisStage(PipelineStage):
                             nx = float(x) - step * float(moor_grad[1][r, c])
                             nz = float(z) - step * float(moor_grad[0][r, c])
                             nr, nc = (int(v) for v in world_to_cell(nx, nz, grid_size_meters, grid_resolution))
-                            if fields["water_edge"][nr, nc] < 0:
+                            # The near edge holds after the move too: the nearest
+                            # "bank" to a mid-river boat can be the disc under the
+                            # camera (Paris: the bridge deck the viewer stands on,
+                            # typed ground), and a boat moored to it sat 12 m from a
+                            # bridge whose boats were all 46 m or further.
+                            if fields["water_edge"][nr, nc] < 0 and math.hypot(nx, nz) >= job_near:
                                 x, z = nx, nz
                                 moored[job_obj_type] = moored.get(job_obj_type, 0) + 1
                     yaw = None

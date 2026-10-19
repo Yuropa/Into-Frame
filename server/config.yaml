@@ -1145,7 +1145,7 @@ stages:
     # synthetic_tile_factor repeats, which doesn't tile and fights the tile's own "flat
     # overcast, no directional shadows" prompt.
     use_intrinsic_delighting: true
-    intrinsic_delight_strength: 0.6 # fraction of the estimated low-frequency SHADING divided
+    intrinsic_delight_strength: 0.8 # fraction of the estimated low-frequency SHADING divided
                                  # out (see util/delight.py); hue and chroma are always the
                                  # photograph's own. Was a linear blend toward the predicted
                                  # albedo, which desaturated every patch --
@@ -1291,8 +1291,8 @@ stages:
     panorama_upright_feather_frac: 0.01  # gaussian feather on the gate, as a fraction of
                                           # blend_map_size -- a binary mask would stencil
                                           # the canopy outline into the ground
-    panorama_upright_full_radius_m: 6.0  # gate at full strength inside this...
-    panorama_upright_falloff_radius_m: 25.0 # ...ramping off to nothing by here. The smear
+    panorama_upright_full_radius_m: 20.0  # gate at full strength inside this...
+    panorama_upright_falloff_radius_m: 40.0 # ...ramping off to nothing by here. The smear
                                           # is proportional to radius, but its VISIBILITY
                                           # is not: this layer is exact from the capture
                                           # point and only parallax reveals the streak, so
@@ -1823,7 +1823,7 @@ stages:
     # all. Mean keep 0.46, so its 16,026 tufts become ~7,400 -- concentrated where the
     # photograph actually shows meadow. Set full_density_greenness to 0 to restore
     # uniform density.
-    full_density_greenness: 0.15
+    full_density_greenness: 0.10
     density_floor_fraction: 0.15
     instance_spacing_m: 0.25  # nominal lattice pitch before jitter.
                                # 0.4 m is one tuft every 40 cm (6.2/m2), which reads as
@@ -1943,7 +1943,7 @@ stages:
     # Extraction runs later and matches crop_{i} against the generated video with
     # SAM2, and that video is rendered from the original fully-lit panorama, so the
     # tracker wants the photograph while the renderer wants the albedo.
-    intrinsic_delight_strength: 0.6
+    intrinsic_delight_strength: 0.8
     # KEEP EQUAL TO Terrain Texture Generation's intrinsic_delight_strength and change
     # them together — matching the two matters more than the absolute value, since the
     # whole point is that objects and ground agree. 1.0 = pure albedo (IntrinsicDiffusion

@@ -2,6 +2,7 @@ from typing import Any, Optional
 from logging import Logger
 
 import numpy as np
+from util.captured_cone import PANORAMA_PITCH_KEY
 import torch
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey
@@ -113,7 +114,7 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         self.max_anchor_spread = float(max_anchor_spread)
 
 
-def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def _hero_photo_rays(h: int, w: int, hfov_deg: float, pitch_deg: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Per-pixel unit ray directions for the hero photo's pinhole camera, looking down +Z.
 
@@ -136,6 +137,12 @@ def _hero_photo_rays(h: int, w: int, hfov_deg: float) -> tuple[np.ndarray, np.nd
     x = np.cos(theta) * np.sin(phi)
     y = np.sin(theta)
     z = np.cos(theta) * np.cos(phi)
+    if pitch_deg:
+        # The camera looked down by pitch_deg and the panorama was levelled
+        # (util.equirect_rotate), so the photo's rays point that much below the
+        # panorama's horizon. y is DOWN here.
+        t = np.radians(float(pitch_deg))
+        y, z = y * np.cos(t) + z * np.sin(t), -y * np.sin(t) + z * np.cos(t)
     norm = np.sqrt(x * x + y * y + z * z)
     return x / norm, y / norm, z / norm
 
@@ -157,6 +164,7 @@ def _fit_panorama_depth_curve(
     sky_mask: Optional[np.ndarray],
     num_bins: int = 14,
     min_samples: int = 300,
+    pitch_deg: float = 0.0,
 ) -> Optional[tuple[np.ndarray, np.ndarray]]:
     """
     Fits a monotonic lookup curve from DAP's raw (0-1) prediction to real metric depth, using
@@ -177,7 +185,7 @@ def _fit_panorama_depth_curve(
     h, w = da3_depth.shape
     dap_h, dap_w = dap_pred_raw.shape
 
-    x, y, z = _hero_photo_rays(h, w, da3_placement_fov_deg)
+    x, y, z = _hero_photo_rays(h, w, da3_placement_fov_deg, pitch_deg=pitch_deg)
     u, v = _equirect_uv_for_rays(x, y, z)
     u_pix = np.clip(np.round(u * (dap_w - 1)).astype(np.int64), 0, dap_w - 1).ravel()
     v_pix = np.clip(np.round(v * (dap_h - 1)).astype(np.int64), 0, dap_h - 1).ravel()
@@ -511,6 +519,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             placement_fov_deg(intrinsics.fov),
             dap_pred_raw_fit,
             sky_mask,
+            pitch_deg=float(context.input_object(PANORAMA_PITCH_KEY) or 0.0),
             num_bins=cfg.num_bins,
             min_samples=cfg.min_samples,
         )

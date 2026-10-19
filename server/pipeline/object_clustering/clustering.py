@@ -700,7 +700,7 @@ class ObjectCategoryClusteringStage(PipelineStage):
         if panorama is None or panorama_depth is None:
             return []
 
-        from pipeline.scene_generation.projection import unproject_bbox_equirect
+        from pipeline.scene_generation.projection import unproject_bbox_equirect, class_height_range
         from scene.camera import CameraExtrinsics
 
         # Identity pose: only the HEIGHT of the returned triple is read, and height is
@@ -735,6 +735,7 @@ class ObjectCategoryClusteringStage(PipelineStage):
             unprojected = unproject_bbox_equirect(
                 box, panorama.width, panorama.height,
                 pano_depth=panorama_depth, extrinsics=extrinsics,
+                height_range_m=class_height_range(obj_class),
             )
             if unprojected is None:
                 continue

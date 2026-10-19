@@ -182,6 +182,55 @@ def measure_panorama_sun(
     )
 
 
+# -- Solar model -------------------------------------------------------------
+#
+# The environment map knows WHERE the sun is and roughly how bright it is, but not
+# its colour: the measured tint comes from the brightest 0.1% of pixels, which the
+# tonemapper has clipped to near white however orange the sun was (Shark Fin's
+# sunset at 4 deg elevation measured #feffe2). The colour of direct sunlight is a
+# function of elevation alone to a good approximation: a longer path through the
+# atmosphere scatters the blue out (Rayleigh, ~lambda^-4) and some of the green
+# (aerosols, ~lambda^-1.3). Below _SOLAR_BLEND_HI_DEG the tint is taken from that
+# model instead of the clipped pixels, blended in over the band so a mid-morning
+# sun keeps its measured warmth. The same transmittance scales the intensity down:
+# the sun at 4 deg delivers a fraction of what it does at 60 deg, and the ambient
+# (the probe's SH from the map) carries the rest of a sunset's light.
+_SOLAR_BLEND_LO_DEG = 10.0
+_SOLAR_BLEND_HI_DEG = 25.0
+_SOLAR_MIN_INTENSITY_SCALE = 0.3
+_RAYLEIGH_TAU = {"r": 0.048, "g": 0.098, "b": 0.230}   # at 650 / 550 / 450 nm
+_AEROSOL_TAU = {"r": 0.080, "g": 0.100, "b": 0.130}    # Angstrom 1.3, tau_550 = 0.10
+
+
+def _air_mass(elevation_deg: float) -> float:
+    """Kasten-Young relative air mass; ~1 at the zenith, ~12 at 4 deg, 38 at 0."""
+    e = max(float(elevation_deg), -0.5)
+    return 1.0 / (np.sin(np.radians(e)) + 0.50572 * (e + 6.07995) ** -1.6364)
+
+
+def solar_transmittance(elevation_deg: float) -> np.ndarray:
+    m = _air_mass(elevation_deg)
+    return np.array([np.exp(-(_RAYLEIGH_TAU[c] + _AEROSOL_TAU[c]) * m) for c in ("r", "g", "b")], dtype=np.float64)
+
+
+def apply_solar_model(tint: np.ndarray, elevation_deg: float) -> "tuple[np.ndarray, float]":
+    """(tint, intensity_scale) for a sun at `elevation_deg`. Above the blend band
+    both are the inputs unchanged (tint as measured, scale 1)."""
+    if not np.isfinite(elevation_deg):
+        return tint, 1.0
+    model = solar_transmittance(elevation_deg)
+    model = model / max(float(model.max()), 1e-6)
+    # Intensity relative to a high sun (60 deg): mean transmittance ratio.
+    high = solar_transmittance(60.0).mean()
+    scale = float(np.clip(solar_transmittance(elevation_deg).mean() / max(high, 1e-6), _SOLAR_MIN_INTENSITY_SCALE, 1.0))
+    w = float(np.clip((_SOLAR_BLEND_HI_DEG - elevation_deg) / (_SOLAR_BLEND_HI_DEG - _SOLAR_BLEND_LO_DEG), 0.0, 1.0))
+    if w <= 0.0:
+        return tint, 1.0
+    out = (1.0 - w) * np.asarray(tint, dtype=np.float64) + w * model
+    out = out / max(float(out.max()), 1e-6)
+    return out, (1.0 - w) * 1.0 + w * scale
+
+
 class SceneLighting:
     """
     Environment map pair estimated by LuxDiT.
@@ -350,14 +399,24 @@ class SceneLighting:
         peak_ratio = float(luminance.max()) / max(float(luminance.mean()), 1e-9)
         if is_hdr and peak_ratio >= _SUN_PEAK_RATIO_FOR_FLOOR:
             unclamped_intensity = max(unclamped_intensity, _SUN_INTENSITY_FLOOR)
+        final_direction = np.asarray(measured[0] if measured else direction, dtype=np.float64)
+        elevation_deg = float(np.degrees(np.arcsin(np.clip(final_direction[1], -1.0, 1.0))))
+        if measured:
+            tint = np.array([int(measured[1][i:i + 2], 16) / 255.0 for i in (1, 3, 5)], dtype=np.float64)
+        else:
+            tint = np.clip(np.asarray(color, dtype=np.float64), 0.0, 1.0)
+        tint, solar_scale = apply_solar_model(tint, elevation_deg)
+        unclamped_intensity *= solar_scale
         return {
             "direction": (
                 list(measured[0]) if measured
                 else [round(float(v), 5) for v in direction]
             ),
-            "color": measured[1] if measured else "#{:02x}{:02x}{:02x}".format(
-                *(int(round(float(c) * 255.0)) for c in np.clip(color, 0.0, 1.0))
+            "color": "#{:02x}{:02x}{:02x}".format(
+                *(int(round(float(c) * 255.0)) for c in np.clip(tint, 0.0, 1.0))
             ),
+            "elevation_deg": round(elevation_deg, 2),
+            "solar_scale": round(float(solar_scale), 3),
             # Where direction/colour came from, so a scene that silently fell back
             # to the estimate is distinguishable from one that didn't.
             "direction_source": "panorama" if measured else "envmap",

@@ -1798,6 +1798,17 @@ class TerrainTextureGenerationStage(PipelineStage):
             # strength 1 -> the gate applies in full; strength 0 -> weight unchanged.
             weight = weight * (1.0 - strength * (1.0 - keep))
 
+            # Water is never ground texture. The water sheet covers real water, and
+            # where a bank slope or a quay wall samples a water pixel (the panorama's
+            # depth put the shoreline a few metres off) the photograph's river was
+            # painted up the bank as a pale band that moved with the viewer and met
+            # the real water sheet along a hard line (Paris, both banks). At full
+            # strength at every distance: a smear of water is wrong wherever it is.
+            water = (np.rint(sampled).astype(np.int32) == int(RegionType.WATER)).astype(np.float32)
+            if water.any():
+                keep_water = np.clip(gaussian_filter(1.0 - water, sigma=sigma), 0.0, 1.0)
+                weight = weight * keep_water
+
         if (
             far_ring_radius_m > 0.0
             and observed_mask is not None

@@ -8,6 +8,7 @@ from pipeline.pipeline_context import PipelineContext, ContextKey
 from util.depth_utils import Depth
 from util.device_utils import DeviceStrategy, preferred_device
 from scene.camera import CameraIntrinsics, CameraExtrinsics
+from util.captured_cone import PANORAMA_PITCH_KEY
 
 _MEMORY_STRATEGY_TYPES = {
     PanoramaGeneratorType.DREAMCUBE,
@@ -34,9 +35,22 @@ class PanoramaConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         generator_type: str = "FLUX",
+        level_horizon: bool = True,
+        level_horizon_min_deg: float = 1.0,
+        level_horizon_min_columns: float = 0.3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.generator_type = PanoramaGeneratorType[generator_type]
+        # Level the panorama to the photographed sea horizon (util.equirect_rotate):
+        # the generator embeds the photo with its centre on the horizon row whatever
+        # the camera's pitch, so a cliff-top shot looking down 5 deg puts the real
+        # horizon 5 deg up the sky and the far sea above eye level. Only a water/sky
+        # boundary is level by definition, so this needs one across at least
+        # level_horizon_min_columns of the frame's width, and ignores pitches under
+        # level_horizon_min_deg.
+        self.level_horizon = bool(level_horizon)
+        self.level_horizon_min_deg = float(level_horizon_min_deg)
+        self.level_horizon_min_columns = float(level_horizon_min_columns)
 
 
 class PanoramaStage(PipelineStage):
@@ -101,13 +115,93 @@ class PanoramaStage(PipelineStage):
             depth_gray = depth_image.gray() if depth_image is not None else None
 
             pano = self._pano.pano(input_image.rgb(), depth_gray, self.temp, fov, full_caption, seed=self.seed, on_progress=self.make_progress_callback(pano_task))
-            context.add_panorama(output_key, pano.panorama)
-            context.add_cubemap(cubemap_key, pano.cubemap)
+            panorama, cubemap = pano.panorama, pano.cubemap
+            pitch = 0.0
+            if self.config.level_horizon and intrinsics is not None:
+                measured = self._measure_pitch(input_image.rgb(), intrinsics)
+                if measured is not None and abs(measured) >= self.config.level_horizon_min_deg:
+                    from util.equirect_rotate import rotate_equirect_pitch
+                    from util.panorama_utils import Panorama
+                    pitch = float(measured)
+                    levelled = rotate_equirect_pitch(panorama.rgb(), pitch)
+                    panorama = Panorama(levelled)
+                    face_w = 512
+                    try:
+                        face_w = int(next(iter(cubemap.images.values())).width)
+                    except Exception:
+                        pass
+                    cubemap = panorama.to_cubemap(face_w)
+                    self.log_info(
+                        f"Panorama levelled: the camera looked {'down' if pitch > 0 else 'up'} "
+                        f"{abs(pitch):.2f} deg (sea horizon), panorama rotated so the horizon is on its middle row"
+                    )
+                elif measured is not None:
+                    self.log_info(f"Camera pitch {measured:+.2f} deg from the sea horizon — under "
+                                  f"{self.config.level_horizon_min_deg:.1f} deg, panorama left as generated")
+            context.add_object(PANORAMA_PITCH_KEY, pitch)
+            context.add_panorama(output_key, panorama)
+            context.add_cubemap(cubemap_key, cubemap)
 
         self.advance_progress(pano_task)
         self.finish_progress(pano_task)
 
         return context
+
+    def _measure_pitch(self, photo, intrinsics) -> "float | None":
+        """Camera pitch in degrees (positive looking down) from the sky/water
+        boundary in the photograph, or None when the frame has no sea horizon.
+
+        SegFormer (the same model Panorama Regions uses) labels the photo; in
+        every column the bottom of the top sky run is checked for water right
+        under it. Those rows are the horizon, level by definition (the dip of a
+        sea horizon from a 13 m cliff is 0.1 deg). Pitch = atan((py - row) / fy).
+        """
+        import numpy as np
+        from pipeline.panorama_segmentation.panorama_segmentation import PanoramaSegmentationClient
+        client = None
+        try:
+            client = PanoramaSegmentationClient(self.preferred_device)
+            raw = client.segment(photo, self.temp, model="segformer", views={"count": 0})
+        except Exception as exc:
+            self.log_warning(f"Horizon levelling skipped: photo segmentation failed ({exc})")
+            return None
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
+        label = np.asarray(raw["label_map"], dtype=np.int64)
+        id2label = {int(k): str(v).lower() for k, v in raw["id2label"].items()}
+        sky_ids = {k for k, v in id2label.items() if v == "sky"}
+        water_ids = {k for k, v in id2label.items() if v.split(",")[0].strip() in ("water", "sea", "river", "lake", "ocean")}
+        if not sky_ids or not water_ids:
+            return None
+        h, w = label.shape
+        is_sky = np.isin(label, list(sky_ids))
+        is_water = np.isin(label, list(water_ids))
+        rows = []
+        for c in range(w):
+            col = is_sky[:, c]
+            if not col[0]:
+                continue
+            bottom = int(np.argmin(col)) if not col.all() else h
+            if bottom >= h - 3:
+                continue
+            if is_water[bottom:bottom + 4, c].any():
+                rows.append(bottom - 0.5)
+        fraction = len(rows) / float(w)
+        if fraction < self.config.level_horizon_min_columns:
+            self.log_info(f"No sea horizon in the photograph ({fraction:.0%} of columns have water under sky) — panorama left as generated")
+            return None
+        row = float(np.median(rows))
+        iw = float(getattr(intrinsics, "width", w) or w)
+        ih = float(getattr(intrinsics, "height", h) or h)
+        fy = float(intrinsics.fy) * h / ih
+        py = float(getattr(intrinsics, "py", ih / 2.0) or ih / 2.0) * h / ih
+        pitch = float(np.degrees(np.arctan2(py - row, fy)))
+        self.log_info(f"Sea horizon at row {row:.0f} of {h} in {fraction:.0%} of columns -> camera pitch {pitch:+.2f} deg")
+        return pitch
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, _, output_key, cubemap_key, _, _ = self._resolved_keys()

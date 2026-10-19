@@ -24,6 +24,10 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+# Context object written by PanoramaStage: the pitch the panorama was levelled by.
+PANORAMA_PITCH_KEY = "panorama_pitch_deg"
+
+
 @dataclass(frozen=True)
 class CapturedCone:
     hfov_deg: float
@@ -32,12 +36,23 @@ class CapturedCone:
     pano_h: int
     photo_w: int
     photo_h: int
+    # The camera's pitch when it took the photo, degrees, positive looking DOWN.
+    # The panorama was levelled by this much (util.equirect_rotate), so the photo's
+    # centre sits this far BELOW the panorama's horizon. 0 when the horizon was not
+    # measured (no sea horizon in the frame) or the panorama was not rotated.
+    pitch_deg: float = 0.0
 
     @classmethod
-    def from_fov(cls, hfov_deg: float, pano_w: int, pano_h: int, photo_w: int, photo_h: int) -> "CapturedCone":
+    def from_fov(cls, hfov_deg: float, pano_w: int, pano_h: int, photo_w: int, photo_h: int,
+                 pitch_deg: float = 0.0) -> "CapturedCone":
         hfov = math.radians(hfov_deg)
         vfov = 2.0 * math.atan(math.tan(hfov / 2.0) * photo_h / photo_w)
-        return cls(hfov_deg, math.degrees(vfov), pano_w, pano_h, photo_w, photo_h)
+        return cls(hfov_deg, math.degrees(vfov), pano_w, pano_h, photo_w, photo_h, float(pitch_deg))
+
+    @property
+    def centre_row(self) -> float:
+        """Panorama row of the photo's centre: the horizon row plus the pitch."""
+        return self.pano_h / 2.0 + self.pitch_deg / 180.0 * self.pano_h
 
     # -- panorama-space extent of the capture ------------------------------
 
@@ -51,7 +66,7 @@ class CapturedCone:
     def v_range(self) -> tuple[float, float]:
         """Panorama rows [top, bottom) covered by the photo."""
         half = self.vfov_deg / 180.0 * self.pano_h / 2.0
-        return self.pano_h / 2.0 - half, self.pano_h / 2.0 + half
+        return self.centre_row - half, self.centre_row + half
 
     def contains_box(self, box, margin_deg: float = 0.0, min_fraction: float = 0.5) -> bool:
         """True when at least `min_fraction` of a panorama-space [x, y, w, h] box
@@ -79,14 +94,14 @@ class CapturedCone:
     def pano_to_photo(self, u: float, v: float) -> tuple[float, float]:
         """Panorama pixel -> photo pixel (unclamped; may fall outside the photo)."""
         lon = (u / self.pano_w - 0.5) * 360.0
-        lat = (v / self.pano_h - 0.5) * 180.0
+        lat = (v / self.pano_h - 0.5) * 180.0 - self.pitch_deg
         px = (lon / self.hfov_deg + 0.5) * self.photo_w
         py = (lat / self.vfov_deg + 0.5) * self.photo_h
         return px, py
 
     def photo_to_pano(self, px: float, py: float) -> tuple[float, float]:
         lon = (px / self.photo_w - 0.5) * self.hfov_deg
-        lat = (py / self.photo_h - 0.5) * self.vfov_deg
+        lat = (py / self.photo_h - 0.5) * self.vfov_deg + self.pitch_deg
         u = (lon / 360.0 + 0.5) * self.pano_w
         v = (lat / 180.0 + 0.5) * self.pano_h
         return u, v
@@ -131,7 +146,8 @@ def captured_cone_from_context(context, pano_w: int, pano_h: int) -> Optional[Ca
         return None
     # The width the photo was actually embedded at, not the camera's own FOV --
     # see placement.py; the two differ by PLACEMENT_FOV_SCALE.
-    return CapturedCone.from_fov(placement_fov_deg(fov), pano_w, pano_h, photo.width, photo.height)
+    pitch = float(context.input_object(PANORAMA_PITCH_KEY) or 0.0)
+    return CapturedCone.from_fov(placement_fov_deg(fov), pano_w, pano_h, photo.width, photo.height, pitch_deg=pitch)
 
 
 def inlay_photo(panorama, photo, cone: CapturedCone, keep=None, max_width: int = 8192,
@@ -160,7 +176,7 @@ def inlay_photo(panorama, photo, cone: CapturedCone, keep=None, max_width: int =
     scale = min(max(1.0, cone.scale_gain()), max_width / float(w))
     W, H = int(round(w * scale)), int(round(h * scale))
     base = np.asarray(panorama.convert("RGB").resize((W, H), PILImage.LANCZOS), dtype=np.float32)
-    big = CapturedCone(cone.hfov_deg, cone.vfov_deg, W, H, cone.photo_w, cone.photo_h)
+    big = CapturedCone(cone.hfov_deg, cone.vfov_deg, W, H, cone.photo_w, cone.photo_h, cone.pitch_deg)
     u0, u1 = big.u_range
     v0, v1 = big.v_range
     c0, c1 = max(int(np.floor(u0)), 0), min(int(np.ceil(u1)), W)
@@ -172,7 +188,7 @@ def inlay_photo(panorama, photo, cone: CapturedCone, keep=None, max_width: int =
     lon = (cols / W - 0.5) * 360.0
     lat = (rows / H - 0.5) * 180.0
     px = (lon / cone.hfov_deg + 0.5) * cone.photo_w - 0.5
-    py = (lat / cone.vfov_deg + 0.5) * cone.photo_h - 0.5
+    py = ((lat - cone.pitch_deg) / cone.vfov_deg + 0.5) * cone.photo_h - 0.5
     PX, PY = np.meshgrid(px, py)
     ph = np.asarray(photo.convert("RGB").resize((cone.photo_w, cone.photo_h)), dtype=np.float32)
     sample = np.stack([map_coordinates(ph[..., c], [PY, PX], order=1, mode="nearest") for c in range(3)], -1)

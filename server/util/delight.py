@@ -39,6 +39,7 @@ def delight_preserving_chroma(
     blur_fraction: float = 0.02,
     max_gain: float = 3.0,
     mask: "np.ndarray | None" = None,
+    chroma_strength: float = 0.0,
 ) -> PILImage.Image:
     """Divide the low-frequency shading out of `photo`, keeping its colour.
 
@@ -83,7 +84,32 @@ def delight_preserving_chroma(
     gain = (reference / np.maximum(smooth, 1e-6)) ** float(strength)
     gain = np.clip(gain, 1.0 / max_gain, max_gain)[..., None]
 
-    out = np.clip((rgb ** 2.2) * gain, 0.0, 1.0) ** (1.0 / 2.2)
+    lin = (rgb ** 2.2) * gain
+
+    # The light's own colour. Dividing out a scalar shading leaves a low sun's
+    # orange on every lit face and the sky's blue in every shadow (Shark Fin's
+    # cliffs stayed sunset-orange after delighting, then were lit orange again
+    # by the client's sun). The illuminant chroma is estimated from the image
+    # itself: the mean colour of the brightest-shaded third over the mean colour
+    # of the darkest third, which is lit-over-shadow for the same materials and
+    # cancels the material colour. Lit pixels are divided by it in proportion to
+    # how lit they are, chroma_strength deep (0 = keep the photograph's colour).
+    # Off by default: on Shark Fin's sunset cliff the shadowed face is proportionally
+    # REDDER than the lit one (warm sky ambient, the camera's tone curve), so the
+    # estimate came out greenish and would have tinted every lit face. A real
+    # intrinsic model is the way to take the sun's colour out; this is not it.
+    if chroma_strength > 0.0:
+        valid = mask if (mask is not None and mask.shape == shading.shape and mask.any()) else np.ones_like(shading, bool)
+        s_lo, s_hi = np.percentile(smooth[valid], [33.0, 67.0])
+        lit, dark = valid & (smooth >= s_hi), valid & (smooth <= s_lo)
+        if lit.sum() >= 50 and dark.sum() >= 50 and s_hi > 1.15 * max(s_lo, 1e-6):
+            lin_src = rgb ** 2.2
+            tint = lin_src[lit].mean(axis=0) / np.maximum(lin_src[dark].mean(axis=0), 1e-4)
+            tint = np.clip(tint / max(float(tint.max()), 1e-6), 0.25, 1.0)
+            lit_weight = np.clip((smooth - s_lo) / max(s_hi - s_lo, 1e-6), 0.0, 1.0)[..., None]
+            lin = lin / (tint[None, None, :] ** (float(chroma_strength) * lit_weight))
+
+    out = np.clip(lin, 0.0, 1.0) ** (1.0 / 2.2)
     out8 = (out * 255.0 + 0.5).astype(np.uint8)
     if rgba:
         return PILImage.fromarray(np.dstack([out8, src[..., 3].astype(np.uint8)]), "RGBA")

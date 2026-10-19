@@ -676,9 +676,10 @@ class PanoramaRegionStage(PipelineStage):
         if cfg.reject_snow_water:
             cone_mask = None
             if photo is not None and photo_hfov:
-                from util.captured_cone import CapturedCone
+                from util.captured_cone import CapturedCone, PANORAMA_PITCH_KEY
                 H_t, W_t = resolved_type_idx_map.shape
-                cone = CapturedCone.from_fov(photo_hfov, W_t, H_t, photo.width, photo.height)
+                cone = CapturedCone.from_fov(photo_hfov, W_t, H_t, photo.width, photo.height,
+                                             pitch_deg=float(context.input_object(PANORAMA_PITCH_KEY) or 0.0))
                 u0, u1 = cone.u_range
                 v0, v1 = cone.v_range
                 cone_mask = np.zeros((H_t, W_t), dtype=bool)

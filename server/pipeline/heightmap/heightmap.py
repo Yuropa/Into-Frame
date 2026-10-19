@@ -53,6 +53,10 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
         level_ground_to_camera: bool = True,
+        anchor_water_plane: bool = True,
+        anchor_water_min_fraction: float = 0.02,
+        bank_reach_m: float = 15.0,
+        bank_max_rise_m: float = 6.0,
         level_ground_ring_m: tuple[float, float] = (6.0, 12.0),
         level_ground_tolerance_m: float = 0.15,
     ):
@@ -198,6 +202,18 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # ring sat at -0.4 m under a 1.0 m camera: the eye was 0.4 m off the
         # ground and knee-high flowers 1.5 m away reached the horizon.
         self.level_ground_to_camera = bool(level_ground_to_camera)
+        # Water scenes with a photo-measured camera height: the height was measured
+        # to the water plane, so the water IS at -camera_height. The depth-derived
+        # map put Paris's river at -8.1 m under a 12.1 m camera and its quays at
+        # -8.4 m (below the water, no relief), and the solved terrain sat under the
+        # water sheet. Water cells are pinned to the plane, the whole map shifted
+        # with them, and the banks given the rise the panorama shows: from each
+        # column's waterline up to where the depth starts receding, at the
+        # waterline's flat-water distance -- a wall of that height.
+        self.anchor_water_plane = bool(anchor_water_plane)
+        self.anchor_water_min_fraction = float(anchor_water_min_fraction)
+        self.bank_reach_m = float(bank_reach_m)
+        self.bank_max_rise_m = float(bank_max_rise_m)
         self.level_ground_ring_m = (float(level_ground_ring_m[0]), float(level_ground_ring_m[1]))
         self.level_ground_tolerance_m = float(level_ground_tolerance_m)
         # Equirectangular mode only: certainty multiplier for cells whose
@@ -240,6 +256,114 @@ class HeightMapStage(PipelineStage):
             SemanticKey.INTRINSICS: ContextKey.INTRINSICS,
             SemanticKey.OUTPUT: ContextKey.HEIGHT_MAP,
         })
+
+    def _anchor_to_water_plane(self, height, pano_u, pano_v, sampled, type_map, panorama_depth, camera_height, cfg):
+        """See anchor_water_plane. Returns the adjusted height array."""
+        from scipy.ndimage import distance_transform_edt
+        from pipeline.panorama_segmentation.panorama_region_result import RegionType
+        water_idx = int(RegionType.WATER)
+        # Only a man-made shore stands up as a wall. Ground, sand or rock above a
+        # waterline is a slope the depth already describes (the same rule on
+        # Shark Fin's beach made a 5.5 m "wall" of sand), and vegetation above a
+        # quay is the trees on it, not more quay (Paris: banks ran to the 8 m cap).
+        land_types = [int(t) for t in (RegionType.BUILT, RegionType.ROAD, RegionType.OTHER)]
+        H, W = type_map.shape[:2]
+        n = height.shape[0]
+        # Which cells are water: each cell looked up in the panorama along the ray
+        # to a point on the water plane at its (x, z). The map's own heights cannot
+        # be used for this lookup -- they are what is being corrected (Paris's
+        # -8 m map looked everything up within 12 deg of the horizon and saw banks
+        # and buildings where the river is).
+        axis = (np.arange(n, dtype=np.float64) + 0.5) / n * cfg.grid_size_meters - cfg.grid_size_meters / 2.0
+        zz, xx = np.meshgrid(axis, axis, indexing="ij")
+        r_cell = np.hypot(xx, zz)
+        lon = np.arctan2(xx, zz)
+        lat = -np.arctan2(float(camera_height), np.maximum(r_cell, 1e-6))
+        row = np.clip(((0.5 - lat / np.pi) * (H - 1)).astype(np.intp), 0, H - 1)
+        col = np.clip(((lon / (2.0 * np.pi) + 0.5) * (W - 1)).astype(np.intp), 0, W - 1)
+        valid = np.isfinite(height) & (r_cell >= 3.0)
+        cell_type = np.rint(type_map[row, col]).astype(np.int32)
+        water = valid & (cell_type == water_idx)
+        frac = float(water.mean())
+        if frac < cfg.anchor_water_min_fraction:
+            self.log_info(f"Water plane anchor: {frac:.1%} of the grid is water — nothing to anchor to")
+            return height
+        y_w = -float(camera_height)
+        shift = y_w - float(np.median(height[water]))
+        out = np.where(np.isfinite(height), height + shift, height).astype(height.dtype)
+        out[water] = y_w
+
+        # Bank rise per panorama column: waterline -> top of the wall.
+        depth = None
+        if panorama_depth is not None:
+            d = np.asarray(panorama_depth.depth, dtype=np.float32)
+            if d.shape != (H, W):
+                d = d[(np.arange(H) * d.shape[0]) // H][:, (np.arange(W) * d.shape[1]) // W]
+            depth = d
+        t = np.rint(np.asarray(type_map)).astype(np.int32)
+        phi_down = (np.arange(H) / H - 0.5) * np.pi  # radians below the horizon, + = down
+        az_of_col = (np.arange(W) / W - 0.5) * 2.0 * np.pi
+        sectors = 72
+        rises = [[] for _ in range(sectors)]
+        is_water = t == water_idx
+        is_land = np.isin(t, land_types)
+        for c in range(0, W, 2):
+            wc = np.flatnonzero(is_water[:, c])
+            if wc.size == 0:
+                continue
+            # The highest water run's top: scan up from the water's lowest row.
+            r_wl = int(wc.min())
+            if phi_down[r_wl] <= np.radians(1.0):
+                continue
+            r_edge = camera_height / np.tan(phi_down[r_wl])
+            r_top = None
+            for rr in range(r_wl - 1, -1, -1):
+                if not is_land[rr, c]:
+                    r_top = rr + 1
+                    break
+                if depth is not None and np.isfinite(depth[rr, c]) and depth[rr, c] > 1.25 * r_edge / max(np.cos(phi_down[rr]), 1e-3):
+                    r_top = rr + 1
+                    break
+            if r_top is None or r_top >= r_wl - 1:
+                continue
+            rise = r_edge * (np.tan(phi_down[r_wl]) - np.tan(phi_down[r_top]))
+            if not np.isfinite(rise) or rise <= 0.0:
+                continue
+            k = int(((az_of_col[c] + np.pi) / (2.0 * np.pi)) * sectors) % sectors
+            rises[k].append(min(float(rise), cfg.bank_max_rise_m))
+        rise_by_sector = np.array([np.median(r) if len(r) >= 3 else np.nan for r in rises])
+        if np.isfinite(rise_by_sector).sum() >= 4:
+            # Fill empty sectors from the nearest measured one (circular), then smooth.
+            idx = np.arange(sectors)
+            good = np.isfinite(rise_by_sector)
+            filled = rise_by_sector.copy()
+            for k in idx[~good]:
+                dist = np.minimum(np.abs(idx[good] - k), sectors - np.abs(idx[good] - k))
+                filled[k] = rise_by_sector[good][np.argmin(dist)]
+            filled = np.median(np.stack([np.roll(filled, k) for k in (-2, -1, 0, 1, 2)]), axis=0)  # circular 5-sector median
+            az = lon
+            cell_m = cfg.grid_size_meters / n
+            dist_w = distance_transform_edt(~water) * cell_m
+            land = ~water & np.isfinite(out)
+            sector_of = (((az + np.pi) / (2.0 * np.pi)) * sectors).astype(int) % sectors
+            target = y_w + filled[sector_of]
+            near = land & (dist_w <= cfg.bank_reach_m)
+            out[near] = np.maximum(out[near], target[near])
+            self.log_info(
+                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m (map shifted {shift:+.2f} m); "
+                f"banks within {cfg.bank_reach_m:.0f} m of the water rise {np.nanpercentile(rise_by_sector, 10):.1f}/"
+                f"{np.nanmedian(rise_by_sector):.1f}/{np.nanpercentile(rise_by_sector, 90):.1f} m (p10/50/90 over "
+                f"{int(good.sum())} of {sectors} azimuth sectors) above it, from the photographed waterline"
+            )
+        else:
+            self.log_info(
+                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m (map shifted {shift:+.2f} m); "
+                "no measurable bank rise in the panorama"
+            )
+        # Land never sits under the water surface.
+        land = ~water & np.isfinite(out)
+        out[land] = np.maximum(out[land], y_w + 0.3)
+        return out
 
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, intrinsics_key, output_key = self._resolved_keys()
@@ -379,6 +503,12 @@ class HeightMapStage(PipelineStage):
                 else:
                     self.log_info(f"Ground {r0:.0f}-{r1:.0f} m from the camera sits {ring_y:+.2f} m, within "
                                   f"{cfg.level_ground_tolerance_m:.2f} m of the {camera_height:.2f} m camera")
+
+        if cfg.anchor_water_plane and camera_estimate.get("source") == "photo" and region_type_mask is not None:
+            height_array = self._anchor_to_water_plane(
+                height_array, pano_uv_u_array, pano_uv_v_array, real_sample_mask_array,
+                np.asarray(region_type_mask), panorama_depth, camera_height, cfg,
+            )
 
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)

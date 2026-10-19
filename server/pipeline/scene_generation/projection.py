@@ -142,7 +142,31 @@ def unproject_bbox(bbox, image_width, image_height, depth_map: Depth, intrinsics
     return position, abs(right[0] - left[0]), abs(bottom[1] - top[1])
 
 
-def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, extrinsics: CameraExtrinsics):
+# Plausible metric heights per class, (min, max) in metres. When the panorama
+# depth puts a detection at a distance that makes it smaller than its class can
+# be, the depth is the thing that is wrong: a conifer that measures 2 m is a far
+# conifer, not a bonsai. Rainier's treeline (10-20 m firs, 150+ m away) read as
+# 0.4-3.6 m trees at 13-60 m because the panorama depth model compresses the far
+# field, and the meadow filled with knee-high conifers. Distance is re-derived
+# from the angular height and the prior's edge instead (see unproject_bbox_equirect).
+CLASS_HEIGHT_RANGE_M: dict[str, tuple[float, float]] = {
+    "tree": (8.0, 35.0),
+    "bush": (0.4, 3.0),
+    "boat": (1.5, 15.0),
+    "person": (1.4, 2.0),
+    "car": (1.2, 2.0),
+    "bus": (2.5, 4.0),
+    "truck": (2.5, 4.5),
+}
+
+
+def class_height_range(obj_class) -> "tuple[float, float] | None":
+    return CLASS_HEIGHT_RANGE_M.get(str(obj_class or "").lower())
+
+
+def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, extrinsics: CameraExtrinsics,
+                            height_range_m: "tuple[float, float] | None" = None,
+                            max_distance_m: "float | None" = None):
     bx, by, bw, bh = bbox
     x1, y1, x2, y2 = bx, by, bx + bw, by + bh
 
@@ -214,6 +238,23 @@ def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, ex
 
     tan_top, tan_bottom = _tan_capped(phi_top), _tan_capped(phi_bottom)
     height = r_horizontal * (tan_top - tan_bottom)
+
+    # Class height prior (CLASS_HEIGHT_RANGE_M): an object smaller than its class
+    # can be is further away than the depth says, one larger is nearer. Move it
+    # along its own ray to the prior's nearest edge; the box's angles are the
+    # measurement that is trusted here, the depth the one that is not.
+    if height_range_m is not None and (tan_top - tan_bottom) > 1e-6 and height > 1e-6:
+        lo, hi = float(height_range_m[0]), float(height_range_m[1])
+        target = lo if height < lo else (hi if height > hi else None)
+        if target is not None:
+            r_horizontal = target / (tan_top - tan_bottom)
+            height = target
+            # The terrain ends: an object the prior pushes off the grid stays on
+            # its edge at whatever height its angle implies there, so it keeps
+            # subtending what it does in the photograph instead of vanishing.
+            if max_distance_m is not None and r_horizontal > max_distance_m:
+                r_horizontal = float(max_distance_m)
+                height = r_horizontal * (tan_top - tan_bottom)
 
     # Centre the object on that same vertical plane, rather than on the centre RAY.
     #

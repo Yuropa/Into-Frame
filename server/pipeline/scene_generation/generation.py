@@ -19,6 +19,7 @@ from pipeline.scene_generation.projection import (
     terrain_local_xz,
     unproject_bbox,
     unproject_bbox_equirect,
+    class_height_range,
 )
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
 from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
@@ -68,6 +69,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         far_landmark_classes: list[str] | None = None,
         landmark_distance_fraction: float = 0.75,
         borrow_mesh_classes: list[str] | None = None,
+        mesh_near_distance_m: float = 15.0,
+        mesh_shape_min_ratio: float = 1.4,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
@@ -86,6 +89,15 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Non-always-mesh classes that also wear a sibling bucket's mesh when their
         # own has none (see run).
         self.borrow_mesh_classes = frozenset(borrow_mesh_classes if borrow_mesh_classes is not None else ["tree"])
+        # A card-preferred class (flowers, trees) still stands as its reconstruction
+        # when the instance is within mesh_near_distance_m of the viewer AND the
+        # mesh has the surface complexity of the real thing: surface area over
+        # convex-hull area >= mesh_shape_min_ratio (Rainier's conifers: 1.90 and
+        # 1.57 for the two that look like firs, 1.20 and 1.06 for the two smooth
+        # cones). Far instances keep the card, which is their photograph. "Everything
+        # looks like billboards" (user, 2026-10-19) was the near trees.
+        self.mesh_near_distance_m = float(mesh_near_distance_m)
+        self.mesh_shape_min_ratio = float(mesh_shape_min_ratio)
         self.far_landmark_classes = frozenset(
             far_landmark_classes if far_landmark_classes is not None
             else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
@@ -931,12 +943,29 @@ class SceneGenerationStage(PipelineStage):
 
             rng = np.random.default_rng(self.seed)
 
-            def unproject_box(box):
+            near_mesh_kept: dict[str, int] = {}
+            shape_ratio_cache: dict[str, float] = {}
+
+            def mesh_shape_ratio(key: str, mesh) -> float:
+                """Surface area over convex-hull area: ~1 for a smooth blob, 1.5+
+                for foliage. Cached per asset key."""
+                if key not in shape_ratio_cache:
+                    try:
+                        tm = mesh.mesh
+                        shape_ratio_cache[key] = float(tm.area / max(tm.convex_hull.area, 1e-6))
+                    except Exception:
+                        shape_ratio_cache[key] = 0.0
+                    self.log_info(f"  {key}: surface/hull area {shape_ratio_cache[key]:.2f}"
+                                  f" ({'stands as a mesh near the viewer' if shape_ratio_cache[key] >= self.config.mesh_shape_min_ratio else 'card at every distance'})")
+                return shape_ratio_cache[key]
+
+            def unproject_box(box, cls=None):
                 """Bbox -> (world position, width, height), in whichever space this run has."""
                 if panorama_depth is not None and panorama is not None:
                     return unproject_bbox_equirect(
                         box, panorama.width, panorama.height,
                         pano_depth=panorama_depth, extrinsics=extrinsics,
+                        height_range_m=class_height_range(cls),
                     )
                 return unproject_bbox(
                     box, input.width, input.height,
@@ -1214,7 +1243,7 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
 
-                    result = unproject_box(box)
+                    result = unproject_box(box, metadata.get("class"))
                     if result is None:
                         self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
                         self.advance_progress(generation_task)
@@ -1492,7 +1521,16 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
                 if card_mesh is not None and cls in self.config.card_preferred_classes:
-                    category_mesh = recon_mesh = None
+                    near = float(np.hypot(float(position[0]) - float(camera_position[0]),
+                                          float(position[2]) - float(camera_position[2])))
+                    keep_mesh = (
+                        recon_mesh is not None and near <= self.config.mesh_near_distance_m
+                        and mesh_shape_ratio(recon_key, recon_mesh) >= self.config.mesh_shape_min_ratio
+                    )
+                    if keep_mesh:
+                        near_mesh_kept[cls] = near_mesh_kept.get(cls, 0) + 1
+                    else:
+                        category_mesh = recon_mesh = None
                 landmark_rows = None
                 if landmark_card:
                     built = self._landmark_card(context, idx)

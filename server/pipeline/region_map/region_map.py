@@ -34,6 +34,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         ground_y_max: float = -0.5,
         camera_height_meters: float = 1.0,
         unphotographed_water_min_distance_m: float = 15.0,
+        river_channel_prior: bool = True,
+        river_channel_margin_m: float = 5.0,
         use_height_map_elevation: bool = True,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
@@ -58,6 +60,14 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # the worst thing a wrong type can do. Such pixels take their nearest
         # non-water type. 0 disables. Distant outpainted water (a lake 50 m out) is kept.
         self.unphotographed_water_min_distance_m = float(unphotographed_water_min_distance_m)
+        # A river photographed with both banks in frame continues as a channel of
+        # that width behind the camera. The outpainted panorama paints the water
+        # it cannot see as a lake (Paris: water 89% of the way across the grid
+        # 10 m behind the bridge, banks 150 m off to the sides), so water outside
+        # the photographed banks' lines becomes bank -- typed as the nearest
+        # non-water surface and raised to the photographed banks' height.
+        self.river_channel_prior = bool(river_channel_prior)
+        self.river_channel_margin_m = float(river_channel_margin_m)
         # Look each grid cell up in the panorama along the ray to its REAL
         # reconstructed elevation (HEIGHT_MAP) rather than to a flat plane
         # camera_height_meters below the camera. False restores the flat-plane
@@ -186,6 +196,129 @@ class RegionMapStage(PipelineStage):
         )
         return out
 
+    def _river_channel_prior(self, context, region_map, elevation, cfg):
+        """Keep the river to the width the photograph shows (see river_channel_prior).
+
+        Returns (region_map, elevation, (x_left, x_right, half_fov_deg)) or
+        (region_map, elevation, None) when the photographed water is not a river
+        with both banks in frame."""
+        from scipy.ndimage import distance_transform_edt
+        from util.captured_cone import captured_cone_from_context
+        water_idx = int(RegionType.WATER)
+        water = region_map == water_idx
+        if not water.any():
+            return region_map, elevation, None
+        cone = captured_cone_from_context(context, 4096, 2048)
+        if cone is None:
+            return region_map, elevation, None
+        half_deg = cone.hfov_deg / 2.0 + 3.0
+        res = region_map.shape[0]
+        grid_m = float(cfg.grid_size_meters)
+        cell_m = grid_m / res
+        axis = (np.arange(res) + 0.5) * cell_m - grid_m / 2.0
+        # row = z (see distribution_synthesis.features.world_to_cell), col = x.
+        edges = []
+        centre_col = res // 2
+        for z0 in np.arange(8.0, min(60.0, grid_m * 0.3), 4.0):
+            r0, r1 = int((z0 + grid_m / 2.0) / cell_m), int((z0 + 4.0 + grid_m / 2.0) / cell_m)
+            band = water[r0:r1].mean(axis=0) >= 0.5
+            cols = np.flatnonzero(band)
+            if cols.size == 0:
+                continue
+            # The water segment nearest the camera's own column.
+            c = cols[np.argmin(np.abs(cols - centre_col))]
+            l = c
+            while l > 0 and band[l - 1]:
+                l -= 1
+            r = c
+            while r < res - 1 and band[r + 1]:
+                r += 1
+            if l == 0 or r == res - 1:
+                continue
+            xl, xr = axis[l], axis[r]
+            zc = z0 + 2.0
+            # A bank at the frame's edge still counts (Paris's banks sit 2-5 deg
+            # outside the cone at 30-50 m): the segment is bounded by generated
+            # content that continues the photographed bank. Far outside it is the
+            # generator's own river, not evidence.
+            if abs(np.degrees(np.arctan2(xl, zc))) > half_deg + 15.0 or abs(np.degrees(np.arctan2(xr, zc))) > half_deg + 15.0:
+                continue
+            edges.append((zc, xl, xr))
+        if len(edges) < 3:
+            self.log_info("River channel: the photograph does not show both banks of its water — no channel prior")
+            return region_map, elevation, None
+        e = np.asarray(edges)
+        zs, xls, xrs = e[:, 0], e[:, 1], e[:, 2]
+        width = float(np.median(xrs - xls))
+        # The channel's axis: the banks' midline fitted over range, so a river
+        # crossing the view at an angle keeps its angle; clamped to 17 deg so a
+        # noisy fit cannot swing the channel behind the camera (8.5 deg).
+        mid = 0.5 * (xls + xrs)
+        slope = float(np.clip(np.polyfit(zs, mid, 1)[0], -0.15, 0.15)) if len(zs) >= 3 else 0.0
+        offset = float(np.median(mid - slope * zs))
+        spread = float(max(np.std(xls - slope * zs), np.std(xrs - slope * zs)))
+        xl, xr = offset - width / 2.0, offset + width / 2.0
+        if width < 5.0 or spread > 0.25 * width:
+            self.log_info(
+                f"River channel: photographed banks at x = {xl:.0f} / {xr:.0f} m vary by {spread:.0f} m "
+                f"over {len(edges)} range band(s) — not a straight channel, no prior"
+            )
+            return region_map, elevation, None
+        X = axis[None, :]
+        Z = axis[:, None]
+        in_cone = np.abs(np.degrees(np.arctan2(X, Z))) <= half_deg
+        margin = float(cfg.river_channel_margin_m)
+        lateral = X - (offset + slope * Z)
+        outside = water & ~in_cone & ((lateral < -width / 2.0 - margin) | (lateral > width / 2.0 + margin))
+        if not outside.any():
+            self.log_info(f"River channel: photographed banks at x = {xl:.0f} / {xr:.0f} m; no water outside them")
+            return region_map, elevation, (xl, xr, half_deg, slope, offset, width)
+        keep = ~water
+        _, (iy, ix) = distance_transform_edt(~keep, return_indices=True)
+        out = region_map.copy()
+        out[outside] = region_map[iy[outside], ix[outside]]
+        # The river runs under a camera that stands over it (Paris: a bridge).
+        # The panorama's nadir is too distorted to type, and the fill around the
+        # exclusion disc made an island of ground at water level under the viewer.
+        r_xz = np.hypot(X, Z)
+        under = (np.abs(lateral) <= width / 2.0) & (r_xz < 12.0) & ~water
+        water_y = None
+        if under.any() and np.abs(offset + slope * 0.0) <= width / 2.0:
+            out[under] = water_idx
+            if elevation is not None:
+                ring = water & (r_xz >= 12.0) & (r_xz < 30.0)
+                wv = elevation[ring]
+                wv = wv[np.isfinite(wv)]
+                if wv.size >= 50:
+                    water_y = float(np.median(wv))
+        else:
+            under = np.zeros_like(under)
+        new_elev = elevation
+        bank_y = None
+        if elevation is not None:
+            if water_y is not None:
+                new_elev = elevation.copy()
+                new_elev[under] = water_y
+            bank_cells = in_cone & ~water & (Z > 0) & (
+                (np.abs(X - xl) <= 10.0) | (np.abs(X - xr) <= 10.0))
+            vals = elevation[bank_cells]
+            vals = vals[np.isfinite(vals)]
+            if vals.size >= 50:
+                bank_y = float(np.median(vals))
+                if new_elev is elevation:
+                    new_elev = elevation.copy()
+                new_elev[outside] = np.maximum(np.nan_to_num(new_elev[outside], nan=bank_y), bank_y)
+        self.log_info(
+            f"River channel: photographed banks at x = {xl:.0f} / {xr:.0f} m ({width:.0f} m wide, axis "
+            f"{np.degrees(np.arctan(slope)):+.0f} deg, {len(edges)} range bands agree within {spread:.0f} m); "
+            f"{int(outside.sum())} cells of water "
+            f"outside the channel behind the camera retyped to the nearest bank"
+            + (f" and raised to the banks' {bank_y:.1f} m" if bank_y is not None else "")
+            + (f"; {int(under.sum())} cells under the camera typed water" + (f" at {water_y:.1f} m" if water_y is not None else "")
+               if under.any() else "")
+        )
+        return out, new_elev, (xl, xr, half_deg, slope, offset, width)
+
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
@@ -285,6 +418,12 @@ class RegionMapStage(PipelineStage):
         )
         self.advance_progress(task)
 
+        river_channel = None
+        if cfg.river_channel_prior:
+            region_map, cell_elevation, river_channel = self._river_channel_prior(
+                context, region_map, cell_elevation, cfg)
+            if river_channel is not None and cell_elevation is not None:
+                context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
         context.add_depth(output_key, region_map.astype(np.float32))
         context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 
@@ -466,6 +605,23 @@ class RegionMapStage(PipelineStage):
             ground_y_max=cfg.ground_y_max,
             camera_height_meters=camera_height,
         )
+        if river_channel is not None and water_chains:
+            xl, xr, half_deg, slope, offset, width = river_channel
+            kept = []
+            dropped = 0
+            for chain in water_chains:
+                arr = np.asarray(chain, dtype=np.float64)
+                if arr.ndim != 2 or len(arr) == 0:
+                    continue
+                az = np.degrees(np.arctan2(arr[:, 0], arr[:, 2]))
+                lateral = arr[:, 0] - (offset + slope * arr[:, 2])
+                inside = (np.abs(az) <= half_deg) | (np.abs(lateral) <= width / 2.0 + cfg.river_channel_margin_m)
+                dropped += int((~inside).sum())
+                if inside.sum() >= 2:
+                    kept.append(np.asarray(chain)[inside] if isinstance(chain, np.ndarray) else arr[inside].tolist())
+            if dropped:
+                self.log_info(f"River channel: {dropped} water chain point(s) outside the channel dropped")
+            water_chains = kept
         context.add_object(ContextKey.WATER_CHAINS, water_chains)
         self.log_info(f"Water chains: {len(water_chains)}")
         if self.temp is not None and panorama_source_rgb is not None and panorama_source is not None:
