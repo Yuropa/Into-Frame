@@ -255,6 +255,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         pool_across_regions: bool = True,
         exclude_types: list[str] | None = None,
         class_max_paint_radius_m: dict[str, float] | None = None,
+        class_min_full_density_radius_m: dict[str, float] | None = None,
         class_falloff_exponent: dict[str, float] | None = None,
         feature_affinity: bool = True,
         feature_min_kl: float = 0.25,
@@ -282,6 +283,12 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         # LODs keep the far instances cheap.
         self.class_max_paint_radius_m = {
             str(k).lower(): float(v) for k, v in (class_max_paint_radius_m or {}).items()
+        }
+        # Floor on a class's full-density radius. Exemplar distance is bounded by
+        # detectability: Rainier's flowers are all detected within 4 m of the camera
+        # and the meadow is blooms to 30 m, so the p75 rule left it thinning from 4 m.
+        self.class_min_full_density_radius_m = {
+            str(k).lower(): float(v) for k, v in (class_min_full_density_radius_m or {}).items()
         }
         self.class_falloff_exponent = {
             str(k).lower(): float(v) for k, v in (class_falloff_exponent or {}).items()
@@ -1079,6 +1086,13 @@ class DistributionSynthesisStage(PipelineStage):
                             f"radius {group_radius:.1f} m -> {observed:.1f} m"
                         )
                         group_radius = observed
+                    class_floor = cfg.class_min_full_density_radius_m.get(obj_type, 0.0)
+                    if class_floor > group_radius:
+                        self.log_info(
+                            f"  {obj_type} [{region_type}]: full-density radius floored at the class's "
+                            f"{class_floor:.1f} m (was {group_radius:.1f} m)"
+                        )
+                        group_radius = class_floor
 
                 # The NEAR edge of the band this class was observed in. The radius above
                 # is a density profile centred on the camera -- "full density inside R,

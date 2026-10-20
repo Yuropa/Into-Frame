@@ -2,9 +2,11 @@ using System;
 using UnityEngine;
 
 /// <summary>
-/// Swaps the static, GLTFast-baked material on the server's flat water mesh for
-/// IntoFrame/WaterSurface, which animates gentle sum-of-sines ripples in the vertex
-/// shader (see WaterSurface.shader). Everything else about the mesh -- position,
+/// Swaps the static, GLTFast-baked material on the server's flat water mesh (and
+/// the far field's water apron, also named "water") for IntoFrame/WaterSurface:
+/// vertex swell, per-pixel ripple, depth-based absorption and shoreline fade from
+/// the camera depth texture, refraction from the opaque texture, the scene probe's
+/// reflection by Fresnel, and the sun's glitter (see WaterSurface.shader). Everything else about the mesh -- position,
 /// scale, the lakebed depression it sits above -- is untouched; only its material
 /// changes.
 ///
@@ -48,6 +50,12 @@ public class WaterMaterialManager : MonoBehaviour
             var c = baked.GetColor(prop);
             var current = mat.GetColor("_BaseColor");
             mat.SetColor("_BaseColor", new Color(c.r, c.g, c.b, current.a));
+            // The shallow tint: the same water a metre deep, lighter and a little
+            // greener than the photographed deep colour. Derived rather than
+            // authored, so a sunset sea and a city river each get their own.
+            Color.RGBToHSV(c, out float h, out float sat, out float val);
+            var shallow = Color.HSVToRGB(h + 0.02f, sat * 0.6f, Mathf.Clamp01(val * 1.6f + 0.1f));
+            mat.SetColor("_ShallowColor", new Color(shallow.r, shallow.g, shallow.b, 1f));
             break;
         }
 

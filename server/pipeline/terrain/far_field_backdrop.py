@@ -78,6 +78,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         keys=None,
         seed: int = 0,
         start_m: float = 0.0,
+        start_at_grid_edge: bool = True,
         far_m: float = 500.0,
         scale_m: float = 0.0,
         start_radius_m: float = 0.0,
@@ -91,8 +92,11 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
-        skirt_min_depth_fraction: float = 0.5,
+        skirt_min_depth_fraction: float = 0.7,
         horizon_water_deg: float = 5.0,
+        water_apron: bool = True,
+        water_apron_min_fraction: float = 0.15,
+        water_apron_radial_steps: int = 8,
         # False: textured with the panorama's own (photographed) light and drawn
         # unlit. Relighting the delit far field with the client's sun through
         # normals estimated from km-scale depth made Rainier's summit bright and
@@ -105,6 +109,13 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # a fraction of the deepest non-sky depth, i.e. where the depth models
         # saturate), falling back to the grid's half-size.
         self.start_m = float(start_m)
+        # True: the shell carries everything the depth map puts beyond the terrain
+        # grid, at its own depth (far_field_radius with scale_m = 3 x the grid's
+        # half-size is within a few metres of linear out to twice the grid). The
+        # saturated-band rule below kept only the depth plateau, so Paris's far
+        # bank, 120-270 m by its waterline, had nowhere to stand once it was no
+        # longer measured at 500 m.
+        self.start_at_grid_edge = bool(start_at_grid_edge)
         # World radius at which the shell begins (0 = the grid's half-size, so the
         # two domains meet at the grid's edge) and the radius the mapping approaches
         # for the most distant content. scale_m is the mapping's e-folding in depth
@@ -138,6 +149,16 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # Water the panorama shows at or above the geometric horizon, up to this
         # many degrees, goes to the shell whatever its depth (see run).
         self.horizon_water_deg = float(horizon_water_deg)
+        # Water the panorama shows BELOW the horizon is the water sheet's, not the
+        # shell's: a pixel of river whose ray meets the water plane short of far_m
+        # is left off the shell and the skirt (both carried the Seine as a
+        # photograph on a billboard, standing over the real water sheet), and a
+        # flat ring at the sheet's own level -- the apron, WATER_APRON_MESH, named
+        # "water" for the client's water shader -- runs from the grid's edge out to
+        # the shell's foot in every azimuth sector mostly typed water.
+        self.water_apron = bool(water_apron)
+        self.water_apron_min_fraction = float(water_apron_min_fraction)
+        self.water_apron_radial_steps = max(1, int(water_apron_radial_steps))
         self.lit = bool(lit)
 
 
@@ -185,6 +206,8 @@ class FarFieldBackdropStage(PipelineStage):
         depth_max = float(finite.max()) if finite.size else 0.0
         band_floor = cfg.far_band_fraction * depth_max
         start_m = cfg.start_m if cfg.start_m > 0 else max(float(measured_start or 0.0), band_floor)
+        if cfg.start_m <= 0 and cfg.start_at_grid_edge:
+            start_m = float(start_radius)
         self.log_info(
             f"Far-field backdrop: depth ceiling {depth_max:.1f} m, measured far start "
             f"{float(measured_start or 0.0):.1f} m, band floor {band_floor:.1f} m -> far beyond {start_m:.1f} m"
@@ -220,6 +243,27 @@ class FarFieldBackdropStage(PipelineStage):
                 touching = np.unique(labels[built & far])
                 touching = touching[touching > 0]
                 if touching.size:
+                    # Only a structure that is mostly far already, or whose
+                    # not-yet-far pixels stand above the horizon (a tower against
+                    # the sky, which no terrain stage builds). A quay on the near
+                    # bank whose far end grazes the band otherwise came whole,
+                    # trees and all, as a pale rectangle at the shell's foot
+                    # (Paris, once the shell started at the grid's edge).
+                    above = np.zeros((H, W), dtype=bool)
+                    above[: H // 2] = True
+                    n_all = np.bincount(labels.ravel(), minlength=count + 1)
+                    n_far = np.bincount(labels[far].ravel(), minlength=count + 1)
+                    n_out_above = np.bincount(labels[~far & above].ravel(), minlength=count + 1)
+                    n_out = n_all - n_far
+                    ok = (n_far >= 0.5 * n_all) | (n_out_above >= 0.6 * np.maximum(n_out, 1))
+                    kept_near = touching[~ok[touching]]
+                    touching = touching[ok[touching]]
+                    if kept_near.size:
+                        self.log_info(
+                            f"Far-field backdrop: {kept_near.size} built structure(s) touching the far band "
+                            f"left to the terrain (mostly near and below the horizon)"
+                        )
+                if touching.size:
                     whole = np.isin(labels, touching) & ~far
                     depth = np.where(whole, depth_max, depth)
                     far |= whole
@@ -247,6 +291,27 @@ class FarFieldBackdropStage(PipelineStage):
                     f"Far-field backdrop: {int(gained.sum())} px of water at or above the horizon "
                     f"moved to the shell (a water plane cannot reach above it)"
                 )
+        # ── water below the horizon belongs to the water sheet and its apron ──
+        y_water = None
+        water_covered = np.zeros((H, W), dtype=bool)
+        water_mesh = context.input_mesh(ContextKey.WATER_MESH)
+        if cfg.water_apron and water_mesh is not None and type_depth is not None:
+            y_water = float(np.median(np.asarray(water_mesh.mesh.vertices, dtype=np.float64)[:, 1]))
+            if y_water < -0.05:
+                types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+                plat_all = (0.5 - np.arange(H) / H) * np.pi
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    t_plane_all = np.where(plat_all < 0, -y_water / np.tan(-plat_all), np.inf)
+                water_covered = (types_full == int(RegionType.WATER)) & (t_plane_all < cfg.far_m)[:, None]
+                dropped = int((far & water_covered).sum())
+                far &= ~water_covered
+                self.log_info(
+                    f"Far-field backdrop: {int(water_covered.sum())} px of water lie on the water plane "
+                    f"(y {y_water:.2f} m) short of {cfg.far_m:.0f} m -- {dropped} px left off the shell "
+                    f"for the water apron"
+                )
+            else:
+                y_water = None
         # Bridge the sky-typed gaps inside a far structure. The Eiffel Tower's
         # lattice is typed half SKY, so per-pixel it is a cloud of specks the
         # stride-8 grid and the silhouette rule reduce to nothing; closed over
@@ -299,9 +364,21 @@ class FarFieldBackdropStage(PipelineStage):
             if (far & landmark).any():
                 self.log_info(f"Far-field backdrop: {int((far & landmark).sum())} px of kept landmarks left to their cards")
                 far &= ~landmark
+        # The forest band Treeline Backdrop already stands at its measured depth.
+        from pipeline.terrain.treeline_backdrop import TREELINE_MASK_KEY
+        treeline_mask = context.input_image(TREELINE_MASK_KEY)
+        tl = None
+        if treeline_mask is not None and far.any():
+            tl = np.asarray(treeline_mask.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
+            taken = int((far & tl).sum())
+            if taken:
+                far &= ~tl
+                self.log_info(f"Far-field backdrop: {taken} px left to the treeline backdrop")
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
+        if cfg.scale_m <= 0 and cfg.start_at_grid_edge:
+            scale_m = 3.0 * float(start_radius)
         self.advance_progress(task)
 
         # ── vertex grid ───────────────────────────────────────────────────────
@@ -333,6 +410,7 @@ class FarFieldBackdropStage(PipelineStage):
         # where their ray meets the ground at the grid edge's own height (per
         # azimuth), no farther out than the shell's foot in that column.
         skirt_full = np.zeros((H, W), dtype=bool)
+        foot = None
         X2, Y2, Z2 = X.copy(), Y.copy(), Z.copy()
         skirt = np.zeros_like(shell)
         grounded = np.zeros_like(shell)
@@ -372,7 +450,13 @@ class FarFieldBackdropStage(PipelineStage):
             foot = np.where(np.isfinite(foot), foot, cfg.far_m)
             foot = np.maximum(foot, cfg.skirt_start_fraction * grid_half)
             skirt = (LAT < 0) & np.isfinite(t_hit) & beyond & not_sky_grid & ~shell
+            skirt &= ~water_covered[np.ix_(rows, cols_w)]
             t = np.minimum(t_hit, foot[None, :])
+            if tl is not None:
+                # The treeline's canopy stands at its measured depth; laid on the
+                # skirt as well it was a pale carpet of trees at the shell's foot
+                # in front of the treeline (Paris's left bank).
+                skirt &= ~tl[np.ix_(rows, cols_w)]
             if cfg.skirt_min_depth_fraction > 0:
                 near_content = skirt & np.isfinite(d_grid) & (d_grid < cfg.skirt_min_depth_fraction * t)
                 if near_content.any():
@@ -399,9 +483,18 @@ class FarFieldBackdropStage(PipelineStage):
                 skirt_full = np.isfinite(pt) & pbeyond & ~far
                 if sky is not None:
                     skirt_full &= ~sky | (plat < -sky_below)[:, None]
+                skirt_full &= ~water_covered
+                if tl is not None:
+                    skirt_full &= ~tl
             self.log_info(
                 f"Far-field backdrop: ground skirt of {int(skirt.sum())} vertices "
                 f"(edge height {float(np.median(edge_y)):.1f} m) between the grid's edge and the shell"
+            )
+        apron_faces = 0
+        if y_water is not None and water_covered.any():
+            apron_faces = self._water_apron(
+                context, cfg, water_mesh, y_water, water_covered, t_plane_all, grid_half,
+                cols, W, foot,
             )
         valid = shell | skirt
         X, Y, Z = X2, Y2, Z2
@@ -500,6 +593,7 @@ class FarFieldBackdropStage(PipelineStage):
             "radius_max": round(float(np.linalg.norm(vertices, axis=-1).max()), 1),
             "strip_rows": [row_min, row_max],
             "lit": cfg.lit,
+            "water_apron_faces": int(apron_faces),
         }
         context.add_object(FAR_FIELD_SUMMARY_KEY, summary)
         self.log_info(
@@ -518,6 +612,86 @@ class FarFieldBackdropStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    def _water_apron(
+        self, context: PipelineContext, cfg: FarFieldBackdropConfiguration, water_mesh,
+        y_water: float, water_covered: np.ndarray, t_plane: np.ndarray, grid_half: float,
+        cols: np.ndarray, W: int, foot: "np.ndarray | None",
+    ) -> int:
+        """A flat ring at the water sheet's level from the grid's edge out to the
+        shell's foot, in every vertex-column sector whose panorama pixels between
+        those radii are mostly water. Written to WATER_APRON_MESH with the sheet's
+        own material, so the client draws it with the same water shader."""
+        r_in = float(grid_half) * cfg.skirt_start_fraction
+        H = water_covered.shape[0]
+        between = (t_plane >= r_in) & (t_plane < cfg.far_m)
+        if not between.any():
+            return 0
+        rows_b = np.flatnonzero(between)
+        cols_w = cols % W
+        water_frac = water_covered[rows_b][:, cols_w].mean(axis=0)
+        is_water = water_frac >= cfg.water_apron_min_fraction
+        if is_water.sum() < 2:
+            self.log_info("Far-field backdrop: no azimuth sector is mostly water between the grid edge and the shell -- no apron")
+            return 0
+        lon = (cols / W - 0.5) * 2.0 * np.pi
+        K = cfg.water_apron_radial_steps
+        r_out = np.full(len(cols), cfg.far_m, dtype=np.float64)
+        if foot is not None:
+            r_out = np.maximum(np.asarray(foot, dtype=np.float64), r_in * 1.05)
+        # Geometric radial spacing: fine at the grid edge, coarse toward the shell.
+        radii = r_in * (r_out[None, :] / r_in) ** (np.arange(K + 1)[:, None] / K)  # (K+1, nc)
+        y_apron = y_water - 0.03  # just under the sheet, so the two never z-fight where they overlap
+        X = radii * np.sin(lon)[None, :]
+        Z = radii * np.cos(lon)[None, :]
+        Y = np.full_like(X, y_apron)
+        vid = np.arange(X.size).reshape(X.shape)
+        verts = np.stack([X.ravel(), Y.ravel(), Z.ravel()], axis=-1)
+        faces = []
+        for j in range(len(cols) - 1):
+            if not (is_water[j] and is_water[j + 1]):
+                continue
+            a, b = vid[:-1, j], vid[1:, j]
+            c, d = vid[:-1, j + 1], vid[1:, j + 1]
+            faces.append(np.stack([a, b, d], axis=-1))
+            faces.append(np.stack([a, d, c], axis=-1))
+        if not faces:
+            return 0
+        faces = np.concatenate(faces, axis=0)
+        # Front face up: flip any triangle whose normal points down.
+        v0, v1, v2 = verts[faces[:, 0]], verts[faces[:, 1]], verts[faces[:, 2]]
+        n = np.cross(v1 - v0, v2 - v0)
+        flip = n[:, 1] < 0
+        faces[flip] = faces[flip][:, [0, 2, 1]]
+        used = np.unique(faces)
+        remap = np.full(verts.shape[0], -1, dtype=np.int64)
+        remap[used] = np.arange(used.size)
+        verts, faces = verts[used], remap[faces]
+        colour = [0.10, 0.30, 0.45, 0.90]
+        try:
+            base = water_mesh.mesh.visual.material.baseColorFactor
+            if base is not None:
+                base = np.asarray(base, dtype=np.float64)
+                colour = [float(v) / (255.0 if base.max() > 1.0 else 1.0) for v in base[:4]]
+        except Exception:
+            pass
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorFactor=colour, metallicFactor=0.0, roughnessFactor=0.08, alphaMode="BLEND",
+        )
+        tm = trimesh.Trimesh(
+            vertices=verts, faces=faces,
+            vertex_normals=np.tile(np.array([[0.0, 1.0, 0.0]]), (verts.shape[0], 1)),
+            visual=trimesh.visual.TextureVisuals(material=material), process=False,
+        )
+        context.add_mesh(ContextKey.WATER_APRON_MESH, Mesh(tm))
+        sectors = int(is_water.sum())
+        self.log_info(
+            f"Far-field backdrop: water apron of {faces.shape[0]} faces at y {y_apron:.2f} m over "
+            f"{sectors} of {len(cols)} azimuth sectors, {r_in:.0f} m out to {float(r_out[is_water].max()):.0f} m"
+        )
+        if self.temp is not None:
+            Mesh(tm).save(self.temp / "water_apron.glb")
+        return int(faces.shape[0])
 
     @staticmethod
     def _kept_landmark_mask(context: PipelineContext, W: int, H: int) -> "np.ndarray | None":

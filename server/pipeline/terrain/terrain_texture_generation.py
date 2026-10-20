@@ -62,9 +62,12 @@ _BASE_PROMPTS: dict[RegionType, str] = {
     # What is UNDER the grass, not the grass: the grass itself is geometry (Grass
     # Cover), and a ground texture with grass painted into it shows as flat grass
     # under the standing blades -- "grass baked into the ground" (user, 2026-10-16).
+    # Soil, with only traces of litter: the grass and the flowers are geometry, and
+    # a floor with stems and moss painted into it read as "grass baked into the
+    # ground" under them (user, 2026-10-16 and again 2026-10-19).
     RegionType.VEGETATION: (
-        "overhead macro photograph of a meadow floor: dark crumbly soil, a fine litter of "
-        "dry grass stems and seed husks, and patches of low fine-grained moss, no leaves"
+        "overhead macro photograph of bare meadow soil: dark brown crumbly earth, fine grit "
+        "and small pebbles, a sparse scatter of dry stems, no grass, no moss, no leaves"
     ),
     RegionType.ROAD: (
         "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
@@ -86,7 +89,7 @@ _BASE_PROMPTS: dict[RegionType, str] = {
 _NEAR_GROUND_PHRASES: dict[RegionType, str] = {
     RegionType.GROUND: "bare earth",
     RegionType.TERRAIN: "stony ground",
-    RegionType.VEGETATION: "meadow floor of soil and moss",
+    RegionType.VEGETATION: "bare meadow soil",
     RegionType.ROAD: "paving",
     RegionType.TRAIL: "a dirt footpath",
     RegionType.FOREST: "forest floor",
@@ -101,8 +104,8 @@ _NEAR_GROUND_SURFACES: dict[RegionType, str] = {
     # The floor under the meadow, for the same reason as _BASE_PROMPTS: the grass
     # stands on this plate as geometry.
     RegionType.VEGETATION: (
-        "the floor of a subalpine meadow, dark crumbly soil under a fine even litter of dry "
-        "grass stems and patches of low fine-grained moss, with bare brown earth between, no leaves"
+        "the bare floor of a subalpine meadow, dark brown crumbly soil and fine grit with a "
+        "sparse scatter of dry stems, even and continuous, no grass, no moss, no leaves"
     ),
     RegionType.FOREST: (
         "an open forest floor, an even carpet of fallen needles, moss and low leafy plants, "
@@ -274,6 +277,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # fights the target tile's own "flat overcast, no directional shadows" prompt.
         # Falls back to the raw patch if the model errors on a given crop.
         use_intrinsic_delighting: bool = True,
+        intrinsic_backend: str = "intrinsicdiffusion",
         # Blend factor toward the predicted albedo: 1.0 = pure albedo (fully delit), 0.0 =
         # the raw patch untouched. IntrinsicDiffusion's albedo can look unnaturally flat/
         # washed out at full strength -- a partial blend keeps some of the patch's own real
@@ -426,6 +430,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         macro_map_size: int = 512,
         macro_blur_texels: float = 1.5,
         macro_strength: float = 1.0,
+        macro_vegetation_chroma: float = 0.35,
         # Low-pass applied in the panorama's ANGULAR domain before the macro bake
         # (see pattern_texture.bake_macro_colour): a conifer is a few columns wide
         # there and a spoke metres long on the ground, so this is where the smear
@@ -545,6 +550,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.macro_map_size = int(macro_map_size)
         self.macro_blur_texels = float(macro_blur_texels)
         self.macro_strength = float(macro_strength)
+        # The macro map is the photograph's colour, and on a meadow that is the
+        # grass's green; multiplied into a soil tile it made the floor green moss.
+        # Over VEGETATION cells the macro colour keeps this fraction of its chroma
+        # (1 = the photograph's, 0 = its luminance only), so the soil stays soil
+        # and the standing grass carries the green.
+        self.macro_vegetation_chroma = float(macro_vegetation_chroma)
         self.reference_max_distance_m = float(reference_max_distance_m)
         self.panorama_max_texel_m = float(panorama_max_texel_m)
         self.panorama_far_ring_radius_m = float(panorama_far_ring_radius_m)
@@ -585,6 +596,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.num_reference_patches = num_reference_patches
         self.reference_patch_fraction = reference_patch_fraction
         self.use_intrinsic_delighting = use_intrinsic_delighting
+        # See pipeline.intrinsic_images.image_intrinsics.ImageIntrinsics.BACKENDS.
+        self.intrinsic_backend = str(intrinsic_backend)
         self.intrinsic_delight_strength = intrinsic_delight_strength
         self.intrinsic_resolution = intrinsic_resolution
         self.intrinsic_agg_num = intrinsic_agg_num
@@ -727,7 +740,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         """Lazily load IntrinsicDiffusion for reference-patch delighting — only if actually used."""
         if self._intrinsics is None:
             device, _ = preferred_device(DeviceStrategy.MEMORY)
-            self._intrinsics = ImageIntrinsics(device)
+            self._intrinsics = ImageIntrinsics(device, backend=self.config.intrinsic_backend)
 
     def _init_supersampler(self) -> None:
         """Lazily load Swin2SR for reference-patch supersampling — only if actually used."""
@@ -1409,6 +1422,19 @@ class TerrainTextureGenerationStage(PipelineStage):
         )
         if self.temp is not None:
             PIL.Image.fromarray((valid * 255).astype(np.uint8)).save(self.temp / "macro_valid.png")
+        if region_map is not None and cfg.macro_vegetation_chroma < 1.0:
+            rm = np.asarray(PIL.Image.fromarray(np.rint(region_map).astype(np.uint8)).resize(
+                (canvas.shape[1], canvas.shape[0]), PIL.Image.NEAREST))
+            veg = rm == int(RegionType.VEGETATION)
+            if veg.any():
+                luma = canvas @ np.array([0.2126, 0.7152, 0.0722], dtype=canvas.dtype)
+                grey = np.repeat(luma[..., None], 3, axis=-1)
+                k = float(cfg.macro_vegetation_chroma)
+                canvas = np.where(veg[..., None], grey + k * (canvas - grey), canvas)
+                self.log_info(
+                    f"Macro colour map: chroma over {veg.mean():.0%} vegetation texels kept at {k:.2f} "
+                    f"(the standing grass carries the green, the floor stays soil)"
+                )
         mean = tuple(float(v) for v in canvas.reshape(-1, 3).mean(axis=0))
         macro = PIL.Image.fromarray((canvas.clip(0, 1) * 255.0 + 0.5).astype(np.uint8), "RGB")
         self.log_info(

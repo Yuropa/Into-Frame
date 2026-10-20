@@ -41,6 +41,9 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         anchor_min_elevation_deg: float = 45.0,
         estimate_camera_height: bool = True,
         max_camera_height_m: float = 60.0,
+        waterline_anchor: bool = True,
+        waterline_min_plane_m: float = 15.0,
+        waterline_captured_only: bool = False,
         max_anchor_spread: float = 2.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -111,6 +114,17 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # and Region Map.
         self.estimate_camera_height = bool(estimate_camera_height)
         self.max_camera_height_m = float(max_camera_height_m)
+        # Scale whatever stands in the water to the distance where its waterline
+        # row meets the water plane (see _waterline_scale). Shark Fin's sea stack
+        # stood 84 m out by the depth model, 51 m by its own waterline.
+        self.waterline_anchor = bool(waterline_anchor)
+        self.waterline_min_plane_m = float(waterline_min_plane_m)
+        # The anchor over the whole panorama by default: Paris's outpainted back
+        # bank read 300 m where its waterline said 160 m, so the far shell stood
+        # it 9 m under the water and the apron stopped short of it. The scale
+        # clamp and the median over neighbouring columns keep a bad outpainted
+        # waterline from doing much harm; True limits it to the photographed cone.
+        self.waterline_captured_only = bool(waterline_captured_only)
         self.max_anchor_spread = float(max_anchor_spread)
 
 
@@ -291,6 +305,89 @@ def _apply_panorama_depth_curve(
 
     corrected = np.clip(corrected, 1e-3, 1e6)
     return corrected.reshape(dap_pred_raw.shape).astype(np.float32)
+
+
+def _waterline_scale(
+    depth: np.ndarray, type_map: np.ndarray, camera_height_m: float, water_type: int, sky_type: int,
+    min_plane_m: float = 15.0, max_plane_m: float = 1000.0, min_below_deg: float = 0.75,
+    run_floor_fraction: float = 0.8, smooth_cols: int = 9, scale_range: tuple[float, float] = (0.4, 3.0),
+    column_mask: "np.ndarray | None" = None,
+) -> tuple[np.ndarray, dict]:
+    """Per-pixel scale that stands whatever meets the water at its waterline.
+
+    A thing that touches the water surface at panorama row r is at the distance
+    where that row's ray meets the water plane, h / tan(-lat): a sea stack, a far
+    bank, a moored boat. The depth model has no such constraint and on Shark Fin
+    put the stack's foot at 84 m where the plane says 51 m (the water beside it
+    read 80 m too), so the stack stood 30 m behind its own surf. Every land pixel
+    with water directly below it is a waterline; the run of non-water, non-sky
+    pixels above it, where the model reads at least run_floor_fraction of the
+    waterline's depth (the thing itself and what stands on it, not a nearer shore
+    sloping down to it), is scaled by plane / model. Each waterline's ratio is
+    median-smoothed with the waterlines of the smooth_cols neighbouring columns
+    that sit within a few rows of it, and clamped to scale_range. column_mask
+    limits the rule to columns (the photographed cone, where the segmentation and
+    the camera height are the photograph's). Returns the (H, W) scale (1 where
+    nothing applies) and a summary."""
+    H, W = depth.shape
+    scale = np.ones((H, W), dtype=np.float64)
+    if camera_height_m <= 0.0:
+        return scale, {"columns": 0, "pixels": 0}
+    water = type_map == water_type
+    sky = type_map == sky_type
+    land = ~water & ~sky & np.isfinite(depth)
+    lat = (0.5 - (np.arange(H) + 0.5) / H) * np.pi
+    with np.errstate(divide="ignore", invalid="ignore"):
+        plane = np.where(lat < -np.radians(min_below_deg), camera_height_m / np.tan(-lat), np.inf)
+    usable = (plane >= min_plane_m) & (plane <= max_plane_m)
+    wl = np.zeros((H, W), dtype=bool)
+    wl[:-1] = land[:-1] & water[1:]
+    wl &= usable[:, None]
+    wl &= depth > 0
+    if column_mask is not None:
+        wl &= np.asarray(column_mask, dtype=bool)[None, :]
+    rows_wl, cols_wl = np.nonzero(wl)
+    if rows_wl.size < 3:
+        return scale, {"columns": 0, "pixels": 0}
+    ratio = plane[rows_wl] / depth[rows_wl, cols_wl]
+    # Smooth each waterline's ratio with its neighbours: same run of coast, i.e.
+    # within half of smooth_cols columns (circular) and 8 rows.
+    k = max(1, smooth_cols // 2)
+    order = np.lexsort((rows_wl, cols_wl))
+    rows_s, cols_s, ratio_s = rows_wl[order], cols_wl[order], ratio[order]
+    smoothed = np.empty_like(ratio_s)
+    by_col: dict[int, np.ndarray] = {}
+    for i in np.unique(cols_s):
+        by_col[int(i)] = np.flatnonzero(cols_s == i)
+    for n in range(rows_s.size):
+        c, r = int(cols_s[n]), int(rows_s[n])
+        acc = []
+        for dc in range(-k, k + 1):
+            cc = (c + dc) % W
+            idx = by_col.get(cc)
+            if idx is None:
+                continue
+            near = idx[np.abs(rows_s[idx] - r) <= 8]
+            if near.size:
+                acc.append(ratio_s[near])
+        smoothed[n] = np.median(np.concatenate(acc)) if acc else ratio_s[n]
+    smoothed = np.clip(smoothed, scale_range[0], scale_range[1])
+    changed = 0
+    for n in range(rows_s.size):
+        c, r = int(cols_s[n]), int(rows_s[n])
+        floor = run_floor_fraction * float(depth[r, c])
+        r0 = r
+        while r0 - 1 >= 0 and land[r0 - 1, c]:
+            r0 -= 1
+        seg = slice(r0, r + 1)
+        take = depth[seg, c] >= floor
+        scale[seg, c] = np.where(take, smoothed[n], scale[seg, c])
+        changed += int(take.sum())
+    return scale, {
+        "columns": int(np.unique(cols_wl).size), "waterlines": int(rows_wl.size), "pixels": changed,
+        "scale_p10": float(np.percentile(smoothed, 10)), "scale_p50": float(np.median(smoothed)),
+        "scale_p90": float(np.percentile(smoothed, 90)),
+    }
 
 
 def _camera_height_scale(
@@ -573,6 +670,44 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 )
             else:
                 self.log_info("Depth anchor: nadir height could not be measured, scale unchanged")
+        # Whatever meets the water stands at its waterline (see _waterline_scale).
+        waterline_scale = None
+        type_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_TERRAIN)
+        if cfg.waterline_anchor and type_depth is not None and camera_height > 0:
+            from pipeline.panorama_segmentation.panorama_region_result import RegionType
+            from PIL import Image as _PILImage
+            type_map = np.asarray(type_depth.depth)
+            if type_map.shape != calibrated_arr.shape:
+                type_map = np.asarray(_PILImage.fromarray(type_map.astype(np.uint8)).resize(
+                    (calibrated_arr.shape[1], calibrated_arr.shape[0]), _PILImage.NEAREST))
+            type_map = np.rint(type_map).astype(np.int32)
+            column_mask = None
+            cone = None
+            if cfg.waterline_captured_only:
+                try:
+                    from util.captured_cone import captured_cone_from_context
+                    cone = captured_cone_from_context(context, calibrated_arr.shape[1], calibrated_arr.shape[0])
+                except Exception:
+                    cone = None
+            if cone is not None:
+                W_ = calibrated_arr.shape[1]
+                u0, u1 = cone.u_range
+                margin = 5.0 / 360.0 * W_
+                cols_ = np.arange(W_)
+                column_mask = ((cols_ - (u0 - margin)) % W_) <= ((u1 + margin) - (u0 - margin)) % W_
+            waterline_scale, wl_stats = _waterline_scale(
+                calibrated_arr, type_map, camera_height, int(RegionType.WATER), int(RegionType.SKY),
+                min_plane_m=cfg.waterline_min_plane_m, column_mask=column_mask,
+            )
+            if wl_stats.get("pixels", 0) > 0:
+                calibrated_arr = calibrated_arr * waterline_scale
+                self.log_info(
+                    f"Waterline anchor: {wl_stats['columns']} column(s) meet the water at {cfg.waterline_min_plane_m:.0f}+ m; "
+                    f"{wl_stats['pixels']} px standing on the water scaled to their waterline distance "
+                    f"(scale p10/p50/p90 {wl_stats['scale_p10']:.2f}/{wl_stats['scale_p50']:.2f}/{wl_stats['scale_p90']:.2f})"
+                )
+            else:
+                waterline_scale = None
         # Far-range compression, not a global scale: the near field has to stay
         # metric because camera_height_meters anchors everything downstream to it.
         # The curve depends only on max_depth_m, so applying the identical
@@ -629,6 +764,8 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 dap_pred_raw_fit, *curve, max_extrapolation_factor=cfg.max_extrapolation_factor
             )
             calibrated_object_arr = calibrated_object_arr * anchor_scale
+            if waterline_scale is not None:
+                calibrated_object_arr = calibrated_object_arr * waterline_scale
             if cfg.max_depth_m is not None:
                 # The identical curve PANORAMA_DEPTH got above -- it's a pure
                 # function of max_depth_m, so both maps place the same real-world

@@ -1930,6 +1930,17 @@ class SceneGenerationStage(PipelineStage):
             water.name = "water"
             scene.add_object(water)
 
+        # The far field's water apron (FarFieldBackdropStage._water_apron): the
+        # sheet continued from the grid's edge to the far bank. Named with "water"
+        # so the client gives it the water shader.
+        apron_mesh = context.input_mesh(ContextKey.WATER_APRON_MESH)
+        if apron_mesh is not None:
+            self.log_info("Adding water apron to scene")
+            apron = Object3D.mesh(ContextKey.WATER_APRON_MESH, x=0.0, y=0.0, z=0.0)
+            apron.set_rotation(*ground_rotation)
+            apron.name = "water_apron"
+            scene.add_object(apron)
+
         # Non-primary ground components (see TerrainMeshStage / HeightMapGenerator.
         # _label_ground_components) -- a separate landmass, an isolated rock
         # formation, anything real but genuinely disconnected from the base terrain.

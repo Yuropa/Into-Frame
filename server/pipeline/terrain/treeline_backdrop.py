@@ -41,7 +41,9 @@ from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from scene.mesh import Mesh
+from util.image_utils import Image as UtilImage
 
+TREELINE_MASK_KEY = "treeline_backdrop_mask"
 TREELINE_SUMMARY_KEY = "treeline_backdrop_summary"
 
 
@@ -292,6 +294,10 @@ class TreelineBackdropStage(PipelineStage):
         # At the photograph's resolution where it was photographed (see
         # util.captured_cone.sharpen_strip): Paris's far bank was a 127 px strip.
         from util.captured_cone import sharpen_strip
+        # The pixels this strip carries, for Far Field Backdrop to leave off its shell.
+        full_alpha = np.zeros((H, W), dtype=np.float32)
+        full_alpha[row_min:row_max + 1] = alpha
+        context.add_image(TREELINE_MASK_KEY, UtilImage(PILImage.fromarray((full_alpha.clip(0, 1) * 255).astype(np.uint8), "L")))
         texture = sharpen_strip(context, panorama, rgb, alpha, row_min, cfg.texture_max_width)
         if texture is None:
             texture = PILImage.fromarray(

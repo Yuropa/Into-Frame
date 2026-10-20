@@ -442,7 +442,7 @@ class SceneBuilder:
         ps = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=self._ambient())
         stats = {"instances": 0, "lod_mesh": 0, "lod_card": 0, "lod_billboard": 0, "billboards": 0, "env": 0, "skipped": 0}
         instances: dict[tuple, list[np.ndarray]] = {}
-        env_names = {"terrain", "water", "treeline", "backdrop"}
+        env_names = {"terrain", "water", "water_apron", "treeline", "backdrop"}
 
         for o in self.scene["objects"]:
             name = str(o.get("name") or "")
@@ -554,7 +554,7 @@ class SceneBuilder:
                     pano_tm, pano_mat = self._pano_pass
                     self._pano_node = (pano_tm, pano_mat, _MIRROR @ pose @ _MIRROR)
                 self._plate_nodes = [(t, m, _MIRROR @ pose @ _MIRROR) for t, m in getattr(self, "_plate_passes", [])]
-            elif name == "water":
+            elif name in ("water", "water_apron"):
                 # The sheet's own colour (the server takes it from the photographed
                 # water, TerrainMeshStage._colour_water_from_photo), as Unity does.
                 colour = [0.10, 0.30, 0.45, 0.90]

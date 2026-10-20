@@ -399,7 +399,7 @@ public class SceneObjectManager : MonoBehaviour
     private static bool IsEnvironmentMesh(string name)
     {
         if (string.IsNullOrEmpty(name)) return false;
-        return name == "terrain" || name == "water" || name == "treeline" || name == "backdrop" || name.StartsWith("formation_");
+        return name == "terrain" || name == "water" || name == "water_apron" || name == "treeline" || name == "backdrop" || name.StartsWith("formation_");
     }
 
     private void SpawnMeshImmediate(SceneObject data)

@@ -31,7 +31,7 @@ public class GrassField : MonoBehaviour
     public float cardRadius = 25f;
     public float cardWidth = 1.5f;   // x the tuft height: a 0.25 m tuft card is 0.38 m wide
     [Range(0f, 1f)] public float cardKeep = 0.35f;
-    public int maxTufts = 60000;
+    public int maxTufts = 100000;
 
     GrassFieldData _data;
     Texture2D _density, _colour;

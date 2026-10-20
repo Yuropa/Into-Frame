@@ -1001,11 +1001,11 @@ stages:
     pano_uv_max_height_drift_m: 0.5 # a vertex keeps its depth sample's cached panorama pixel only while it
                              # still stands within this of the sampled height; the ridge envelope raised
                              # Rainier's far ring 9 m above its samples and the stale pixels streaked it
-    water_depression_ramp_m: 2.0 # metres in from the shore over which the lakebed descends to its full
+    water_depression_ramp_m: 3.0 # metres in from the shore over which the lakebed descends to its full
                              # water_depression_m. The bed is the terrain itself at the shoreline (the
                              # water surface is levelled to the shore's own height) so no step is cut
                              # around the lake; the sheet covers every shoreline triangle.
-    water_depression_m: 0.5 # metres the lakebed is carved below the water surface (from REGION_MAP's
+    water_depression_m: 2.0 # metres the lakebed is carved below the water surface (from REGION_MAP's
                              # WATER cells), so an eventually-animated water plane's wave amplitude
                              # never exposes the terrain underneath it. Also emits a separate flat
                              # water mesh (WATER_MESH) at the un-depressed water surface elevation.
@@ -1382,7 +1382,7 @@ stages:
     max_depth_spread: 1.6       # p90/p10 depth within a run: a wall, not a floor
     bin_px: 16                  # panorama columns per quad
     min_bin_fill: 0.5
-    min_bins: 4
+    min_bins: 3                  # 4 left the Rainier capture without its forest band (3 bins)
     feather_px: 2.0
 
   - name: Object Detection
@@ -1708,6 +1708,9 @@ stages:
     feature_floor: 0.1
     min_feature_exemplars: 6
     bloom_classes: [flower]           # density scaled by the detector's measured recall
+    bloom_max_density_m2: 30.0        # 18 painted a thin meadow against the photograph's wall of blooms (user, 2026-10-19)
+    class_min_full_density_radius_m:  # floor on the full-density radius per class: a bloom class's detections all
+      flower: 15.0                    # sit within 4 m (the far ones are too small to detect) but the meadow is not
     bloom_max_boost: 6.0
     align_to_water_classes: [boat, dock]
     moor_fraction: {boat: 0.6, dock: 1.0}   # share moved onto the water moor_offset_m off the bank
@@ -1753,7 +1756,7 @@ stages:
     # the grass_tuft class outright, and its instances are written as `synthetic`
     # so Panorama Asset Generation below skips them the same way it skips painted
     # distribution points.
-    max_radius_m: 25.0        # grass is one Object3D per instance with no client-side
+    max_radius_m: 35.0        # grass is one Object3D per instance with no client-side
                                # instancing, so coverage is bounded; the terrain texture
                                # carries the ground beyond this.
     # Two gates on whether this scene gets grass at all. Region typing alone answers
@@ -1823,7 +1826,8 @@ stages:
     # all. Mean keep 0.46, so its 16,026 tufts become ~7,400 -- concentrated where the
     # photograph actually shows meadow. Set full_density_greenness to 0 to restore
     # uniform density.
-    full_density_greenness: 0.10
+    full_density_greenness: 0.06
+    tufts_per_m2: 52.0        # 36 read as thin over the soil floor (user, 2026-10-19); the client's GrassField.maxTufts budget caps the total
     density_floor_fraction: 0.15
     instance_spacing_m: 0.25  # nominal lattice pitch before jitter.
                                # 0.4 m is one tuft every 40 cm (6.2/m2), which reads as

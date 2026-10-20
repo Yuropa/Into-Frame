@@ -206,6 +206,7 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         max_background_fraction: float = 0.5,
         mask_background_fraction: bool = True,
         use_intrinsic_delighting: bool = True,
+        intrinsic_backend: str = "intrinsicdiffusion",
         intrinsic_delight_strength: float = 0.6,
         intrinsic_resolution: int = 768,
         intrinsic_agg_num: int = 2,
@@ -344,6 +345,8 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # absolute value -- keep this equal to the terrain stage's own
         # intrinsic_delight_strength, and change them together.
         self.use_intrinsic_delighting = bool(use_intrinsic_delighting)
+        # See pipeline.intrinsic_images.image_intrinsics.ImageIntrinsics.BACKENDS.
+        self.intrinsic_backend = str(intrinsic_backend)
         self.intrinsic_delight_strength = float(intrinsic_delight_strength)
         self.intrinsic_resolution = int(intrinsic_resolution)
         self.intrinsic_agg_num = int(intrinsic_agg_num)
@@ -1066,7 +1069,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         from util.image_utils import Image as UtilImage
 
         task = self.create_progress(len(indices), "Delighting object crops…")
-        intrinsics = ImageIntrinsics(self.preferred_device)
+        intrinsics = ImageIntrinsics(self.preferred_device, backend=self.config.intrinsic_backend)
         written = 0
         try:
             for idx in sorted(indices):

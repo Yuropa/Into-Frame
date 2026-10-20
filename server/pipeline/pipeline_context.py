@@ -55,6 +55,7 @@ class ContextKey:
     TERRAIN_MESH = "terrain_mesh"
     TERRAIN_PHYSICS_MESH = "terrain_physics_mesh"
     WATER_MESH = "water_mesh"
+    WATER_APRON_MESH = "water_apron_mesh"
     TERRAIN_FORMATIONS = "terrain_formations"
     TREELINE_BACKDROP = "treeline_backdrop"
     FAR_FIELD_BACKDROP = "far_field_backdrop"
@@ -150,6 +151,7 @@ class ContextKey:
         "height_map_params",
         "terrain_mesh",
         "water_mesh",
+        "water_apron_mesh",
         "terrain_formations",
         "lighting",
         "recognize_tags",
