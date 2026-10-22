@@ -49,10 +49,27 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         despike_dense_min_real_support: float = 0.6,
         pinnacle_threshold_m: float = 1.0,
         pinnacle_window: int = 31,
+        wall_relief_m: float = 4.0,
+        wall_rock_fraction: float = 0.5,
+        wall_min_distance_m: float = 10.0,
+        wall_shoulder_factor: float = 2.0,
+        wall_shoulder_min_m: float = 6.0,
+        wall_shoulder_max_m: float = 30.0,
+        wall_bin_m: float = 2.0,
+        densify_radius_m: float = 0.6,
+        densify_min_samples: int = 3,
+        densify_min_distance_m: float = 20.0,
+        densify_far_fraction: float = 0.5,
+        wall_far_fraction: float = 0.33,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
         level_ground_to_camera: bool = True,
+        standing_viewer_prior: bool = True,
+        viewer_eye_height_m: float = 1.7,
+        standing_min_drop_m: float = 3.0,
+        standing_pedestal_radius_m: float = 3.0,
+        standing_ring_m: tuple[float, float] = (7.0, 10.0),
         anchor_water_plane: bool = True,
         anchor_water_min_fraction: float = 0.02,
         bank_reach_m: float = 15.0,
@@ -179,6 +196,26 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # HeightMapGenerator._flatten_pinnacles. 0 disables.
         self.pinnacle_threshold_m = float(pinnacle_threshold_m)
         self.pinnacle_window = int(pinnacle_window)
+        # A cliff face seen side-on (a headland across a cove, a sea stack) is
+        # taken at its crest and the land behind it raised to match -- see the
+        # wall rule in HeightMapGenerator.generate. wall_relief_m is the span of
+        # raw samples inside one cell that makes it a wall (0 disables); nearer
+        # than wall_min_distance_m the nadir's depth noise spans metres too.
+        self.wall_relief_m = float(wall_relief_m)
+        self.wall_rock_fraction = float(wall_rock_fraction)
+        self.wall_min_distance_m = float(wall_min_distance_m)
+        self.wall_shoulder_factor = float(wall_shoulder_factor)
+        self.wall_shoulder_min_m = float(wall_shoulder_min_m)
+        self.wall_shoulder_max_m = float(wall_shoulder_max_m)
+        self.wall_bin_m = float(wall_bin_m)
+        # Far samples are one cell in ten; cells within densify_radius_m of
+        # densify_min_samples real samples take their mean instead of the flat-
+        # ground guess, beyond densify_min_distance_m. See the generator.
+        self.densify_radius_m = float(densify_radius_m)
+        self.densify_min_samples = int(densify_min_samples)
+        self.densify_min_distance_m = float(densify_min_distance_m)
+        self.densify_far_fraction = float(densify_far_fraction)
+        self.wall_far_fraction = float(wall_far_fraction)
         # Binary closing iterations applied to the ground-valid classification
         # before it gates which pixels count as ground (see
         # HeightMapGenerator._ground_valid_mask). Per-pixel semantic segmentation
@@ -202,6 +239,21 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # ring sat at -0.4 m under a 1.0 m camera: the eye was 0.4 m off the
         # ground and knee-high flowers 1.5 m away reached the horizon.
         self.level_ground_to_camera = bool(level_ground_to_camera)
+        # The viewer stands on something. With a photo-measured camera height the
+        # nadir is scaled to the plane the photographed people stand on, and on a
+        # clifftop capture that plane is the beach far below (Shark Fin: ground
+        # 12.4 m under a camera the client leaves at the photographer's height, so
+        # the viewer hovers over sand with no cliff under them). When the ground in
+        # standing_ring_m is not water and lies more than standing_min_drop_m below
+        # eye height, a pedestal at -viewer_eye_height_m is raised under the camera:
+        # flat to standing_pedestal_radius_m and blended into the measured terrain
+        # over 1.5 x the drop (at least 8 m) -- a clifftop knoll above the beach.
+        # Over water (Paris: a bridge) nothing changes; the viewer is on the deck.
+        self.standing_viewer_prior = bool(standing_viewer_prior)
+        self.viewer_eye_height_m = float(viewer_eye_height_m)
+        self.standing_min_drop_m = float(standing_min_drop_m)
+        self.standing_pedestal_radius_m = float(standing_pedestal_radius_m)
+        self.standing_ring_m = (float(standing_ring_m[0]), float(standing_ring_m[1]))
         # Water scenes with a photo-measured camera height: the height was measured
         # to the water plane, so the water IS at -camera_height. The depth-derived
         # map put Paris's river at -8.1 m under a 12.1 m camera and its quays at
@@ -274,7 +326,7 @@ class HeightMapStage(PipelineStage):
         # be used for this lookup -- they are what is being corrected (Paris's
         # -8 m map looked everything up within 12 deg of the horizon and saw banks
         # and buildings where the river is).
-        axis = (np.arange(n, dtype=np.float64) + 0.5) / n * cfg.grid_size_meters - cfg.grid_size_meters / 2.0
+        axis = (np.arange(n, dtype=np.float64) + 0.5) / n * self._grid_size_m - self._grid_size_m / 2.0
         zz, xx = np.meshgrid(axis, axis, indexing="ij")
         r_cell = np.hypot(xx, zz)
         lon = np.arctan2(xx, zz)
@@ -342,7 +394,7 @@ class HeightMapStage(PipelineStage):
                 filled[k] = rise_by_sector[good][np.argmin(dist)]
             filled = np.median(np.stack([np.roll(filled, k) for k in (-2, -1, 0, 1, 2)]), axis=0)  # circular 5-sector median
             az = lon
-            cell_m = cfg.grid_size_meters / n
+            cell_m = self._grid_size_m / n
             dist_w = distance_transform_edt(~water) * cell_m
             land = ~water & np.isfinite(out)
             sector_of = (((az + np.pi) / (2.0 * np.pi)) * sectors).astype(int) % sectors
@@ -372,6 +424,13 @@ class HeightMapStage(PipelineStage):
         # (see CAMERA_HEIGHT_KEY); the configured height otherwise.
         camera_estimate = context.input_object(CAMERA_HEIGHT_KEY) or {}
         camera_height = float(camera_estimate.get("meters") or cfg.camera_height_meters)
+        # The grid's extent: chosen per capture by Panorama Depth Calibration from
+        # the depth's reliable range (see its adaptive_grid), the configured value
+        # when it did not.
+        grid_size = float(context.input_object(ContextKey.TERRAIN_GRID_SIZE_M) or cfg.grid_size_meters)
+        self._grid_size_m = grid_size
+        if grid_size != cfg.grid_size_meters:
+            self.log_info(f"Grid: {grid_size:.0f} m across (Panorama Depth Calibration), not the configured {cfg.grid_size_meters:.0f} m")
 
         task = self.create_progress(3, "Height Map…")
 
@@ -447,7 +506,7 @@ class HeightMapStage(PipelineStage):
         height_array, certainty_array, cell_relief_array, cell_slope_array, true_observed_array, component_id_array, pano_uv_u_array, pano_uv_v_array, real_sample_mask_array = HeightMapGenerator.generate(
             depth=depth,
             intrinsics=intrinsics,
-            grid_size_meters=cfg.grid_size_meters,
+            grid_size_meters=grid_size,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
             use_equirectangular=cfg.use_equirectangular,
@@ -477,16 +536,43 @@ class HeightMapStage(PipelineStage):
             despike_dense_min_real_support=cfg.despike_dense_min_real_support,
             pinnacle_threshold_m=cfg.pinnacle_threshold_m,
             pinnacle_window=cfg.pinnacle_window,
+            wall_relief_m=cfg.wall_relief_m, wall_rock_fraction=cfg.wall_rock_fraction,
+            wall_min_distance_m=cfg.wall_min_distance_m,
+            wall_shoulder_factor=cfg.wall_shoulder_factor,
+            wall_shoulder_min_m=cfg.wall_shoulder_min_m,
+            wall_shoulder_max_m=cfg.wall_shoulder_max_m,
+            wall_bin_m=cfg.wall_bin_m,
+            densify_radius_m=cfg.densify_radius_m,
+            densify_min_samples=cfg.densify_min_samples,
+            densify_min_distance_m=cfg.densify_min_distance_m, densify_far_fraction=cfg.densify_far_fraction, wall_far_fraction=cfg.wall_far_fraction, far_start_m=(float(far_start) if far_start else None),
             region_closing_iterations=cfg.region_closing_iterations,
             single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,
         )
         self.advance_progress(task)
 
+        dens_report = getattr(HeightMapGenerator, "_last_densify_report", None)
+        HeightMapGenerator._last_densify_report = None
+        if dens_report:
+            n_dens, n_fwd, win = dens_report
+            self.log_info(
+                f"Densified: {n_dens:,} cell(s) beyond {cfg.densify_min_distance_m:.0f} m took the mean of the real "
+                f"samples within {win:.2f} m ({n_fwd:,} forward-projected cell(s) in all)"
+            )
+        wall_report = getattr(HeightMapGenerator, "_last_wall_report", None)
+        HeightMapGenerator._last_wall_report = None
+        if wall_report:
+            n_wall, n_shoulder, n_facing, rel50, rel90, cr50, cr90, r0, r1 = wall_report
+            self.log_info(
+                f"Walls: {n_wall:,} cell(s) hold a vertical face of {rel50:.1f}/{rel90:.1f} m (p50/p90) "
+                f"at {r0:.0f}-{r1:.0f} m, raised to their crest ({cr50:+.1f}/{cr90:+.1f} m); {n_facing:,} face the "
+                f"camera and carry {n_shoulder:,} shoulder cell(s) behind them"
+            )
+
         if cfg.level_ground_to_camera and camera_estimate.get("source") != "photo":
             r0, r1 = cfg.level_ground_ring_m
             n = cfg.grid_resolution
-            axis = (np.arange(n, dtype=np.float32) + 0.5) / n * cfg.grid_size_meters - cfg.grid_size_meters / 2.0
+            axis = (np.arange(n, dtype=np.float32) + 0.5) / n * grid_size - grid_size / 2.0
             zz, xx = np.meshgrid(axis, axis, indexing="ij")
             rr = np.hypot(xx, zz)
             ring = (rr >= r0) & (rr <= r1) & np.isfinite(height_array)
@@ -510,6 +596,65 @@ class HeightMapStage(PipelineStage):
                 np.asarray(region_type_mask), panorama_depth, camera_height, cfg,
             )
 
+        if cfg.standing_viewer_prior and camera_estimate.get("source") == "photo":
+            from pipeline.panorama_segmentation.panorama_region_result import RegionType as _RT
+            n = cfg.grid_resolution
+            axis = (np.arange(n, dtype=np.float32) + 0.5) / n * grid_size - grid_size / 2.0
+            zz, xx = np.meshgrid(axis, axis, indexing="ij")
+            rr = np.hypot(xx, zz)
+            r0, r1 = cfg.standing_ring_m
+            ring = (rr >= r0) & (rr <= r1) & np.isfinite(height_array)
+            water_frac = None
+            if region_type_mask is not None and ring.any():
+                tm = np.asarray(region_type_mask)
+                th, tw = tm.shape
+                u = pano_uv_u_array[ring]
+                v = pano_uv_v_array[ring]
+                okuv = np.isfinite(u) & np.isfinite(v)
+                if okuv.sum() >= 50:
+                    tu = np.clip((u[okuv] * (tw - 1)).astype(np.int64), 0, tw - 1)
+                    tv = np.clip((v[okuv] * (th - 1)).astype(np.int64), 0, th - 1)
+                    water_frac = float((np.rint(tm[tv, tu]).astype(np.int32) == int(_RT.WATER)).mean())
+            target = -float(cfg.viewer_eye_height_m)
+            ring_y = float(np.median(height_array[ring])) if ring.any() else np.nan
+            if water_frac is None and region_type_mask is not None and ring.any() and np.isfinite(ring_y):
+                # The ring was filled rather than sampled (Paris: the water plane
+                # anchor wrote it, so no panorama UVs). Type it the way the anchor
+                # does: look each cell up along the ray to its point on the ring's
+                # own plane. A bridge or a boat deck must never get a pedestal.
+                tm = np.asarray(region_type_mask)
+                th, tw = tm.shape
+                lon = np.arctan2(xx[ring], zz[ring])
+                lat = -np.arctan2(-ring_y, np.maximum(rr[ring], 1e-6))
+                row = np.clip(((0.5 - lat / np.pi) * (th - 1)).astype(np.intp), 0, th - 1)
+                col = np.clip(((lon / (2.0 * np.pi) + 0.5) * (tw - 1)).astype(np.intp), 0, tw - 1)
+                water_frac = float((np.rint(tm[row, col]).astype(np.int32) == int(_RT.WATER)).mean())
+            drop = target - ring_y if np.isfinite(ring_y) else 0.0
+            if water_frac is not None and water_frac >= 0.5:
+                self.log_info(
+                    f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out is {water_frac:.0%} water "
+                    f"({ring_y:+.2f} m) -- the viewer is on a deck over it, nothing raised"
+                )
+            elif np.isfinite(ring_y) and drop >= cfg.standing_min_drop_m:
+                R0 = float(cfg.standing_pedestal_radius_m)
+                R1 = R0 + max(8.0, 1.5 * drop)
+                t = np.clip((rr - R0) / max(R1 - R0, 1e-6), 0.0, 1.0)
+                sm = t * t * (3.0 - 2.0 * t)
+                measured = np.where(np.isfinite(height_array), height_array, ring_y)
+                raised = target * (1.0 - sm) + measured * sm
+                within = rr <= R1
+                lifted = within & (raised > measured)
+                height_array = np.where(lifted, raised, height_array).astype(height_array.dtype)
+                true_observed_array[within] = True
+                self.log_info(
+                    f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out lies {ring_y:+.2f} m, {drop:.1f} m below eye "
+                    f"height ({'%.0f%% water' % (100 * water_frac) if water_frac is not None else 'type unknown'}); "
+                    f"a pedestal at {target:+.1f} m raised under the camera, flat to {R0:.0f} m and blended out by {R1:.0f} m "
+                    f"({int(lifted.sum()):,} cell(s) lifted)"
+                )
+            elif np.isfinite(ring_y):
+                self.log_info(f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out lies {ring_y:+.2f} m, within {cfg.standing_min_drop_m:.0f} m of eye height")
+
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)
         context.add_depth(ContextKey.HEIGHT_MAP_CERTAINTY, Depth(certainty_array))
@@ -528,7 +673,7 @@ class HeightMapStage(PipelineStage):
         context.add_depth(ContextKey.HEIGHT_MAP_PANO_V, Depth(pano_uv_v_array))
 
         context.add_object(ContextKey.HEIGHT_MAP_PARAMS, {
-            "grid_size_meters":    cfg.grid_size_meters,
+            "grid_size_meters":    grid_size,
             "grid_resolution":     cfg.grid_resolution,
             "ground_y_max":        cfg.ground_y_max,
             "camera_height_meters": camera_height,

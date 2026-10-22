@@ -36,6 +36,10 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         unphotographed_water_min_distance_m: float = 15.0,
         river_channel_prior: bool = True,
         river_channel_margin_m: float = 5.0,
+        open_water_prior: bool = True,
+        open_water_min_deg: float = 5.0,
+        open_water_bank_tolerance_m: float = 1.5,
+        open_water_extend_deg: float = 60.0,
         use_height_map_elevation: bool = True,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
@@ -68,6 +72,21 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # non-water surface and raised to the photographed banks' height.
         self.river_channel_prior = bool(river_channel_prior)
         self.river_channel_margin_m = float(river_channel_margin_m)
+        # Water that meets the sky in the photograph is open water: the sea (or a
+        # lake) runs from the shore to the horizon. The outpainted panorama closes
+        # it instead -- Shark Fin's cove came back as a lagoon ringed by sand --
+        # so inside the photographed cone every column whose water reaches the
+        # sky boundary is water from its shore out to the grid's edge, and
+        # outside the cone the shore is continued as the straight line fitted to
+        # the photographed shore points, with the sea side of it water. Land that
+        # stands more than open_water_bank_tolerance_m above the water plane (a
+        # headland, a stack -- photographed or outpainted) is left standing.
+        # Needs at least open_water_min_deg of the cone's columns to reach the
+        # sky as water; a river closed by its far bank (Paris) never does.
+        self.open_water_prior = bool(open_water_prior)
+        self.open_water_min_deg = float(open_water_min_deg)
+        self.open_water_bank_tolerance_m = float(open_water_bank_tolerance_m)
+        self.open_water_extend_deg = float(open_water_extend_deg)
         # Look each grid cell up in the panorama along the ray to its REAL
         # reconstructed elevation (HEIGHT_MAP) rather than to a flat plane
         # camera_height_meters below the camera. False restores the flat-plane
@@ -213,7 +232,7 @@ class RegionMapStage(PipelineStage):
             return region_map, elevation, None
         half_deg = cone.hfov_deg / 2.0 + 3.0
         res = region_map.shape[0]
-        grid_m = float(cfg.grid_size_meters)
+        grid_m = float(self._grid_size_m)
         cell_m = grid_m / res
         axis = (np.arange(res) + 0.5) * cell_m - grid_m / 2.0
         # row = z (see distribution_synthesis.features.world_to_cell), col = x.
@@ -319,12 +338,131 @@ class RegionMapStage(PipelineStage):
         )
         return out, new_elev, (xl, xr, half_deg, slope, offset, width)
 
+    def _open_water_prior(self, context, region_map, elevation, type_idx_map, panorama_depth, camera_height, cfg):
+        """Open water to the horizon -- see open_water_prior. Returns
+        (region_map, elevation, ocean_columns or None), ocean_columns being the
+        panorama columns (at type_idx_map's width) whose grid-edge cell is water."""
+        from scipy.ndimage import zoom as _zoom
+        from util.captured_cone import captured_cone_from_context
+        water_idx = int(RegionType.WATER)
+        sky_idx = int(RegionType.SKY)
+        H, W = type_idx_map.shape
+        cone = captured_cone_from_context(context, W, H)
+        if cone is None:
+            return region_map, elevation, None
+        depth = panorama_depth.depth.astype(np.float32)
+        if depth.shape != (H, W):
+            depth = _zoom(depth, (H / depth.shape[0], W / depth.shape[1]), order=1)
+        az = ((np.arange(W) + 0.5) / W - 0.5) * 360.0
+        in_cone = np.abs(az) <= cone.hfov_deg / 2.0
+        # Sea columns: the first non-sky pixel from the top is water (haze and
+        # a thin band of OTHER at the horizon tolerated: the first ground-typed
+        # pixel within 1% of the height).
+        non_sky = type_idx_map != sky_idx
+        first = np.argmax(non_sky, axis=0)
+        has = non_sky.any(axis=0)
+        band = max(2, H // 100)
+        sea_col = np.zeros(W, dtype=bool)
+        for c in np.flatnonzero(has & in_cone):
+            r0 = int(first[c])
+            seg = type_idx_map[r0:min(H, r0 + band), c]
+            ground = seg[np.isin(seg, [water_idx, int(RegionType.TERRAIN), int(RegionType.GROUND),
+                                       int(RegionType.VEGETATION), int(RegionType.BUILT), int(RegionType.FOREST),
+                                       int(RegionType.SNOW), int(RegionType.ROAD), int(RegionType.TRAIL)])]
+            if ground.size and int(ground[0]) == water_idx:
+                sea_col[c] = True
+        min_cols = int(cfg.open_water_min_deg / 360.0 * W)
+        if sea_col.sum() < min_cols:
+            if sea_col.any():
+                self.log_info(
+                    f"Open water: only {sea_col.sum()} column(s) ({sea_col.sum() * 360.0 / W:.1f} deg) of the "
+                    f"{cone.hfov_deg:.0f} deg cone meet the sky as water -- no open-water prior"
+                )
+            return region_map, elevation, None
+        # Shore distance per column: the nearest water pixel below the horizon.
+        rows = np.arange(H)
+        lat = (0.5 - (rows + 0.5) / H) * np.pi
+        below = lat < 0
+        water_px = (type_idx_map == water_idx) & below[:, None] & np.isfinite(depth) & (depth > 0)
+        r_h = depth * np.cos(lat)[:, None]
+        r_shore = np.full(W, np.nan)
+        cols_with_water = np.flatnonzero(water_px.any(axis=0) & in_cone)
+        for c in cols_with_water:
+            r_shore[c] = float(np.nanmin(np.where(water_px[:, c], r_h[:, c], np.nan)))
+        res = region_map.shape[0]
+        grid_m = float(self._grid_size_m)
+        half = grid_m / 2.0
+        cell_m = grid_m / res
+        axis = (np.arange(res) + 0.5) * cell_m - half
+        X = axis[None, :]
+        Z = axis[:, None]
+        R = np.hypot(X, Z)
+        AZ = np.degrees(np.arctan2(X, Z))
+        y_water = -float(camera_height)
+        tol = float(cfg.open_water_bank_tolerance_m)
+        low = np.ones_like(R, dtype=bool) if elevation is None else ~(np.isfinite(elevation) & (elevation > y_water + tol))
+        out = region_map.copy()
+        new_elev = elevation.copy() if elevation is not None else None
+        converted_in = converted_out = 0
+        # Inside the cone: sea columns are water from their shore to the edge.
+        col_of = ((AZ / 360.0 + 0.5) * W).astype(np.int64) % W
+        shore_of = r_shore[col_of]
+        sea_cell = sea_col[col_of] & np.isfinite(shore_of) & (R > shore_of) & (np.abs(AZ) <= cone.hfov_deg / 2.0)
+        conv = sea_cell & low & (out != water_idx)
+        out[conv] = water_idx
+        converted_in = int(conv.sum())
+        # Outside the cone: the shore continues past each edge of the photograph
+        # at the distance it had there (the median over the last 3 deg inside the
+        # edge), for open_water_extend_deg of azimuth; beyond that distance the
+        # generator's content is low ground the sea covers. A cove is not a
+        # straight line (Shark Fin's shore points spread 14 m about any line), so
+        # the shore is carried round the edge rather than fitted.
+        half_fov = cone.hfov_deg / 2.0
+        edges = []
+        for sign in (-1.0, 1.0):
+            edge_az = sign * half_fov
+            near_edge = in_cone & np.isfinite(r_shore) & (np.abs(az - edge_az) <= 3.0) & (r_shore < half)
+            if near_edge.sum() >= 4:
+                edges.append((sign, float(np.nanmedian(r_shore[near_edge]))))
+        conv2 = np.zeros_like(out, dtype=bool)
+        for sign, r_edge in edges:
+            rel = sign * (AZ - sign * half_fov)   # degrees past this edge, positive outside
+            band = (rel > 0.0) & (rel <= float(cfg.open_water_extend_deg))
+            conv2 |= band & (R > r_edge * 1.1) & low & (out != water_idx) & (R > 5.0)
+        if conv2.any():
+            out[conv2] = water_idx
+            converted_out = int(conv2.sum())
+        changed = (out == water_idx) & (region_map != water_idx)
+        if new_elev is not None and changed.any():
+            new_elev[changed] = y_water
+        # Which panorama columns end in water at the grid's edge, for the far field.
+        edge_r = half - 2.0 * cell_m
+        lon_c = np.radians(az)
+        ex = np.clip(((edge_r * np.sin(lon_c)) + half) / cell_m, 0, res - 1).astype(np.int64)
+        ez = np.clip(((edge_r * np.cos(lon_c)) + half) / cell_m, 0, res - 1).astype(np.int64)
+        ocean_cols = out[ez, ex] == water_idx
+        self.log_info(
+            f"Open water: {sea_col.sum()} column(s) ({sea_col.sum() * 360.0 / W:.0f} deg) of the {cone.hfov_deg:.0f} deg cone "
+            f"meet the sky as water; {converted_in} cell(s) beyond their shore typed water inside the cone"
+            + (f", {converted_out} outside it past the shore at the cone's edges ("
+               + ", ".join(f"{'left' if sg < 0 else 'right'} {r_e:.0f} m" for sg, r_e in edges)
+               + f") for {cfg.open_water_extend_deg:.0f} deg" if edges else
+               "; no shore distance at either edge of the cone, nothing changed outside it")
+            + f"; water reaches the grid's edge over {ocean_cols.mean():.0%} of the azimuths"
+        )
+        return out, new_elev, ocean_cols
+
     def run(self, context: PipelineContext) -> PipelineContext:
         depth_key, output_key = self._resolved_keys()
         cfg: RegionMapConfiguration = self.config
         # Measured from the photo by Panorama Depth Calibration when it could be
         # (see CAMERA_HEIGHT_KEY); the configured height otherwise.
         camera_height = float((context.input_object(CAMERA_HEIGHT_KEY) or {}).get("meters") or cfg.camera_height_meters)
+        # The grid's extent follows Height Map's (chosen per capture by Panorama
+        # Depth Calibration -- see TERRAIN_GRID_SIZE_M); the two maps must agree.
+        params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        grid_m = float(params.get("grid_size_meters") or context.input_object(ContextKey.TERRAIN_GRID_SIZE_M) or cfg.grid_size_meters)
+        self._grid_size_m = grid_m
 
         task = self.create_progress(6, "Region Map…")
 
@@ -357,7 +495,7 @@ class RegionMapStage(PipelineStage):
             # (already computed by this point in the pipeline) with the unrestricted
             # Panorama.project_3d instead.
             _, _, X_grid, Z_grid = grid_cell_panorama_uv(
-                cfg.grid_size_meters, cfg.grid_resolution, camera_height,
+                grid_m, cfg.grid_resolution, camera_height,
                 panorama_source_rgb.shape[0], panorama_source_rgb.shape[1],
             )
             height_map_depth = context.input_depth(ContextKey.HEIGHT_MAP)
@@ -406,7 +544,7 @@ class RegionMapStage(PipelineStage):
         region_map, certainty_array = RegionMapGenerator.generate(
             panorama_depth=panorama_depth,
             type_idx_map=type_idx_map,
-            grid_size_meters=cfg.grid_size_meters,
+            grid_size_meters=grid_m,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
             camera_height_meters=camera_height,
@@ -424,6 +562,17 @@ class RegionMapStage(PipelineStage):
                 context, region_map, cell_elevation, cfg)
             if river_channel is not None and cell_elevation is not None:
                 context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
+        ocean_cols = None
+        if cfg.open_water_prior and river_channel is None:
+            region_map, cell_elevation, ocean_cols = self._open_water_prior(
+                context, region_map, cell_elevation, type_idx_map, panorama_depth, camera_height, cfg)
+            if ocean_cols is not None and cell_elevation is not None:
+                context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
+        if ocean_cols is not None:
+            context.add_object(ContextKey.OCEAN_COLUMNS, {
+                "width": int(type_idx_map.shape[1]),
+                "columns": [int(c) for c in np.flatnonzero(ocean_cols)],
+            })
         context.add_depth(output_key, region_map.astype(np.float32))
         context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 
@@ -461,7 +610,7 @@ class RegionMapStage(PipelineStage):
             water_idx=water_idx,
             terrain_idx=terrain_idx,
             min_terrain_silhouette_frac=cfg.min_terrain_silhouette_frac,
-            grid_size_meters=cfg.grid_size_meters,
+            grid_size_meters=grid_m,
             grid_resolution=cfg.grid_resolution,
             panorama_depth=panorama_depth,
             prominence_min_m=cfg.ridge_prominence_min_m,
@@ -545,7 +694,7 @@ class RegionMapStage(PipelineStage):
             panorama_depth=panorama_depth,
             sky_idx=sky_idx,
             panorama_rgb=panorama_rgb,
-            grid_size_meters=cfg.grid_size_meters,
+            grid_size_meters=grid_m,
             grid_resolution=cfg.grid_resolution,
             max_range_factor=cfg.interior_peak_max_range_factor,
             min_depth_m=cfg.interior_peak_min_depth_m,
@@ -600,7 +749,7 @@ class RegionMapStage(PipelineStage):
             type_idx_map=type_idx_map,
             panorama_depth=panorama_depth,
             water_idx=int(RegionType.WATER),
-            grid_size_meters=cfg.grid_size_meters,
+            grid_size_meters=grid_m,
             grid_resolution=cfg.grid_resolution,
             ground_y_max=cfg.ground_y_max,
             camera_height_meters=camera_height,

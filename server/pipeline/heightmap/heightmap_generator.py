@@ -57,6 +57,19 @@ class HeightMapGenerator:
         despike_dense_min_real_support: float = 0.6,
         pinnacle_threshold_m: float = 1.0,
         pinnacle_window: int = 31,
+        wall_relief_m: float = 4.0,
+        wall_rock_fraction: float = 0.5,
+        wall_min_distance_m: float = 10.0,
+        wall_shoulder_factor: float = 2.0,
+        wall_shoulder_min_m: float = 6.0,
+        wall_shoulder_max_m: float = 30.0,
+        wall_bin_m: float = 2.0,
+        densify_radius_m: float = 0.6,
+        densify_min_samples: int = 3,
+        densify_min_distance_m: float = 20.0,
+        densify_far_fraction: float = 0.5,
+        wall_far_fraction: float = 0.33,
+        far_start_m: Optional[float] = None,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         debug_dir: Optional[Path] = None,
@@ -377,11 +390,12 @@ class HeightMapGenerator:
             # samples in the same cell.
             cell_relief = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
 
-            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg, any_forward_mask = (
+            dense_mask, fwd_mean_y, fwd_relief, fwd_slope_deg, any_forward_mask, fwd_crest, fwd_raw_relief, fwd_coarse_mean, fwd_rock_frac = (
                 HeightMapGenerator._forward_project_cell_stats(
                     d, sky_mask, region_type_mask, grid_size_meters, grid_resolution,
                     ground_y_max, ground_y_min, nadir_exclusion_radius, min_forward_samples,
                     region_closing_iterations, outlier_threshold_m=despike_threshold_m,
+                    coarse_bin_cells=max(1, int(round(wall_bin_m / (grid_size_meters / grid_resolution)))),
                 )
             )
             if dense_mask.any():
@@ -426,6 +440,57 @@ class HeightMapGenerator:
                 height_map[use_weak] = fwd_mean_y[use_weak]
                 cell_relief[use_weak] = fwd_relief[use_weak]
 
+            # The depth is trusted for stand-up detail only well inside its far
+            # start: Mount Rainier's far start is 80 m and the mountain -- really
+            # kilometres away -- is compressed into 30-80 m, where keeping its
+            # sparse samples raised a snow-textured slab across the meadow. Shark
+            # Fin (far start 1152 m) and Paris (371 m) keep their whole grid.
+            far_known = float(far_start_m) if far_start_m else (float(far_exclusion_radius) if far_exclusion_radius else half * 2.0)
+            densify_limit = min(half, densify_far_fraction * far_known) if densify_far_fraction > 0 else half
+            wall_limit = min(half, wall_far_fraction * far_known) if wall_far_fraction > 0 else half
+            # The wall rule stays inside the depth's trusted radius whatever the
+            # far start: let out to 200 m on Shark Fin it raised 176k shoulder
+            # cells and boxed the sea stack into a flat-topped block with needle
+            # spikes nearer in. The 45 m ceiling is where the viewer's own cliff
+            # edge lives; distant cliffs are left to the depth as it is.
+            if far_exclusion_radius:
+                wall_limit = min(wall_limit, float(far_exclusion_radius))
+            # Densify the far field. Beyond ~20 m one panorama pixel covers several
+            # cells (at 80 m a sample every 240 cm2 against 24 cm2 cells), so real
+            # forward-projected samples sit one cell in ten, each surrounded by the
+            # single-ray flat-ground guess, and the component test below -- 8-
+            # connectivity on cells -- never joins them: every far slope was
+            # discarded as a scatter of one-cell components and refilled from the
+            # flat-plane lookup (Shark Fin's headlands at 80-100 m, 2-17 m above the
+            # camera in the panorama, came out at sea level; Rainier's slopes needed
+            # the ridge chains to exist at all). Each cell within densify_radius_m
+            # of at least densify_min_samples real samples takes their mean instead
+            # of the flat-ground guess; those cells count as observed. Near the
+            # camera the samples are dense and the flat-ground single ray is close
+            # to right, so nothing changes inside densify_min_distance_m.
+            densified_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+            if densify_radius_m > 0 and any_forward_mask.any():
+                cell_m_d = grid_size_meters / grid_resolution
+                k = max(3, int(round(densify_radius_m / cell_m_d)) | 1)
+                w_f = any_forward_mask.astype(np.float32)
+                num = uniform_filter(np.where(any_forward_mask, height_map, 0.0).astype(np.float32), size=k, mode="constant")
+                den = uniform_filter(w_f, size=k, mode="constant")
+                cnt = den * float(k * k)
+                densified_mask = (
+                    ~any_forward_mask & (cnt >= float(densify_min_samples) - 0.5)
+                    & (r_grid > densify_min_distance_m)
+                    & (r_grid < densify_limit)
+                )
+                if densified_mask.any():
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        local = num / np.maximum(den, 1e-9)
+                    height_map[densified_mask] = local[densified_mask]
+                    cell_relief[densified_mask] = 0.0
+                    cell_slope_deg[densified_mask] = 0.0
+                    HeightMapGenerator._last_densify_report = (
+                        int(densified_mask.sum()), int(any_forward_mask.sum()), k * cell_m_d,
+                    )
+
             if despike_threshold_m > 0:
                 # dense_mask/any_forward_mask cells are candidates too, not just the
                 # single-ray fallback: on this pipeline's own captures, forward-
@@ -441,7 +506,7 @@ class HeightMapGenerator:
                 # with mostly empty/interpolated neighbours) must not get flattened
                 # back toward a mostly-synthetic local median. See _despike_cells.
                 height_map, spike_mask = HeightMapGenerator._despike_cells(
-                    height_map, strict_mask=dense_mask | any_forward_mask,
+                    height_map, strict_mask=dense_mask | any_forward_mask | densified_mask,
                     threshold_m=despike_threshold_m, window=despike_window,
                     distance_m=sampled_depth, reference_distance_m=despike_reference_distance_m,
                     strict_threshold_scale=despike_dense_threshold_scale,
@@ -471,7 +536,97 @@ class HeightMapGenerator:
                             debug_dir / "heightmap_despiked_cells.png"
                         )
 
+            # Walls: a cliff face seen side-on. Every filter above is written for
+            # a surface the viewer could walk on, and a vertical face fails all of
+            # them -- its samples span metres inside one cell (the within-cell
+            # outlier test keeps a 0.3 m slice of them), the slice disagrees with
+            # its neighbours (despike), the surviving crest is one or two cells
+            # wide (pinnacle), and the walkability test below severs it. Shark
+            # Fin's headlands measured 9-21 m above the camera in the panorama and
+            # came out at sea level in every map. A cell whose RAW forward samples
+            # span wall_relief_m or more, nearer than the depth's reliable range,
+            # takes the top of that span as its height: the terrain surface at a
+            # cliff's (x, z) is its crest, the face hangs below it. The land behind
+            # a crest is not lower than the crest (that is what makes it a cliff),
+            # so a shoulder of wall_shoulder_factor x the relief (clamped to
+            # wall_shoulder_min_m..wall_shoulder_max_m) along the ray away from
+            # the camera is raised to the crest too; both are kept through the
+            # component test and the blur as the measured geometry they are.
+            wall_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+            if wall_relief_m > 0 and any_forward_mask.any():
+                cell_m_w = grid_size_meters / grid_resolution
+                reliable = wall_limit
+                wall = (
+                    any_forward_mask
+                    & (fwd_raw_relief >= wall_relief_m)
+                    & (r_grid >= wall_min_distance_m) & (r_grid <= reliable)
+                    & np.isfinite(height_map)
+                    & (fwd_crest > height_map + 0.5 * wall_relief_m)
+                    & (fwd_rock_frac >= wall_rock_fraction)
+                )
+                if wall.any():
+                    zi_w, xi_w = np.nonzero(wall)
+                    cx = (xi_w + 0.5) * cell_m_w - half
+                    cz = (zi_w + 0.5) * cell_m_w - half
+                    rr = np.hypot(cx, cz).clip(1e-6)
+                    ux, uz = cx / rr, cz / rr
+                    relief_w = fwd_raw_relief[zi_w, xi_w].astype(np.float64)
+                    crest_w = fwd_crest[zi_w, xi_w].astype(np.float64)
+                    # Only a face that FACES the camera has land at crest height
+                    # behind it. The viewer's own cliff edge is a wall too (Shark
+                    # Fin: the drop from the clifftop to the beach at 16-45 m),
+                    # and behind that one lies the beach. The sign of the coarse
+                    # mean height along the ray tells them apart: rising away
+                    # from the camera is a face seen from across.
+                    def _coarse_at(dist_m):
+                        px_ = cx + ux * dist_m
+                        pz_ = cz + uz * dist_m
+                        xi_ = np.clip(np.floor((px_ + half) / cell_m_w).astype(np.int64), 0, grid_resolution - 1)
+                        zi_ = np.clip(np.floor((pz_ + half) / cell_m_w).astype(np.int64), 0, grid_resolution - 1)
+                        v = fwd_coarse_mean[zi_, xi_]
+                        return np.where(np.isfinite(v) & (v != 0.0), v, np.nan)
+                    near_y, far_y = _coarse_at(-wall_bin_m), _coarse_at(wall_bin_m)
+                    facing = np.isfinite(near_y) & np.isfinite(far_y) & (far_y > near_y + 0.25 * relief_w)
+                    reach = np.where(facing, np.clip(wall_shoulder_factor * relief_w, wall_shoulder_min_m, wall_shoulder_max_m), 0.0)
+                    step = 2.0 * cell_m_w
+                    K = max(1, int(np.ceil(float(reach.max()) / step)))
+                    steps = (np.arange(1, K + 1) * step)
+                    canvas = np.full((grid_resolution, grid_resolution), -np.inf, dtype=np.float64)
+                    # Chunked so a large wall does not materialise K x N points at once.
+                    chunk = max(1, 4_000_000 // max(K, 1))
+                    for a in range(0, len(zi_w), chunk):
+                        b = a + chunk
+                        px = cx[a:b, None] + ux[a:b, None] * steps[None, :]
+                        pz = cz[a:b, None] + uz[a:b, None] * steps[None, :]
+                        ok = steps[None, :] <= reach[a:b, None]
+                        xi_s = np.floor((px + half) / cell_m_w).astype(np.int64)
+                        zi_s = np.floor((pz + half) / cell_m_w).astype(np.int64)
+                        ok &= (xi_s >= 0) & (xi_s < grid_resolution) & (zi_s >= 0) & (zi_s < grid_resolution)
+                        cr = np.broadcast_to(crest_w[a:b, None], px.shape)
+                        np.maximum.at(canvas, (zi_s[ok], xi_s[ok]), cr[ok])
+                    shoulder = np.isfinite(canvas) & ~wall & (
+                        np.isnan(height_map) | (height_map < canvas)
+                    )
+                    height_map[wall] = fwd_crest[wall]
+                    cell_relief[wall] = fwd_raw_relief[wall]
+                    height_map[shoulder] = canvas[shoulder].astype(np.float32)
+                    cell_relief[shoulder] = 0.0
+                    cell_slope_deg[shoulder] = 0.0
+                    wall_mask = wall | shoulder
+                    if debug_dir is not None:
+                        PIL.Image.fromarray((wall_mask * 255).astype(np.uint8), "L").save(
+                            debug_dir / "heightmap_wall_cells.png"
+                        )
+                    HeightMapGenerator._last_wall_report = (
+                        int(wall.sum()), int(shoulder.sum()), int(facing.sum()),
+                        float(np.percentile(relief_w, 50)), float(np.percentile(relief_w, 90)),
+                        float(np.percentile(crest_w, 50)), float(np.percentile(crest_w, 90)),
+                        float(rr.min()), float(rr.max()),
+                    )
+
         else:
+            wall_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
+            densified_mask = np.zeros((grid_resolution, grid_resolution), dtype=bool)
             if sky_mask is not None and sky_mask.shape == d.shape:
                 d = d.copy()
                 d[sky_mask] = np.nan
@@ -551,6 +706,17 @@ class HeightMapGenerator:
                 height_map, flood_fill_max_step, min_component_area_fraction, label_smooth_sigma
             )
             accepted = component_id > 0
+            if wall_mask.any() or densified_mask.any():
+                # A crest and its shoulder are measured geometry (see the wall
+                # rule above): the step at their edge is what the walkability test
+                # exists to find, and it must not cost them their heights. They
+                # join the component beside them -- the plateau behind a wall when
+                # it qualified on its own, else the largest neighbour.
+                orphan = (wall_mask | densified_mask) & ~accepted & np.isfinite(height_map)
+                if orphan.any():
+                    near_id = maximum_filter(component_id, size=7)
+                    component_id[orphan] = np.where(near_id[orphan] > 0, near_id[orphan], 1)
+                    accepted = component_id > 0
             height_map[~accepted] = np.nan
             cell_relief[~accepted] = 0.0
             cell_slope_deg[~accepted] = 0.0
@@ -712,6 +878,9 @@ class HeightMapGenerator:
         # node the harmonic solve can shape from real neighbours and ridge-chain
         # anchors instead.
         if use_equirectangular and far_exclusion_radius is not None and far_exclusion_radius > 0:
+            # Densified cells are not exempt: beyond the far start the depth they
+            # average is the saturated band (Rainier's mountain folded into the
+            # last 20 m of the grid), and the ridge chains shape that, not a pin.
             far_exclusion_mask = (_r_cell > far_exclusion_radius) & ~any_forward_mask
             true_observed[far_exclusion_mask] = False
 
@@ -776,7 +945,7 @@ class HeightMapGenerator:
             blurred = gaussian_filter(
                 np.where(observed, height_map, 0.0), sigma=single_sample_blur_sigma
             )
-            blur_weight = np.where(observed & ~dense_mask & ~any_forward_mask, 1.0 - certainty, 0.0)
+            blur_weight = np.where(observed & ~dense_mask & ~any_forward_mask & ~wall_mask & ~densified_mask, 1.0 - certainty, 0.0)
             height_map = np.where(
                 observed, height_map * (1.0 - blur_weight) + blurred * blur_weight, height_map
             ).astype(np.float32)
@@ -906,7 +1075,8 @@ class HeightMapGenerator:
         min_samples: int,
         region_closing_iterations: int = 2,
         outlier_threshold_m: float = 0.0,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        coarse_bin_cells: int = 40,
+    ) -> tuple[np.ndarray, ...]:
         """
         Forward-project every panorama pixel (rather than one inverse-mapped ray per
         output cell) and compute real per-cell statistics wherever any independent
@@ -972,7 +1142,7 @@ class HeightMapGenerator:
                        dense_mask (but keeps its filtered mean_y via any_mask).
                        0 disables (matches prior behaviour exactly).
 
-        Returns (dense_mask, mean_y, relief, slope_deg, any_mask), all
+        Returns (dense_mask, mean_y, relief, slope_deg, any_mask, crest, raw_relief, coarse_mean), all
         (grid_resolution, grid_resolution) except any_mask/dense_mask which are
         bool. any_mask marks every cell with >= 1 forward-projected sample;
         dense_mask (a subset) marks cells with >= min_samples (post outlier-
@@ -986,6 +1156,10 @@ class HeightMapGenerator:
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
             np.zeros((grid_resolution, grid_resolution), dtype=bool),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
+            np.zeros((grid_resolution, grid_resolution), dtype=np.float32),
         )
 
         d_masked = d.copy()
@@ -1012,6 +1186,19 @@ class HeightMapGenerator:
         else:
             valid &= Y <= ground_y_max
 
+        # Each sample's panorama type, for the wall rule: a face of ROCK
+        # (RegionType.TERRAIN) is a cliff; the same relief in a tree canopy
+        # (Mount Rainier's forest at 30 m read as 4.7 m "walls") is not.
+        if region_type_mask is not None:
+            from scipy.ndimage import zoom as _zoom
+            from pipeline.panorama_segmentation.panorama_region_result import RegionType as _RT
+            tm = np.asarray(region_type_mask)
+            if tm.shape != d.shape:
+                tm = _zoom(tm, (d.shape[0] / tm.shape[0], d.shape[1] / tm.shape[1]), order=0)
+            rock_full = np.rint(tm).astype(np.int32) == int(_RT.TERRAIN)
+            Rg = rock_full[valid].astype(np.float64)
+        else:
+            Rg = np.ones(int(valid.sum()), dtype=np.float64)
         Xg, Yg, Zg = X[valid], Y[valid], Z[valid]
         if len(Xg) == 0:
             return empty
@@ -1022,13 +1209,51 @@ class HeightMapGenerator:
         zi = np.digitize(Zg, z_edges) - 1
         in_bounds = (xi >= 0) & (xi < grid_resolution) & (zi >= 0) & (zi < grid_resolution)
         xi, zi = xi[in_bounds], zi[in_bounds]
-        Xg, Yg, Zg = Xg[in_bounds], Yg[in_bounds], Zg[in_bounds]
+        Xg, Yg, Zg, Rg = Xg[in_bounds], Yg[in_bounds], Zg[in_bounds], Rg[in_bounds]
         if len(Xg) == 0:
             return empty
 
         lin = zi.astype(np.int64) * grid_resolution + xi.astype(np.int64)
         uniq_lin, inverse, counts = np.unique(lin, return_inverse=True, return_counts=True)
         n = counts.astype(np.float64)
+
+        # The raw span of every sample in a COARSE bin (coarse_bin_cells fine
+        # cells a side, ~2 m), before the outlier rejection below trims anything:
+        # the crest (top) and relief of a vertical face, which the trimmed
+        # per-cell statistics cannot see. A face 90 m out lands its rows across a
+        # few metres of cells (one panorama column is three cells wide there and
+        # the depth jitters by metres), so no single 5 cm cell holds the span --
+        # a 2 m bin does. Each fine cell inherits its bin's crest and relief. See
+        # the wall rule in generate().
+        f = max(1, int(coarse_bin_cells))
+        cres = (grid_resolution + f - 1) // f
+        coarse_lin = (zi // f).astype(np.int64) * cres + (xi // f).astype(np.int64)
+        uniq_c, inv_c = np.unique(coarse_lin, return_inverse=True)
+        c_max = np.full(len(uniq_c), -np.inf)
+        c_min = np.full(len(uniq_c), np.inf)
+        np.maximum.at(c_max, inv_c, Yg)
+        np.minimum.at(c_min, inv_c, Yg)
+        c_sum = np.zeros(len(uniq_c)); np.add.at(c_sum, inv_c, Yg.astype(np.float64))
+        c_mean = c_sum / np.maximum(np.bincount(inv_c, minlength=len(uniq_c)), 1)
+        zi_u = (uniq_lin // grid_resolution).astype(np.int64)
+        xi_u = (uniq_lin % grid_resolution).astype(np.int64)
+        parent = np.searchsorted(uniq_c, (zi_u // f) * cres + (xi_u // f))
+        raw_max_y = c_max[parent]
+        raw_min_y = c_min[parent]
+        # The coarse mean on the full grid (every fine cell of a populated bin),
+        # for the wall rule's facing test.
+        coarse_mean_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        cz_u = (uniq_c // cres).astype(np.int64)
+        cx_u = (uniq_c % cres).astype(np.int64)
+        small = np.zeros((cres, cres), dtype=np.float32)
+        small[cz_u, cx_u] = c_mean.astype(np.float32)
+        coarse_mean_grid[:] = np.repeat(np.repeat(small, f, axis=0), f, axis=1)[:grid_resolution, :grid_resolution]
+        # Fraction of each coarse bin's samples that are rock, on the full grid.
+        c_cnt = np.maximum(np.bincount(inv_c, minlength=len(uniq_c)), 1)
+        c_rock = np.bincount(inv_c, weights=Rg, minlength=len(uniq_c)) / c_cnt
+        small_r = np.zeros((cres, cres), dtype=np.float32)
+        small_r[cz_u, cx_u] = c_rock.astype(np.float32)
+        coarse_rock_grid = np.repeat(np.repeat(small_r, f, axis=0), f, axis=1)[:grid_resolution, :grid_resolution].copy()
 
         def scatter_sum(vals: np.ndarray) -> np.ndarray:
             out = np.zeros(len(uniq_lin), dtype=np.float64)
@@ -1126,6 +1351,10 @@ class HeightMapGenerator:
         any_mask[zi_all, xi_all] = True
         mean_y_grid[zi_all, xi_all] = mean_y.astype(np.float32)
         relief_grid[zi_all, xi_all] = relief_1d.astype(np.float32)
+        crest_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        raw_relief_grid = np.zeros((grid_resolution, grid_resolution), dtype=np.float32)
+        crest_grid[zi_all, xi_all] = raw_max_y.astype(np.float32)
+        raw_relief_grid[zi_all, xi_all] = (raw_max_y - raw_min_y).astype(np.float32)
 
         d_lin = uniq_lin[dense_idx]
         zi_d = (d_lin // grid_resolution).astype(np.int64)
@@ -1134,7 +1363,7 @@ class HeightMapGenerator:
         dense_mask[zi_d, xi_d] = True
         slope_grid[zi_d, xi_d] = slope_1d[dense_idx].astype(np.float32)
 
-        return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask
+        return dense_mask, mean_y_grid, relief_grid, slope_grid, any_mask, crest_grid, raw_relief_grid, coarse_mean_grid, coarse_rock_grid
 
     @staticmethod
     def _flatten_pinnacles(height_map: np.ndarray, threshold_m: float, window: int) -> tuple[np.ndarray, np.ndarray]:

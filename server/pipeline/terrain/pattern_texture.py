@@ -619,6 +619,14 @@ def bake_projected_colour(
         RegionType.ROAD, RegionType.TRAIL, RegionType.WATER,
     )])
     valid = surface
+    # Water colour belongs to water texels only. A bank texel whose projection
+    # lands a pixel or two into the river (the banks are a few cells wide at the
+    # resolution the depth draws them) took the Seine's teal into the macro map,
+    # and the macro tints every tiled layer: Paris's quays came out water-coloured.
+    if region_map is not None:
+        rh0, rw0 = region_map.shape
+        region0 = np.rint(_zoom(region_map.astype(np.float32), (S / rh0, S / rw0), order=0)).astype(np.int32)
+        valid &= ~((shown == int(RegionType.WATER)) & (region0 != int(RegionType.WATER)))
     # A meadow is upright too: a 0.5 m plant at 20 m from a 1 m camera smears
     # plant_height * d / camera_height = 10 m along its ray, so beyond
     # near_vegetation_m the meadow's pixels are not a sound projection either

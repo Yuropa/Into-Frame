@@ -20,6 +20,7 @@ from pipeline.scene_generation.projection import (
     unproject_bbox,
     unproject_bbox_equirect,
     class_height_range,
+    class_typical_height,
 )
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
 from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
@@ -66,6 +67,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         water_draft_fraction: float = 0.15,
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
+        skip_far_objects: bool = True,
         far_landmark_classes: list[str] | None = None,
         landmark_distance_fraction: float = 0.75,
         borrow_mesh_classes: list[str] | None = None,
@@ -115,6 +117,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # fractions are Unity's screenRelativeTransitionHeight: the level is shown
         # while the instance fills at least that fraction of the screen height, and
         # the last one's value is the cull threshold (0 = never culled).
+        self.skip_far_objects = bool(skip_far_objects)
         self.runtime_lods = bool(runtime_lods)
         # Classes whose card stands in for their reconstruction whenever both
         # exist: a wildflower's card is its reference view at full resolution,
@@ -539,7 +542,15 @@ def mesh_instance_scale(
     scale = float(height) / extent_y
     if by_length and max(extent_x, extent_z) > extent_y:
         scale = float(max(width, height)) / max(extent_x, extent_z)
-    size_limit = float(max_size_m) if max_size_m else _MAX_OBJECT_SIZE_M
+    # The backstop is relative to the detection as well: a mesh scaled to its
+    # instance's own height cannot legitimately render much larger than the box
+    # it was scaled to, but it may well render larger than 25 m when the box is
+    # (Shark Fin's sea stack is a 21 m detection whose SAM3D mesh is wider than
+    # tall: scaled to height it renders 25.2 m across on one run and just under
+    # 25 on the next, and the flat limit turned the stack into a billboard on the
+    # unlucky runs). 1.5 x the box allows a squat rock; the Rainier sheet -- a 3 m
+    # detection rendering 47 m -- is still caught by the 25 m floor.
+    size_limit = float(max_size_m) if max_size_m else max(_MAX_OBJECT_SIZE_M, 1.5 * float(max(width, height)))
 
     # Backstop on the RENDERED size. _MAX_OBJECT_SIZE_M above culls on the detected
     # box, which is the wrong quantity for this failure and always passes it: the
@@ -924,6 +935,8 @@ class SceneGenerationStage(PipelineStage):
             # Cone policy from the detection stages (see hires_crops.is_photographed).
             fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
             unphotographed_skipped = 0
+            far_skipped = 0
+            far_start_m = float(context.input_object(ContextKey.FAR_FIELD_START_M) or 0.0)
 
             # Which visual variants each class actually has, taken from the pool
             # keys Panorama Asset Generation just wrote ("{class}::{bucket}").
@@ -1249,6 +1262,23 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
                     position, width, height = result
+
+                    # A far object the depth brought near (see CLASS_TYPICAL_HEIGHT_M):
+                    # at its angular height it would have to stand beyond the
+                    # far-field start to be a typical one of its class. The far
+                    # backdrop shows it already; a 3-D copy is a knee-high tree.
+                    typical = class_typical_height(cls) if self.config.skip_far_objects else None
+                    if typical and far_start_m > 0.0 and height > 1e-6:
+                        r_here = float(np.hypot(position[0] - camera_position[0], position[2] - camera_position[2]))
+                        r_typical = typical * r_here / float(height)
+                        if r_typical > far_start_m:
+                            far_skipped += 1
+                            self.log_info(
+                                f"Skipping object {idx} ({cls}): {height:.1f} m tall at {r_here:.0f} m would be a "
+                                f"{typical:.0f} m one at {r_typical:.0f} m, beyond the far-field start {far_start_m:.0f} m"
+                            )
+                            self.advance_progress(generation_task)
+                            continue
 
                 max_dim = max(width, height)
                 if max_dim > _MAX_OBJECT_SIZE_M and cls not in self.config.far_landmark_classes:
@@ -1850,6 +1880,11 @@ class SceneGenerationStage(PipelineStage):
                 self.log_info(
                     f"Captured-cone policy: skipped {unphotographed_skipped} detection(s) "
                     f"from the outpainted part of the panorama"
+                )
+            if far_skipped:
+                self.log_info(
+                    f"Far objects: {far_skipped} detection(s) left to the far backdrop -- at their angular size "
+                    f"a typical one of their class would stand beyond the far-field start {far_start_m:.0f} m"
                 )
 
             if rejected_rigid:

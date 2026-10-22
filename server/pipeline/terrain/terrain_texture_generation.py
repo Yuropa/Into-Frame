@@ -112,7 +112,11 @@ _NEAR_GROUND_SURFACES: dict[RegionType, str] = {
         "fine and continuous"
     ),
     RegionType.GROUND: (
-        "bare earth, fine dry soil and grit with small pebbles, even and continuous"
+        # "small pebbles" came back as a riverbed of fist-sized rounded stones with
+        # surf breaking across it on the Shark Fin capture, whose caption says
+        # ocean; the ground is asked for as fine and dry, stones embedded and sparse.
+        "bare earth, fine dry soil and grit with a sparse scatter of small embedded stones, "
+        "matte and dusty, even and continuous"
     ),
     RegionType.TERRAIN: (
         "stony mountain ground, fine gravel and grit with low cushion plants, even and continuous"
@@ -242,6 +246,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         wrap_seam_band_px: int = 512,
         # 200 m terrain / 4 m per tile = 50 repeats → ~4 cm/texel at 1024 px
         synthetic_tile_factor: float = 50.0,
+        synthetic_tile_world_m: float = 4.0,
         use_photo_reference: bool = True,
         # Flatten each reference patch (_extract_reference_patches) from its own real
         # depth points (Panorama.unwarp_box) instead of a plain perspective reprojection
@@ -499,7 +504,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # odd tile factor the shader already repeats it every plate width, so a
         # seamless plate can carry the ground beyond its disc too. 0 disables.
         near_seam_band: float = 0.2,
-        near_seam_strength: float = 0.45,
+        near_seam_strength: float = 0.65,
         # Replace the start image within this radius of the camera by the ring
         # just outside it: straight down is the panorama's outpainted nadir, a
         # grey blob the repaint turns into a boulder under the player's feet.
@@ -590,6 +595,12 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # UV tiling factor for synthetic region tiles (panorama layer always uses 1.0).
         # At 50× over a 200 m grid one tile covers 4 m → ~0.4 cm/texel at 1024 px.
         self.synthetic_tile_factor = synthetic_tile_factor
+        # Metres one synthetic tile covers on the ground. The repeat count is the
+        # grid's size over this, so a 400 m grid (Paris, Shark Fin -- see Panorama
+        # Depth Calibration's adaptive_grid) tiles at the same ground scale as a
+        # 200 m one instead of stretching every tile twofold. 0 falls back to the
+        # fixed synthetic_tile_factor.
+        self.synthetic_tile_world_m = float(synthetic_tile_world_m)
         self.use_photo_reference = use_photo_reference
         self.use_point_cloud_unwarp = use_point_cloud_unwarp
         self.describe_material = describe_material
@@ -1079,6 +1090,19 @@ class TerrainTextureGenerationStage(PipelineStage):
         if panorama_terrain is not None and height_map_depth is not None:
             grid_size = (height_map_params.get("grid_size_meters") if height_map_params else None) or 100.0
             half = grid_size / 2.0
+            if cfg.synthetic_tile_world_m > 0:
+                synth_factor = float(grid_size) / cfg.synthetic_tile_world_m
+                tile_factors = {
+                    k: (synth_factor if abs(float(v) - cfg.synthetic_tile_factor) < 1e-6 else v)
+                    for k, v in tile_factors.items()
+                }
+                if abs(synth_factor - cfg.synthetic_tile_factor) > 1e-6:
+                    self.log_info(
+                        f"Synthetic tiles repeat {synth_factor:.0f}x across the {grid_size:.0f} m grid "
+                        f"({cfg.synthetic_tile_world_m:.0f} m per tile), not the configured {cfg.synthetic_tile_factor:.0f}x"
+                    )
+            else:
+                synth_factor = cfg.synthetic_tile_factor
 
             pano_tile = self._panorama_tile(
                 panorama_terrain, cfg.panorama_layer_max_resolution,
@@ -1138,10 +1162,10 @@ class TerrainTextureGenerationStage(PipelineStage):
                 SplatLayer(
                     name=rt.label,
                     tile=tiles[rt.label],
-                    tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
+                    tile_factor=tile_factors.get(rt.label, synth_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
                     # A world-space bake (tile_factor 1) must not be re-offset.
-                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, cfg.synthetic_tile_factor) > 1.0,
+                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, synth_factor) > 1.0,
                 )
                 for rt in present_types if rt.label in tiles
             ]
@@ -1152,9 +1176,9 @@ class TerrainTextureGenerationStage(PipelineStage):
                 SplatLayer(
                     name=rt.label,
                     tile=tiles[rt.label],
-                    tile_factor=tile_factors.get(rt.label, cfg.synthetic_tile_factor),
+                    tile_factor=tile_factors.get(rt.label, synth_factor),
                     smoothness=_LAYER_SMOOTHNESS.get(rt, 0.1),
-                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, cfg.synthetic_tile_factor) > 1.0,
+                    stochastic=cfg.stochastic_tiling and tile_factors.get(rt.label, synth_factor) > 1.0,
                 )
                 for rt in present_types if rt.label in tiles
             ]
@@ -1387,7 +1411,12 @@ class TerrainTextureGenerationStage(PipelineStage):
         return (
             "flat overcast daylight: high-altitude aerial photograph straight down onto "
             + surface + ", evenly spread across the whole frame with no focal point and nothing in the "
-            "centre." + scene + " Diffuse even light, uniform exposure, photorealistic, sharp"
+            "centre." + scene
+            # A land plate must not pick up the sea the caption describes (Shark
+            # Fin's beach plate drew surf); a water plate is asked for the water.
+            + (" Dry ground only: no water, no waves, no foam, no shoreline in the frame."
+               if dominant != RegionType.WATER else " Still water seen from above: no boats, no shore in the frame.")
+            + " Diffuse even light, uniform exposure, photorealistic, sharp"
         )
 
     def _macro_map(

@@ -536,8 +536,18 @@ stages:
                                 # at 53 m of a 55 m maximum), so "far" is the saturated band, not a
                                 # distance. Read by Terrain Reconstruction (ridges kept out of the
                                 # grid) and Far Field Backdrop (stood up behind it).
-    max_depth_m: 100.0          # hard ceiling on the farthest calibrated depth -- must match
-                                 # Height Map's grid_size_meters / 2 below, since nothing farther
+    # The terrain grid's half-size, and with it the depth ceiling below, is chosen
+    # per capture from the far-field start: clamped to grid_half_min_m..grid_half_max_m
+    # and rounded up to grid_step_m. Paris (far start 371 m) and Shark Fin (1152 m)
+    # get a 400 m grid that holds the far bank and the headlands as terrain; Rainier
+    # (80 m) keeps 200 m so its saturated mountain stays on the far-field shell.
+    # Written as TERRAIN_GRID_SIZE_M; false restores the fixed grid_size_meters.
+    adaptive_grid: true
+    grid_half_min_m: 100.0
+    grid_half_max_m: 200.0
+    grid_step_m: 50.0
+    max_depth_m: 100.0          # hard ceiling on the farthest calibrated depth when adaptive_grid is
+                                 # off -- must match Height Map's grid_size_meters / 2 below, since nothing farther
                                  # can ever land inside that grid anyway. Enforced by compressing
                                  # only the FAR end of the range (see _compress_far_range): identity
                                  # below 0.6 * max_depth_m, then a bounded exponential approach to
@@ -561,7 +571,9 @@ stages:
     keys:
       depth: panorama_depth
       intrinsics: intrinsics
-    grid_size_meters: 200.0      # side length of the output grid in metres
+    grid_size_meters: 200.0      # side length of the output grid in metres when Panorama Depth
+                                 # Calibration's adaptive_grid is off (it otherwise writes 200-400 m
+                                 # per capture as TERRAIN_GRID_SIZE_M, which this stage follows)
     grid_resolution: 4096        # grid cells per side → ~4.9 cm/cell over 200 m
     ground_y_max: -0.5           # Y threshold (camera space): points ≤ this are ground candidates
     use_equirectangular: true    # depth is from equirectangular panorama, not pinhole
@@ -660,6 +672,40 @@ stages:
     despike_dense_min_real_support: 0.6 # minimum fraction (0-1) of real (non-interpolated)
     pinnacle_threshold_m: 1.0   # measured features narrower than pinnacle_window cells and taller than
     pinnacle_window: 31         # this are lowered to their surroundings (tree bases pinned as rock at 10-20 m)
+    # Cliff faces seen side-on. A cell whose raw forward samples span wall_relief_m
+    # (a headland's face, a sea stack) takes its crest as its height, and the land
+    # behind it for 2 x the relief (6-30 m) is raised to the crest: the face hangs
+    # below the terrain surface, it is not the surface. Applied only inside the
+    # depth's reliable range (the far-field start) and beyond wall_min_distance_m.
+    # Shark Fin: the headlands measured 9-21 m above the camera in the panorama and
+    # every map had them at sea level, because the outlier/despike/pinnacle/
+    # walkability filters above are each written for ground and each removes a
+    # vertical face. 0 disables.
+    wall_relief_m: 4.0          # raw sample span inside a wall_bin_m bin that makes it a wall
+    wall_rock_fraction: 0.5      # a wall must be mostly rock (TERRAIN) in the panorama: tree canopies have the relief but are not cliffs
+    wall_bin_m: 2.0             # the bin: a face 90 m out spreads its rows over metres of cells
+    wall_min_distance_m: 10.0
+    wall_shoulder_factor: 2.0
+    wall_shoulder_min_m: 6.0
+    wall_shoulder_max_m: 30.0
+    # Far samples are sparse (one cell in ten at 80 m); a cell within
+    # densify_radius_m of densify_min_samples real samples takes their mean
+    # instead of the flat-ground single-ray guess, beyond densify_min_distance_m.
+    # Without it every far slope fell apart into one-cell components and was
+    # refilled flat. 0 disables.
+    densify_radius_m: 0.6
+    densify_min_samples: 3
+    densify_min_distance_m: 20.0
+    densify_far_fraction: 0.5    # densify only inside this fraction of the far-field start (Rainier: the mountain compressed into 30-80 m is not terrain)
+    wall_far_fraction: 0.33      # walls only inside this fraction of the far-field start (and never past far_exclusion_radius)
+    # The viewer stands on something: with a photo-measured camera height the nadir
+    # is the plane the photographed people stand on (Shark Fin: the beach, 12.4 m
+    # down), so a pedestal at eye height is raised under the camera when the ground
+    # 7-10 m out is not water and lies over standing_min_drop_m below eye height.
+    standing_viewer_prior: true
+    viewer_eye_height_m: 1.7
+    standing_min_drop_m: 3.0
+    standing_pedestal_radius_m: 3.0
                                  # cells required in a dense_mask/any_forward_mask cell's own
                                  # despike_window before it can be flagged at all — protects a
                                  # real, sparsely-surrounded sample (e.g. an isolated distant
@@ -683,6 +729,15 @@ stages:
 
   - name: Region Map
     stage: RegionMapStage
+    # Water that meets the sky in the photograph is open water to the horizon:
+    # sea columns inside the cone are water from their shore to the grid's edge,
+    # the shore line is continued outside the cone and its sea side is water;
+    # land standing over open_water_bank_tolerance_m above the water plane stays.
+    # Shark Fin's cove came back from the outpainter as a lagoon ringed by sand.
+    open_water_prior: true
+    open_water_min_deg: 5.0
+    open_water_bank_tolerance_m: 1.5
+    open_water_extend_deg: 60.0   # how far past each edge of the photograph the shore is carried
     unphotographed_water_min_distance_m: 15.0  # outpainted water this close, outside the cone, is retyped
     # Look each grid cell up in the panorama along the ray to its REAL reconstructed
     # elevation (HEIGHT_MAP, computed by the previous stage) instead of assuming a
@@ -707,7 +762,8 @@ stages:
     # flat-plane bootstrap, so the elevation this reads is only as good as that.
     # false restores the flat-plane lookup.
     use_height_map_elevation: true
-    grid_size_meters: 200.0     # must match Height Map grid extent
+    grid_size_meters: 200.0     # must match Height Map grid extent (followed automatically when
+                                 # Panorama Depth Calibration chose the grid per capture)
     grid_resolution: 4096       # must match Height Map resolution
     ground_y_max: -0.5
     camera_height_meters: 1.0
@@ -1174,6 +1230,8 @@ stages:
     # 200 m terrain / 4 m per tile = 50 repeats → ~0.4 cm/texel at 1024 px
     # Adjust proportionally for different grid_size_meters: factor = grid_size / tile_world_size
     synthetic_tile_factor: 50.0
+    synthetic_tile_world_m: 4.0   # the repeat count is grid_size / this at run time, so a 400 m
+                                  # grid keeps 4 m tiles; 0 uses synthetic_tile_factor as is
     # Panorama layer coverage: viewing-latitude ramp (camera at world origin) that keeps
     # the real photo dominant across almost the whole terrain. Synthetic tiles only fill
     # the narrow nadir hole under the camera and a thin band right at the horizon, where
@@ -1218,7 +1276,7 @@ stages:
     near_layout_strength: 0.9   # the start's low frequencies put back under the generated detail
     near_guidance_scale: 2.5    # lower than the tiles' 3.5: less of FLUX.1-dev's dramatic drone look
     near_seam_band: 0.2         # repaint this fraction of the plate at its edges so it wraps (0: not tileable)
-    near_seam_strength: 0.45    # light repaint of the cross-faded edge band, to clean the ghosting
+    near_seam_strength: 0.65    # unused since the seam became a min-cut quilt (near_ground.make_seamless); kept for older configs
     near_candidates: 3          # paint this many and keep the one least arranged in rings around the camera
     near_nadir_fill_m: 2.0      # fill the start within this radius from around it (the nadir blob became a boulder)
     # Packed PBR detail per tiled layer: normal from the tile's micro-height (its
@@ -1606,6 +1664,9 @@ stages:
     # (n=332 needs somewhere between 25 and 50, since 25 iters finishes in 16.5s).
     max_iters: 100
     size_jitter: 0.15
+    size_band_sigma: 0.4        # painted instances take an exemplar seen at a similar distance
+                                # (log-normal kernel, ~1.5x at one sigma); 0 = any exemplar.
+                                # Rainier's meadow was 8 m firs copied from exemplars 95 m out.
     input_boundary_pad_factor: 1.5
     # synthesize_cli is handed n_points=-1, so the painted count is INFERRED from the
     # input-vs-output candidate density ratio and scales with the painted area -- over
@@ -2365,6 +2426,7 @@ stages:
     runtime_lods: true
     lod_mesh_screen_fraction: 0.06
     card_preferred_classes: [flower, tree]   # the card replaces the reconstruction whenever the group has one: a tree card is its reference view (needles, colour), the mesh a faceted dark cone
+    skip_far_objects: true       # a detection too small for its class at the depth's distance is a far object (Rainier's trees on the mountain flank): left to the backdrop
     lod_card_screen_fraction: 0.025
     lod_billboard_screen_fraction: 0.003
     lod_exempt_classes:

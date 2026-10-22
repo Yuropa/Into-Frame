@@ -45,6 +45,10 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         waterline_min_plane_m: float = 15.0,
         waterline_captured_only: bool = False,
         max_anchor_spread: float = 2.5,
+        adaptive_grid: bool = True,
+        grid_half_min_m: float = 100.0,
+        grid_half_max_m: float = 200.0,
+        grid_step_m: float = 50.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Number of quantile bins used to build the raw-prediction -> metric-depth lookup
@@ -83,6 +87,19 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # content ordered and distinguishable without touching the near field.
         # None disables (only the relative max_extrapolation_factor cap above applies).
         self.max_depth_m = max_depth_m
+        # The terrain grid's half-size follows the depth's reliable range. A fixed
+        # 100 m half left the far bank of the Seine (160 m) and Shark Fin's
+        # headlands (130-220 m) outside the terrain, to be faked by the far-field
+        # skirt; a fixed 200 m half would pull Rainier's saturated mountain (far
+        # start 80 m) into the grid as a hill. The half is the far-field start
+        # measured below, clamped to grid_half_min_m..grid_half_max_m and rounded
+        # up to grid_step_m, written as TERRAIN_GRID_SIZE_M for Height Map and
+        # Region Map, and it replaces max_depth_m as the compression ceiling (the
+        # two must agree: nothing deeper than the half can land in the grid).
+        self.adaptive_grid = bool(adaptive_grid)
+        self.grid_half_min_m = float(grid_half_min_m)
+        self.grid_half_max_m = float(grid_half_max_m)
+        self.grid_step_m = float(grid_step_m)
         # Where the far field begins, as a fraction of the deepest non-sky metric
         # depth. Neither depth model measures distance past a few tens of metres: on
         # the Rainier capture DA3 puts the summit at 53 m with a 55 m maximum and the
@@ -727,6 +744,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         if sky_mask is not None and np.asarray(sky_mask).shape == calibrated_arr.shape:
             non_sky = calibrated_arr[~np.asarray(sky_mask, dtype=bool)]
         finite = non_sky[np.isfinite(non_sky)]
+        far_start = 0.0
         if finite.size:
             # The saturation plateau is the top of the distribution, not a high
             # percentile of it: on Rainier the mountain is under 0.5 % of non-sky
@@ -741,8 +759,20 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 f"p99.5 {p995:.1f} m, saturation plateau {plateau:.0f} m — far field starts at "
                 f"{far_start:.1f} m ({cfg.far_fraction:.2f} x the plateau)"
             )
-        if cfg.max_depth_m is not None:
-            calibrated_arr = _compress_far_range(calibrated_arr, cfg.max_depth_m)
+        max_depth_m = cfg.max_depth_m
+        if cfg.adaptive_grid and finite.size:
+            step = max(cfg.grid_step_m, 1.0)
+            half = float(np.clip(far_start, cfg.grid_half_min_m, cfg.grid_half_max_m))
+            half = float(np.ceil(half / step - 1e-6) * step)
+            context.add_object(ContextKey.TERRAIN_GRID_SIZE_M, 2.0 * half)
+            max_depth_m = half
+            self.log_info(
+                f"Terrain grid: {2.0 * half:.0f} m across (half {half:.0f} m from the far-field start "
+                f"{far_start:.0f} m, clamped to {cfg.grid_half_min_m:.0f}-{cfg.grid_half_max_m:.0f} m); "
+                f"depth ceiling {max_depth_m:.0f} m"
+            )
+        if max_depth_m is not None:
+            calibrated_arr = _compress_far_range(calibrated_arr, max_depth_m)
         calibrated = Depth(calibrated_arr)
         if self.temp is not None:
             calibrated.save_debug_image(self.temp / "pano_depth_calibrated.png")
@@ -751,9 +781,9 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             f"Calibrated panorama depth {before_min:.1f} → {before_max:.1f} m (raw) "
             f"into {calibrated.min():.1f} → {calibrated.max():.1f} m (calibrated"
             + (
-                f", far range compressed above {0.6 * cfg.max_depth_m:.0f} m "
-                f"to fit {cfg.max_depth_m:.0f} m)"
-                if cfg.max_depth_m is not None else ")"
+                f", far range compressed above {0.6 * max_depth_m:.0f} m "
+                f"to fit {max_depth_m:.0f} m)"
+                if max_depth_m is not None else ")"
             )
         )
         context.add_depth(panorama_depth_key, calibrated)
@@ -766,12 +796,12 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             calibrated_object_arr = calibrated_object_arr * anchor_scale
             if waterline_scale is not None:
                 calibrated_object_arr = calibrated_object_arr * waterline_scale
-            if cfg.max_depth_m is not None:
+            if max_depth_m is not None:
                 # The identical curve PANORAMA_DEPTH got above -- it's a pure
                 # function of max_depth_m, so both maps place the same real-world
                 # point at the same distance without sharing any fitted state.
                 calibrated_object_arr = _compress_far_range(
-                    calibrated_object_arr, cfg.max_depth_m
+                    calibrated_object_arr, max_depth_m
                 )
             calibrated_object = Depth(calibrated_object_arr)
             if self.temp is not None:
@@ -780,8 +810,8 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 f"Calibrated panorama object depth {obj_before_min:.1f} → {obj_before_max:.1f} m (raw) "
                 f"into {calibrated_object.min():.1f} → {calibrated_object.max():.1f} m (calibrated"
                 + (
-                    f", far range compressed to fit {cfg.max_depth_m:.0f} m)"
-                    if cfg.max_depth_m is not None else ")"
+                    f", far range compressed to fit {max_depth_m:.0f} m)"
+                    if max_depth_m is not None else ")"
                 )
             )
             context.add_depth(ContextKey.PANORAMA_OBJECT_DEPTH, calibrated_object)

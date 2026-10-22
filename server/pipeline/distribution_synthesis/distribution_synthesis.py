@@ -228,6 +228,7 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         max_candidates_per_tile: int = 2000,
         max_iters: int = 400,
         size_jitter: float = 0.15,
+        size_band_sigma: float = 0.4,
         input_boundary_pad_factor: float = 1.5,
         max_instances_per_group: int = 12000,
         min_exemplars: int = 8,
@@ -369,6 +370,16 @@ class DistributionSynthesisConfiguration(PipelineStageConfiguration):
         self.max_candidates_per_tile = max_candidates_per_tile
         self.max_iters = max_iters
         self.size_jitter = size_jitter
+        # A painted instance draws its exemplar from those observed at a similar
+        # distance: a log-normal kernel over exemplar distance / instance distance
+        # with this sigma (0.4 = within ~1.5x at one sigma). The exemplars carry
+        # the depth model's own compression -- a tree at the far clamp measures a
+        # third of one 30 m out -- so a near instance wearing a far exemplar's
+        # size (or the reverse) breaks the size-with-distance the photograph
+        # shows. Rainier's meadow filled with 8 m firs painted from exemplars
+        # at 95 m; with the band each tree takes the size its distance was seen
+        # at. 0 restores the uniform draw.
+        self.size_band_sigma = float(size_band_sigma)
         self.input_boundary_pad_factor = input_boundary_pad_factor
         # Hard ceiling on painted instances per (object_type, region_type) group,
         # and the last thing applied. Each tile is asked for its own share of the
@@ -1382,6 +1393,7 @@ class DistributionSynthesisStage(PipelineStage):
 
             # Phase 3: consume results back in the original deterministic job order
             # (not completion order) so RNG draws for size/jitter stay reproducible.
+            exemplar_radius: dict[int, "np.ndarray | bool"] = {}
             for job, synth in zip(jobs, results):
                 if not synth or not synth.get("output_points"):
                     continue
@@ -1481,7 +1493,23 @@ class DistributionSynthesisStage(PipelineStage):
                     # instances that match neither. Also inherits the observed mix of
                     # variants for free -- a region that was 80% bucket 0 paints ~80%
                     # bucket 0.
-                    e = int(rng.integers(len(dist.sizes)))
+                    if cfg.size_band_sigma > 0 and len(dist.sizes) > 1:
+                        ex_r = exemplar_radius.get(id(dist))
+                        if ex_r is None:
+                            ex_r = np.hypot(*np.asarray(dist.points, dtype=np.float64).T) if len(dist.points) == len(dist.sizes) else None
+                            exemplar_radius[id(dist)] = ex_r if ex_r is not None else False
+                        if ex_r is not None and ex_r is not False:
+                            r_here = max(float(math.hypot(x, z)), 1e-3)
+                            lw = np.log(np.maximum(ex_r, 1e-3) / r_here) / cfg.size_band_sigma
+                            pw = np.exp(-0.5 * lw * lw)
+                            if pw.sum() < 1e-6:
+                                pw = np.exp(-0.5 * (lw / 3.0) ** 2)
+                            pw = pw / pw.sum() if pw.sum() > 0 else None
+                            e = int(rng.choice(len(dist.sizes), p=pw)) if pw is not None else int(rng.integers(len(dist.sizes)))
+                        else:
+                            e = int(rng.integers(len(dist.sizes)))
+                    else:
+                        e = int(rng.integers(len(dist.sizes)))
                     w, h = dist.sizes[e]
                     bucket = dist.buckets[e] if e < len(dist.buckets) else 0
                     jitter = 1.0 + float(rng.uniform(-cfg.size_jitter, cfg.size_jitter))

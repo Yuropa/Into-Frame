@@ -61,6 +61,8 @@ class ContextKey:
     FAR_FIELD_BACKDROP = "far_field_backdrop"
     PANORAMA_DEPTH_METRIC = "panorama_depth_metric"
     FAR_FIELD_START_M = "far_field_start_m"
+    TERRAIN_GRID_SIZE_M = "terrain_grid_size_m"
+    OCEAN_COLUMNS = "ocean_columns"
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
     OBJECT_CORRELATION = "object_correlation"

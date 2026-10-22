@@ -199,40 +199,76 @@ def blend_crops(size: int, crop: int, stride: int, generate: Callable[[int, int,
     return PIL.Image.fromarray(merged.clip(0, 255).astype(np.uint8), "RGB")
 
 
+def _min_cut_path(cost: np.ndarray) -> np.ndarray:
+    """Minimum-cost 8-connected path from the first row of `cost` (rows x cols)
+    to the last: the classic image-quilting seam. Returns one column per row."""
+    h, w = cost.shape
+    acc = cost.astype(np.float64).copy()
+    back = np.zeros((h, w), dtype=np.int8)
+    for r in range(1, h):
+        prev = acc[r - 1]
+        left = np.concatenate(([np.inf], prev[:-1]))
+        right = np.concatenate((prev[1:], [np.inf]))
+        stack = np.stack([left, prev, right])
+        k = np.argmin(stack, axis=0)
+        acc[r] += stack[k, np.arange(w)]
+        back[r] = k - 1
+    path = np.zeros(h, dtype=np.int64)
+    path[-1] = int(np.argmin(acc[-1]))
+    for r in range(h - 1, 0, -1):
+        path[r - 1] = path[r] + back[r, path[r]]
+    return path
+
+
 def make_seamless(image: PIL.Image.Image, repaint: Callable[[PIL.Image.Image, PIL.Image.Image], PIL.Image.Image] | None,
                   band_fraction: float = 0.2, lowpass_fraction: float = 0.05) -> PIL.Image.Image:
     """Make `image` wrap without touching its middle (the ground under the camera).
 
     Rolled by half, the image's edges meet in a cross through the middle with a
-    hard join. Inside a band of `band_fraction` around that cross the rolled
-    image is cross-faded with the unrolled one, which is continuous there (it
-    is the image's own middle): the classic offset tile, seamless by
-    construction but ghosted where the two overlap. `repaint(image, mask)` (an
-    inpainting call at low strength; mask white = repaint) then cleans the
-    ghosting inside the band, taking only fine detail from it so the band keeps
-    the cross-faded brightness. Given the hard join itself instead, the model
-    paints a path or ditch along it, which tiles as a dark grid."""
+    hard join; the unrolled image is continuous there (it is the image's own
+    middle). Inside a band of `band_fraction` around the cross the result takes
+    the unrolled image, outside it the rolled one, and the switch between them
+    runs along minimum-difference cuts (image quilting): one path on each side
+    of each arm, found where the two images' fine detail agrees best, so no
+    pebble is cut visibly. Only the low frequencies are cross-faded across the
+    band, to carry the brightness over. Earlier versions cross-faded the whole
+    band and then repainted it (`repaint`): the cross-fade ghosted the pebbles
+    and the repaint turned the ghosting into a smooth, stone-free strip -- a
+    grid of paths at every repeat of the plate. `repaint` is accepted for
+    compatibility and no longer used."""
+    from scipy.ndimage import gaussian_filter
     w, h = image.size
     src = np.asarray(image.convert("RGB"), dtype=np.float32)
     rolled = np.roll(src, (h // 2, w // 2), axis=(0, 1))
+    sigma = max(lowpass_fraction * w, 1.0)
+    lo = lambda a: np.stack([gaussian_filter(a[..., c], sigma, mode="wrap") for c in range(3)], axis=-1)
+    lo_src, lo_rolled = lo(src), lo(rolled)
+    hi_src, hi_rolled = src - lo_src, rolled - lo_rolled
+
     yy, xx = np.mgrid[0:h, 0:w]
-    dist = np.minimum(np.abs(xx + 0.5 - w / 2.0) / w, np.abs(yy + 0.5 - h / 2.0) / h)  # to the cross, as a fraction
+    dist = np.minimum(np.abs(xx + 0.5 - w / 2.0) / w, np.abs(yy + 0.5 - h / 2.0) / h)
     half_band = band_fraction / 2.0
     t = (1.0 - dist / max(half_band, 1e-6)).clip(0.0, 1.0)
     alpha = (t * t * (3.0 - 2.0 * t))[..., None].astype(np.float32)
-    faded = rolled * (1.0 - alpha) + src * alpha
-    if repaint is not None:
-        mask = (dist <= half_band).astype(np.uint8) * 255
-        out = np.asarray(repaint(PIL.Image.fromarray(faded.clip(0, 255).astype(np.uint8), "RGB"),
-                                 PIL.Image.fromarray(mask, "L")).convert("RGB").resize((w, h), PIL.Image.LANCZOS),
-                         dtype=np.float32)
-        if lowpass_fraction > 0.0:
-            from scipy.ndimage import gaussian_filter
-            sigma = lowpass_fraction * w
-            lo = lambda a: np.stack([gaussian_filter(a[..., c], sigma, mode="wrap") for c in range(3)], axis=-1)
-            out = out - lo(out) + lo(faded)
-        faded = out * alpha + faded * (1.0 - alpha)
-    merged = np.roll(faded, (-(h // 2), -(w // 2)), axis=(0, 1))
+    lo_out = lo_rolled * (1.0 - alpha) + lo_src * alpha
+
+    # Where the fine detail switches from the rolled image to the unrolled one:
+    # inside the cuts (towards the cross) it is the unrolled image's.
+    diff = ((hi_src - hi_rolled) ** 2).sum(axis=-1)
+    bw = max(int(half_band * w), 8)
+    cx, cy = w // 2, h // 2
+    inside = np.zeros((h, w), dtype=bool)
+    # Vertical arm: two top-to-bottom paths, left and right of the centre column.
+    pl = _min_cut_path(diff[:, cx - bw:cx]) + (cx - bw)
+    pr = _min_cut_path(diff[:, cx:cx + bw]) + cx
+    inside |= (xx >= pl[:, None]) & (xx <= pr[:, None])
+    # Horizontal arm: two left-to-right paths, above and below the centre row.
+    pt = _min_cut_path(diff[cy - bw:cy, :].T) + (cy - bw)
+    pb = _min_cut_path(diff[cy:cy + bw, :].T) + cy
+    inside |= (yy >= pt[None, :]) & (yy <= pb[None, :])
+    hi_out = np.where(inside[..., None], hi_src, hi_rolled)
+
+    merged = np.roll(lo_out + hi_out, (-(h // 2), -(w // 2)), axis=(0, 1))
     return PIL.Image.fromarray(merged.clip(0, 255).astype(np.uint8), "RGB")
 
 

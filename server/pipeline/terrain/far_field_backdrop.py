@@ -303,6 +303,27 @@ class FarFieldBackdropStage(PipelineStage):
                 with np.errstate(divide="ignore", invalid="ignore"):
                     t_plane_all = np.where(plat_all < 0, -y_water / np.tan(-plat_all), np.inf)
                 water_covered = (types_full == int(RegionType.WATER)) & (t_plane_all < cfg.far_m)[:, None]
+                # Open water (Region Map's open_water_prior): in the azimuths where
+                # the sea reaches the grid's edge, everything the panorama shows
+                # below the horizon out to the shell is sea too, whatever the
+                # outpainter drew there (Shark Fin: sand). Those pixels leave the
+                # shell and the skirt, and the apron carries the sea out to the shell.
+                ocean = context.input_object(ContextKey.OCEAN_COLUMNS) or {}
+                if ocean.get("columns"):
+                    ow = int(ocean.get("width") or W)
+                    oc = np.zeros(ow, dtype=bool)
+                    oc[np.asarray(ocean["columns"], dtype=np.int64)] = True
+                    if ow != W:
+                        oc = oc[(np.arange(W) * ow // W)]
+                    sea_rows = (t_plane_all < cfg.far_m) & (plat_all < 0)
+                    gained = sea_rows[:, None] & oc[None, :] & ~water_covered
+                    if sky is not None:
+                        gained &= ~sky
+                    water_covered |= gained
+                    self.log_info(
+                        f"Far-field backdrop: open water over {oc.mean():.0%} of the azimuths -- "
+                        f"{int(gained.sum())} px below the horizon there treated as sea"
+                    )
                 dropped = int((far & water_covered).sum())
                 far &= ~water_covered
                 self.log_info(

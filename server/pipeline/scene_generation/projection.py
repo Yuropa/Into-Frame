@@ -144,13 +144,21 @@ def unproject_bbox(bbox, image_width, image_height, depth_map: Depth, intrinsics
 
 # Plausible metric heights per class, (min, max) in metres. When the panorama
 # depth puts a detection at a distance that makes it smaller than its class can
-# be, the depth is the thing that is wrong: a conifer that measures 2 m is a far
+# be, the depth is the thing that is wrong: a conifer that measures 0.4 m is a far
 # conifer, not a bonsai. Rainier's treeline (10-20 m firs, 150+ m away) read as
 # 0.4-3.6 m trees at 13-60 m because the panorama depth model compresses the far
 # field, and the meadow filled with knee-high conifers. Distance is re-derived
 # from the angular height and the prior's edge instead (see unproject_bbox_equirect).
+#
+# The tree floor is a sapling, not a grown tree. At 8 m every tree the depth put
+# nearer than ~95 m was pushed out until it stood 8 m tall and 1-3 m wide (28 of
+# Rainier's 28 meadow exemplars measured exactly 8.0 m), and the distant treeline
+# -- really kilometres away -- became full-size firs at 25-95 m all round the
+# viewer. The far-away tree's real evidence is its angular size; keeping it
+# small at the depth's distance is what makes it read as far, and the floor only
+# has to stop a tree from standing knee-high next to the viewer.
 CLASS_HEIGHT_RANGE_M: dict[str, tuple[float, float]] = {
-    "tree": (8.0, 35.0),
+    "tree": (2.0, 35.0),
     "bush": (0.4, 3.0),
     "boat": (1.5, 15.0),
     "person": (1.4, 2.0),
@@ -162,6 +170,23 @@ CLASS_HEIGHT_RANGE_M: dict[str, tuple[float, float]] = {
 
 def class_height_range(obj_class) -> "tuple[float, float] | None":
     return CLASS_HEIGHT_RANGE_M.get(str(obj_class or "").lower())
+
+
+# A typical standing height per class, for the far test in Scene Generation: a
+# detection whose angular height would need to be further away than the
+# far-field start to stand this tall is a far object the depth brought near
+# (Mount Rainier's trees on the mountain's flank, kilometres off, landed at
+# 50-70 m as 2 m firs). The far backdrop already shows it; no 3-D copy.
+CLASS_TYPICAL_HEIGHT_M: dict[str, float] = {
+    "tree": 6.0,
+    "bus": 3.0,
+    "truck": 3.0,
+    "boat": 3.0,
+}
+
+
+def class_typical_height(obj_class) -> "float | None":
+    return CLASS_TYPICAL_HEIGHT_M.get(str(obj_class or "").lower())
 
 
 def unproject_bbox_equirect(bbox, pano_width, pano_height, pano_depth: Depth, extrinsics: CameraExtrinsics,
