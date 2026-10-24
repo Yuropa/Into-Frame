@@ -55,6 +55,8 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         ridge_override_min_distance_m: float = 30.0,
         ridge_override_feather_m: float = 15.0,
         ridge_max_metric_depth_m: float = 0.0,
+        ridge_anchor_per_point: bool = True,
+        ridge_crest_sample_rows: tuple = (12, 24),
         meadow_restore_factor: float = 0.25,
         restore_blur_m: float = 1.0,
         river_valley_depth: float = 0.5,
@@ -177,6 +179,13 @@ class TerrainReconstructionConfiguration(PipelineStageConfiguration):
         self.ridge_max_slope_angle_deg = ridge_max_slope_angle_deg
         self.ridge_override_min_distance_m = ridge_override_min_distance_m
         self.ridge_override_feather_m = ridge_override_feather_m
+        # Judge the photographed part of a ridge chain point by point (see the loop
+        # in run()): one chain can trace the whole horizon, and its median depth is
+        # then the outpainted far content while the photographed headlands inside it
+        # are measured well inside the grid. The crest pixel reads the sky's depth, so
+        # each point's range is the median of the metric depth these rows under it.
+        self.ridge_anchor_per_point = bool(ridge_anchor_per_point)
+        self.ridge_crest_sample_rows = tuple(int(v) for v in ridge_crest_sample_rows)
         # A ridge chain whose METRIC depth (PANORAMA_DEPTH_METRIC, before the far
         # range was compressed into the grid) is beyond this is not raised in the
         # grid at all: it is the far field, and FarFieldBackdropStage stands it up
@@ -406,7 +415,30 @@ class TerrainReconstructionStage(PipelineStage):
             d = d[np.isfinite(d) & (d > 0)]
             return float(np.median(d)) if d.size else None
 
+        def chain_point_ranges(chain: np.ndarray) -> "np.ndarray | None":
+            """Per point: the metric range of the panorama a few rows under the
+            crest (the crest pixel itself carries the sky's depth), NaN where the
+            reading is missing or saturated."""
+            if metric_depth is None:
+                return None
+            dh, dw = metric_depth.depth.shape[:2]
+            lon = np.arctan2(chain[:, 0], chain[:, 2])
+            lat = np.arctan2(chain[:, 1], np.hypot(chain[:, 0], chain[:, 2]).clip(1e-6))
+            cols = np.clip(((lon / (2.0 * np.pi) + 0.5) * dw).astype(int), 0, dw - 1)
+            rows = np.clip(((0.5 - lat / np.pi) * dh).astype(int), 0, dh - 1)
+            lo, hi = cfg.ridge_crest_sample_rows
+            samples = np.stack([metric_depth.depth[np.clip(rows + k, 0, dh - 1), cols]
+                                for k in range(int(lo), int(hi) + 1, 4)], axis=0).astype(np.float64)
+            d_max = float(np.nanmax(metric_depth.depth)) if np.isfinite(metric_depth.depth).any() else 0.0
+            samples = np.where(np.isfinite(samples) & (samples > 0) & (samples < 0.97 * d_max), samples, np.nan)
+            with np.errstate(all="ignore"):
+                return np.nanmedian(samples, axis=0)
+
+        from util.captured_cone import captured_cone_from_context
+        cone = captured_cone_from_context(context, 2, 1) if metric_depth is not None else None
         n_points_dropped = 0
+        n_relifted = 0
+        anchored_chains: list[np.ndarray] = []
         for raw_chain in ridge_chains:
             chain = np.asarray(raw_chain, dtype=np.float32)
             if len(chain) < 2:
@@ -417,8 +449,26 @@ class TerrainReconstructionStage(PipelineStage):
                 continue
             d_metric = chain_metric_depth(chain)
             if d_metric is not None and d_metric > metric_limit:
-                n_far += 1
-                continue
+                if not (cfg.ridge_anchor_per_point and cone is not None):
+                    n_far += 1
+                    continue
+                # The chain as a whole is far, but the photographed part of it may
+                # not be: Shark Fin's headlands stand 115-190 m under their crests
+                # while the horizon chain they belong to runs round the outpainted
+                # 360 degrees. Keep the points inside the cone whose range under
+                # the crest lies inside the grid, moved out to that range.
+                r_pt = chain_point_ranges(chain)
+                lon_deg = np.degrees(np.arctan2(chain[:, 0], chain[:, 2]))
+                near = (np.isfinite(r_pt) & (r_pt <= min(metric_limit, 0.95 * z_half))
+                        & (np.abs(lon_deg) <= cone.hfov_deg / 2.0))
+                if near.sum() < 2:
+                    n_far += 1
+                    continue
+                scale = (r_pt[near] / horiz[near].clip(1e-6)).astype(np.float32)
+                chain = chain[near] * scale[:, None]   # y = r tan(lat) scales with r too
+                horiz = horiz[near] * scale
+                n_relifted += int(near.sum())
+                n_far += 1   # the rest of the chain still goes to the far field
             # A chain can clear the median-distance qualification above while
             # still dipping past individual points close to the camera (noisy
             # silhouette tracing) -- anchoring those as hard Dirichlet BCs pins
@@ -437,12 +487,15 @@ class TerrainReconstructionStage(PipelineStage):
             fixed_mask[rows_c, cols_c] = True
             fixed_elev[rows_c, cols_c] = chain[:, 1].astype(np.float64)  # Y = elevation
             n_anchored += 1
+            anchored_chains.append(chain)
 
         self.log_info(
             f"Ridge chains: {n_anchored} anchored (≥{min_anchor_m:.0f} m), "
             f"{n_skipped} foreground skipped, {n_points_dropped} near-camera "
             f"point(s) dropped (<{cfg.ridge_override_min_distance_m:.0f} m), "
             f"{n_far} beyond {metric_limit:.0f} m metric handed to the far-field backdrop"
+            + (f"; {n_relifted} photographed point(s) of those re-lifted to their measured range inside the grid"
+               if n_relifted else "")
         )
 
         # ── Critical-slope envelope ───────────────────────────────────────────
@@ -496,13 +549,12 @@ class TerrainReconstructionStage(PipelineStage):
             ) * cliff_mask_s
             max_slope_tan_map = np.tan(np.radians(envelope_angle))
 
-            for raw_chain in ridge_chains:
-                chain = np.asarray(raw_chain, dtype=np.float32)
-                if len(chain) < 2:
-                    continue
-                horiz = np.sqrt(chain[:, 0] ** 2 + chain[:, 2] ** 2)
-                if float(np.median(horiz)) < min_anchor_m:
-                    continue
+            # Only the chains that were anchored, as they were anchored: a chain
+            # handed to the far field (or the far part of one whose photographed
+            # points were re-lifted) is not a crest in this grid, and walking the
+            # raw chains here built a ridge ring round the viewer at the shell's
+            # radius from the whole outpainted horizon.
+            for chain in anchored_chains:
                 rows_c, cols_c = world_to_grid(chain)
 
                 # Per-cell crest elevation (max where multiple chain points overlap)

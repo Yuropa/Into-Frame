@@ -63,6 +63,7 @@ class ContextKey:
     FAR_FIELD_START_M = "far_field_start_m"
     TERRAIN_GRID_SIZE_M = "terrain_grid_size_m"
     OCEAN_COLUMNS = "ocean_columns"
+    TERRAIN_PLAN = "terrain_plan"              # Region Map: the top-down plan's summary (kind, water level, coast lines, channel)
     LIGHTING = "lighting"
     RECOGNIZE_TAGS = "recognize_tags"
     OBJECT_CORRELATION = "object_correlation"

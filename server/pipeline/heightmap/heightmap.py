@@ -61,6 +61,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         densify_min_distance_m: float = 20.0,
         densify_far_fraction: float = 0.5,
         wall_far_fraction: float = 0.33,
+        wall_max_distance_m: float = 0.0,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
         reclaimed_certainty_factor: float = 0.5,
@@ -216,6 +217,7 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.densify_min_distance_m = float(densify_min_distance_m)
         self.densify_far_fraction = float(densify_far_fraction)
         self.wall_far_fraction = float(wall_far_fraction)
+        self.wall_max_distance_m = float(wall_max_distance_m)
         # Binary closing iterations applied to the ground-valid classification
         # before it gates which pixels count as ground (see
         # HeightMapGenerator._ground_valid_mask). Per-pixel semantic segmentation
@@ -544,7 +546,7 @@ class HeightMapStage(PipelineStage):
             wall_bin_m=cfg.wall_bin_m,
             densify_radius_m=cfg.densify_radius_m,
             densify_min_samples=cfg.densify_min_samples,
-            densify_min_distance_m=cfg.densify_min_distance_m, densify_far_fraction=cfg.densify_far_fraction, wall_far_fraction=cfg.wall_far_fraction, far_start_m=(float(far_start) if far_start else None),
+            densify_min_distance_m=cfg.densify_min_distance_m, densify_far_fraction=cfg.densify_far_fraction, wall_far_fraction=cfg.wall_far_fraction, wall_max_distance_m=cfg.wall_max_distance_m, far_start_m=(float(far_start) if far_start else None),
             region_closing_iterations=cfg.region_closing_iterations,
             single_sample_blur_sigma=cfg.single_sample_blur_sigma,
             debug_dir=self.temp,

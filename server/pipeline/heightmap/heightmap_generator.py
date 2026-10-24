@@ -69,6 +69,7 @@ class HeightMapGenerator:
         densify_min_distance_m: float = 20.0,
         densify_far_fraction: float = 0.5,
         wall_far_fraction: float = 0.33,
+        wall_max_distance_m: float = 0.0,
         far_start_m: Optional[float] = None,
         region_closing_iterations: int = 2,
         single_sample_blur_sigma: float = 1.5,
@@ -453,8 +454,8 @@ class HeightMapGenerator:
             # cells and boxed the sea stack into a flat-topped block with needle
             # spikes nearer in. The 45 m ceiling is where the viewer's own cliff
             # edge lives; distant cliffs are left to the depth as it is.
-            if far_exclusion_radius:
-                wall_limit = min(wall_limit, float(far_exclusion_radius))
+            if wall_max_distance_m and wall_max_distance_m > 0:
+                wall_limit = min(wall_limit, float(wall_max_distance_m))
             # Densify the far field. Beyond ~20 m one panorama pixel covers several
             # cells (at 80 m a sample every 240 cm2 against 24 cm2 cells), so real
             # forward-projected samples sit one cell in ten, each surrounded by the

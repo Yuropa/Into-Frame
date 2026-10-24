@@ -697,7 +697,8 @@ stages:
     densify_min_samples: 3
     densify_min_distance_m: 20.0
     densify_far_fraction: 0.5    # densify only inside this fraction of the far-field start (Rainier: the mountain compressed into 30-80 m is not terrain)
-    wall_far_fraction: 0.33      # walls only inside this fraction of the far-field start (and never past far_exclusion_radius)
+    wall_far_fraction: 0.33      # walls only inside this fraction of the far-field start
+    wall_max_distance_m: 0.0     # hard ceiling on the wall rule's reach in metres; 0 = none (Shark Fin's headlands stand 60-200 m out)
     # The viewer stands on something: with a photo-measured camera height the nadir
     # is the plane the photographed people stand on (Shark Fin: the beach, 12.4 m
     # down), so a pedestal at eye height is raised under the camera when the ground
@@ -738,6 +739,18 @@ stages:
     open_water_min_deg: 5.0
     open_water_bank_tolerance_m: 1.5
     open_water_extend_deg: 60.0   # how far past each edge of the photograph the shore is carried
+    # The terrain plan (pipeline/region_map/terrain_plan.py): the water and the land
+    # cover rebuilt by rule from the photographed cone -- sea beyond every shore and
+    # past land standing in it, carried round each open edge of the photograph along
+    # the coast's direction; a river as a constant-width channel through the whole
+    # grid; no outpainted water that does not continue photographed water; land
+    # cover in regions rather than radial slivers. Drawn as terrain_plan.png. false
+    # restores the two priors above on their own.
+    terrain_plan: true
+    plan_edge_deg: 10.0           # the coast's direction at a cone edge is fitted over this much of the cone
+    plan_hole_m2: 200.0           # land islets inside a water body smaller than this are water
+    plan_land_smooth_m: 4.0       # land-cover regions are at least this wide (0 disables)
+    plan_smooth_min_distance_m: 20.0  # the near field keeps its photographed detail
     unphotographed_water_min_distance_m: 15.0  # outpainted water this close, outside the cone, is retyped
     # Look each grid cell up in the panorama along the ray to its REAL reconstructed
     # elevation (HEIGHT_MAP, computed by the previous stage) instead of assuming a
@@ -879,6 +892,9 @@ stages:
                                     # artifacts right around the user.
     ridge_override_feather_m: 15.0  # width (m) of the linear ramp-in beyond ridge_override_min_distance_m
     ridge_max_metric_depth_m: 0     # a ridge whose UNCOMPRESSED depth (Panorama Depth Calibration's
+    ridge_anchor_per_point: true    # a far chain's photographed points whose depth under the crest lies inside
+                                    # the grid are anchored at that range (Shark Fin's headlands at 115-190 m)
+    ridge_crest_sample_rows: [12, 24]  # panorama rows under the crest sampled for that range (the crest reads sky)
     meadow_restore_factor: 0.25     # meadow cells keep only a quarter of the raw-depth restoration (plant tops, not ground)
     restore_blur_m: 1.0             # measured heights are low-passed to this scale before restoration (shape, not noise)
                                     # metric map) is beyond this is not raised in the grid; the Far

@@ -40,6 +40,11 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         open_water_min_deg: float = 5.0,
         open_water_bank_tolerance_m: float = 1.5,
         open_water_extend_deg: float = 60.0,
+        terrain_plan: bool = True,
+        plan_edge_deg: float = 10.0,
+        plan_hole_m2: float = 200.0,
+        plan_land_smooth_m: float = 4.0,
+        plan_smooth_min_distance_m: float = 20.0,
         use_height_map_elevation: bool = True,
         nadir_exclusion_radius: float = 3.0,
         nadir_ramp_width: float = 5.0,
@@ -87,6 +92,14 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         self.open_water_min_deg = float(open_water_min_deg)
         self.open_water_bank_tolerance_m = float(open_water_bank_tolerance_m)
         self.open_water_extend_deg = float(open_water_extend_deg)
+        # The terrain plan (pipeline/region_map/terrain_plan.py) rebuilds the water
+        # and the land cover by rule from the photographed cone and replaces the
+        # two priors above; they remain the fallback when it is off.
+        self.terrain_plan = bool(terrain_plan)
+        self.plan_edge_deg = float(plan_edge_deg)
+        self.plan_hole_m2 = float(plan_hole_m2)
+        self.plan_land_smooth_m = float(plan_land_smooth_m)
+        self.plan_smooth_min_distance_m = float(plan_smooth_min_distance_m)
         # Look each grid cell up in the panorama along the ray to its REAL
         # reconstructed elevation (HEIGHT_MAP) rather than to a flat plane
         # camera_height_meters below the camera. False restores the flat-plane
@@ -557,17 +570,62 @@ class RegionMapStage(PipelineStage):
         self.advance_progress(task)
 
         river_channel = None
-        if cfg.river_channel_prior:
-            region_map, cell_elevation, river_channel = self._river_channel_prior(
-                context, region_map, cell_elevation, cfg)
-            if river_channel is not None and cell_elevation is not None:
-                context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
         ocean_cols = None
-        if cfg.open_water_prior and river_channel is None:
-            region_map, cell_elevation, ocean_cols = self._open_water_prior(
-                context, region_map, cell_elevation, type_idx_map, panorama_depth, camera_height, cfg)
-            if ocean_cols is not None and cell_elevation is not None:
-                context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
+        plan = None
+        if cfg.terrain_plan:
+            from pipeline.region_map.terrain_plan import PlanConfig, build_plan, draw_plan
+            from util.captured_cone import captured_cone_from_context
+            cone = captured_cone_from_context(context, type_idx_map.shape[1], type_idx_map.shape[0])
+            if cone is None:
+                self.log_warning("Terrain plan: no photographed cone (missing intrinsics or photo) -- map left as projected")
+            else:
+                before = region_map.copy()
+                region_map, cell_elevation, plan = build_plan(
+                    region_map, cell_elevation, type_idx_map,
+                    panorama_depth.depth.astype(np.float32), cone.hfov_deg, camera_height, grid_m,
+                    PlanConfig(
+                        open_water_min_deg=cfg.open_water_min_deg,
+                        bank_tolerance_m=cfg.open_water_bank_tolerance_m,
+                        edge_deg=cfg.plan_edge_deg,
+                        extend_deg=cfg.open_water_extend_deg,
+                        river_margin_m=cfg.river_channel_margin_m,
+                        hole_m2=cfg.plan_hole_m2,
+                        land_smooth_m=cfg.plan_land_smooth_m,
+                        smooth_min_distance_m=cfg.plan_smooth_min_distance_m,
+                    ),
+                    self.log_info,
+                )
+                if cell_elevation is not None:
+                    context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
+                context.add_object(ContextKey.TERRAIN_PLAN, plan.summary())
+                if plan.channel is not None:
+                    ch = plan.channel
+                    river_channel = (ch["x_left"], ch["x_right"], cone.hfov_deg / 2.0 + 3.0, ch["slope"], ch["offset"], ch["width"])
+                # Which panorama columns end in water at the grid's edge, for the far field.
+                res = region_map.shape[0]
+                cell_m = grid_m / res
+                W = type_idx_map.shape[1]
+                lon_c = np.radians(((np.arange(W) + 0.5) / W - 0.5) * 360.0)
+                edge_r = grid_m / 2.0 - 2.0 * cell_m
+                ex = np.clip(((edge_r * np.sin(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
+                ez = np.clip(((edge_r * np.cos(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
+                ocean_cols = region_map[ez, ex] == int(RegionType.WATER)
+                if not ocean_cols.any():
+                    ocean_cols = None
+                if self.temp is not None:
+                    PILImage.fromarray(colorize_region_type_map(before[::4, ::4])).save(self.temp / "terrain_plan_before.png")
+                    draw_plan(region_map, plan, grid_m).save(self.temp / "terrain_plan.png")
+        else:
+            if cfg.river_channel_prior:
+                region_map, cell_elevation, river_channel = self._river_channel_prior(
+                    context, region_map, cell_elevation, cfg)
+                if river_channel is not None and cell_elevation is not None:
+                    context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
+            if cfg.open_water_prior and river_channel is None:
+                region_map, cell_elevation, ocean_cols = self._open_water_prior(
+                    context, region_map, cell_elevation, type_idx_map, panorama_depth, camera_height, cfg)
+                if ocean_cols is not None and cell_elevation is not None:
+                    context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
         if ocean_cols is not None:
             context.add_object(ContextKey.OCEAN_COLUMNS, {
                 "width": int(type_idx_map.shape[1]),
@@ -754,7 +812,28 @@ class RegionMapStage(PipelineStage):
             ground_y_max=cfg.ground_y_max,
             camera_height_meters=camera_height,
         )
-        if river_channel is not None and water_chains:
+        if plan is not None and water_chains:
+            # A chain point on the plan's land is the outpainter's water, not the
+            # photograph's: Region Map Refinement paints chains as water, so it would
+            # put the dropped water back.
+            res = region_map.shape[0]
+            cell_m = grid_m / res
+            kept = []
+            dropped = 0
+            for chain in water_chains:
+                arr = np.asarray(chain, dtype=np.float64)
+                if arr.ndim != 2 or len(arr) == 0:
+                    continue
+                ci = np.clip(((arr[:, 0] + grid_m / 2.0) / cell_m).astype(np.int64), 0, res - 1)
+                ri = np.clip(((arr[:, 2] + grid_m / 2.0) / cell_m).astype(np.int64), 0, res - 1)
+                inside = plan.water[ri, ci]
+                dropped += int((~inside).sum())
+                if inside.sum() >= 2:
+                    kept.append(np.asarray(chain)[inside] if isinstance(chain, np.ndarray) else arr[inside].tolist())
+            if dropped:
+                self.log_info(f"Terrain plan: {dropped} water chain point(s) on planned land dropped")
+            water_chains = kept
+        elif river_channel is not None and water_chains:
             xl, xr, half_deg, slope, offset, width = river_channel
             kept = []
             dropped = 0
