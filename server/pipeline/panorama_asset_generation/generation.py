@@ -6,12 +6,13 @@ from typing import Any
 
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.model_generation.model_generation import ModelGenerator, ModelGeneratorType
+from pipeline.model_generation.model_generation_base import read_toward_camera
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
     VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY, ALWAYS_MESH_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES,
 )
-from pipeline.grass_cover.cards import crossed_card_mesh, reference_cut_side
+from pipeline.grass_cover.cards import crossed_card_mesh, defringe_rgba, reference_cut_side
 from util.lod_metrics import angular_height_px_from_box
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
@@ -98,6 +99,11 @@ _SR_KEY = "crop_sr_{idx}"
 # {category_mesh_{class}_{bucket}: {"idx", "class", "bucket", "depth"}} for every
 # group this stage chose a mesh representative for (see run()).
 MESH_SOURCES_KEY = "mesh_sources"
+# {mesh_key: [x, y, z]}: the unit direction from each reconstructed mesh to the
+# photographer, in the mesh's own frame (model_generation_base.read_toward_camera).
+# Scene Generation turns a photographed instance so this points at the capture
+# point: the side the photograph shows is the side the viewer sees.
+MESH_FRONTS_KEY = "mesh_fronts"
 # What became of each mesh group: "mesh", or why it has none ("empty_mask",
 # "meshify_failed"). Lets has_expected_output tell a group that was tried and fell
 # back to its card or billboard from one that was never reached.
@@ -604,6 +610,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
         self._close_supersampler()
         asset_task = self.create_progress(len(group_best), "Generating 3D assets…")
         self._mesh_outcomes: dict[str, str] = {}
+        self._mesh_fronts: dict[str, list[float]] = dict(context.input_object(MESH_FRONTS_KEY) or {})
         # One generator process at a time: the groups are batched by the generator
         # their class routes to (category_generators), the default generator's
         # batch first, so the two models never share the GPU.
@@ -626,6 +633,7 @@ class PanoramaAssetGenerationStage(PipelineStage):
 
         self.finish_progress(asset_task)
         context.add_object(MESH_OUTCOMES_KEY, self._mesh_outcomes)
+        context.add_object(MESH_FRONTS_KEY, self._mesh_fronts)
         return context
 
     def _generator_for(self, obj_class: str) -> ModelGeneratorType:
@@ -641,6 +649,10 @@ class PanoramaAssetGenerationStage(PipelineStage):
             if cached is not None:
                 self.log_info(f"  {mesh_key}: cached ({cached.vertex_count}v {cached.face_count}f)")
                 self._mesh_outcomes[mesh_key] = "mesh"
+                if mesh_key not in self._mesh_fronts and self.temp is not None:
+                    front = read_toward_camera(self.temp / mesh_key)
+                    if front is not None:
+                        self._mesh_fronts[mesh_key] = [float(v) for v in front]
                 self.advance_progress(asset_task)
                 continue
 
@@ -684,6 +696,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
             super().clean_up()
             try:
                 mesh = gen.meshify(crop, temp_path, seed=self.seed)
+                front = getattr(mesh, "toward_camera", None)
+                if front is not None:
+                    self._mesh_fronts[mesh_key] = [float(v) for v in front]
+                    self.log_info(f"  {mesh_key}: photographed from {np.degrees(np.arctan2(front[0], front[2])):+.0f} deg of its local +Z")
+                else:
+                    self._mesh_fronts.pop(mesh_key, None)
                 # See repair_meshes: Poisson reconstruction cannot carry a UV
                 # texture through, so it only runs when asked for, or when the
                 # reconstruction came back colour-only anyway (SAM3D's
@@ -1112,6 +1130,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     blur_fraction=self.config.delight_blur_fraction,
                     mask=opaque,
                 )
+                # The client samples this as a billboard with bilinear filtering and
+                # mipmaps and clips at alpha 0.5, so the texels under alpha 0 (the
+                # sky or the completion canvas behind the subject) blend into every
+                # edge pixel as a pale outline. Same treatment the cards already get
+                # in crossed_card_mesh: mixed edge pixels dropped, the opaque colour
+                # bled out under the transparent area. SAM3D reads only the alpha.
+                if getattr(delit, "mode", "") == "RGBA":
+                    delit = defringe_rgba(delit)
 
                 context.add_image(_delit_key(idx), delit)
                 written += 1

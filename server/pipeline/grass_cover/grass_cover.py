@@ -349,7 +349,10 @@ class GrassCoverStage(PipelineStage):
             self.log_info(
                 f"Grass near the viewer: {area_stats['near_prior_cells']} cells outside the photograph "
                 f"follow its ground at the same distance ({area_stats.get('near_prior_bands', 1)} band(s), "
-                f"{area_stats['near_prior_pass_fraction']:.0%} grass)"
+                f"{area_stats['near_prior_pass_fraction']:.0%} grass"
+                + (f"; {area_stats['near_prior_bridged_bands']} failed band(s) between passing ones bridged"
+                   if area_stats.get("near_prior_bridged_bands") else "")
+                + ")"
             )
         area_m2 = area_square_meters(mask, grid_size_meters)
         self.log_info(

@@ -461,6 +461,8 @@ class TerrainNoiseRefinementStage(PipelineStage):
             from pipeline.terrain.terrain_generator import TerrainMeshGenerator
             from pipeline.panorama_segmentation.panorama_region_result import RegionType
             rm = region_depth.depth
+            plan = context.input_object(ContextKey.TERRAIN_PLAN) or {}
+            plan_water_y = plan.get("water_y") if isinstance(plan, dict) else None
             if rm.shape == terrain.shape:
                 terrain = TerrainMeshGenerator.level_water_bodies(
                     terrain, rm.astype(np.int16) == int(RegionType.WATER),
@@ -469,6 +471,7 @@ class TerrainNoiseRefinementStage(PipelineStage):
                     percentile=cfg.water_level_percentile,
                     bank_blend_m=cfg.water_bank_blend_m,
                     bank_max_step_m=cfg.water_bank_max_step_m,
+                    planned_level=float(plan_water_y) if plan_water_y is not None else None,
                     log=self.log_info,
                 )
             else:

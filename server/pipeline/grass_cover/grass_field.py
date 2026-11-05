@@ -72,6 +72,9 @@ def build_grass_field(
     u, v = sample(pano_u), sample(pano_v)
     ok = sample(sampled.astype(np.float32), order=0) > 0.5
     h, w = panorama_rgb.shape[:2]
+    # Unsampled cells carry NaN coordinates; they are refilled from `ok` below.
+    u = np.nan_to_num(u, nan=0.0)
+    v = np.nan_to_num(v, nan=0.5)
     pr = np.clip(((1.0 - v) * (h - 1)).astype(np.intp), 0, h - 1)
     pc = np.clip((u * (w - 1)).astype(np.intp), 0, w - 1)
     colour = panorama_rgb[pr, pc, :3].astype(np.float32)

@@ -1,4 +1,6 @@
+import json
 from pathlib import Path
+import numpy as np
 import trimesh
 
 from scene.mesh import Mesh
@@ -31,7 +33,36 @@ class ModelGeneratorBase(RemoteClient):
                 else:
                     mesh = trimesh.util.concatenate(geoms)
 
-            return Mesh(mesh)
+            # The reconstructor hands back a conformant glTF model: right-handed,
+            # +X the object's right as photographed. The scene frame is its mirror
+            # (see Mesh._mirror_x), and the file is read verbatim, so until now
+            # every generated mesh stood in the scene flipped left-to-right --
+            # invisible on a tree or a boat, wrong on a rock that leans one way.
+            out = Mesh(Mesh._mirror_x(mesh))
+            out.toward_camera = read_toward_camera(temp_path)
+            return out
         finally:
             glb_path.unlink(missing_ok=True)
+
+
+def read_toward_camera(temp_path: "Path | None") -> "np.ndarray | None":
+    """The unit direction from a generated mesh to the photographer, in the
+    mesh's own (scene-frame) coordinates, from the pose the SAM3D worker wrote next
+    to it (model_generation_sam3d_imp._write_pose); None when there is none (other
+    generators, older runs). The worker's direction is in the GLB's right-handed
+    frame, so its X flips with the mesh's (meshify above)."""
+    if temp_path is None:
+        return None
+    pose_path = Path(temp_path) / "pose.json"
+    if not pose_path.exists():
+        return None
+    try:
+        with open(pose_path) as f:
+            d = np.asarray(json.load(f).get("toward_camera_glb"), dtype=float)
+    except (OSError, ValueError, TypeError):
+        return None
+    if d.shape != (3,) or not np.all(np.isfinite(d)) or np.linalg.norm(d) < 1e-6:
+        return None
+    d = d / np.linalg.norm(d)
+    return np.array([-d[0], d[1], d[2]], dtype=float)
     

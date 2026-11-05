@@ -97,6 +97,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         water_apron: bool = True,
         water_apron_min_fraction: float = 0.15,
         water_apron_radial_steps: int = 8,
+        water_apron_open_water_m: float = 5000.0,
         # False: textured with the panorama's own (photographed) light and drawn
         # unlit. Relighting the delit far field with the client's sun through
         # normals estimated from km-scale depth made Rainier's summit bright and
@@ -159,6 +160,14 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.water_apron = bool(water_apron)
         self.water_apron_min_fraction = float(water_apron_min_fraction)
         self.water_apron_radial_steps = max(1, int(water_apron_radial_steps))
+        # In the azimuths Region Map declared open water (OCEAN_COLUMNS) the apron
+        # runs out to this radius rather than to the shell's foot: a sheet ending
+        # at far_m (500 m) is still 1.4 deg under the horizon from a 12.5 m
+        # clifftop, and where the panorama's sea at the horizon is glare typed as
+        # sky nothing stands on the shell there, so Shark Fin's sunward horizon
+        # was a bar of skybox between the apron's edge and the sky. At 5 km the
+        # edge sits 0.14 deg under the horizon -- a pixel or two in the viewer.
+        self.water_apron_open_water_m = float(water_apron_open_water_m)
         self.lit = bool(lit)
 
 
@@ -294,6 +303,7 @@ class FarFieldBackdropStage(PipelineStage):
         # ── water below the horizon belongs to the water sheet and its apron ──
         y_water = None
         water_covered = np.zeros((H, W), dtype=bool)
+        open_water_cols = None
         water_mesh = context.input_mesh(ContextKey.WATER_MESH)
         if cfg.water_apron and water_mesh is not None and type_depth is not None:
             y_water = float(np.median(np.asarray(water_mesh.mesh.vertices, dtype=np.float64)[:, 1]))
@@ -315,14 +325,23 @@ class FarFieldBackdropStage(PipelineStage):
                     oc[np.asarray(ocean["columns"], dtype=np.int64)] = True
                     if ow != W:
                         oc = oc[(np.arange(W) * ow // W)]
+                    # A river leaving the grid through its channel (open_water
+                    # false) fills its sectors with the plane out to the shell like
+                    # the sea does -- the outpainted far river is not shell content
+                    # (Paris: pale panels at the horizon) -- but is not carried to
+                    # the horizon: a water sector is a wedge between two azimuths,
+                    # which stands as a teal box where a river's banks would converge.
+                    if ocean.get("open_water", True):
+                        open_water_cols = oc
                     sea_rows = (t_plane_all < cfg.far_m) & (plat_all < 0)
                     gained = sea_rows[:, None] & oc[None, :] & ~water_covered
                     if sky is not None:
                         gained &= ~sky
                     water_covered |= gained
                     self.log_info(
-                        f"Far-field backdrop: open water over {oc.mean():.0%} of the azimuths -- "
-                        f"{int(gained.sum())} px below the horizon there treated as sea"
+                        f"Far-field backdrop: {'open water' if open_water_cols is not None else 'the river'} over "
+                        f"{oc.mean():.0%} of the azimuths -- {int(gained.sum())} px below the horizon there "
+                        f"treated as {'sea' if open_water_cols is not None else 'river out to the shell'}"
                     )
                 dropped = int((far & water_covered).sum())
                 far &= ~water_covered
@@ -515,7 +534,7 @@ class FarFieldBackdropStage(PipelineStage):
         if y_water is not None and water_covered.any():
             apron_faces = self._water_apron(
                 context, cfg, water_mesh, y_water, water_covered, t_plane_all, grid_half,
-                cols, W, foot,
+                cols, W, foot, open_water_cols,
             )
         valid = shell | skirt
         X, Y, Z = X2, Y2, Z2
@@ -638,6 +657,7 @@ class FarFieldBackdropStage(PipelineStage):
         self, context: PipelineContext, cfg: FarFieldBackdropConfiguration, water_mesh,
         y_water: float, water_covered: np.ndarray, t_plane: np.ndarray, grid_half: float,
         cols: np.ndarray, W: int, foot: "np.ndarray | None",
+        open_water_cols: "np.ndarray | None" = None,
     ) -> int:
         """A flat ring at the water sheet's level from the grid's edge out to the
         shell's foot, in every vertex-column sector whose panorama pixels between
@@ -660,6 +680,13 @@ class FarFieldBackdropStage(PipelineStage):
         r_out = np.full(len(cols), cfg.far_m, dtype=np.float64)
         if foot is not None:
             r_out = np.maximum(np.asarray(foot, dtype=np.float64), r_in * 1.05)
+        n_open = 0
+        if open_water_cols is not None and cfg.water_apron_open_water_m > cfg.far_m:
+            # Open water reaches the horizon, whatever the shell does there.
+            open_sector = open_water_cols[cols % W]
+            r_out = np.where(open_sector, np.maximum(r_out, cfg.water_apron_open_water_m), r_out)
+            is_water |= open_sector
+            n_open = int(open_sector.sum())
         # Geometric radial spacing: fine at the grid edge, coarse toward the shell.
         radii = r_in * (r_out[None, :] / r_in) ** (np.arange(K + 1)[:, None] / K)  # (K+1, nc)
         y_apron = y_water - 0.03  # just under the sheet, so the two never z-fight where they overlap
@@ -709,6 +736,7 @@ class FarFieldBackdropStage(PipelineStage):
         self.log_info(
             f"Far-field backdrop: water apron of {faces.shape[0]} faces at y {y_apron:.2f} m over "
             f"{sectors} of {len(cols)} azimuth sectors, {r_in:.0f} m out to {float(r_out[is_water].max()):.0f} m"
+            + (f" ({n_open} open-water sector(s) carried to {cfg.water_apron_open_water_m:.0f} m)" if n_open else "")
         )
         if self.temp is not None:
             Mesh(tm).save(self.temp / "water_apron.glb")

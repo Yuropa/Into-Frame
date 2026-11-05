@@ -68,6 +68,8 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         max_base_elevation_deg: float = 8.0,
         feather_px: float = 2.0,
         texture_max_width: int = 8192,
+        max_silhouette_slope: float = 1.0,
+        silhouette_gap_px: int = 48,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Canopy closer than this is placed as individual instances by the object
@@ -99,6 +101,14 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         # Gaussian blur on the alpha so the silhouette is not a pixel staircase.
         self.feather_px = float(feather_px)
         self.texture_max_width = int(texture_max_width)
+        # The band's top edge may descend at most this many rows per column
+        # toward a gap wider than silhouette_gap_px: a band that ends in one
+        # column stands as a box with a vertical side (Paris: the photographed
+        # bank's canopy stopped dead at the photo's edge, and clumps on the
+        # outpainted bank ended in walls). 1.0 is a 45-degree taper in
+        # panorama pixels; 0 disables.
+        self.max_silhouette_slope = float(max_silhouette_slope)
+        self.silhouette_gap_px = int(silhouette_gap_px)
 
 
 class TreelineBackdropStage(PipelineStage):
@@ -218,6 +228,11 @@ class TreelineBackdropStage(PipelineStage):
         if floating:
             self.log_info(f"Treeline backdrop: {floating} column run(s) floating more than "
                           f"{cfg.max_base_elevation_deg:g} deg above the ground under them dropped")
+        if cfg.max_silhouette_slope > 0:
+            top, bottom, tapered = self._taper_ends(top, bottom, cfg.max_silhouette_slope, cfg.silhouette_gap_px)
+            if tapered:
+                self.log_info(f"Treeline backdrop: {tapered} column(s) lowered so the band's ends slope "
+                              f"at most {cfg.max_silhouette_slope:g} row(s) per column instead of standing as walls")
         self.advance_progress(task)
 
         # ── Per azimuth bin: one quad ──────────────────────────────────────────
@@ -453,6 +468,47 @@ class TreelineBackdropStage(PipelineStage):
             return float(ys[i])
 
         return sample
+
+    @staticmethod
+    def _taper_ends(top: np.ndarray, bottom: np.ndarray, slope: float, gap_px: int):
+        """Per-column heights limited to a lower envelope of slope `slope` rows per
+        column from every gap wider than gap_px (narrower gaps -- a removed pole,
+        a bin the run test missed -- are bridged for the envelope only). Returns
+        the adjusted top, bottom and how many columns were lowered. The panorama
+        wraps, so the envelope is run on three copies and the middle one kept."""
+        W = top.shape[0]
+        have = top >= 0
+        h = np.where(have, bottom - top + 1, 0).astype(np.float64)
+        # Bridge gaps narrower than gap_px with the mean of the neighbours' heights.
+        filled = h.copy()
+        c = 0
+        while c < W:
+            if have[c]:
+                c += 1
+                continue
+            e = c
+            while e < W and not have[e]:
+                e += 1
+            if e - c < gap_px and c > 0 and e < W:
+                filled[c:e] = 0.5 * (h[c - 1] + h[e])
+            c = e
+        tiled = np.concatenate([filled, filled, filled])
+        env = tiled.copy()
+        n = tiled.shape[0]
+        for i in range(1, n):
+            env[i] = min(env[i], env[i - 1] + slope)
+        for i in range(n - 2, -1, -1):
+            env[i] = min(env[i], env[i + 1] + slope)
+        env = env[W:2 * W]
+        new_h = np.minimum(h, env)
+        lowered = have & (new_h < h - 0.5)
+        new_top = top.copy()
+        new_bottom = bottom.copy()
+        keep = have & (new_h >= 1.0)
+        new_top[keep] = (bottom[keep] - np.rint(new_h[keep]).astype(np.int32) + 1)
+        new_top[have & ~keep] = -1
+        new_bottom[have & ~keep] = -1
+        return new_top, new_bottom, int(lowered.sum())
 
     @staticmethod
     def _drop_fragments(alpha: np.ndarray, rgb: np.ndarray, canopy_luma: float,

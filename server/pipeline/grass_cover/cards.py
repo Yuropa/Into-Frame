@@ -158,13 +158,30 @@ def defringe_rgba(texture: PILImage.Image, passes: int = 2, light_margin: float 
         return texture.convert("RGBA")
     rgb = rgba[..., :3].astype(np.float32)
     lum = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    # What was behind the subject: the texels under alpha 0 still hold the
+    # photograph's (or the completion canvas's) background. Each edge pixel is
+    # compared with the nearest such texel as well as with the interior, so a
+    # mixed pixel is caught whatever colour the background was -- sky behind a
+    # boat, snow behind a conifer -- not only when it is lighter.
+    background = None
+    if (~alpha).any():
+        _, (by, bx) = distance_transform_edt(alpha, return_indices=True)
+        background = rgb[by, bx]
     for _ in range(passes):
         interior = binary_erosion(alpha, iterations=2)
         if not interior.any():
             break
         edge = alpha & ~binary_erosion(alpha)
         _, (iy, ix) = distance_transform_edt(~interior, return_indices=True)
+        inner = rgb[iy, ix]
         lighter = edge & (lum - lum[iy, ix] > light_margin)
+        if background is not None:
+            d_bg = np.linalg.norm(rgb - background, axis=-1)
+            d_in = np.linalg.norm(rgb - inner, axis=-1)
+            # Closer to the background than to the interior, and the two are
+            # distinguishable at all (a leaf against a leaf stays).
+            mixed = edge & (d_bg < d_in) & (np.linalg.norm(inner - background, axis=-1) > 24.0)
+            lighter |= mixed
         if not lighter.any():
             break
         alpha &= ~lighter

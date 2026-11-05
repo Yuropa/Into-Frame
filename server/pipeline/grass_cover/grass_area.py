@@ -238,11 +238,15 @@ def grass_area_mask(
             band = max(float(near_prior_band_m), 1.0)
             prior_mask = np.zeros_like(sampled)
             fractions: list[float] = []
+            # (inner radius, outer radius, passed, the greenness it was filled with)
+            bands: list[tuple[float, float, bool, float]] = []
             a = 0.0
             while a < near_prior_radius_m:
                 b = min(a + band, near_prior_radius_m)
                 in_band = (radius_m >= a) & (radius_m < b)
                 seen = in_photo & in_band
+                passed = False
+                fill_green = float("nan")
                 if int(seen.sum()) >= 50:
                     ref = seen & grass_typed
                     share = float(ref.sum()) / float(seen.sum())
@@ -250,12 +254,40 @@ def grass_area_mask(
                     pass_fraction = float(passing.sum()) / float(max(ref.sum(), 1))
                     if share >= 0.5 and pass_fraction >= 0.5 and int(passing.sum()) >= 25:
                         target = in_band & ~in_photo & (cell_type != int(RegionType.WATER))
-                        greenness = np.where(target, float(np.median(greenness[passing])), greenness)
+                        fill_green = float(np.median(greenness[passing]))
+                        greenness = np.where(target, fill_green, greenness)
                         cell_type = np.where(target, int(RegionType.VEGETATION), cell_type).astype(np.int16)
                         sampled = sampled | target
                         prior_mask |= target
                         fractions.append(share * pass_fraction)
+                        passed = True
+                bands.append((a, b, passed, fill_green))
                 a = b
+            # A band the photo failed (or barely saw) between two it passed is a
+            # bare ring around the viewer -- on the Rainier capture the 10-15 m band
+            # dropped to 0.15 density between 0.8 and 0.95 either side, because the
+            # photo's ground there is the conifer ring's forest floor while the
+            # meadow runs behind the viewer on both sides of it. Treated like its
+            # neighbours: the meadow does not stop for one band and start again.
+            bridged = 0
+            for k, (a_k, b_k, passed_k, _) in enumerate(bands):
+                if passed_k:
+                    continue
+                before = [g for (_, _, ok, g) in bands[:k] if ok]
+                after = [g for (_, _, ok, g) in bands[k + 1:] if ok]
+                if not before or not after:
+                    continue
+                in_band = (radius_m >= a_k) & (radius_m < b_k)
+                target = in_band & ~in_photo & (cell_type != int(RegionType.WATER))
+                if not target.any():
+                    continue
+                greenness = np.where(target, 0.5 * (before[-1] + after[0]), greenness)
+                cell_type = np.where(target, int(RegionType.VEGETATION), cell_type).astype(np.int16)
+                sampled = sampled | target
+                prior_mask |= target
+                bridged += 1
+            if stats is not None:
+                stats["near_prior_bridged_bands"] = bridged
             if prior_mask.any():
                 mask = sampled & np.isin(cell_type, [int(rt) for rt in _GRASS_SOURCE_TYPES])
                 if stats is not None:

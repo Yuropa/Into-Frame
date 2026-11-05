@@ -185,11 +185,20 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
             cut = float(getattr(src_mat, "alphaCutoff", None) or 0.5) * 255.0
             arr = arr.copy()
             arr[..., 3] = np.where(arr[..., 3] >= cut, 255, 0).astype(np.uint8)
-        kwargs["baseColorTexture"] = pyrender.Texture(source=arr, source_channels="RGBA")
+        # The exporter (scene.mesh.Mesh._clamp_samplers) writes a clamp-to-edge
+        # sampler for every mesh whose UVs stay inside the texture; glTFast
+        # honours it, so this does too. Under REPEAT the top edge of a card
+        # blended its opaque bottom row in: a dark bar over every far tree.
+        sampler = None
+        uv = getattr(tm.visual, "uv", None)
+        if uv is not None and len(uv) and float(np.min(uv)) >= -1e-3 and float(np.max(uv)) <= 1.0 + 1e-3:
+            from pyrender.constants import GLTF
+            sampler = pyrender.Sampler(wrapS=GLTF.CLAMP_TO_EDGE, wrapT=GLTF.CLAMP_TO_EDGE)
+        kwargs["baseColorTexture"] = pyrender.Texture(source=arr, source_channels="RGBA", sampler=sampler)
         if unlit:
             # The photograph's own light is in the pixels: show them as emission
             # (a second Texture object; one shared between slots loses the cutout).
-            kwargs["emissiveTexture"] = pyrender.Texture(source=arr.copy(), source_channels="RGBA")
+            kwargs["emissiveTexture"] = pyrender.Texture(source=arr.copy(), source_channels="RGBA", sampler=sampler)
             kwargs["emissiveFactor"] = [1.0, 1.0, 1.0]
             kwargs["baseColorFactor"] = [0.0, 0.0, 0.0, 1.0]
     elif color is not None:

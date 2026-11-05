@@ -416,6 +416,12 @@ class TerrainMeshStage(PipelineStage):
         component_id, formation_ids = self._select_formations(component_id, height_map, grid_size, cfg)
 
         # ── Generate mesh ──────────────────────────────────────────────────────
+        # The plan's water plane, when there is one: a body already pinned to it by
+        # Terrain Reconstruction keeps that exact level (see _level_water).
+        plan = context.input_object(ContextKey.TERRAIN_PLAN) or {}
+        planned_water_y = plan.get("water_y") if isinstance(plan, dict) else None
+        planned_water_y = float(planned_water_y) if planned_water_y is not None else None
+
         mesh, water_mesh, pano_uv, uv_folds_fixed = TerrainMeshGenerator.generate(
             height_map=height_map,
             grid_size_meters=grid_size,
@@ -435,6 +441,7 @@ class TerrainMeshStage(PipelineStage):
             water_depression_m=cfg.water_depression_m,
             min_water_area_m2=cfg.min_water_area_m2,
             water_level_percentile=cfg.water_level_percentile,
+            planned_water_y=planned_water_y,
             water_depression_ramp_m=cfg.water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,
@@ -501,6 +508,7 @@ class TerrainMeshStage(PipelineStage):
             water_depression_m=cfg.water_depression_m,
             min_water_area_m2=cfg.min_water_area_m2,
             water_level_percentile=cfg.water_level_percentile,
+            planned_water_y=planned_water_y,
             water_depression_ramp_m=cfg.water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,

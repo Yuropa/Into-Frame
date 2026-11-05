@@ -435,7 +435,41 @@ class Mesh:
                 inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
             tree, bin_data = _read_glb(Path(path).read_bytes())
             tree.setdefault("asset", {}).setdefault("extras", {})[self._HANDEDNESS_MARKER] = "gltf"
+            self._clamp_samplers(tree)
             _write_glb(Path(path), tree, bin_data)
+
+    @staticmethod
+    def _clamp_samplers(tree: dict) -> None:
+        """Textures sampled only inside [0, 1] get a clamp-to-edge sampler.
+
+        trimesh writes no sampler, so every texture defaults to glTF's REPEAT. At
+        a card's top edge the bilinear (and every mip) sample then blends the
+        texture's bottom row in, and a cutout's bottom row is its most opaque one
+        (the trunk, the ground patch, a hull): from a few tens of metres every
+        tree card carried a dark bar floating over its crown, the width of its
+        base. Clamping makes the edge sample the edge, which defringe_rgba keeps
+        transparent. Meshes whose UVs run past the texture (the terrain's tiled
+        splat) keep REPEAT."""
+        textures = tree.get("textures")
+        if not textures:
+            return
+        accessors = tree.get("accessors", [])
+        for mesh in tree.get("meshes", []):
+            for prim in mesh.get("primitives", []):
+                for name, idx in prim.get("attributes", {}).items():
+                    if not name.startswith("TEXCOORD"):
+                        continue
+                    acc = accessors[idx] if idx < len(accessors) else {}
+                    lo, hi = acc.get("min"), acc.get("max")
+                    if lo is None or hi is None:
+                        return
+                    if min(lo) < -1e-3 or max(hi) > 1.0 + 1e-3:
+                        return
+        samplers = tree.setdefault("samplers", [])
+        samplers.append({"magFilter": 9729, "minFilter": 9987, "wrapS": 33071, "wrapT": 33071})
+        clamp = len(samplers) - 1
+        for tex in textures:
+            tex.setdefault("sampler", clamp)
 
     @classmethod
     def _stored_in_gltf_frame(cls, path) -> bool:

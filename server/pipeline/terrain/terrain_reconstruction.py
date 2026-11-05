@@ -767,6 +767,35 @@ class TerrainReconstructionStage(PipelineStage):
             fixed_elev[rows_w, cols_w] = water_y
             n_water += 1
 
+        # ── Planned water ─────────────────────────────────────────────────────
+        # The terrain plan (Region Map) put every planned water cell on one plane
+        # at the photographed water level and its banks above it. Only the water
+        # CHAINS were pinned here, so the solve interpolated the unphotographed
+        # river from the outpainted panorama's low land: on Paris the sheet ended
+        # up -15..-11 m across a plane at -11.7 m, Noise Refinement levelled it to
+        # the broken shore's p25 (-13.4 m), and the banks stood 1.7 m proud of the
+        # water. Every planned water cell is a fixed node at the plane, and after
+        # the solve no land sits under it (the Height Map's own rule, re-applied).
+        plan = context.input_object(ContextKey.TERRAIN_PLAN) or {}
+        plan_water_y = plan.get("water_y") if isinstance(plan, dict) else None
+        plan_water = None
+        if plan_water_y is not None and np.isfinite(float(plan_water_y)):
+            region_depth_plan = context.input_depth(ContextKey.REGION_MAP)
+            if region_depth_plan is not None:
+                region_plan = region_depth_plan.depth
+                if region_plan.shape != (H, W):
+                    region_plan = nd_zoom(region_plan.astype(np.float32), (H / region_plan.shape[0], W / region_plan.shape[1]), order=0)
+                plan_water = np.rint(region_plan).astype(np.int32) == int(RegionType.WATER)
+                if plan_water.any():
+                    water_s = TerrainReconstructionStage._downsample_observed_max(plan_water, H_s, W_s)
+                    fixed_mask[water_s] = True
+                    fixed_elev[water_s] = float(plan_water_y)
+                    self.log_info(
+                        f"Planned water: {int(water_s.sum())} solve node(s) held at the plane {float(plan_water_y):+.2f} m"
+                    )
+                else:
+                    plan_water = None
+
         self.log_info(
             f"Terrain reconstruction: {n_rivers} river(s), {n_water} water chain(s); "
             f"{int(fixed_mask.sum())} / {H_s * W_s} nodes fixed"
@@ -981,6 +1010,37 @@ class TerrainReconstructionStage(PipelineStage):
                     f"the measured {measured_span:.1f} m span, under the "
                     f"{cfg.max_relief_inflation:.1f}x ceiling"
                 )
+
+        if plan_water is not None:
+            y_w = float(plan_water_y)
+            new_hm[plan_water] = y_w
+            # Land the solve sank under the plane comes up to the plan's bank
+            # height: the channel's measured bank when the plan has a channel
+            # (Terrain Mesh retypes flat land within half a metre of the sheet as
+            # water, so a lowland skimming the plane would widen the river into
+            # it), else just clear of the surface. Only ALONG the water, though:
+            # a floor applied to the whole map lifted 12.6 M cells of the Rainier
+            # meadow (its lake is two cells, and its plane sits above the meadow's
+            # dips) -- the rule is about banks, not about the map's minimum.
+            channel = plan.get("channel") if isinstance(plan.get("channel"), dict) else {}
+            bank_y = channel.get("bank_y")
+            if bank_y is not None and np.isfinite(float(bank_y)):
+                bank_y, band_m = max(float(bank_y), y_w + 0.6), 20.0
+            else:
+                bank_y, band_m = y_w + 0.3, 6.0
+            cell_m = grid_size / max(W, 1)
+            water_area_m2 = float(plan_water.sum()) * cell_m * cell_m
+            sunk_n = 0
+            if water_area_m2 >= 25.0:
+                near = distance_transform_edt(~plan_water) * cell_m <= band_m
+                land = ~plan_water & near & np.isfinite(new_hm)
+                sunk = land & (new_hm < bank_y)
+                new_hm[sunk] = bank_y
+                sunk_n = int(sunk.sum())
+            self.log_info(
+                f"Planned water: {int(plan_water.sum())} cell(s) ({water_area_m2:.0f} m2) set to the plane {y_w:+.2f} m; "
+                f"{sunk_n} land cell(s) within {band_m:.0f} m raised to {bank_y:+.2f} m"
+            )
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 

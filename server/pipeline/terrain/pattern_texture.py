@@ -574,6 +574,7 @@ def bake_projected_colour(
     near_m: float = 3.0,
     blur_texels: float = 1.0,
     near_vegetation_m: float = 8.0,
+    near_depth_tolerance: "float | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The photograph projected onto the terrain where that projection is sound,
     and filled from itself everywhere else.
@@ -642,7 +643,16 @@ def bake_projected_colour(
         du = np.clip(np.rint(pu / max(W - 1, 1) * (dw - 1)).astype(np.int64), 0, dw - 1)
         dv = np.clip(np.rint(pv / max(H - 1, 1) * (dh - 1)).astype(np.int64), 0, dh - 1)
         dp = depth[dv, du].astype(np.float64)
-        agree = np.isfinite(dp) & (np.abs(dp - d) <= depth_tolerance * np.maximum(d, near_m))
+        # Asymmetric when near_depth_tolerance is given: a pixel measured FARTHER
+        # than the texel is depth noise on the same ground, but one measured
+        # much NEARER shows something standing between the camera and the
+        # texel -- a quay wall, a boat, people on the bank -- which the
+        # projection lays flat along the ground behind it. On Paris the low
+        # quay behind the left bank's wall took the wall and its crowd as a
+        # 20 m streak under the symmetric 0.6 test.
+        scale = np.maximum(d, near_m)
+        near_tol = depth_tolerance if near_depth_tolerance is None else float(near_depth_tolerance)
+        agree = np.isfinite(dp) & (dp - d <= depth_tolerance * scale) & (d - dp <= near_tol * scale)
         valid &= agree
     # (c) the pixel's ground footprint
     texel = 2.0 * half / S

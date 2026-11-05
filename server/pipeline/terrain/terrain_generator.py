@@ -157,6 +157,7 @@ class TerrainMeshGenerator:
         water_depression_m: float = 0.5,
         min_water_area_m2: float = 12.0,
         water_level_percentile: float = 25.0,
+        planned_water_y: Optional[float] = None,
         water_depression_ramp_m: float = 2.0,
         observed_mask: Optional[Depth] = None,
         component_id: Optional[Depth] = None,
@@ -418,7 +419,7 @@ class TerrainMeshGenerator:
                 # one indexes the same ground in the other.
                 water_Y = TerrainMeshGenerator._level_water(
                     water_grid, hm_level, is_water, Y_pos, row_rm, col_rm,
-                    water_level_percentile,
+                    water_level_percentile, planned_level=planned_water_y,
                 )
                 # Distance to the nearest dry cell, in metres, as a 0..1 ramp over
                 # water_depression_ramp_m (see the carve below).
@@ -613,6 +614,7 @@ class TerrainMeshGenerator:
         component_id: Optional[Depth] = None,
         formation_depression_m: float = 0.5,
         water_level_percentile: float = 25.0,
+        planned_water_y: Optional[float] = None,
         water_depression_ramp_m: float = 2.0,
     ) -> Mesh:
         """
@@ -647,6 +649,7 @@ class TerrainMeshGenerator:
             # different set of lakes than the visual mesh shows.
             min_water_area_m2=min_water_area_m2,
             water_level_percentile=water_level_percentile,
+            planned_water_y=planned_water_y,
             water_depression_ramp_m=water_depression_ramp_m,
             observed_mask=observed_mask,
             component_id=component_id,
@@ -972,10 +975,20 @@ class TerrainMeshGenerator:
         percentile: float,
         bank_blend_m: float,
         bank_max_step_m: float,
+        planned_level: Optional[float] = None,
+        planned_tolerance_m: float = 1.0,
         log=None,
     ) -> np.ndarray:
         """Flatten each body of water IN THE HEIGHT MAP to one level, and grade the
         bank around it to meet that level.
+
+        planned_level: the terrain plan's water surface (TERRAIN_PLAN water_y) when
+        the plan has one. Terrain Reconstruction already pins planned water to it,
+        so a body whose own cells sit within planned_tolerance_m of the plane IS the
+        planned water and keeps that exact level instead of the shore estimate --
+        on the Paris capture the shore ring read 0.19 m above the plane and the
+        sheet sat that far up the quay. Bodies away from the plane (a pond above a
+        river) still take their own shore level.
 
         The reconstruction under a lake is a guess at a surface that reflects the
         sky and reads as far: on the Rainier capture the labelled lake sat in a
@@ -1015,6 +1028,13 @@ class TerrainMeshGenerator:
             if heights.size == 0:
                 continue
             level = float(np.percentile(heights, percentile))
+            how = f"shore p{percentile:.0f}"
+            if planned_level is not None and np.isfinite(planned_level):
+                own = height[body]
+                own = own[np.isfinite(own)]
+                if own.size and abs(float(np.median(own)) - float(planned_level)) <= planned_tolerance_m:
+                    level = float(planned_level)
+                    how = "planned surface"
             out[body] = level
             if bank_blend_m > 0.0:
                 dist = distance_transform_edt(~body) * cell
@@ -1025,7 +1045,7 @@ class TerrainMeshGenerator:
                 area = float(body.sum()) * cell * cell
                 log(
                     f"  water body {component}: {area:.0f} m2 levelled to {level:+.2f} m "
-                    f"(shore p{percentile:.0f}; body was {np.percentile(height[body], 25):+.2f}..{np.percentile(height[body], 75):+.2f} m)"
+                    f"({how}; body was {np.percentile(height[body], 25):+.2f}..{np.percentile(height[body], 75):+.2f} m)"
                 )
         return out.astype(height.dtype, copy=False)
 
@@ -1038,8 +1058,13 @@ class TerrainMeshGenerator:
         row_rm: np.ndarray,
         col_rm: np.ndarray,
         percentile: float,
+        planned_level: Optional[float] = None,
+        planned_tolerance_m: float = 1.0,
     ) -> np.ndarray:
         """Flatten each connected water body to a single elevation.
+
+        planned_level: see level_water_bodies -- a body already sitting on the
+        plan's water plane keeps that exact level.
 
         Water used to take `Y_pos` unchanged -- whatever the reconstructed terrain
         happened to be under each water-typed cell -- which is only correct if the
@@ -1114,7 +1139,16 @@ class TerrainMeshGenerator:
                 heights = Y_pos[member]
             if heights.size == 0:
                 continue
-            water_Y[member] = float(np.percentile(heights, percentile))
+            level = float(np.percentile(heights, percentile))
+            if (
+                planned_level is not None and np.isfinite(planned_level)
+                and height_grid is not None and height_grid.shape == water_grid.shape
+            ):
+                own = height_grid[labels == component]
+                own = own[np.isfinite(own)]
+                if own.size and abs(float(np.median(own)) - float(planned_level)) <= planned_tolerance_m:
+                    level = float(planned_level)
+            water_Y[member] = level
         return water_Y
 
     @staticmethod

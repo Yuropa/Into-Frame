@@ -68,6 +68,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
         skip_far_objects: bool = True,
+        sliver_min_box_px: float = 8.0,
+        sliver_max_box_aspect: float = 12.0,
+        sliver_exempt_classes: list[str] | None = None,
         far_landmark_classes: list[str] | None = None,
         landmark_distance_fraction: float = 0.75,
         borrow_mesh_classes: list[str] | None = None,
@@ -118,6 +121,17 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # while the instance fills at least that fraction of the screen height, and
         # the last one's value is the cull threshold (0 = never culled).
         self.skip_far_objects = bool(skip_far_objects)
+        # A detection box thinner than sliver_min_box_px, or more than
+        # sliver_max_box_aspect times longer than it is tall (or the reverse), is
+        # not a picture of an object: Paris's object 51 was a "boat" box of 787 x 4
+        # panorama pixels -- the far quay's waterline -- and stood in the river as
+        # a 14 m blue panel. Classes that really are that elongated are exempt.
+        self.sliver_min_box_px = float(sliver_min_box_px)
+        self.sliver_max_box_aspect = float(sliver_max_box_aspect)
+        self.sliver_exempt_classes = frozenset(
+            sliver_exempt_classes if sliver_exempt_classes is not None
+            else ["bridge", "fence", "wall", "railing", "train", "pier", "jetty", "dock", "road", "river"]
+        )
         self.runtime_lods = bool(runtime_lods)
         # Classes whose card stands in for their reconstruction whenever both
         # exist: a wildflower's card is its reference view at full resolution,
@@ -550,7 +564,13 @@ def mesh_instance_scale(
     # 25 on the next, and the flat limit turned the stack into a billboard on the
     # unlucky runs). 1.5 x the box allows a squat rock; the Rainier sheet -- a 3 m
     # detection rendering 47 m -- is still caught by the 25 m floor.
-    size_limit = float(max_size_m) if max_size_m else max(_MAX_OBJECT_SIZE_M, 1.5 * float(max(width, height)))
+    # Measured against the box's DIAGONAL, not its longer side: a mesh scaled to the
+    # box's height may legitimately be wider than the box is (Shark Fin's 17 x 16 m
+    # stack rendered 27.2 m across from a 1.68:1 mesh and the 1.5 x 17 m = 26 m limit
+    # turned it into a billboard), and the diagonal is the box's size whichever way
+    # the mesh's long axis lands. The Rainier sheet, a 3 m detection, is still caught
+    # by the 25 m floor.
+    size_limit = float(max_size_m) if max_size_m else max(_MAX_OBJECT_SIZE_M, 1.5 * float(np.hypot(width, height)))
 
     # Backstop on the RENDERED size. _MAX_OBJECT_SIZE_M above culls on the detected
     # box, which is the wrong quantity for this failure and always passes it: the
@@ -932,6 +952,15 @@ class SceneGenerationStage(PipelineStage):
                     kind_length_m[key] = float(kind["length_m"])
                 if kind and kind.get("height_m"):
                     kind_height_m[key] = float(kind["height_m"])
+            # The longest typed member of each class: the detected-size cull below
+            # is a backstop against misdetections the size of a house, and a class
+            # whose typed exemplar is a 35 m tour boat has 35 m members (Paris's
+            # right-bank barge was culled at 25.8 m).
+            class_kind_length_m: dict[str, float] = {}
+            for kind in object_kinds.values():
+                if kind and kind.get("class") and kind.get("length_m"):
+                    cls_name = str(kind["class"])
+                    class_kind_length_m[cls_name] = max(class_kind_length_m.get(cls_name, 0.0), float(kind["length_m"]))
             # Cone policy from the detection stages (see hires_crops.is_photographed).
             fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
             unphotographed_skipped = 0
@@ -953,6 +982,15 @@ class SceneGenerationStage(PipelineStage):
             camera_position = (
                 np.array(extrinsics.translation, dtype=float) if extrinsics is not None else np.zeros(3)
             )
+            # Which way each reconstructed mesh was photographed from (Panorama
+            # Asset Generation's MESH_FRONTS_KEY), so a photographed instance can
+            # show the viewer the side the photograph shows.
+            mesh_fronts: dict[str, np.ndarray] = {}
+            for key, vec in (context.input_object("mesh_fronts") or {}).items():
+                vec = np.asarray(vec, dtype=float)
+                if vec.shape == (3,) and np.hypot(vec[0], vec[2]) > 1e-3:
+                    mesh_fronts[key] = vec
+            faced_photographer = 0
 
             rng = np.random.default_rng(self.seed)
 
@@ -1256,6 +1294,17 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
 
+                    bw, bh = float(box[2]), float(box[3])
+                    thin = min(bw, bh) < self.config.sliver_min_box_px
+                    long = max(bw, bh) > self.config.sliver_max_box_aspect * max(min(bw, bh), 1e-6)
+                    if (thin or long) and cls not in self.config.sliver_exempt_classes:
+                        self.log_info(
+                            f"Skipping object {idx} ({cls}): detection box {bw:.0f}x{bh:.0f} px is a sliver, "
+                            f"not a picture of a {cls}"
+                        )
+                        self.advance_progress(generation_task)
+                        continue
+
                     result = unproject_box(box, metadata.get("class"))
                     if result is None:
                         self.log_warning(f"Could not unproject bbox for object {idx}, skipping")
@@ -1281,8 +1330,9 @@ class SceneGenerationStage(PipelineStage):
                             continue
 
                 max_dim = max(width, height)
-                if max_dim > _MAX_OBJECT_SIZE_M and cls not in self.config.far_landmark_classes:
-                    self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit")
+                size_cull_m = max(_MAX_OBJECT_SIZE_M, 1.3 * class_kind_length_m.get(cls, 0.0))
+                if max_dim > size_cull_m and cls not in self.config.far_landmark_classes:
+                    self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit {size_cull_m:.0f}m")
                     self.advance_progress(generation_task)
                     continue
 
@@ -1766,6 +1816,57 @@ class SceneGenerationStage(PipelineStage):
                         yaw = float(metadata["yaw_deg"]) + (90.0 if ext[2] > ext[0] else 0.0)
                         yaw += 180.0 * int(rng.integers(2)) + float(rng.uniform(-8.0, 8.0))
                         mesh_obj.set_rotation(0.0, yaw % 360.0, 0.0)
+                    elif (
+                        mesh_key in mesh_fronts
+                        and metadata.get("in_captured_fov")
+                        and not metadata.get("synthetic")
+                    ):
+                        # A photographed object wearing a reconstruction: turn the
+                        # side the photograph shows toward the capture point.
+                        # Shark Fin's sea stack and Paris's tour boat got a random
+                        # yaw before this -- the fin's hooked back, the boat's
+                        # hallucinated side, from exactly where the photo was taken.
+                        # The same mesh on a sibling detection (both stacks share
+                        # rock_0) faces the photographer too: it is still the
+                        # photographed side that reads as that object.
+                        front = mesh_fronts[mesh_key]
+                        toward = camera_position - np.asarray(position, dtype=float)
+                        yaw = float(np.degrees(np.arctan2(toward[0], toward[2]) - np.arctan2(front[0], front[2])))
+                        # The pose is SAM3D's opinion; the detection box is the
+                        # photograph's. Paris's tour boat (box 39x131 px, seen
+                        # stern-on from the bridge) came back with its long axis
+                        # across the pose's view, so faced "correctly" it lay
+                        # broadside, 24 m wide, where the photo shows a 4 m stern.
+                        # When the silhouette the pose would present disagrees
+                        # with the box by over 2.5x and a quarter turn agrees at
+                        # least twice as well, the quarter turn wins.
+                        ext = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                        if width > 1e-6 and height > 1e-6 and float(ext[1]) > 1e-6:
+                            box_aspect = float(width) / float(height)
+                            across = np.array([toward[2], -toward[0]], dtype=float)
+                            across /= max(float(np.hypot(*across)), 1e-9)
+
+                            def presented(theta_deg: float) -> float:
+                                t = np.radians(theta_deg)
+                                local_x = np.array([np.cos(t), -np.sin(t)])
+                                local_z = np.array([np.sin(t), np.cos(t)])
+                                w = abs(float(ext[0]) * float(local_x @ across)) + abs(float(ext[2]) * float(local_z @ across))
+                                return w / float(ext[1])
+
+                            def disagreement(theta_deg: float) -> float:
+                                a = max(presented(theta_deg), 1e-6)
+                                return max(a / box_aspect, box_aspect / a)
+
+                            d0, d90 = disagreement(yaw), disagreement(yaw + 90.0)
+                            if d0 > 2.5 and d0 >= 2.0 * d90:
+                                self.log_info(
+                                    f"  object {idx} ({cls}): the pose's side would show {presented(yaw):.2f}:1 against the "
+                                    f"detection's {box_aspect:.2f}:1 ({d0:.1f}x off); a quarter turn shows "
+                                    f"{presented(yaw + 90.0):.2f}:1 ({d90:.1f}x) -- turned"
+                                )
+                                yaw += 90.0
+                        mesh_obj.set_rotation(0.0, float(yaw) % 360.0, 0.0)
+                        faced_photographer += 1
                     else:
                         mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(scale_x, scale_y, scale_z)
@@ -1868,69 +1969,71 @@ class SceneGenerationStage(PipelineStage):
                 + ", ".join(f"{n} {c}" for c, n in sorted(dropped_in_water.items(), key=lambda kv: -kv[1]))
             )
 
-            if backdrop_skipped:
-                self.log_info(f"Backdrop: skipped {backdrop_skipped} detection(s) left in the terrain plate at the far clamp")
-            if background_skipped:
-                self.log_info(
-                    f"Background rejection: skipped {background_skipped} detection(s) "
-                    f"Panorama Asset Generation measured as sky/unmeasured-depth rather "
-                    f"than objects"
-                )
-            if unphotographed_skipped:
-                self.log_info(
-                    f"Captured-cone policy: skipped {unphotographed_skipped} detection(s) "
-                    f"from the outpainted part of the panorama"
-                )
-            if far_skipped:
-                self.log_info(
-                    f"Far objects: {far_skipped} detection(s) left to the far backdrop -- at their angular size "
-                    f"a typical one of their class would stand beyond the far-field start {far_start_m:.0f} m"
-                )
+        if backdrop_skipped:
+            self.log_info(f"Backdrop: skipped {backdrop_skipped} detection(s) left in the terrain plate at the far clamp")
+        if background_skipped:
+            self.log_info(
+                f"Background rejection: skipped {background_skipped} detection(s) "
+                f"Panorama Asset Generation measured as sky/unmeasured-depth rather "
+                f"than objects"
+            )
+        if unphotographed_skipped:
+            self.log_info(
+                f"Captured-cone policy: skipped {unphotographed_skipped} detection(s) "
+                f"from the outpainted part of the panorama"
+            )
+        if far_skipped:
+            self.log_info(
+                f"Far objects: {far_skipped} detection(s) left to the far backdrop -- at their angular size "
+                f"a typical one of their class would stand beyond the far-field start {far_start_m:.0f} m"
+            )
 
-            if rejected_rigid:
-                self.log_info(
-                    f"Rigid overlap: dropped {rejected_rigid} object(s) inside another "
-                    f"rigid model's reach ({len(rigid_placed)} kept)"
+        if faced_photographer:
+            self.log_info(f"Facing the photographer: {faced_photographer} photographed object(s) turned so the reconstructed side the photo shows faces the capture point")
+        if rejected_rigid:
+            self.log_info(
+                f"Rigid overlap: dropped {rejected_rigid} object(s) inside another "
+                f"rigid model's reach ({len(rigid_placed)} kept)"
+            )
+        if rejected_overlap:
+            self.log_info(
+                f"Overlap rejection: dropped {rejected_overlap} object(s) landing inside "
+                f"one already placed (min separation "
+                f"{self.config.overlap_min_separation:.2f}, {occ_n} kept)"
+            )
+            # Broken out by class because the threshold now varies by class, so
+            # one total cannot say whether a population is being thinned as
+            # intended or a discrete class is being culled by accident.
+            for key, count in sorted(rejected_overlap_by_class.items(), key=lambda kv: -kv[1]):
+                used = self.config.overlap_min_separation_overrides.get(
+                    key, self.config.overlap_min_separation
                 )
-            if rejected_overlap:
-                self.log_info(
-                    f"Overlap rejection: dropped {rejected_overlap} object(s) landing inside "
-                    f"one already placed (min separation "
-                    f"{self.config.overlap_min_separation:.2f}, {occ_n} kept)"
-                )
-                # Broken out by class because the threshold now varies by class, so
-                # one total cannot say whether a population is being thinned as
-                # intended or a discrete class is being culled by accident.
-                for key, count in sorted(rejected_overlap_by_class.items(), key=lambda kv: -kv[1]):
-                    used = self.config.overlap_min_separation_overrides.get(
-                        key, self.config.overlap_min_separation
-                    )
-                    self.log_info(f"    {key}: {count} instance(s) at separation {used:.2f}")
-                for example in rejected_examples:
-                    self.log_info(f"    rejected object {example}")
+                self.log_info(f"    {key}: {count} instance(s) at separation {used:.2f}")
+            for example in rejected_examples:
+                self.log_info(f"    rejected object {example}")
 
-            if lod_counts:
-                self.log_info(
-                    "Runtime LODs: "
-                    + ", ".join(f"{n} instance(s) with {k} level(s)" for k, n in sorted(lod_counts.items()))
-                )
-            if mesh_rejections:
-                self.log_warning(
-                    f"Category mesh rejection: {sum(mesh_rejections.values())} instance(s) "
-                    f"across {len(mesh_rejections)} mesh(es) billboarded instead of meshed"
-                )
-                for key, count in sorted(mesh_rejections.items(), key=lambda kv: -kv[1]):
-                    self.log_warning(f"    {key}: {count} instance(s)")
+        if lod_counts:
+            self.log_info(
+                "Runtime LODs: "
+                + ", ".join(f"{n} instance(s) with {k} level(s)" for k, n in sorted(lod_counts.items()))
+            )
+        if mesh_rejections:
+            self.log_warning(
+                f"Category mesh rejection: {sum(mesh_rejections.values())} instance(s) "
+                f"across {len(mesh_rejections)} mesh(es) billboarded instead of meshed"
+            )
+            for key, count in sorted(mesh_rejections.items(), key=lambda kv: -kv[1]):
+                self.log_warning(f"    {key}: {count} instance(s)")
 
-            # Reporting must never be able to fail the stage. This exact call took
-            # a completed 85-minute run down at the last stage with a NameError on
-            # a debug-file write -- every object placed, the scene assembled, and
-            # the run discarded by a log line. A diagnostic that can destroy the
-            # thing it is diagnosing is worse than no diagnostic.
-            try:
-                self._log_mesh_geometry(mesh_geometry)
-            except Exception as e:
-                self.log_warning(f"Could not report mesh geometry ({type(e).__name__}: {e})")
+        # Reporting must never be able to fail the stage. This exact call took
+        # a completed 85-minute run down at the last stage with a NameError on
+        # a debug-file write -- every object placed, the scene assembled, and
+        # the run discarded by a log line. A diagnostic that can destroy the
+        # thing it is diagnosing is worse than no diagnostic.
+        try:
+            self._log_mesh_geometry(mesh_geometry)
+        except Exception as e:
+            self.log_warning(f"Could not report mesh geometry ({type(e).__name__}: {e})")
 
         # Terrain/water/formation vertices were built directly in the panorama's
         # own frame (+Z = theta 0), matching the skybox's UNROTATED orientation --

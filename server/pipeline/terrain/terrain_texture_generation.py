@@ -1,4 +1,5 @@
 import math
+import re
 from typing import Any, Optional
 from logging import Logger
 
@@ -50,6 +51,35 @@ _GROUND_TYPES: frozenset[RegionType] = frozenset({
 # description would fight the actual photo reference instead of following it. These name
 # the material and its 1-2 defining traits only — the real reference crops
 # (_extract_reference_patches) and per-region LAB colour transfer carry the rest.
+# Words in the scene caption that make its bare GROUND paving rather than earth.
+# RegionType.GROUND folds earth, field, sand and pavement together, and with no
+# photo reference (Paris's quays are too far and too foreshortened to sample) the
+# generic prompt made the Seine's embankments mudflats. The caption is the one
+# scene-level description every stage has; "eiffel tower", "city street",
+# "harbour" say paved ground as surely as "meadow" says soil.
+_URBAN_WORDS = frozenset(
+    "city cities town urban street streets quay quays quayside embankment promenade "
+    "harbour harbor plaza piazza square bridge cathedral church palace castle eiffel "
+    "downtown boulevard avenue pier docks dock marina canal skyline buildings village "
+    "market station monument temple museum parliament".split()
+)
+_URBAN_GROUND_PROMPT = (
+    "macro close-up photograph of worn pale grey stone paving slabs of a city quay, "
+    "large weathered limestone flagstones with narrow joints, fine wear scratches and grit"
+)
+_URBAN_NEAR_GROUND_SURFACE = (
+    "worn pale grey stone paving of a city quay, large weathered limestone flagstones with "
+    "narrow joints, even and continuous"
+)
+
+
+def _is_urban_scene(caption: Any) -> bool:
+    if not caption:
+        return False
+    words = re.findall(r"[a-z]+", str(caption).lower())
+    return any(w in _URBAN_WORDS for w in words)
+
+
 _BASE_PROMPTS: dict[RegionType, str] = {
     RegionType.GROUND: (
         "macro close-up photograph of loose soil grit, tiny sharp gravel stones, "
@@ -393,6 +423,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # ~3x the eye height the projection is sound. Falls back to the unrestricted
         # search when a region has no pixels this close (rock on the far ridge).
         reference_max_distance_m: float = 8.0,
+        reference_max_footprint_m: float = 0.35,
         # Withhold the panorama layer from texels where one panorama pixel would
         # cover more than this much ground (0 disables). Computed from distance and
         # the view ray's grazing angle against the height map's own surface, so a
@@ -402,6 +433,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # hands over to the tiled material. Ramps from full weight at half this
         # value to zero at it.
         panorama_max_texel_m: float = 0.6,
+        panorama_occluder_depth_ratio: float = 0.0,
+        panorama_water_hard_radius_m: float = 60.0,
         # Beyond this radius, unobserved terrain (the ridge envelope / outpainted
         # dome) keeps the projected panorama regardless of the texel-size and
         # upright gates -- see _panorama_visibility_weight. 0 disables.
@@ -443,6 +476,7 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         macro_angular_sigma_deg: float = 2.0,
         macro_max_texel_m: float = 3.0,
         macro_depth_tolerance: float = 0.6,
+        macro_depth_near_tolerance: float = 0.6,
         # Region types whose detail tile may be cut from a near-field photo patch
         # (tile_source "patch"). Surfaces only: dirt, rock, road are flat and a
         # patch flattened onto its own plane is a texture of them. Vegetation is
@@ -548,6 +582,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.tile_seam_fix = str(tile_seam_fix)
         self.macro_max_texel_m = float(macro_max_texel_m)
         self.macro_depth_tolerance = float(macro_depth_tolerance)
+        # Tighter on the near side (see pattern_texture.bake_projected_colour).
+        self.macro_depth_near_tolerance = float(macro_depth_near_tolerance)
         self.patch_tile_types = frozenset(
             patch_tile_types if patch_tile_types is not None else ["ground", "terrain", "road", "trail"]
         )
@@ -562,7 +598,21 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # and the standing grass carries the green.
         self.macro_vegetation_chroma = float(macro_vegetation_chroma)
         self.reference_max_distance_m = float(reference_max_distance_m)
+        # When nothing of a region lies within reference_max_distance_m, a reference
+        # crop may still come from farther pixels, but only ones whose ground
+        # footprint is at most this (see _extract_reference_patches); 0 = any.
+        self.reference_max_footprint_m = float(reference_max_footprint_m)
         self.panorama_max_texel_m = float(panorama_max_texel_m)
+        # A texel whose panorama pixel was measured nearer than this fraction of
+        # the texel's own distance is looking at something in front of its ground
+        # (see _panorama_visibility_weight); 0 disables. Off by default: on the
+        # Rainier capture the calibrated depth within 60 m reads about HALF the
+        # texel distance on bare terrain (median ratio 0.54), so any threshold that
+        # catches a wall on Paris (ratios 0.9-1.3 there) strips the whole meadow.
+        self.panorama_occluder_depth_ratio = float(panorama_occluder_depth_ratio)
+        # Within this radius the water gate survives the far-ring restoration
+        # (see _panorama_visibility_weight).
+        self.panorama_water_hard_radius_m = float(panorama_water_hard_radius_m)
         self.panorama_far_ring_radius_m = float(panorama_far_ring_radius_m)
         self.panorama_far_ring_feather_m = float(panorama_far_ring_feather_m)
         self.delight_panorama_layer = bool(delight_panorama_layer)
@@ -1129,6 +1179,9 @@ class TerrainTextureGenerationStage(PipelineStage):
                     "is not in context — the panorama layer will keep painting upright "
                     "vegetation onto the ground plane"
                 )
+            pano_depth_for_gate = (
+                context.input_depth(ContextKey.PANORAMA_DEPTH) if cfg.panorama_occluder_depth_ratio > 0.0 else None
+            )
             pano_weight = self._panorama_visibility_weight(
                 height_map_depth.depth, half, cfg.blend_map_size, cfg.panorama_blend_power,
                 nadir_cutoff_deg=cfg.nadir_cutoff_deg,
@@ -1145,6 +1198,9 @@ class TerrainTextureGenerationStage(PipelineStage):
                 observed_mask=(observed_depth.depth if observed_depth is not None else None),
                 far_ring_radius_m=cfg.panorama_far_ring_radius_m,
                 far_ring_feather_m=cfg.panorama_far_ring_feather_m,
+                pano_depth=(pano_depth_for_gate.depth if pano_depth_for_gate is not None else None),
+                occluder_depth_ratio=cfg.panorama_occluder_depth_ratio,
+                water_hard_radius_m=cfg.panorama_water_hard_radius_m,
             )
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
@@ -1399,11 +1455,15 @@ class TerrainTextureGenerationStage(PipelineStage):
                 if rt in _NEAR_GROUND_SURFACES:
                     ranked.append((rt, counts[idx] / total))
         dominant = ranked[0][0] if ranked else RegionType.VEGETATION
-        minor = [_NEAR_GROUND_PHRASES[rt] for rt, frac in ranked[1:] if frac >= 0.15]
-        surface = _NEAR_GROUND_SURFACES[dominant]
+        caption = context.input_object(ContextKey.INPUT_CAPTION)
+        urban = _is_urban_scene(caption)
+        minor = [
+            "paving" if (rt == RegionType.GROUND and urban) else _NEAR_GROUND_PHRASES[rt]
+            for rt, frac in ranked[1:] if frac >= 0.15
+        ]
+        surface = _URBAN_NEAR_GROUND_SURFACE if (dominant == RegionType.GROUND and urban) else _NEAR_GROUND_SURFACES[dominant]
         if minor:
             surface += ", with some " + " and ".join(minor)
-        caption = context.input_object(ContextKey.INPUT_CAPTION)
         scene = f" The place is: {str(caption).strip()}." if caption else ""
         # "High-altitude aerial" sets the scale: asked for a close photograph of
         # ground, FLUX.1-dev draws metre-wide herbs and boulders whatever width
@@ -1442,7 +1502,7 @@ class TerrainTextureGenerationStage(PipelineStage):
         canvas, valid = bake_projected_colour(
             panorama, height_map, half, cfg.macro_map_size, type_map, depth, region_map,
             max_texel_m=cfg.macro_max_texel_m, depth_tolerance=cfg.macro_depth_tolerance,
-            blur_texels=cfg.macro_blur_texels,
+            blur_texels=cfg.macro_blur_texels, near_depth_tolerance=cfg.macro_depth_near_tolerance,
         )
         self.log_info(
             f"Macro colour map: {valid.mean():.1%} of texels are a sound projection of the photograph "
@@ -1661,6 +1721,11 @@ class TerrainTextureGenerationStage(PipelineStage):
         observed_mask: Optional[np.ndarray] = None,
         far_ring_radius_m: float = 0.0,
         far_ring_feather_m: float = 8.0,
+        pano_depth: Optional[np.ndarray] = None,
+        occluder_depth_ratio: float = 0.75,
+        occluder_depth_feather: float = 0.10,
+        occluder_max_distance_m: float = 80.0,
+        water_hard_radius_m: float = 60.0,
     ) -> np.ndarray:
         """
         Per-texel visibility weight for the panorama layer, based on the
@@ -1763,6 +1828,10 @@ class TerrainTextureGenerationStage(PipelineStage):
             horizon_fade_deg=horizon_fade_deg,
         ).reshape(blend_map_size, blend_map_size)
         base_weight = weight.copy()
+        # Gates the far-ring restoration below must respect: a texel whose panorama
+        # pixel is water, or something standing in front of its ground, has no
+        # photograph of its ground at all, observed or not.
+        hard_gate = np.ones_like(weight)
 
         if max_texel_m > 0.0:
             # Ground covered by ONE panorama pixel at this texel: distance times the
@@ -1853,6 +1922,38 @@ class TerrainTextureGenerationStage(PipelineStage):
             # strength 1 -> the gate applies in full; strength 0 -> weight unchanged.
             weight = weight * (1.0 - strength * (1.0 - keep))
 
+            # Whatever stands between the camera and this texel's ground is not its
+            # ground, whatever type it carries. The panorama pixel a texel samples
+            # was measured at a depth; the texel itself sits at a known distance.
+            # Where the pixel is much NEARER than the texel it shows something in
+            # front of the ground -- a quay wall, a moored boat, a person on the
+            # bank -- and the projection paints that thing flat along the ground
+            # behind it, stretched by its height over the camera's. On Paris the
+            # low quay behind the left bank's wall was a 20 m streak of the wall's
+            # stones and the people on it, all typed GROUND/TERRAIN, so neither
+            # gate above touched it. Flat ground reads depth ~= distance and
+            # passes; the ratio is tolerant (0.75) because both numbers are noisy.
+            if pano_depth is not None and occluder_depth_ratio > 0.0:
+                pd_h, pd_w = pano_depth.shape
+                pd_row = ((1.0 - v) * (pd_h - 1)).clip(0, pd_h - 1)
+                pd_col = (u * (pd_w - 1)).clip(0, pd_w - 1)
+                d_pix = map_coordinates(
+                    np.asarray(pano_depth, dtype=np.float32), [pd_row.ravel(), pd_col.ravel()],
+                    order=1, mode="nearest",
+                ).reshape(blend_map_size, blend_map_size)
+                dist_t = np.sqrt(X ** 2 + Y ** 2 + Z ** 2).clip(1e-3)
+                ratio = np.where(np.isfinite(d_pix) & (d_pix > 0), d_pix / dist_t, 1.0)
+                lo = occluder_depth_ratio - occluder_depth_feather
+                in_front = 1.0 - np.clip((ratio - lo) / max(occluder_depth_feather, 1e-6), 0.0, 1.0)
+                # Near field only. Farther out the depth map saturates (Paris: 200 m
+                # against texels at 280 m) and the far ring's own case is a ridge
+                # pixel at 110 m describing a texel at 150 m, which this test would
+                # call an occluder; both are exactly what the ring exists to keep.
+                in_front = np.where(dist_t < occluder_max_distance_m, in_front, 0.0)
+                in_front = gaussian_filter(in_front.astype(np.float32), sigma=sigma)
+                weight = weight * (1.0 - in_front.astype(np.float32))
+                hard_gate = hard_gate * (1.0 - in_front.astype(np.float32))
+
             # Water is never ground texture. The water sheet covers real water, and
             # where a bank slope or a quay wall samples a water pixel (the panorama's
             # depth put the shoreline a few metres off) the photograph's river was
@@ -1863,6 +1964,16 @@ class TerrainTextureGenerationStage(PipelineStage):
             if water.any():
                 keep_water = np.clip(gaussian_filter(1.0 - water, sigma=sigma), 0.0, 1.0)
                 weight = weight * keep_water
+                # Absolute within water_hard_radius_m, where a land texel wearing
+                # the river is a flat painted smear at the viewer's feet (Paris's
+                # low quay, 25-45 m). Farther out the far ring may still restore
+                # it: past the plan's banks in the unphotographed directions the
+                # outpainted panorama shows river where the plan laid land, and a
+                # bank of bare ground tile there read as a mudflat across the whole
+                # back view, where the painted water at least continues the river
+                # the panorama shows all round.
+                r_tex = np.sqrt(X ** 2 + Z ** 2)
+                hard_gate = hard_gate * np.where(r_tex < water_hard_radius_m, keep_water, 1.0).astype(np.float32)
 
         if (
             far_ring_radius_m > 0.0
@@ -1876,7 +1987,11 @@ class TerrainTextureGenerationStage(PipelineStage):
             r_ring = np.sqrt(X ** 2 + Z ** 2)
             ring = np.clip((r_ring - far_ring_radius_m) / max(far_ring_feather_m, 1e-6), 0.0, 1.0)
             ring = (ring * (1.0 - observed.clip(0.0, 1.0))).astype(np.float32)
-            weight = weight + ring * (base_weight - weight)
+            # Restored to the plain latitude weight, but never past the hard gates:
+            # on Paris every unobserved cell past 30 m -- the whole left bank's low
+            # quay among them -- took the outpainted panorama at full weight, and
+            # what that quay's pixels show is water and the far quay's crowd.
+            weight = weight + ring * (base_weight * hard_gate - weight)
 
         return (weight ** blend_power).astype(np.float32)
 
@@ -2094,6 +2209,9 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _build_prompt(self, rt: RegionType, caption: Any) -> str:
         base = _BASE_PROMPTS.get(rt, "close-up macro photo of natural outdoor ground surface material")
+        if rt == RegionType.GROUND and _is_urban_scene(caption):
+            base = _URBAN_GROUND_PROMPT
+            self.log_info("ground: the caption describes a built-up place; its bare ground is paving, not earth")
         return self._material_prompt(base)
 
     def _material_prompt(self, description: str) -> str:
@@ -2943,10 +3061,41 @@ class TerrainTextureGenerationStage(PipelineStage):
             elif require_near:
                 return []
             else:
-                self.log_info(
-                    f"  reference patches for region {region_val}: nothing solid within "
-                    f"{max_distance_m:.0f} m, searching the whole region (expect projection smear)"
-                )
+                # Not the whole region: only pixels whose projection is sound, i.e.
+                # one panorama pixel covers at most reference_max_footprint_m of
+                # ground along its ray (depth x the pixel's angle over the sine of
+                # the ray's dip; flat ground assumed, which is the case that
+                # smears). The whole-region search on Paris -- a camera on a
+                # bridge, no ground within 8 m -- picked the far quay at 60 m,
+                # a radial smear of trees and a crowd, and FLUX dutifully made a
+                # 1024 px tile of it that repeated as a grid across every bank.
+                # With nothing sound left the caller generates from the prompt
+                # alone, which is the honest fallback.
+                max_fp = float(getattr(self.config, "reference_max_footprint_m", 0.0) or 0.0)
+                if max_fp > 0.0:
+                    lat = (0.5 - (np.arange(H) + 0.5) / H) * np.pi
+                    dip = np.maximum(np.abs(np.sin(lat)), 0.02)[:, None]
+                    footprint = np.where(np.isfinite(depth), depth, np.inf) * (np.pi / H) / dip
+                    sound = remaining & (footprint <= max_fp)
+                    if distance_transform_edt(sound).max() >= 4.0:
+                        remaining = sound
+                        self.log_info(
+                            f"  reference patches for region {region_val}: nothing solid within "
+                            f"{max_distance_m:.0f} m; restricted to {int(sound.sum()):,} px whose pixel "
+                            f"covers at most {max_fp:.2f} m of ground"
+                        )
+                    else:
+                        self.log_info(
+                            f"  reference patches for region {region_val}: nothing solid within "
+                            f"{max_distance_m:.0f} m and no pixel covers {max_fp:.2f} m of ground or less "
+                            f"-- no photo reference (generated from the prompt alone)"
+                        )
+                        return []
+                else:
+                    self.log_info(
+                        f"  reference patches for region {region_val}: nothing solid within "
+                        f"{max_distance_m:.0f} m, searching the whole region (expect projection smear)"
+                    )
         patches: list[PIL.Image.Image] = []
 
         for _ in range(max(1, num_patches)):

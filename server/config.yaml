@@ -1312,6 +1312,7 @@ stages:
     # the far field and was a radial smear, so the tiles were smears too. Falls back
     # to the whole region when a type has no pixels this close (rock on a far ridge).
     reference_max_distance_m: 8.0
+    reference_max_footprint_m: 0.35  # far fallback only: a reference pixel may cover at most this much ground (else prompt-only)
     # Detail tiles for SURFACE regions (patch_tile_types: ground, terrain, road,
     # trail) come from the photograph: the region's largest near-field patch,
     # flattened onto its own plane, delit, supersampled and made tileable by
@@ -1338,6 +1339,8 @@ stages:
     # elsewhere -- no more radial spokes from the flat far field.
     macro_max_texel_m: 3.0        # the macro map is colour at ~0.2 m/texel; a 3 m footprint still describes it
     macro_depth_tolerance: 0.6    # rejects the horizon band (depth a tenth of the texel distance), keeps the mid meadow
+    macro_depth_near_tolerance: 0.6  # near-side tolerance; lower it to reject pixels measured nearer than their texel
+                                     # (an occluder). Kept symmetric: Rainier's near depth reads ~0.5x the texel distance.
     tile_seam_fix: offset         # offset-and-feather; "flux" repaints the seam cross (left a bright frame)
                                    # tree is a few columns there and a spoke metres long
                                    # on the ground, so that is where the smear averages out
@@ -1362,6 +1365,10 @@ stages:
     #     2-5 m   1.00 -> 0.50        20-50 m  0.78 -> 0.77
     #     5-10 m  0.99 -> 0.69       50-142 m  0.88 -> 0.88
     panorama_upright_gate: true
+    panorama_water_hard_radius_m: 60.0   # within this, a land texel whose panorama pixel is water never gets the
+                                         # photo back from the far-ring restoration (Paris's low quay at 25-45 m)
+    panorama_occluder_depth_ratio: 0.0   # >0: drop the photo where its depth is under this fraction of the texel distance
+                                         # within 80 m (an occluder). Off: Rainier's near depth is ~0.5x everywhere.
     panorama_upright_feather_frac: 0.01  # gaussian feather on the gate, as a fraction of
                                           # blend_map_size -- a binary mask would stencil
                                           # the canopy outline into the ground
@@ -1458,6 +1465,10 @@ stages:
     min_bin_fill: 0.5
     min_bins: 3                  # 4 left the Rainier capture without its forest band (3 bins)
     feather_px: 2.0
+    max_silhouette_slope: 1.0   # the band's top may fall at most this many rows per column toward a
+                                # gap: a band ending in one column stood as a box with a vertical
+                                # side (Paris: the bank's canopy stopped dead at the photo's edge)
+    silhouette_gap_px: 48       # gaps narrower than this are bridged for that test, not tapered into
 
   - name: Object Detection
     stage: ObjectDetectionStage
@@ -1586,6 +1597,8 @@ stages:
     max_buckets_per_class: 8          # 0 disables (distance-cut only, prior behaviour)
     min_bucket_size: 3                # 0/1 disables the fold
     outsize_split_ratio: 2.5
+    shape_split_ratio: 2.5          # box aspect this many times off the bucket's median -> own bucket (<= 1.0 disables)
+    shape_split_min_height_m: 5.0   # only a member at least this tall, and at most one per bucket
     # A last pass over the finished buckets: split the tallest member of a bucket into
     # a bucket of its own when it is this many times taller IN METRES than the next
     # tallest. <= 1.0 disables.
@@ -2443,6 +2456,9 @@ stages:
     lod_mesh_screen_fraction: 0.06
     card_preferred_classes: [flower, tree]   # the card replaces the reconstruction whenever the group has one: a tree card is its reference view (needles, colour), the mesh a faceted dark cone
     skip_far_objects: true       # a detection too small for its class at the depth's distance is a far object (Rainier's trees on the mountain flank): left to the backdrop
+    sliver_min_box_px: 8.0       # a detection box thinner than this, or
+    sliver_max_box_aspect: 12.0  # longer than this many times its thickness, is a waterline/edge, not an object (Paris: a 787x4 px "boat" stood in the river as a 14 m blue panel)
+    sliver_exempt_classes: [bridge, fence, wall, railing, train, pier, jetty, dock, road, river]
     lod_card_screen_fraction: 0.025
     lod_billboard_screen_fraction: 0.003
     lod_exempt_classes:

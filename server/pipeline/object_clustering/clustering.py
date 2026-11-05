@@ -43,6 +43,8 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         caption_veto: bool = True,
         outsize_split_ratio: float = 2.5,
         outsize_split_min_height_m: float = 2.0,
+        shape_split_ratio: float = 2.5,
+        shape_split_min_height_m: float = 5.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.embedding_model_name = embedding_model_name
@@ -114,6 +116,23 @@ class ObjectCategoryClusteringConfiguration(PipelineStageConfiguration):
         # Rainier capture, and every small bucket on the Irises painting, whose 10,739
         # detections are all centimetres tall.
         self.outsize_split_min_height_m = float(outsize_split_min_height_m)
+        # Second split, on SHAPE: a member whose box aspect (width:height) is this
+        # many times off the rest of its bucket's median gets its own bucket. A
+        # bucket shares one reconstruction, and the mesh is scaled to each member's
+        # detection, so a squat mesh handed to a tall thin detection fails Scene
+        # Generation's aspect gate and renders as a card. Shark Fin: its two sea
+        # stacks are one visual bucket, but one box is 1.09:1 and the other 0.40:1
+        # (2.7x); the mesh built from the squat one turned the thin one into a
+        # billboard. Same-class objects differing that much in silhouette are
+        # different shapes however alike their texture. <= 1.0 disables.
+        self.shape_split_ratio = float(shape_split_ratio)
+        # Only a member at least this tall is split off for shape, and at most one
+        # per bucket (the worst). Below it a billboard is an acceptable rendering, so
+        # being wrong about the shared mesh's shape costs little, while every split
+        # is another reconstruction: unrestricted, the rule fired 12 times on the
+        # Paris trees and 17 times on Rainier's flowers and trees, whose boxes range
+        # from single stems to whole clumps.
+        self.shape_split_min_height_m = float(shape_split_min_height_m)
 
 
 class ObjectCategoryClusteringStage(PipelineStage):
@@ -776,6 +795,56 @@ class ObjectCategoryClusteringStage(PipelineStage):
                 f"{runner_up:.1f} m for the next largest ({tallest / runner_up:.1f}x) — "
                 f"splitting it into {obj_class}::{new_bucket}"
             )
+
+        # Shape pass, over the buckets as they stand after the size split.
+        shape_ratio = self.config.shape_split_ratio
+        if shape_ratio > 1.0:
+            height_by_idx = {idx: h for members in groups.values() for h, idx in members}
+            shape_groups: dict[tuple[str, int], list[tuple[float, int]]] = {}
+            for idx in range(count):
+                metadata = context.object(f"metadata_{idx}")
+                if not metadata or metadata.get("position_only"):
+                    continue
+                obj_class, bucket, box = metadata.get("class"), metadata.get("bucket"), metadata.get("box")
+                if not obj_class or bucket is None or not box or obj_class == "indeterminate":
+                    continue
+                w, h = float(box[2]), float(box[3])
+                if w <= 0 or h <= 0:
+                    continue
+                shape_groups.setdefault((obj_class, int(bucket)), []).append((w / h, idx))
+            for (obj_class, bucket), members in sorted(shape_groups.items()):
+                if len(members) >= 2:
+                    worst = None
+                    for i, (aspect, idx) in enumerate(members):
+                        if height_by_idx.get(idx, 0.0) < self.config.shape_split_min_height_m:
+                            continue
+                        others = [a for j, (a, _) in enumerate(members) if j != i]
+                        median = float(np.median(others))
+                        if median <= 0:
+                            continue
+                        off = max(aspect / median, median / aspect)
+                        if worst is None or off > worst[0]:
+                            worst = (off, i, aspect, median, idx)
+                    if worst is None or worst[0] < shape_ratio:
+                        continue
+                    off, i, aspect, median, idx = worst
+                    new_bucket = max(buckets_in_class[obj_class]) + 1
+                    buckets_in_class[obj_class].add(new_bucket)
+                    metadata = context.object(f"metadata_{idx}") or {}
+                    context.add_object(f"metadata_{idx}", {**metadata, "bucket": new_bucket})
+                    splits.append({
+                        "class": obj_class,
+                        "from_bucket": bucket,
+                        "to_bucket": new_bucket,
+                        "idx": idx,
+                        "aspect": round(aspect, 2),
+                        "bucket_aspect": round(median, 2),
+                        "ratio": round(off, 2),
+                    })
+                    self.log_info(
+                        f"  {obj_class}::{bucket}: crop_{idx} is {aspect:.2f}:1 against the bucket's "
+                        f"{median:.2f}:1 ({off:.1f}x off in shape) — splitting it into {obj_class}::{new_bucket}"
+                    )
         return splits
 
     def _set_bucket(self, context: PipelineContext, idx: int, bucket: int):

@@ -71,7 +71,44 @@ class ModelGenerator(ModelGeneratorBase):
                 with_texture_baking=False,
                 use_vertex_color=True,
             )
+        self._write_pose(temp_path, output)
         return output["glb"]
+
+    @staticmethod
+    def _write_pose(temp_path: Path, output: dict) -> None:
+        """Record where the photographer stood relative to the mesh.
+
+        SAM3D reconstructs the object in a canonical, gravity-aligned frame and
+        predicts the pose (quaternion, translation, scale) that carries it into the
+        input camera's PyTorch3D frame (+X left, +Y up, +Z forward): p_cam =
+        (s * p_local) @ R + t. The GLB keeps the canonical frame re-axed Y-up
+        (to_glb: (x, y, z) -> (x, z, -y)), so without the pose nothing downstream
+        knows which side of the mesh the photograph shows. The direction from the
+        object to the camera is written in the GLB's own frame alongside the raw
+        pose; the generator client reads it back (model_generation_base).
+        """
+        try:
+            from pytorch3d.transforms import quaternion_to_matrix
+            import json
+            q = output["rotation"].reshape(-1, 4)[0].detach().float().cpu()
+            t = output["translation"].reshape(-1, 3)[0].detach().float().cpu().numpy()
+            s = output["scale"].reshape(-1)[0:3].detach().float().cpu().numpy()
+            R = quaternion_to_matrix(q[None])[0].numpy()
+            norm = float(np.linalg.norm(t))
+            # A decoder that leaves the object at the origin says nothing about
+            # the view direction; the camera then looks straight down +Z at it.
+            d_cam = (-t / norm) if norm > 1e-6 else np.array([0.0, 0.0, -1.0])
+            d_local = d_cam @ R.T
+            d_glb = np.array([d_local[0], d_local[2], -d_local[1]], dtype=float)
+            with open(temp_path / "pose.json", "w") as f:
+                json.dump({
+                    "rotation_wxyz": [float(v) for v in q],
+                    "translation": [float(v) for v in t],
+                    "scale": [float(v) for v in s],
+                    "toward_camera_glb": [float(v) for v in d_glb],
+                }, f, indent=2)
+        except Exception as e:  # the mesh is still good without it
+            print(f"SAM3D pose not recorded: {e}", flush=True)
 
 
 if __name__ == "__main__":

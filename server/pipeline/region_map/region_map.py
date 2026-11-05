@@ -571,6 +571,7 @@ class RegionMapStage(PipelineStage):
 
         river_channel = None
         ocean_cols = None
+        open_water = True
         plan = None
         if cfg.terrain_plan:
             from pipeline.region_map.terrain_plan import PlanConfig, build_plan, draw_plan
@@ -610,7 +611,19 @@ class RegionMapStage(PipelineStage):
                 ex = np.clip(((edge_r * np.sin(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
                 ez = np.clip(((edge_r * np.cos(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
                 ocean_cols = region_map[ez, ex] == int(RegionType.WATER)
-                if not ocean_cols.any():
+                if plan.channel is not None and ocean_cols.any():
+                    # A river leaves the grid through its channel, which is not
+                    # the sea reaching the horizon: carried out to 5 km by the
+                    # far field's apron, Paris's Seine stood as a teal box over
+                    # the far bank where the photo shows a bridge and buildings.
+                    # The columns are still written (open_water false) so the far
+                    # field fills them with the plane out to its shell.
+                    open_water = False
+                    self.log_info(
+                        f"Terrain plan: water leaves the grid over {ocean_cols.mean():.0%} of the azimuths "
+                        "through the river channel -- not open water"
+                    )
+                elif not ocean_cols.any():
                     ocean_cols = None
                 if self.temp is not None:
                     PILImage.fromarray(colorize_region_type_map(before[::4, ::4])).save(self.temp / "terrain_plan_before.png")
@@ -630,6 +643,7 @@ class RegionMapStage(PipelineStage):
             context.add_object(ContextKey.OCEAN_COLUMNS, {
                 "width": int(type_idx_map.shape[1]),
                 "columns": [int(c) for c in np.flatnonzero(ocean_cols)],
+                "open_water": bool(open_water),
             })
         context.add_depth(output_key, region_map.astype(np.float32))
         context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
