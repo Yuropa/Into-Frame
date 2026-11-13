@@ -146,7 +146,10 @@ class PlanModel:
             raise RuntimeError("no Anthropic key: set ANTHROPIC_API_KEY or `keyring set anthropic 3dcodeverse`")
         client = anthropic.Anthropic(api_key=key, timeout=self.timeout_s, max_retries=self.retries)
         msg = client.messages.create(
-            model=self.model, max_tokens=max_tokens, system=system,
+            # Readings drift between calls at the default temperature (Paris: river
+            # 130 m visible -> 110 m inferred, sun az 140 -> 110 between two readings
+            # of the same photograph); the plan should be as repeatable as it can be.
+            model=self.model, max_tokens=max_tokens, system=system, temperature=0.0,
             tools=[{"name": tool_name, "description": "Record the scene plan read from the photograph.",
                     "input_schema": schema}],
             # Forced tool_choice ("tool"/"any") is rejected by this model family, so the

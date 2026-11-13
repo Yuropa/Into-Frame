@@ -59,8 +59,10 @@ for scene in "${scenes[@]}"; do
     photo="$ROOT/server/samples/$scene.jpg"
     [ -f "$photo" ] || { say "no photo at $photo; skipping"; continue; }
     run="$(resolve_run "$scene")"
-    if [ -n "$run" ] && [ ! -f "$run/Scene Plan/scene_plan.json" ]; then
-        say "[$scene] no Scene Plan in $run; reading the photograph once"
+    want=$(python -c "import sys; sys.path.insert(0,'$ROOT/server'); from pipeline.scene_plan.schema import SCHEMA_VERSION; print(SCHEMA_VERSION)")
+    have=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('schema_version'))" "$run/Scene Plan/scene_plan.json" 2>/dev/null || echo none)
+    if [ -n "$run" ] && [ "$have" != "$want" ]; then
+        say "[$scene] Scene Plan in $run is schema $have, want $want; reading the photograph once"
         python "$ROOT/scripts/replay-stage.py" "$run" "Scene Plan" --save >> "$logdir/$scene.plan.log" 2>&1 \
             || say "[$scene] Scene Plan replay failed (see $scene.plan.log); the run will read it itself"
     fi

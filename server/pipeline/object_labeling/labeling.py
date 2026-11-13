@@ -50,6 +50,7 @@ from pipeline.object_typing.categories import (
     OBJECT_CATEGORIES, ENVIRONMENT_CATEGORIES, normalize_category,
 )
 from pipeline.scene_generation.object_scale import OBJECT_HEIGHT_PRIORS
+from pipeline.scene_plan import ScenePlan
 from util.captured_cone import captured_cone_from_context
 from util.device_utils import DeviceStrategy, preferred_device
 from util.image_utils import Image
@@ -74,6 +75,8 @@ class ObjectLabelingConfiguration(PipelineStageConfiguration):
         min_coverage: float = 0.6,
         confident_score: float = 0.30,
         default_vocabulary: list[str] | None = None,
+        plan_vocabulary: bool = True,
+        max_prompt_phrases: int = 12,
         add_unmatched_boxes: bool = True,
         represented_fraction: float = 0.4,
         min_area_fraction: float = 0.0003,
@@ -88,6 +91,10 @@ class ObjectLabelingConfiguration(PipelineStageConfiguration):
         # panorama's size -- same reasoning as SegmentationConfiguration's
         # panorama_detect_scale: outside the cone only occluder labels are needed.
         self.panorama_detect_scale = float(panorama_detect_scale)
+        # Prompt the detector with the scene plan's landmarks, objects and species too.
+        self.plan_vocabulary = bool(plan_vocabulary)
+        # Phrases per Grounding DINO prompt; longer prompts lower every score.
+        self.max_prompt_phrases = int(max_prompt_phrases)
         # Fraction of a blob's mask that must lie inside a labelled box for the blob
         # to take its label.
         self.min_coverage = float(min_coverage)
@@ -151,17 +158,44 @@ class ObjectLabelingStage(PipelineStage):
         for cls in self.config.default_vocabulary:
             if cls in OBJECT_CATEGORIES:
                 classes[cls.replace("_", " ")] = cls
+        # The scene plan's reading of the photograph (docs/hybrid-scene-plan.md): the
+        # structures and props it names, visible or inferred, each prompted by its
+        # category and its own phrase. RAM++ tagged Paris with no bridge and no
+        # building; the plan names the Pont d'Iena and the apartments behind the quay.
+        plan = ScenePlan.from_context(context) if self.config.plan_vocabulary else None
+        if plan is not None:
+            added = {ph: cls for ph, cls in plan.vocabulary("inferred").items() if ph not in classes}
+            classes.update(added)
+            if added:
+                self.log_info(f"Scene plan adds {len(added)} phrase(s): " + ", ".join(sorted(added)))
         return classes
 
     # ── detector passes ──────────────────────────────────────────────────────
 
     def _detect(self, image: Image, phrases: list[str], label: str) -> list[dict]:
-        task = self.create_progress(1, f"Grounding on the {label}…")
-        dets = self._detector.detect(
-            image.rgb(), phrases, self.temp or self.output, on_progress=self.make_progress_callback(task),
-        )
+        """Grounding DINO over the vocabulary in chunks of max_prompt_phrases, merged
+        by box overlap. One long prompt dilutes every phrase's score: with the scene
+        plan's 15 phrases added to Paris's 14, the hero boat fell 0.63 -> 0.49, the
+        tower 0.77 -> 0.63 and 13 of 17 boats dropped under the threshold."""
+        n = max(1, int(self.config.max_prompt_phrases))
+        chunks = [phrases[i:i + n] for i in range(0, len(phrases), n)] or [[]]
+        task = self.create_progress(len(chunks), f"Grounding on the {label}…")
+        dets: list[dict] = []
+        for chunk in chunks:
+            dets.extend(self._detector.detect(
+                image.rgb(), chunk, self.temp or self.output, on_progress=self.make_progress_callback(task),
+            ))
+            self.advance_progress(task)
         self.finish_progress(task)
-        return dets
+        if len(chunks) == 1:
+            return dets
+        # The same thing found under two prompts keeps its best-scoring label.
+        kept: list[dict] = []
+        for det in sorted(dets, key=lambda d: -float(d["score"])):
+            if any(_box_iou(det["box"], k["box"]) > 0.5 for k in kept):
+                continue
+            kept.append(det)
+        return kept
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: ObjectLabelingConfiguration = self.config
@@ -175,7 +209,7 @@ class ObjectLabelingStage(PipelineStage):
         pano_w, pano_h = panorama.width, panorama.height
 
         vocab = self._vocabulary(context)
-        phrases = sorted(vocab)
+        phrases = list(vocab)  # scene tags and defaults first, the plan's phrases after
         self.log_info(f"Vocabulary ({len(phrases)}): {', '.join(phrases)}")
 
         if self._detector is None:

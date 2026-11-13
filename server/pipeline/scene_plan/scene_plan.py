@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration, SemanticKey
 from pipeline.pipeline_context import ContextKey, PipelineContext
-from pipeline.scene_plan.schema import PLAN_SCHEMA, SCHEMA_VERSION, SYSTEM_PROMPT, USER_PROMPT, EVIDENCE
+from pipeline.scene_plan.schema import PLAN_SCHEMA, SCHEMA_VERSION, SYSTEM_PROMPT, USER_PROMPT, EVIDENCE, CATEGORY_ENUM
 from pipeline.scene_plan.client import PlanModel, SpendLedger, NoApiError, SpendCapError, ModelReply
 
 _ROOT = Path(__file__).resolve().parents[3]
@@ -90,6 +90,9 @@ def validate_plan(data: dict) -> tuple[dict, list[str]]:
         kept = []
         for it in items:
             if isinstance(it, dict) and it.get("evidence") in EVIDENCE:
+                if lst in ("landmarks", "objects") and it.get("category") not in CATEGORY_ENUM:
+                    notes.append(f"{lst}: category {it.get('category')!r} not in the list ({str(it.get('class'))[:40]})")
+                    it.pop("category", None)  # read conservatively from the class text instead
                 kept.append(it)
             else:
                 notes.append(f"{lst}: entry without evidence dropped ({str(it)[:60]})")

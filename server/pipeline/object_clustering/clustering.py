@@ -14,6 +14,7 @@ from scipy.spatial.distance import pdist
 
 from pipeline.object_clustering.dinov2_embedder import DinoV2Embedder
 from pipeline.object_correlation.object_correlation_result import ObjectCorrelationResult, ObjectGroupStats
+from pipeline.scene_plan import ScenePlan
 from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES, BUILT_ENVIRONMENT_CATEGORIES, WATERBORNE_CATEGORIES,
     LEVEL_GROUND_CATEGORIES, DOMESTIC_CAPTION_SUBJECTS, OBJECT_CATEGORIES,
@@ -233,6 +234,11 @@ class ObjectCategoryClusteringStage(PipelineStage):
             tag.strip() for tag in str(tags).split("|")
             if normalize_category(tag.strip()) in BUILT_ENVIRONMENT_CATEGORIES
         })
+        plan = ScenePlan.from_context(context)
+        if plan is not None:
+            # The scene plan's visible structures count as named too.
+            built_tags += sorted(c for c in plan.categories("visible") if c in BUILT_ENVIRONMENT_CATEGORIES
+                                 and c not in built_tags)
         if built_tags:
             return True, (
                 f"only {built_fraction * 100:.1f}% built region, but the scene tags "

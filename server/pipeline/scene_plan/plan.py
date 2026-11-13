@@ -18,6 +18,24 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from pipeline.pipeline_context import ContextKey, PipelineContext
+from pipeline.object_typing.categories import OBJECT_CATEGORIES
+
+# Species classes the plan uses (schema) -> the pipeline's object categories.
+_SPECIES_CATEGORY = {"flower": "flower", "tree": "tree", "shrub": "bush", "grass": None, "reed": None, "moss": None}
+
+# Categories that name a region rather than an instance; never prompted from the plan.
+_REGION_CATEGORIES = {"forest"}
+
+# v1 plans carry free-text classes only. A conservative reading of them: a known
+# category word, or one of these, and nothing else (token matching through
+# normalize_category reads "stone arch bridge" as rock).
+_CLASS_WORDS = {
+    "barge": "boat", "houseboat": "boat", "péniche": "boat", "peniche": "boat", "ferry": "boat",
+    "vessel": "boat", "yacht": "boat", "apartment": "building", "apartments": "building",
+    "house": "building", "houses": "building", "block": "building", "roofs": "building",
+    "church": "building", "viaduct": "bridge", "overpass": "bridge", "spire": "tower",
+    "steeple": "tower", "people": "person", "passengers": "person", "tourists": "person",
+}
 
 
 @dataclass
@@ -90,6 +108,60 @@ class ScenePlan:
             if isinstance(it, dict) and rank.get(it.get("evidence"), -1) >= need:
                 out.append(it)
         return out
+
+    # ── what the scene contains (for the understanding stages) ────────────────
+    @staticmethod
+    def category_of(item: dict, kind: str) -> Optional[str]:
+        """The pipeline object category of a landmark/object/species entry, or None
+        for scenery. v2 plans say it; v1 plans are read conservatively."""
+        if kind == "species":
+            return _SPECIES_CATEGORY.get(str(item.get("class", "")).lower())
+        cat = item.get("category")
+        if isinstance(cat, str):
+            return cat if cat in OBJECT_CATEGORIES else None
+        text = str(item.get("class", "")).lower()
+        if text in OBJECT_CATEGORIES:
+            return text
+        for tok in text.replace("/", " ").replace("(", " ").replace(")", " ").split():
+            if tok in OBJECT_CATEGORIES:
+                return tok
+            if tok in _CLASS_WORDS:
+                return _CLASS_WORDS[tok]
+        return None
+
+    def entries(self, min_evidence: str = "inferred") -> list[tuple[str, dict, str]]:
+        """(kind, entry, category) for every landmark, object and species that is an
+        object the pipeline can build, at or above the evidence level."""
+        out = []
+        for kind in ("landmarks", "objects", "species"):
+            for it in self.items(kind, min_evidence):
+                cat = self.category_of(it, kind)
+                if cat:
+                    out.append((kind, it, cat))
+        return out
+
+    def vocabulary(self, min_evidence: str = "inferred") -> dict[str, str]:
+        """Detector phrase -> object category, for Object Labeling. Each entry
+        contributes its category word, its `phrase`, and a proper name when it has
+        one (the name finds the Eiffel Tower where "tower" alone does not)."""
+        vocab: dict[str, str] = {}
+        for kind, it, cat in self.entries(min_evidence):
+            if cat in _REGION_CATEGORIES:
+                # A band, not a thing: a "conifer tree line" box outscored the tree
+                # boxes inside it and relabelled 115 of Rainier's tree blobs forest.
+                continue
+            vocab[cat.replace("_", " ")] = cat
+            phrase = str(it.get("phrase") or "").strip().lower()
+            if phrase and len(phrase.split()) <= 5:
+                vocab[phrase] = cat
+            name = str(it.get("name") or "").strip()
+            if kind == "landmarks" and name and name[:1].isupper() and len(name.split()) <= 4:
+                vocab[name.lower()] = cat
+        return vocab
+
+    def categories(self, min_evidence: str = "visible") -> set[str]:
+        """Object categories the plan says are in the photograph."""
+        return {cat for _, _, cat in self.entries(min_evidence)}
 
     # ── the rule ──────────────────────────────────────────────────────────────
     def prior(

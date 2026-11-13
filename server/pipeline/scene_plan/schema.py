@@ -1,11 +1,20 @@
-"""Scene plan schema v1 (docs/hybrid-scene-plan.md section 3).
+"""Scene plan schema v2 (docs/hybrid-scene-plan.md section 3).
 
 Camera frame: ahead = 0 deg, azimuth positive clockwise (to the right), metres and
 degrees. Every claim block carries `evidence` and `because`; a numeric field is
 null when the photograph gives no basis for it.
 """
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# v2: every landmark, object and species names the pipeline's own object category and
+# a short detector phrase, so the plan can prompt Object Labeling (Grounding DINO) and
+# the built-structure veto directly instead of being normalised from free text ("stone
+# arch bridge" token-matches "rock"). "environment" marks scenery that is not an object
+# (a summit, a glacier, a snow patch, a trail).
+from pipeline.object_typing.categories import OBJECT_CATEGORIES
+
+CATEGORY_ENUM = sorted(OBJECT_CATEGORIES) + ["environment"]
 
 EVIDENCE = ["visible", "inferred", "invented"]
 
@@ -14,6 +23,11 @@ _evidence = {"type": "string", "enum": EVIDENCE,
                             "context (place, scale cues, shadows); invented: plausible but unsupported."}
 _because = {"type": "string", "description": "one short sentence: what in the photograph supports this"}
 _num = {"type": ["number", "null"]}
+_category = {"type": "string", "enum": CATEGORY_ENUM,
+             "description": "the pipeline's object category this is; 'environment' for scenery that is not an "
+                            "object (summit, glacier, snow patch, trail, quay)"}
+_phrase = {"type": "string", "description": "2-4 plain English words an open-vocabulary detector would find it "
+                                             "by, e.g. 'stone arch bridge', 'moored barge', 'magenta paintbrush flower'"}
 
 
 def _claim(props: dict, required: list[str] | None = None) -> dict:
@@ -68,12 +82,14 @@ PLAN_SCHEMA = {
         }, ["kind", "ground"]),
         "landmarks": {"type": "array", "items": _claim({
             "name": {"type": "string"}, "class": {"type": "string"},
+            "category": _category, "phrase": _phrase,
             "bearing_deg": _num, "distance_m": _num, "height_m": _num,
             "side": {"type": "string", "enum": ["left", "centre", "right"]},
-        }, ["name", "class", "bearing_deg", "distance_m", "height_m", "side"])},
+        }, ["name", "class", "category", "phrase", "bearing_deg", "distance_m", "height_m", "side"])},
         "species": {"type": "array", "items": _claim({
             "name": {"type": "string"},
             "class": {"type": "string", "enum": ["flower", "grass", "shrub", "tree", "reed", "moss"]},
+            "phrase": _phrase,
             "size_m": _num,
             "colours": {"type": "array", "items": {"type": "string"}},
             "form": {"type": "string"},
@@ -81,11 +97,12 @@ PLAN_SCHEMA = {
             "where": {"type": "string"},
             "crop_hint": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
                           "description": "x, y, w, h as fractions of the photograph where one clear specimen is"},
-        }, ["name", "class", "size_m", "colours", "form", "density", "where"])},
+        }, ["name", "class", "phrase", "size_m", "colours", "form", "density", "where"])},
         "objects": {"type": "array", "items": _claim({
-            "class": {"type": "string"}, "count": {"type": "integer"}, "where": {"type": "string"},
+            "class": {"type": "string"}, "category": _category, "phrase": _phrase,
+            "count": {"type": "integer"}, "where": {"type": "string"},
             "size_m": _num,
-        }, ["class", "count", "where"])},
+        }, ["class", "category", "phrase", "count", "where"])},
         "motion": {"type": "array", "items": _claim({
             "target": {"type": "string"},
             "kind": {"type": "string", "enum": ["sway", "travel", "flow", "drift", "ripple"]},
@@ -121,6 +138,11 @@ Provenance is the point. Every block carries `evidence`:
 - invented: plausible for the place but unsupported by pixels (what is behind the camera, a skyline you cannot see).
 The pipeline uses visible claims to bound its own measurements, inferred claims only when its measurement fails, \
 and invented claims as text only. Over-claiming `visible` corrupts the scene; under-claiming wastes a fact.
+
+Landmarks, objects and species are also how the pipeline learns what to look for: give each its `category` \
+from the fixed list (what the pipeline can build; `environment` for scenery it cannot) and a `phrase` of 2-4 \
+plain words a detector would find it by. Name every visible structure, not only the famous one: a bridge, \
+the buildings behind a tree line, moored boats, a quay wall, each as its own entry with a count.
 
 Be concrete and numeric. Ranges are not accepted; give the best single number and say the basis in `because`. \
 Species: name the plant as a botanist would, give its size, colours, form (spike, mat, tussock, conifer...), \

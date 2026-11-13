@@ -47,6 +47,68 @@ Built and tested on the cached Paris and Rainier runs:
 - Not started: phase 3 atmosphere/motion, phase 5 species layer, phase 6 selectors,
   client capture.
 
+### The plan as scene understanding (2026-11-13, afternoon)
+
+hybrid1 showed the gap the harness does not have: the plan read Paris well (Pont
+d'Iena, peniches, apartments behind the quay, an office block) and nothing consumed it,
+while our own understanding was one caption line plus RAM++ tags that named no bridge
+and no building, so Scene Generation placed 26 boats, 24 trees and one tower. Changes:
+
+- **Schema v2**: every landmark, object and species carries `category` from the
+  pipeline's own `OBJECT_CATEGORIES` (or `environment`) and a 2-4 word detector
+  `phrase`. Free text normalised badly ("stone arch bridge" token-matched rock). The
+  prompt now asks for every visible structure as its own entry with a count. Re-reading
+  both photographs cost $0.11 each.
+- **Object Labeling reads the plan**: `ScenePlan.vocabulary()` adds each entry's
+  category word, phrase and proper name to the Grounding DINO vocabulary
+  (`plan_vocabulary: true`). Region-like categories (`forest`) are never prompted: a
+  "conifer tree line" box outscored the tree boxes inside it and relabelled 115 of
+  Rainier's tree blobs forest.
+- **Chunked prompts** (`max_prompt_phrases: 12`): one long prompt dilutes every
+  phrase's score. With 29 phrases Paris's hero boat fell 0.63 -> 0.49, the tower
+  0.77 -> 0.63 and 13 of 17 boats dropped under the threshold. Chunks are merged by box
+  overlap, best score wins. Replayed: Paris keeps 16 of 17 boats and gains the bridge
+  (0.47) and the office block; Rainier's blob labels are unchanged (flower 50 vs 49,
+  tree 41 vs 45).
+- **Built-structure veto** in Object Category Clustering counts the plan's visible
+  structure categories as named, beside the RAM++ tags.
+- `hybrid-run.sh` pre-seeds the plan whenever the cached record's schema version
+  differs from the code's, so a schema bump never cascades into the panorama.
+- Not done: the plan's `size_m` / `distance_m` as per-entry scale priors for the size
+  veto and the far-object rule; the plan's place/terrain kind in place of the caption
+  string match for urban scenes; the representation choice (card / mesh / backdrop)
+  from category + angular size instead of the per-class lists.
+
+**hybrid2 results** (both scenes rebuilt from Object Labeling, 13:26-16:11):
+
+| scene | dino_global | dino_layout | colour dE | judge |
+|---|---|---|---|---|
+| Paris (vs hybrid1) | 0.737 -> 0.722 | 0.569 -> 0.561 | 10.5 -> 14.0 | 0.27 -> 0.19 |
+| Rainier (vs hybrid1) | 0.496 -> 0.630 | 0.463 -> 0.455 | 17.8 -> 15.4 | 0.12 -> 0.09 |
+
+- **Detection is solved, representation is not.** The bridge was boxed (0.49) and the
+  Pullman block named, but both sit at the depth model's far clamp, so Panorama
+  Foreground Inpainting kept them in the terrain plate as backdrop and Object Instance
+  Refinement absorbed the bridge into a rock blob (containment 0.92). The one building
+  that became geometry was an 18 px crop of distant roofs that SAM3D turned into a
+  mesh at 185 m. Nothing the plan knows about a far structure (category, bearing,
+  distance, height) is used by the stages that decide what a far detection becomes.
+  That is the structures layer: plan-described far structures as placeholder geometry
+  at the measured depth, not SAM3D on a sliver.
+- **Plan readings drift between calls.** The v2 reading of the same Paris photograph
+  moved the river from 130 m visible to 110 m inferred, the sun from az 140 to 110 and
+  the camera from 11 m to 10 m; Rainier's camera went 1.2 -> 0.9 m and the sun
+  az -85/el 8 -> -75/12. With the width now "inferred" the river prior did not fire,
+  the channel fitted 90 m again, and Paris's colour dE went back from 10.5 to 14.0,
+  which confirms the width was what hybrid1's dE gain came from. The client now reads
+  at temperature 0; the cache already pins a reading once made.
+- **Rainier's DINO global of 0.630 is the best so far**, but its labels were unchanged
+  by the plan vocabulary, so the gain is the 0.9 m camera and a different LuxDiT /
+  texture draw (sun again behind the camera, az 144 el 52), not understanding.
+- The judge's failed musts are unchanged in kind: no crowded tour boat with a wake, no
+  readable bridge, no dense paintbrush/lupine mass, and on Rainier no trail and no
+  lone fir at the left edge (the plan names both; nothing consumes them).
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
