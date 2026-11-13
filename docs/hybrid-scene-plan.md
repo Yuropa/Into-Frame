@@ -79,6 +79,36 @@ and no building, so Scene Generation placed 26 boats, 24 trees and one tower. Ch
   string match for urban scenes; the representation choice (card / mesh / backdrop)
   from category + angular size instead of the per-class lists.
 
+**hybrid2 results** (both scenes rebuilt from Object Labeling, 13:26-16:11):
+
+| scene | dino_global | dino_layout | colour dE | judge |
+|---|---|---|---|---|
+| Paris (vs hybrid1) | 0.737 -> 0.722 | 0.569 -> 0.561 | 10.5 -> 14.0 | 0.27 -> 0.19 |
+| Rainier (vs hybrid1) | 0.496 -> 0.630 | 0.463 -> 0.455 | 17.8 -> 15.4 | 0.12 -> 0.09 |
+
+- **Detection is solved, representation is not.** The bridge was boxed (0.49) and the
+  Pullman block named, but both sit at the depth model's far clamp, so Panorama
+  Foreground Inpainting kept them in the terrain plate as backdrop and Object Instance
+  Refinement absorbed the bridge into a rock blob (containment 0.92). The one building
+  that became geometry was an 18 px crop of distant roofs that SAM3D turned into a
+  mesh at 185 m. Nothing the plan knows about a far structure (category, bearing,
+  distance, height) is used by the stages that decide what a far detection becomes.
+  That is the structures layer: plan-described far structures as placeholder geometry
+  at the measured depth, not SAM3D on a sliver.
+- **Plan readings drift between calls.** The v2 reading of the same Paris photograph
+  moved the river from 130 m visible to 110 m inferred, the sun from az 140 to 110 and
+  the camera from 11 m to 10 m; Rainier's camera went 1.2 -> 0.9 m and the sun
+  az -85/el 8 -> -75/12. With the width now "inferred" the river prior did not fire,
+  the channel fitted 90 m again, and Paris's colour dE went back from 10.5 to 14.0,
+  which confirms the width was what hybrid1's dE gain came from. The client now reads
+  at temperature 0; the cache already pins a reading once made.
+- **Rainier's DINO global of 0.630 is the best so far**, but its labels were unchanged
+  by the plan vocabulary, so the gain is the 0.9 m camera and a different LuxDiT /
+  texture draw (sun again behind the camera, az 144 el 52), not understanding.
+- The judge's failed musts are unchanged in kind: no crowded tour boat with a wake, no
+  readable bridge, no dense paintbrush/lupine mass, and on Rainier no trail and no
+  lone fir at the left edge (the plan names both; nothing consumes them).
+
 ### Species layer, structures layer, sun override (2026-11-13, evening)
 
 Built after hybrid2, from the user's two directions: the plan must improve the
@@ -119,35 +149,58 @@ the constraint that every generated colour comes from the photograph.
   az -75 el 12 at #ffc16c.
 - scene-check reads the latest stage's `scene.json`, so placeholders are graded.
 
-**hybrid2 results** (both scenes rebuilt from Object Labeling, 13:26-16:11):
+Short test runs (`t1`, Rainier from Species Assets, Paris from Structure
+Placeholders): Rainier's judge went 0.09 -> 0.32 with 5/6 acceptance and no failed
+must (the paintbrush/lupine mass item passes for the first time), DINO global
+0.630 -> 0.528 (the regression guard: the near field no longer resembles the photo's
+pixels, which is expected when cut-outs of the photo become geometry), colour dE
+unchanged at 15.4. The judge's remaining issues: brown conifers (the measured foliage
+was read on the lit side; trees now use 90 % of their pixels), one plant shape per
+bucket (now 3 variants per flower bucket, 2 per tree, spread per instance), the
+clipped summit and the trail (not addressed). Paris: the bridge was built at 550 m
+and painted over by the far-field shell (depth ceiling 531 m); structures now stand
+at the far-field start at most (372 m). Full rebuild of both scenes from Panorama
+Lighting launched as `hybrid3` at 18:42.
+
+**hybrid3 results** (both scenes rebuilt from Panorama Lighting, 18:42-21:22):
 
 | scene | dino_global | dino_layout | colour dE | judge |
 |---|---|---|---|---|
-| Paris (vs hybrid1) | 0.737 -> 0.722 | 0.569 -> 0.561 | 10.5 -> 14.0 | 0.27 -> 0.19 |
-| Rainier (vs hybrid1) | 0.496 -> 0.630 | 0.463 -> 0.455 | 17.8 -> 15.4 | 0.12 -> 0.09 |
+| Paris (vs hybrid2) | 0.722 -> 0.755 | 0.561 -> 0.575 | 14.0 -> 13.8 | 0.19 -> 0.21 |
+| Rainier (vs hybrid2) | 0.630 -> 0.373 | 0.455 -> 0.434 | 15.4 -> 24.7 | 0.09 -> 0.12 |
 
-- **Detection is solved, representation is not.** The bridge was boxed (0.49) and the
-  Pullman block named, but both sit at the depth model's far clamp, so Panorama
-  Foreground Inpainting kept them in the terrain plate as backdrop and Object Instance
-  Refinement absorbed the bridge into a rock blob (containment 0.92). The one building
-  that became geometry was an 18 px crop of distant roofs that SAM3D turned into a
-  mesh at 185 m. Nothing the plan knows about a far structure (category, bearing,
-  distance, height) is used by the stages that decide what a far detection becomes.
-  That is the structures layer: plan-described far structures as placeholder geometry
-  at the measured depth, not SAM3D on a sliver.
-- **Plan readings drift between calls.** The v2 reading of the same Paris photograph
-  moved the river from 130 m visible to 110 m inferred, the sun from az 140 to 110 and
-  the camera from 11 m to 10 m; Rainier's camera went 1.2 -> 0.9 m and the sun
-  az -85/el 8 -> -75/12. With the width now "inferred" the river prior did not fire,
-  the channel fitted 90 m again, and Paris's colour dE went back from 10.5 to 14.0,
-  which confirms the width was what hybrid1's dE gain came from. The client now reads
-  at temperature 0; the cache already pins a reading once made.
-- **Rainier's DINO global of 0.630 is the best so far**, but its labels were unchanged
-  by the plan vocabulary, so the gain is the 0.9 m camera and a different LuxDiT /
-  texture draw (sun again behind the camera, az 144 el 52), not understanding.
-- The judge's failed musts are unchanged in kind: no crowded tour boat with a wake, no
-  readable bridge, no dense paintbrush/lupine mass, and on Rainier no trail and no
-  lone fir at the left edge (the plan names both; nothing consumes them).
+- **Paris** is the best Paris so far on every metric. Both structures were built (the
+  Pont d'Iena deck at 372 m, the Pullman block at 226 m), the LuxDiT draw sat inside
+  the plan window so the override did not fire, and the species layer was idle (four
+  buckets keep their cards: no broadleaf form). The judge still fails the same two
+  musts: the near boat is a small yellow-roofed vessel without a crowd or wake, and the
+  bridge reads as "a vague grey structure at the horizon on the left" -- a flat deck at
+  372 m under the far-field strip is a grey line, not the photo's stone arches.
+- **Rainier went dark and blue** and that is the sun override. Render mean RGB
+  102/115/116 (t1) -> 44/59/73, capture-view ground 87/91/80 -> 25/33/36, black
+  fraction 0.03; the judge saw "dusk or night", 3/6 acceptance, failed must a2 (the
+  flowers are unreadable in the dark). On the finished scene with the check renderer:
+  sky unchanged, terrain texture unchanged (mean 117/144/151), the loss is shading.
+  (a) The horizontal irradiance of the key light fell from 1.95 x sin 37 = 1.17 to
+  0.92 x sin 12 = 0.19: this draw gave a smaller sun, the solar model took 45 % for
+  the 12-degree path and the cosine took the rest. (b) At 12 degrees the meadow
+  geometry around a 0.9 m camera shadows the ground completely (down view 18/27/28 at
+  any intensity, 71/70/49 with shadows off). Ground brightness with the irradiance
+  preserved: el 12 -> 37/43/41, el 20 -> 58/59/50, el 30 -> 61/61/50; hybrid2's sun
+  from behind at el 37 gave 87/91/80. The photograph was exposed for its own light;
+  the renderers have no exposure, so moving the sun alone cannot be right.
+- **Fix.** When the key light moves to the plan's direction its intensity now keeps
+  the env map sun's horizontal irradiance (sin el_env / sin el_plan, and the
+  transmittance the map's elevation already paid is not charged twice; cap
+  `plan_sun_max_intensity` 4.0), and the elevation is floored at
+  `plan_sun_min_elevation_deg` 20 with the azimuth kept. The floor is a threshold
+  standing in for the section 7 exposure fit, and is documented as one. Replay:
+  key light az -75 el 20, intensity 6.89 -> 4.00. Rainier rerun from Panorama
+  Lighting as `hybrid3b` at 21:36.
+- **The key light's strength is a draw.** Same photograph, same stage: hybrid2 peak
+  969 / share 0.18 / 1.95x; hybrid3 peak 294 / share 0.18 / 0.92x; the replay peak
+  1564 / share 0.31. Three LuxDiT draws are not enough to pin the intensity, which is
+  another reason the exposure should be fitted to the photograph rather than drawn.
 
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 

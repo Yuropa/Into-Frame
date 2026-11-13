@@ -241,9 +241,16 @@ class SceneLighting:
     HTTP round-trips, alongside the key light extracted from them (see sun()).
     """
 
-    def __init__(self, ldr: PILImage.Image, log: PILImage.Image, hdr=None, measured_sun=None):
+    def __init__(self, ldr: PILImage.Image, log: PILImage.Image, hdr=None, measured_sun=None,
+                 sun_intensity_scale: float = 1.0, sun_intensity_max: Optional[float] = None):
         self.ldr = ldr
         self.log = log
+        # Exposure compensation when the key light is moved away from the env map's
+        # own sun (PanoramaLightingStage, plan override): the photograph was exposed
+        # for the light it had, so the moved sun keeps the horizontal irradiance the
+        # map's sun delivered. The cap is widened by the caller for the same reason.
+        self.sun_intensity_scale = float(sun_intensity_scale)
+        self.sun_intensity_max = sun_intensity_max
         # (direction, color) measured from the PANORAMA's own sky rather than from
         # the estimated environment map, or None. See sun() and measure_panorama_sun.
         self.measured_sun = measured_sun
@@ -407,6 +414,8 @@ class SceneLighting:
             tint = np.clip(np.asarray(color, dtype=np.float64), 0.0, 1.0)
         tint, solar_scale = apply_solar_model(tint, elevation_deg)
         unclamped_intensity *= solar_scale
+        unclamped_intensity *= self.sun_intensity_scale
+        intensity_max = float(self.sun_intensity_max) if self.sun_intensity_max else _SUN_INTENSITY_MAX
         return {
             "direction": (
                 list(measured[0]) if measured
@@ -420,7 +429,8 @@ class SceneLighting:
             # Where direction/colour came from, so a scene that silently fell back
             # to the estimate is distinguishable from one that didn't.
             "direction_source": "panorama" if measured else "envmap",
-            "intensity": round(float(np.clip(unclamped_intensity, 0.0, _SUN_INTENSITY_MAX)), 3),
+            "intensity": round(float(np.clip(unclamped_intensity, 0.0, intensity_max)), 3),
+            "intensity_scale": round(float(self.sun_intensity_scale), 3),
             "peak_ratio": round(peak_ratio, 1),
             # The two numbers _SUN_INTENSITY_SCALE has to be calibrated against, and
             # neither was recoverable from a run before this: `intensity` above is

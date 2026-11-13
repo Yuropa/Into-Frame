@@ -825,6 +825,10 @@ class SceneBuilder:
     def _add_sun(self, ps: pyrender.Scene):
         sun = (self.scene.get("lighting") or {}).get("sun") or {}
         d = np.asarray(sun.get("direction") or [0.3, 0.8, -0.5], dtype=np.float64)
+        if self.args.sun_az_el:
+            # Debug override: aim the key light at az,el (deg) in the scene frame.
+            az, el = (math.radians(float(v)) for v in self.args.sun_az_el.split(","))
+            d = np.array([math.cos(el) * math.sin(az), math.sin(el), math.cos(el) * math.cos(az)])
         yaw = math.radians(float(self.scene.get("skyboxRotation") or 0.0))
         cy, sy = math.cos(yaw), math.sin(yaw)
         d = np.array([cy * d[0] + sy * d[2], d[1], -sy * d[0] + cy * d[2]])
@@ -918,6 +922,7 @@ def main() -> int:
     ap.add_argument("--ambient", type=float, default=0.45, help="ambient as a fraction of the sky's mean colour")
     ap.add_argument("--exposure", type=float, default=1.0)
     ap.add_argument("--no-shadows", action="store_true")
+    ap.add_argument("--sun-az-el", default=None, help="debug: aim the sun at 'az,el' degrees instead of the scene's direction")
     ap.add_argument("--save-depth", action="store_true", help="also write <view>_depth.npy (metres, 0 where only sky)")
     ap.add_argument("--pano-uv", choices=["baked", "analytic"], default="baked",
                     help="terrain panorama layer through the mesh's baked TEXCOORD_1 (what Unity samples) or the analytic projection")

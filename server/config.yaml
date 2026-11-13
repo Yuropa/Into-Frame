@@ -465,6 +465,8 @@ stages:
     plan_sun_az_tolerance_deg: 35.0
     plan_sun_el_tolerance_deg: 20.0
     plan_sun_override: true      # no draw inside the window -> key light aimed at the plan's sun
+    plan_sun_min_elevation_deg: 20.0   # floor for that key light (no exposure fit yet; a lower sun shadows the near field)
+    plan_sun_max_intensity: 4.0        # cap for its exposure-compensated intensity (the map's own sun keeps 2.0)
     crop_fov_deg: 90.0          # only used when estimate_from_photo is false
 
   - name: Skybox Inpainting

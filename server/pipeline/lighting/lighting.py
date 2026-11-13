@@ -1,6 +1,6 @@
 import math
 from logging import Logger
-from typing import Any
+from typing import Optional, Any
 
 import numpy as np
 
@@ -28,6 +28,8 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         plan_sun_az_tolerance_deg: float = 35.0,
         plan_sun_el_tolerance_deg: float = 20.0,
         plan_sun_override: bool = True,
+        plan_sun_min_elevation_deg: float = 20.0,
+        plan_sun_max_intensity: float = 4.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.crop_fov_deg = float(crop_fov_deg)
@@ -50,6 +52,15 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         self.plan_sun_el_tolerance_deg = float(plan_sun_el_tolerance_deg)
         # Aim the key light at the plan's sun when no LuxDiT draw lies inside its window.
         self.plan_sun_override = bool(plan_sun_override)
+        # Stand-in for an exposure fit the pipeline does not have yet. The photograph
+        # was exposed for its lit surfaces; a key light below this elevation buries
+        # the near field around a ground-level camera in its own geometry's shadow in
+        # any renderer (Rainier hybrid3: plan sun el 12 left the meadow at a third of
+        # its brightness even with the irradiance preserved). The azimuth is kept.
+        self.plan_sun_min_elevation_deg = float(plan_sun_min_elevation_deg)
+        # Ceiling for the exposure-compensated intensity of a moved key light
+        # (SceneLighting.sun_intensity_max); the env map's own sun keeps the usual cap.
+        self.plan_sun_max_intensity = float(plan_sun_max_intensity)
         # LuxDiT samples to draw (seeded seed+i). One sample's HDR is a lottery:
         # the same Rainier photo gave a peak of 80 (sun 0.5x) on one run and 3.2
         # (sun 0.07x, a dull scene) on the next. The sample whose map has the
@@ -197,6 +208,7 @@ class PanoramaLightingStage(PipelineStage):
             input_image = panorama.rgb()
 
         self._plan_sun_direction = None
+        self._plan_sun_env_el = None
         samples = []
         for i in range(self.config.num_samples):
             sample = self._lux_dit.estimate(
@@ -261,9 +273,14 @@ class PanoramaLightingStage(PipelineStage):
             # carrying the env map's own sun colour.
             probe = SceneLighting(ldr=result.ldr, log=result.log, hdr=result.hdr).sun() or {}
             measured_sun = (list(self._plan_sun_direction), str(probe.get("color") or "#ffffff"))
-            self.log_info("Sun direction from the scene plan (no photographed disc); colour from the env map")
+            sun_scale, sun_max = self._exposure_scale(probe)
+            self.log_info("Sun direction from the scene plan (no photographed disc); colour from the env map; "
+                          f"intensity x{sun_scale:.2f} keeps the map sun's horizontal irradiance (cap {sun_max:g})")
+        else:
+            sun_scale, sun_max = 1.0, None
         lighting = SceneLighting(
             ldr=result.ldr, log=result.log, hdr=result.hdr, measured_sun=measured_sun,
+            sun_intensity_scale=sun_scale, sun_intensity_max=sun_max,
         )
 
         if self.temp is not None:
@@ -307,6 +324,23 @@ class PanoramaLightingStage(PipelineStage):
         self.finish_progress(task)
         return context
 
+    def _exposure_scale(self, probe: dict) -> tuple[float, Optional[float]]:
+        """(intensity scale, cap) for a key light moved from the env map's sun to the
+        plan's: the photograph was exposed for the irradiance the map's sun put on the
+        ground, so the moved sun delivers the same horizontal irradiance, and the solar
+        transmittance the map's elevation already paid is not charged twice."""
+        from scene.lighting import apply_solar_model
+        env_el = self._plan_sun_env_el
+        new_el = math.degrees(math.asin(max(-1.0, min(1.0, float(self._plan_sun_direction[1])))))
+        if env_el is None:
+            return 1.0, self.config.plan_sun_max_intensity
+        env_sin = max(math.sin(math.radians(float(env_el))), math.sin(math.radians(5.0)))
+        new_sin = max(math.sin(math.radians(new_el)), math.sin(math.radians(5.0)))
+        env_solar = float(probe.get("solar_scale") or 1.0)
+        _, new_solar = apply_solar_model(np.ones(3), new_el)
+        scale = (env_sin / new_sin) * (env_solar / max(float(new_solar), 1e-3))
+        return float(scale), self.config.plan_sun_max_intensity
+
     def _apply_plan_sun_window(self, context: PipelineContext, samples, result):
         """Pick the sharpest LuxDiT draw inside the plan's sun window, if any lies inside."""
         from pipeline.scene_plan import ScenePlan
@@ -349,11 +383,15 @@ class PanoramaLightingStage(PipelineStage):
             # el 42, 150 deg outside the photographed cone, against low light from the
             # left that the photo's shadows show). The plan's direction is used for
             # the key light; the env map (sky, ambient) is still the sharpest draw.
-            el, az = math.radians(float(pel)), math.radians(float(paz))
+            el_used = max(float(pel), self.config.plan_sun_min_elevation_deg)
+            el, az = math.radians(el_used), math.radians(float(paz))
             self._plan_sun_direction = [round(math.cos(el) * math.sin(az), 5), round(math.sin(el), 5),
                                         round(math.cos(el) * math.cos(az), 5)]
+            self._plan_sun_env_el = float(chosen_az_el[1]) if chosen_az_el else None
+            raised = (f" (elevation raised from {pel:g} to the {el_used:g} floor: no exposure fit yet, "
+                      "a lower key light shadows the near field)" if el_used > float(pel) else "")
             note = (f"sun: no LuxDiT draw inside the plan window az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev}); "
-                    f"key light aimed at the plan's az {paz:g} el {pel:g}, env map from the sharpest draw"
+                    f"key light aimed at the plan's az {paz:g} el {el_used:g}{raised}, env map from the sharpest draw"
                     + (f" (az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f})" if chosen_az_el else ""))
             rec.update({"used": [paz, pel], "source": "plan", "note": note})
         else:
