@@ -24,6 +24,9 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         estimate_from_photo: bool = True,
         measured_sun_must_be_photographed: bool = True,
         num_samples: int = 3,
+        plan_sun_window: bool = True,
+        plan_sun_az_tolerance_deg: float = 35.0,
+        plan_sun_el_tolerance_deg: float = 20.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.crop_fov_deg = float(crop_fov_deg)
@@ -37,6 +40,13 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         # camera) at el 7 behind-right. The photo sits at the panorama's centre
         # with no yaw, so the env map's frame IS the panorama's frame.
         self.estimate_from_photo = bool(estimate_from_photo)
+        # Scene Plan (docs/hybrid-scene-plan.md): among LuxDiT's draws, prefer the
+        # sharpest one whose sun lies inside the plan's window (its azimuth/elevation
+        # reading, visible or inferred, +/- the tolerances). No draw inside: the
+        # sharpest overall is kept and the disagreement is logged, never corrected.
+        self.plan_sun_window = bool(plan_sun_window)
+        self.plan_sun_az_tolerance_deg = float(plan_sun_az_tolerance_deg)
+        self.plan_sun_el_tolerance_deg = float(plan_sun_el_tolerance_deg)
         # LuxDiT samples to draw (seeded seed+i). One sample's HDR is a lottery:
         # the same Rainier photo gave a peak of 80 (sun 0.5x) on one run and 3.2
         # (sun 0.07x, a dull scene) on the next. The sample whose map has the
@@ -192,14 +202,17 @@ class PanoramaLightingStage(PipelineStage):
                 seed=self.seed + i,
             )
             probe = SceneLighting(ldr=sample.ldr, log=sample.log, hdr=sample.hdr).sun() or {}
-            samples.append((probe.get("peak_ratio", 0.0), probe.get("sun_share", 0.0), sample))
+            az_el = self._az_el(np.asarray(probe["direction"], dtype=np.float64)) if probe.get("direction") is not None else None
+            samples.append((probe.get("peak_ratio", 0.0), probe.get("sun_share", 0.0), sample, az_el))
             if probe:
-                az, el = self._az_el(np.asarray(probe["direction"], dtype=np.float64))
+                az, el = az_el
                 self.log_info(
                     f"  LuxDiT sample {i + 1}/{self.config.num_samples}: peak ratio {probe['peak_ratio']:.1f}, "
                     f"sun share {probe['sun_share']:.4f}, az {az:.0f}° el {el:.0f}°"
                 )
         result = max(samples, key=lambda s: (s[0], s[1]))[2]
+        if self.config.plan_sun_window:
+            result = self._apply_plan_sun_window(context, samples, result)
 
         # Where the sun actually is, read off the panorama rather than off the
         # estimate. PanoramaRegionStage runs before this one, so its typing of the
@@ -283,6 +296,50 @@ class PanoramaLightingStage(PipelineStage):
         self.advance_progress(task)
         self.finish_progress(task)
         return context
+
+    def _apply_plan_sun_window(self, context: PipelineContext, samples, result):
+        """Pick the sharpest LuxDiT draw inside the plan's sun window, if any lies inside."""
+        from pipeline.scene_plan import ScenePlan
+        plan = ScenePlan.from_context(context)
+        if plan is None:
+            return result
+        paz, pel, pev = plan.get("sun.azimuth_deg"), plan.get("sun.elevation_deg"), plan.evidence("sun")
+        if not isinstance(paz, (int, float)) or not isinstance(pel, (int, float)) or pev not in ("visible", "inferred"):
+            self.log_info(f"Scene Plan: sun window unavailable (az {paz}, el {pel}, {pev})")
+            return result
+        az_tol, el_tol = self.config.plan_sun_az_tolerance_deg, self.config.plan_sun_el_tolerance_deg
+
+        def inside(az_el):
+            if az_el is None:
+                return False
+            daz = (az_el[0] - float(paz) + 180.0) % 360.0 - 180.0
+            return abs(daz) <= az_tol and abs(az_el[1] - float(pel)) <= el_tol
+
+        chosen_az_el = next((s[3] for s in samples if s[2] is result), None)
+        within = [s for s in samples if inside(s[3])]
+        rec = {"field": "sun direction (az, el deg)", "plan": [paz, pel], "evidence": pev,
+               "because": plan.because("sun"), "measured": list(chosen_az_el) if chosen_az_el else None,
+               "measured_source": "luxdit sharpest of %d" % len(samples)}
+        if within:
+            best = max(within, key=lambda s: (s[0], s[1]))
+            if best[2] is not result:
+                note = (f"sun: sharpest draw az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f} lies outside the plan window "
+                        f"az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g}; {len(within)}/{len(samples)} draws inside, "
+                        f"using az {best[3][0]:.0f} el {best[3][1]:.0f} (peak {best[0]:.1f})")
+                rec.update({"used": list(best[3]), "source": "plan-window", "note": note})
+                result = best[2]
+            else:
+                note = (f"sun: sharpest draw az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f} is inside the plan window "
+                        f"az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev})")
+                rec.update({"used": list(chosen_az_el), "source": "measured", "note": note})
+        else:
+            note = (f"sun: no LuxDiT draw inside the plan window az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev}); "
+                    f"keeping the sharpest" + (f" at az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f}" if chosen_az_el else ""))
+            rec.update({"used": list(chosen_az_el) if chosen_az_el else None, "source": "measured", "note": note})
+        self.log_info("Scene Plan: " + note)
+        plan.overrides.append(rec)
+        plan.publish(context, "lighting")
+        return result
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         _, output_key = self._resolved_keys()

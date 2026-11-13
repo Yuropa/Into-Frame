@@ -13,6 +13,8 @@ __pycache__/
 .Python
 build/
 output/
+# Scene Plan cross-run cache and spend ledger (cache/scene_plan/)
+cache/
 checkpoints/
 mnt/
 /src/

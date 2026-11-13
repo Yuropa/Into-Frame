@@ -15,6 +15,23 @@ stages:
   - name: Captioning
     stage: CaptioningStage
 
+  - name: Scene Plan
+    stage: ScenePlanStage
+    # One vision-model reading of the photograph (docs/hybrid-scene-plan.md): vantage,
+    # scale, sun, atmosphere, water, terrain kind, species, landmarks, motion, each claim
+    # labelled visible / inferred / invented. Cached twice -- in this run's context and in
+    # cache/scene_plan/<sha256(photo)>-v<schema>-<model>.json across runs -- so a photograph
+    # is read ONCE, ever. Consumers (Panorama Lighting, Panorama Depth Calibration, Region
+    # Map, Scene Generation) apply it only through ScenePlan.prior(): a visible claim bounds
+    # a measurement, an inferred one stands in for a missing or insane one, invented is text.
+    model: anthropic:claude-opus-5-5      # or openai:<model> with base_url for a local server
+    max_usd_per_run: 2.0                  # paid calls past this fail the stage, never silently
+    no_api: false                         # true (or FRAME_NO_API=1): a cache miss is an error, no call
+    refresh: false                        # true: ignore the cache and read the photograph again (billed)
+    timeout_s: 600
+    retries: 1
+    required: false                       # false: no plan -> every consumer behaves as before
+
   - name: Depth Generation
     stage: DepthStage
 
@@ -442,6 +459,11 @@ stages:
     # from 91 degrees outside anything the camera saw.
     measured_sun_must_be_photographed: true
     num_samples: 3              # LuxDiT draws; the sharpest-peaked map is kept (one draw is a lottery)
+    # Scene Plan: prefer the sharpest draw whose sun lies inside the plan's window
+    # (its az/el reading +/- the tolerances). No draw inside: sharpest kept, logged.
+    plan_sun_window: true
+    plan_sun_az_tolerance_deg: 35.0
+    plan_sun_el_tolerance_deg: 20.0
     crop_fov_deg: 90.0          # only used when estimate_from_photo is false
 
   - name: Skybox Inpainting
@@ -523,6 +545,11 @@ stages:
     anchor_to_camera_height: true
     camera_height_meters: 1.0
     anchor_min_elevation_deg: 45.0
+    # Scene Plan: its camera height stands in when the photo has no size anchor
+    # (source config), bounds a measured one within the tolerance when the claim is
+    # visible, and is only logged when inferred and in disagreement.
+    plan_prior: true
+    plan_height_tolerance: 0.25
     max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
                                  # range at this many times the farthest/nearest fitted median
                                  # metric depth, instead of an unbounded log-space extrapolation —
@@ -747,6 +774,10 @@ stages:
     # cover in regions rather than radial slivers. Drawn as terrain_plan.png. false
     # restores the two priors above on their own.
     terrain_plan: true
+    # Scene Plan: a visible river width bounds the channel fit (Paris: 88 m fitted
+    # through the nadir fill vs 130 m photographed); moved to within the tolerance.
+    plan_prior: true
+    plan_width_tolerance: 0.15
     plan_edge_deg: 10.0           # the coast's direction at a cone edge is fitted over this much of the cone
     plan_hole_m2: 200.0           # land islets inside a water body smaller than this are water
     plan_land_smooth_m: 4.0       # land-cover regions are at least this wide (0 disables)

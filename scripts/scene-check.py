@@ -29,6 +29,15 @@ Flags:
                 fraction of the frame (components over 0.3% only).
   flat          non-sky regions with almost no texture (over 2% of the frame);
                 the test renderer's water is flat, so read this as a delta.
+Scene Plan (docs/hybrid-scene-plan.md): when the run has a Scene Plan, the record
+carries its key readings and every prior decision the consumer stages published
+(plan_overrides_*.json: field, measured, plan, used, source), printed under the table.
+  --judge      a vision model (default anthropic:claude-haiku-5-5) grades the photo view
+               against the photograph and the plan's acceptance list: observe, list
+               issues (target, kind, severity), pass/fail each acceptance item, then a
+               0-1 score computed in code from the rubric minus penalties. Written to
+               <out>/verdict.json and the history row (judge, acceptance_pass). Cents per
+               check; honours FRAME_NO_API=1 (no call, no judge columns).
 Scene names resolve to output/<uuid>/ by comparing input.png with
 server/samples/<name>.jpg.
 """
@@ -207,6 +216,137 @@ class Scorer:
         }
 
 
+# ── scene plan ──────────────────────────────────────────────────────────────────
+
+def plan_summary(run: Path) -> dict | None:
+    """The run's Scene Plan readings and the prior decisions its consumers published."""
+    pf = run / "Scene Plan" / "scene_plan.json"
+    if not pf.exists():
+        return None
+    try:
+        rec = json.loads(pf.read_text())
+    except ValueError:
+        return None
+    p = rec.get("plan", {})
+
+    def blk(name, *fields):
+        b = p.get(name, {}) or {}
+        out = {f: b.get(f) for f in fields if b.get(f) is not None}
+        out["evidence"] = b.get("evidence")
+        return out
+
+    overrides = []
+    for f in sorted(run.glob("*/plan_overrides_*.json")):
+        try:
+            for o in json.loads(f.read_text()):
+                overrides.append({"stage": f.parent.name, "field": o.get("field"), "measured": o.get("measured"),
+                                  "plan": o.get("plan"), "used": o.get("used"), "source": o.get("source"),
+                                  "evidence": o.get("evidence")})
+        except ValueError:
+            pass
+    return {
+        "model": rec.get("model"), "source": rec.get("source"), "created": rec.get("created"),
+        "place": blk("place", "kind", "name"), "camera": blk("camera", "height_m", "pitch_deg"),
+        "sun": blk("sun", "azimuth_deg", "elevation_deg", "warmth"),
+        "water": blk("water", "kind", "width_m"), "terrain": blk("terrain", "kind"),
+        "species": [x.get("name") for x in p.get("species", [])],
+        "acceptance": p.get("acceptance", []), "overrides": overrides,
+    }
+
+
+JUDGE_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["summary", "issues", "acceptance", "rubric"],
+    "properties": {
+        "summary": {"type": "string", "description": "two sentences: what the render shows vs the photograph"},
+        "issues": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                   "required": ["target", "kind", "severity", "text"],
+                   "properties": {"target": {"type": "string"},
+                                  "kind": {"type": "string", "enum": ["composition", "geometry", "material", "scale",
+                                                                      "lighting", "atmosphere", "missing", "extra"]},
+                                  "severity": {"type": "string", "enum": ["minor", "major", "severe"]},
+                                  "text": {"type": "string"}}}},
+        "acceptance": {"type": "array", "items": {"type": "object", "additionalProperties": False,
+                       "required": ["id", "pass", "evidence"],
+                       "properties": {"id": {"type": "string"}, "pass": {"type": "boolean"}, "evidence": {"type": "string"}}}},
+        "rubric": {"type": "object", "additionalProperties": False,
+                   "required": ["layout", "geometry", "materials", "lighting", "atmosphere", "realism"],
+                   "properties": {k: {"type": "integer", "minimum": 0, "maximum": 5}
+                                  for k in ["layout", "geometry", "materials", "lighting", "atmosphere", "realism"]}},
+    },
+}
+JUDGE_SYSTEM = """You grade a real-time 3D reconstruction of a photograph. You see the photograph first, then the \
+render from the same camera. Observe before you score: say what the render shows, list concrete issues with the \
+thing they are about, judge each acceptance item from what is visible, then score the rubric 0-5 (5 = \
+indistinguishable from a photograph of the place). The render is a game-engine frame, not a photo: judge whether it \
+reads as the same place with believable geometry, surfaces, light and air, not pixel identity."""
+_PENALTY = {"minor": 0.02, "major": 0.06, "severe": 0.12}
+_WEIGHTS = {"layout": 0.25, "geometry": 0.2, "materials": 0.15, "lighting": 0.15, "atmosphere": 0.1, "realism": 0.15}
+
+
+def judge(photo: Image.Image, render: Image.Image, plan: dict | None, model_id: str, out: Path) -> dict | None:
+    """Vision-model verdict on the photo view. Returns the verdict dict (also written to out/verdict.json)."""
+    import os
+    sys.path.insert(0, str(ROOT / "server"))
+    from pipeline.scene_plan.client import PlanModel, SpendLedger, NoApiError, SpendCapError, image_to_jpeg_b64
+    pm = PlanModel(model_id, timeout_s=300, retries=1)
+    if pm.no_api:
+        print("  judge: paid calls are off (FRAME_NO_API); skipped")
+        return None
+    acceptance = (plan or {}).get("acceptance") or []
+    acc_text = "\n".join(f"- {a.get('id')} [{a.get('priority')}]: {a.get('text')}" for a in acceptance) or "- (none)"
+    user = ("The first image is the photograph, the second the render from its camera. Acceptance items read from the "
+            f"photograph:\n{acc_text}\n\nRecord your verdict by calling the judge tool.")
+    import anthropic
+    from pipeline.scene_plan.client import resolve_anthropic_key, estimate_usd, ModelReply
+    key = resolve_anthropic_key()
+    if not key:
+        print("  judge: no Anthropic key; skipped")
+        return None
+    b1, _, _ = image_to_jpeg_b64(photo, 1024)
+    b2, _, _ = image_to_jpeg_b64(render, 1024)
+    client = anthropic.Anthropic(api_key=key, timeout=300, max_retries=1)
+    ledger = SpendLedger(ROOT / "cache" / "scene_plan", run_cap_usd=2.0)
+    try:
+        ledger.check(0.05, "scene-check judge")
+        msg = client.messages.create(
+            model=pm.model, max_tokens=2500, system=JUDGE_SYSTEM,
+            tools=[{"name": "judge", "description": "Record the verdict.", "input_schema": JUDGE_SCHEMA}],
+            tool_choice={"type": "auto"},
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b1}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b2}},
+                {"type": "text", "text": user}]}])
+    except (NoApiError, SpendCapError) as exc:
+        print(f"  judge: {exc}")
+        return None
+    except Exception as exc:
+        print(f"  judge failed: {type(exc).__name__}: {exc}")
+        return None
+    data = next((b.input for b in msg.content if getattr(b, "type", "") == "tool_use"), None)
+    if not isinstance(data, dict):
+        print("  judge: no tool call in the reply")
+        return None
+    usd = estimate_usd(pm.model, msg.usage.input_tokens, msg.usage.output_tokens)
+    ledger.record("scene-check judge", ModelReply(data, pm.model, "anthropic", msg.usage.input_tokens,
+                                                  msg.usage.output_tokens, usd, 0.0), out.name, "judge")
+    rubric = data.get("rubric", {})
+    base = sum(_WEIGHTS[k] * float(rubric.get(k, 0)) / 5.0 for k in _WEIGHTS)
+    penalty = min(0.3, sum(_PENALTY.get(i.get("severity"), 0.0) for i in data.get("issues", [])))
+    musts = {a.get("id") for a in acceptance if a.get("priority") == "must"}
+    failed_must = [a["id"] for a in data.get("acceptance", []) if a.get("id") in musts and not a.get("pass")]
+    score = max(0.0, base - penalty)
+    if failed_must:
+        score = min(score, 0.6)
+    passed = sum(1 for a in data.get("acceptance", []) if a.get("pass"))
+    verdict = {"model": pm.model, "score": round(score, 3), "rubric_score": round(base, 3), "penalty": round(penalty, 3),
+               "failed_must": failed_must, "acceptance_pass": f"{passed}/{len(data.get('acceptance', []))}",
+               "summary": data.get("summary"), "issues": data.get("issues", []), "acceptance": data.get("acceptance", []),
+               "rubric": rubric, "usd": round(usd, 4)}
+    (out / "verdict.json").write_text(json.dumps(verdict, indent=2))
+    return verdict
+
+
 # ── sheet ───────────────────────────────────────────────────────────────────────
 
 def _row(images: list[Image.Image], labels: list[str], w: int) -> Image.Image:
@@ -252,6 +392,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, default=ROOT / "scratch" / "check")
     ap.add_argument("--width", type=int, default=720, help="render width per view")
     ap.add_argument("--grass", action="store_true", help="render grass blades (slow)")
+    ap.add_argument("--judge", action="store_true", help="vision-model verdict on the photo view (cents per check)")
+    ap.add_argument("--judge-model", default="anthropic:claude-haiku-5-5")
     args = ap.parse_args()
     label = args.label or dt.datetime.now().strftime("%m%d-%H%M")
     scorer = Scorer()
@@ -285,6 +427,21 @@ def main() -> int:
         record["views"] = views
         record["black"] = round(sum(f["black"] for f in views.values()), 4)
         record["flat"] = round(sum(f["flat"] for f in views.values()), 4)
+        plan = plan_summary(run)
+        if plan is not None:
+            record["plan"] = {k: plan[k] for k in ("model", "source", "camera", "sun", "water", "terrain")}
+            record["plan_overrides"] = plan["overrides"]
+        if args.judge:
+            verdict = judge(photo, now["photo"], plan, args.judge_model, out)
+            if verdict is not None:
+                record["judge"] = verdict["score"]
+                record["acceptance_pass"] = verdict["acceptance_pass"]
+                record["judge_issues"] = len(verdict["issues"])
+                print(f"[{name}] judge {verdict['score']:.2f} (rubric {verdict['rubric_score']:.2f} - {verdict['penalty']:.2f}"
+                      f"{', must failed: ' + ', '.join(verdict['failed_must']) if verdict['failed_must'] else ''}); "
+                      f"acceptance {verdict['acceptance_pass']}; {verdict['summary']}", flush=True)
+                for i in verdict["issues"]:
+                    print(f"    {i.get('severity'):6s} {i.get('kind'):11s} {i.get('target')}: {i.get('text')}")
 
         hist_path = base / "history.jsonl"
         history = [json.loads(l) for l in hist_path.read_text().splitlines() if l.strip()] if hist_path.exists() else []
@@ -300,7 +457,7 @@ def main() -> int:
         summary.append((name, record, prev))
         print(f"[{name}] sheet: {out / 'sheet.png'}", flush=True)
 
-    keys = ["dino_global", "dino_layout", "colour_de", "black", "flat", "oversize", "boat_tall", "treeline_tall"]
+    keys = ["dino_global", "dino_layout", "colour_de", "judge", "black", "flat", "oversize", "boat_tall", "treeline_tall"]
     print()
     print(f"{'scene':<15}" + "".join(f"{k:>20}" for k in keys))
     for name, rec, prev in summary:
@@ -317,6 +474,13 @@ def main() -> int:
         for k in ("oversize_examples", "boat_tall_examples"):
             if rec.get(k):
                 print(f"    {k}: {', '.join(rec[k])}")
+        if rec.get("plan"):
+            pl = rec["plan"]
+            print(f"    plan ({pl.get('model')}, {pl.get('source')}): camera {pl['camera']} sun {pl['sun']} water {pl['water']}")
+            for o in rec.get("plan_overrides", []):
+                if o.get("source") not in (None, "measured", "n/a"):
+                    print(f"    prior {o['stage']}: {o['field']} measured {o.get('measured')} -> {o.get('used')} "
+                          f"({o.get('source')}, plan {o.get('plan')} {o.get('evidence')})")
     return 0
 
 

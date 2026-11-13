@@ -41,6 +41,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         open_water_bank_tolerance_m: float = 1.5,
         open_water_extend_deg: float = 60.0,
         terrain_plan: bool = True,
+        plan_prior: bool = True,
+        plan_width_tolerance: float = 0.2,
         plan_edge_deg: float = 10.0,
         plan_hole_m2: float = 200.0,
         plan_land_smooth_m: float = 4.0,
@@ -76,6 +78,10 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # the photographed banks' lines becomes bank -- typed as the nearest
         # non-water surface and raised to the photographed banks' height.
         self.river_channel_prior = bool(river_channel_prior)
+        # Scene Plan (docs/hybrid-scene-plan.md): a visible river width bounds the
+        # channel fit (Paris: fitted 88 m through the nadir fill, photographed 130 m).
+        self.plan_prior = bool(plan_prior)
+        self.plan_width_tolerance = float(plan_width_tolerance)
         self.river_channel_margin_m = float(river_channel_margin_m)
         # Water that meets the sky in the photograph is open water: the sea (or a
         # lake) runs from the shore to the horizon. The outpainted panorama closes
@@ -581,6 +587,21 @@ class RegionMapStage(PipelineStage):
                 self.log_warning("Terrain plan: no photographed cone (missing intrinsics or photo) -- map left as projected")
             else:
                 before = region_map.copy()
+                scene_plan = None
+                prior_width = None
+                if cfg.plan_prior:
+                    from pipeline.scene_plan import ScenePlan
+                    scene_plan = ScenePlan.from_context(context)
+                    if scene_plan is not None:
+                        w = scene_plan.get("water.width_m")
+                        if (scene_plan.evidence("water") == "visible" and scene_plan.get("water.kind") in ("river", "stream")
+                                and isinstance(w, (int, float)) and w > 0):
+                            prior_width = float(w)
+                            self.log_info(f"Scene Plan: river {prior_width:.0f} m wide (visible) bounds the channel fit "
+                                          f"within {cfg.plan_width_tolerance:.0%}")
+                        else:
+                            self.log_info(f"Scene Plan: no visible river width (water {scene_plan.get('water.kind')}, "
+                                          f"{scene_plan.evidence('water')}); channel fit stands alone")
                 region_map, cell_elevation, plan = build_plan(
                     region_map, cell_elevation, type_idx_map,
                     panorama_depth.depth.astype(np.float32), cone.hfov_deg, camera_height, grid_m,
@@ -593,9 +614,20 @@ class RegionMapStage(PipelineStage):
                         hole_m2=cfg.plan_hole_m2,
                         land_smooth_m=cfg.plan_land_smooth_m,
                         smooth_min_distance_m=cfg.plan_smooth_min_distance_m,
+                        prior_width_m=prior_width,
+                        prior_width_tol=cfg.plan_width_tolerance,
                     ),
                     self.log_info,
                 )
+                if scene_plan is not None:
+                    wp = plan.width_prior or {}
+                    scene_plan.overrides.append({
+                        "field": "river width (m)", "measured": wp.get("measured"), "measured_source": "channel fit",
+                        "plan": prior_width, "evidence": scene_plan.evidence("water"), "because": scene_plan.because("water"),
+                        "used": wp.get("used"), "source": wp.get("source", "measured" if plan.kind == "river" else "n/a"),
+                        "note": f"terrain plan kind {plan.kind}; plan water {scene_plan.get('water.kind')}",
+                    })
+                    scene_plan.publish(context, "region_map")
                 if cell_elevation is not None:
                     context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
                 context.add_object(ContextKey.TERRAIN_PLAN, plan.summary())

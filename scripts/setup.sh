@@ -440,6 +440,23 @@ create_main_environment() {
     conda run --no-capture-output -n frame pip install --no-build-isolation git+https://github.com/SunzeY/AlphaCLIP.git \
         || { error "AlphaCLIP install failed in 'frame'"; exit 1; }
 
+    # Scene Plan stage (docs/hybrid-scene-plan.md): the anthropic SDK and keyring come from
+    # requirements.txt; the API key is NOT a file. Store it once in the login keyring:
+    #     conda run -n frame keyring set anthropic 3dcodeverse
+    # (or export ANTHROPIC_API_KEY). Without a key the stage logs a warning and the
+    # pipeline runs as before; set FRAME_NO_API=1 to forbid paid calls outright.
+    if conda run --no-capture-output -n frame python -c "import anthropic, keyring" >/dev/null 2>&1; then
+        if conda run --no-capture-output -n frame python -c "import keyring,sys; sys.exit(0 if keyring.get_password('anthropic','3dcodeverse') else 1)" >/dev/null 2>&1 \
+           || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+            success "Scene Plan: anthropic SDK present, API key found (keyring or environment)."
+        else
+            warn "Scene Plan: anthropic SDK present but no API key. Store one with: conda run -n frame keyring set anthropic 3dcodeverse"
+            warn "            (the stage is skipped with a warning until then; cached plans in cache/scene_plan/ still load)"
+        fi
+    else
+        warn "Scene Plan: 'anthropic' / 'keyring' failed to import in 'frame'; the Scene Plan stage will be skipped."
+    fi
+
     mkdir -p "$LIB_DIR"
     mkdir -p "$CHECKPOINT_DIR"
     mkdir -p "$PACKAGES_DIR"

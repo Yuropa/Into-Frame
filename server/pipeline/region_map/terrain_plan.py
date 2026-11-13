@@ -60,6 +60,7 @@ class TerrainPlan:
     coast_lines: list[list[tuple[float, float]]] = field(default_factory=list)   # polylines, world xz
     channel: Optional[dict] = None
     hfov_deg: float = 0.0
+    width_prior: Optional[dict] = None       # Scene Plan river width: measured / plan / used
 
     def summary(self) -> dict:
         return {
@@ -69,6 +70,7 @@ class TerrainPlan:
             "notes": list(self.notes),
             "coast_lines": [[list(p) for p in line] for line in self.coast_lines],
             "channel": self.channel,
+            "width_prior": self.width_prior,
         }
 
 
@@ -82,6 +84,8 @@ class PlanConfig:
     hole_m2: float = 200.0                 # land islets inside water smaller than this are water
     land_smooth_m: float = 4.0             # land-cover regions are at least this wide (0 disables)
     smooth_min_distance_m: float = 20.0    # the near field keeps its photographed detail
+    prior_width_m: Optional[float] = None  # Scene Plan: the photographed river's width when both banks are visible
+    prior_width_tol: float = 0.2           # the fitted width is moved inside this fraction of it
 
 
 def _column_shore_stats(type_idx_map, depth, cone_hfov_deg, half_m, bin_m=2.0, min_px=3):
@@ -336,6 +340,20 @@ def build_plan(
     # ── river ─────────────────────────────────────────────────────────────────
     elif plan.kind == "river":
         xl, xr, slope, offset, width, spread, nb = river
+        if cfg.prior_width_m and cfg.prior_width_m > 0 and width > 0:
+            # The plan read both banks (visible); the fit measured them through the
+            # nadir fill and removed boats. Inside the tolerance the fit stands; outside
+            # it the channel is widened or narrowed about its own axis to the edge of
+            # the tolerance, so the banks still follow the photographed midline.
+            lo, hi = cfg.prior_width_m * (1.0 - cfg.prior_width_tol), cfg.prior_width_m * (1.0 + cfg.prior_width_tol)
+            used = min(max(width, lo), hi)
+            plan.width_prior = {"measured": width, "plan": cfg.prior_width_m, "tolerance": cfg.prior_width_tol,
+                                "used": used, "source": "clamped" if used != width else "measured"}
+            if used != width:
+                notes.append(f"river width {width:.0f} m moved to {used:.0f} m (plan: {cfg.prior_width_m:.0f} m visible, "
+                             f"tolerance {cfg.prior_width_tol:.0%})")
+                width = used
+                xl, xr = offset - width / 2.0, offset + width / 2.0
         lateral = X - (offset + slope * Z)
         channel = np.abs(lateral) <= width / 2.0
         water_cells = region_map == water_idx

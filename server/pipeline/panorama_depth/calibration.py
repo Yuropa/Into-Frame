@@ -41,6 +41,8 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         anchor_min_elevation_deg: float = 45.0,
         estimate_camera_height: bool = True,
         max_camera_height_m: float = 60.0,
+        plan_prior: bool = True,
+        plan_height_tolerance: float = 0.25,
         waterline_anchor: bool = True,
         waterline_min_plane_m: float = 15.0,
         waterline_captured_only: bool = False,
@@ -131,6 +133,12 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # and Region Map.
         self.estimate_camera_height = bool(estimate_camera_height)
         self.max_camera_height_m = float(max_camera_height_m)
+        # Scene Plan (docs/hybrid-scene-plan.md): the plan's camera height stands in
+        # when the photo offered no anchor (Rainier: 1 m config vs the plan's 1.2 m),
+        # bounds a measured one when the claim is visible, and is only logged when it
+        # is inferred and disagrees with a measurement that passed sanity.
+        self.plan_prior = bool(plan_prior)
+        self.plan_height_tolerance = float(plan_height_tolerance)
         # Scale whatever stands in the water to the distance where its waterline
         # row meets the water plane (see _waterline_scale). Shark Fin's sea stack
         # stood 84 m out by the depth model, 51 m by its own waterline.
@@ -661,6 +669,22 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             if measured is not None:
                 estimate = measured
                 camera_height = measured["meters"]
+        if cfg.plan_prior:
+            from pipeline.scene_plan import ScenePlan
+            plan = ScenePlan.from_context(context)
+            if plan is not None:
+                r = plan.prior(
+                    "camera.height_m", measured=camera_height,
+                    measured_source="photo" if estimate.get("source") == "photo" else "config",
+                    tolerance=cfg.plan_height_tolerance,
+                    sanity=lambda h: 0.3 <= h <= cfg.max_camera_height_m, label="camera height (m)",
+                )
+                self.log_info("Scene Plan: " + r.note)
+                if r.changed:
+                    camera_height = float(r.value)
+                    estimate = {"meters": camera_height, "source": "plan", "evidence": r.evidence,
+                                "measured": r.measured, "measured_source": estimate.get("source")}
+                plan.publish(context, "calibration")
         context.add_object(CAMERA_HEIGHT_KEY, estimate)
         anchor_scale = 1.0
         if estimate.get("source") == "photo":

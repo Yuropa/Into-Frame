@@ -1,6 +1,6 @@
 import json
 import math
-from typing import Any
+from typing import Optional, Any
 from logging import Logger
 
 import torch
@@ -73,6 +73,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         sliver_exempt_classes: list[str] | None = None,
         far_landmark_classes: list[str] | None = None,
         landmark_distance_fraction: float = 0.75,
+        plan_landmark_distance: bool = True,
         borrow_mesh_classes: list[str] | None = None,
         mesh_near_distance_m: float = 15.0,
         mesh_shape_min_ratio: float = 1.4,
@@ -91,6 +92,10 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # Named landmarks are placed at this fraction of the far clip plane (0 = where
         # the depth map put them); see run.
         self.landmark_distance_fraction = float(landmark_distance_fraction)
+        # Scene Plan (docs/hybrid-scene-plan.md): a landmark the plan read with a
+        # distance (visible or inferred) is pushed to that distance instead of the
+        # fixed fraction of the far clip, capped just inside the far clip.
+        self.plan_landmark_distance = bool(plan_landmark_distance)
         # Non-always-mesh classes that also wear a sibling bucket's mesh when their
         # own has none (see run).
         self.borrow_mesh_classes = frozenset(borrow_mesh_classes if borrow_mesh_classes is not None else ["tree"])
@@ -765,6 +770,45 @@ class SceneGenerationStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.SCENE
         })
 
+    def _plan_landmark_distance(self, context: PipelineContext, metadata: dict, cls: str, offset) -> Optional[float]:
+        """The Scene Plan's distance for this landmark, matched by class word and bearing
+        (within 25 deg), when the claim is visible or inferred; None otherwise."""
+        try:
+            from pipeline.scene_plan import ScenePlan
+            plan = ScenePlan.from_context(context)
+        except Exception:
+            return None
+        if plan is None:
+            return None
+        bearing = float(np.degrees(np.arctan2(float(offset[0]), float(offset[2]))))
+        name = str(metadata.get("name") or "").lower()
+        words = {w for w in (cls or "").lower().replace("_", " ").split() if len(w) > 2}
+        best = None
+        for lm in plan.items("landmarks", "inferred"):
+            lm_words = set((str(lm.get("class", "")) + " " + str(lm.get("name", ""))).lower().split())
+            if not (words & lm_words) and not (name and name in str(lm.get("name", "")).lower()):
+                continue
+            b = lm.get("bearing_deg")
+            d = lm.get("distance_m")
+            if not isinstance(d, (int, float)) or d <= 0:
+                continue
+            dbearing = abs(((float(b) if isinstance(b, (int, float)) else bearing) - bearing + 180.0) % 360.0 - 180.0)
+            if dbearing > 25.0:
+                continue
+            if best is None or dbearing < best[0]:
+                best = (dbearing, float(d), lm)
+        if best is None:
+            return None
+        _, dist, lm = best
+        self.log_info(f"Scene Plan: landmark '{lm.get('name')}' ({lm.get('evidence')}) at {dist:.0f} m, "
+                      f"bearing {lm.get('bearing_deg')} deg -- {lm.get('because', '')}")
+        plan.overrides.append({"field": f"landmark distance (m): {lm.get('name')}", "measured": None,
+                               "measured_source": "landmark_distance_fraction", "plan": dist,
+                               "evidence": lm.get("evidence"), "because": lm.get("because", ""),
+                               "used": dist, "source": "plan", "note": "pushed along its ray to the plan distance"})
+        plan.publish(context, "scene_generation")
+        return dist
+
     def run(self, context: PipelineContext) -> PipelineContext:
         count_key, extrinsics_key, intrinsics_key, input_key, depth_key, panorama_key, output_key = self._resolved_keys()
 
@@ -1407,6 +1451,10 @@ class SceneGenerationStage(PipelineStage):
                     offset = np.array(position, dtype=float) - camera_position
                     d_old = float(np.hypot(offset[0], offset[2]))
                     target = self.config.landmark_distance_fraction * float(scene.far_clip_plane)
+                    if self.config.plan_landmark_distance:
+                        planned = self._plan_landmark_distance(context, metadata, cls, offset)
+                        if planned is not None:
+                            target = min(planned, 0.95 * float(scene.far_clip_plane))
                     if d_old > 1e-3 and target > 1.2 * d_old:
                         k = target / d_old
                         landmark_ground_y = ground_y_at(position[0], position[2], scene.skybox_rotation)
