@@ -464,6 +464,7 @@ stages:
     plan_sun_window: true
     plan_sun_az_tolerance_deg: 35.0
     plan_sun_el_tolerance_deg: 20.0
+    plan_sun_override: true      # no draw inside the window -> key light aimed at the plan's sun
     crop_fov_deg: 90.0          # only used when estimate_from_photo is false
 
   - name: Skybox Inpainting
@@ -2230,6 +2231,20 @@ stages:
     delight_blur_fraction: 0.02  # low-pass radius of the shading estimate delighting
                                  # divides out, as a fraction of the crop's longer side
 
+  # Procedural species meshes for the near field, coloured from the photograph
+  # (pipeline/species/species_assets.py, docs/hybrid-scene-plan.md section 6).
+  - name: Species Assets
+    stage: SpeciesAssetsStage
+    enabled: true
+    blender_path: ~/.local/bin/blender-5.2
+    classes: [flower, tree]
+    max_members: 12              # crops measured per bucket palette
+    match_max_delta_e: 40.0      # a bucket further than this from every plan species keeps its card
+    variants: 3                  # procedural variants per flower bucket (Scene Generation spreads instances over them)
+    tree_variants: 2
+    timeout_s: 600
+    min_evidence: visible
+
   - name: Tree Mesh Refinement
     stage: TreeMeshGenerationStage
     enabled: false              # 2026-10-17: every Tree-D result on Rainier failed its aspect or class
@@ -2252,6 +2267,7 @@ stages:
     stage: SceneGenerationStage
     keys:
       panorama: panorama_sky
+    species_mesh_near_distance_m: 60.0   # a Species Assets mesh stays a mesh this far out (cards beyond)
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
     # Floor on a category mesh's own vertical extent as a fraction of its largest
@@ -2494,6 +2510,17 @@ stages:
     lod_billboard_screen_fraction: 0.003
     lod_exempt_classes:
       - grass_tuft                    # thousands of instances on one card: no LODGroup
+
+  # Plan-named far structures (a bridge, a building block) the detection path left
+  # in the backdrop, as placeholder geometry at the plan's bearing and distance,
+  # coloured from their own pixels (pipeline/structures/structure_placeholders.py).
+  - name: Structure Placeholders
+    stage: StructurePlaceholdersStage
+    enabled: true
+    categories: [bridge, building, tree]   # a tree landmark (the lone fir) stands as a species mesh
+    min_evidence: visible
+    far_clip_fraction: 0.95
+    bearing_match_deg: 20.0      # an already placed mesh of the class this close on bearing means it exists
 
   - name: Material Maps
     stage: MaterialMapsStage

@@ -95,11 +95,28 @@ def resolve(scene: str) -> tuple[str, Path]:
 
 # ── geometry flags ──────────────────────────────────────────────────────────────
 
+
+def _stage_dirs_in_order(run: Path) -> list[Path]:
+    order_file = run / "_stage_order.json"
+    try:
+        names = json.loads(order_file.read_text())
+        if isinstance(names, dict):
+            names = names.get("stages") or list(names)
+    except Exception:
+        names = sorted(d.name for d in run.iterdir() if d.is_dir())
+    return [run / n for n in names if (run / n).is_dir()]
+
 def geometry_flags(run: Path) -> dict:
     import trimesh
     from scene.mesh import Mesh
 
-    scene = json.loads((run / "Scene Generation" / "scene.json").read_text())
+    # The latest stage's scene wins, as in the context (Structure Placeholders appends
+    # objects after Scene Generation).
+    scene_file = run / "Scene Generation" / "scene.json"
+    for stage_dir in _stage_dirs_in_order(run):
+        if (stage_dir / "scene.json").exists():
+            scene_file = stage_dir / "scene.json"
+    scene = json.loads(scene_file.read_text())
     glbs: dict[str, Path] = {}
     order_file = run / "_stage_order.json"
     order = json.loads(order_file.read_text()) if order_file.exists() else sorted(

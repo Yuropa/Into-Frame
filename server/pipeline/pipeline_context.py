@@ -30,7 +30,9 @@ class ContextKey:
     EXTRINSICS = "extrinsics"
     PANORAMA = "panorama"
     INPUT_CAPTION = "input_caption"
-    SCENE_PLAN = "scene_plan"                # Scene Plan: the vision model's provenance-labelled reading of the photo
+    SCENE_PLAN = "scene_plan"
+    SPECIES_MESHES = "species_meshes"          # Species Assets: bucket meshes replaced by procedural species (key -> record)
+    STRUCTURE_PLACEHOLDERS = "structure_placeholders"  # Structure Placeholders: plan-named far structures built as geometry                # Scene Plan: the vision model's provenance-labelled reading of the photo
     PANAORAMA_CUBENAME = "panorama_cubemap"
     OBJECT_COUNT = "count"
     FOREGROUND_MASKED_IMAGE = "foreground_masked_image"

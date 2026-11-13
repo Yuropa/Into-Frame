@@ -79,6 +79,46 @@ and no building, so Scene Generation placed 26 boats, 24 trees and one tower. Ch
   string match for urban scenes; the representation choice (card / mesh / backdrop)
   from category + angular size instead of the per-class lists.
 
+### Species layer, structures layer, sun override (2026-11-13, evening)
+
+Built after hybrid2, from the user's two directions: the plan must improve the
+scene (not just four numbers) and the near-field cards are the quality floor, with
+the constraint that every generated colour comes from the photograph.
+
+- **Species Assets** (`server/pipeline/species/`, stage after Panorama Asset
+  Generation). For each (class, bucket) group of flower/tree detections: the bucket's
+  palette is measured from its members' masked hires crops (`palette.py`: bloom /
+  foliage / stem split by hue and saturation, Lab k-means, the brighter 60 % of each
+  part so the client's sun does not darken the plant twice); the bucket is matched to a
+  plan species by bloom-palette dE against the species' crop-hint palette (colour words
+  only when there is no hint; a bucket further than 40 dE from every species keeps its
+  card); `blender_species.py` builds the species' form (spike, raceme, seedhead,
+  conifer, tuft, shrub; one material, a palette texture, no default colour anywhere)
+  in Blender 5.2 headless, 1.8 s for nine plants, cached by spec hash in
+  `cache/species/`; the mesh replaces `category_mesh_{class}_{bucket}`, the card stays
+  as the far LOD. Scene Generation keeps a species mesh to
+  `species_mesh_near_distance_m` (60 m) whatever its hull ratio; rigging and sway apply
+  as to any vegetation mesh. Rainier replay: five flower buckets matched lupine (dE 3),
+  pasqueflower seed heads (9), lousewort (14, 16) and paintbrush (11), four tree
+  buckets the subalpine fir. Broadleaf trees have no form yet and keep their cards
+  (Paris's plane trees and willows).
+- **Structure Placeholders** (`server/pipeline/structures/`, stage after Scene
+  Generation). A visible plan landmark of category bridge or building that Scene
+  Generation did not place as a mesh near its bearing becomes massing: a bridge is a
+  deck on piers with parapets spanning the terrain plan's river channel perpendicular
+  to its axis; a building is a block of the plan height facing the camera, walked in
+  along its ray until it stands on reconstructed ground. Placed at min(plan distance,
+  0.95 x far clip) with the height scaled to keep the angular size, coloured by the
+  median of its own detection box in the photograph. Paris replay: the Pont d'Iena
+  deck 114 m across the 90 m channel on 5 piers at 550 m, colour (137, 131, 118) from
+  the absorbed bridge detection's pixels.
+- **Sun override** (`plan_sun_override: true`). When no LuxDiT draw lies inside the
+  plan window, the key light is aimed at the plan's direction with the env map's own
+  sun colour; the sharpest draw still supplies the sky and ambient. Rainier replay:
+  three draws at az -115/-143/169 against the plan's az -75 el 12; key light now
+  az -75 el 12 at #ffc16c.
+- scene-check reads the latest stage's `scene.json`, so placeholders are graded.
+
 **hybrid2 results** (both scenes rebuilt from Object Labeling, 13:26-16:11):
 
 | scene | dino_global | dino_layout | colour dE | judge |

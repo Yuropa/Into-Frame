@@ -27,6 +27,7 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         plan_sun_window: bool = True,
         plan_sun_az_tolerance_deg: float = 35.0,
         plan_sun_el_tolerance_deg: float = 20.0,
+        plan_sun_override: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.crop_fov_deg = float(crop_fov_deg)
@@ -47,6 +48,8 @@ class PanoramaLightingConfiguration(PipelineStageConfiguration):
         self.plan_sun_window = bool(plan_sun_window)
         self.plan_sun_az_tolerance_deg = float(plan_sun_az_tolerance_deg)
         self.plan_sun_el_tolerance_deg = float(plan_sun_el_tolerance_deg)
+        # Aim the key light at the plan's sun when no LuxDiT draw lies inside its window.
+        self.plan_sun_override = bool(plan_sun_override)
         # LuxDiT samples to draw (seeded seed+i). One sample's HDR is a lottery:
         # the same Rainier photo gave a peak of 80 (sun 0.5x) on one run and 3.2
         # (sun 0.07x, a dull scene) on the next. The sample whose map has the
@@ -193,6 +196,7 @@ class PanoramaLightingStage(PipelineStage):
         else:
             input_image = panorama.rgb()
 
+        self._plan_sun_direction = None
         samples = []
         for i in range(self.config.num_samples):
             sample = self._lux_dit.estimate(
@@ -252,6 +256,12 @@ class PanoramaLightingStage(PipelineStage):
                     f"Solar disc photographed at az {az:.1f}° el {el:.1f}° — using it"
                 )
 
+        if measured_sun is None and getattr(self, "_plan_sun_direction", None) is not None:
+            # The photograph has no disc to measure; the plan's direction stands in,
+            # carrying the env map's own sun colour.
+            probe = SceneLighting(ldr=result.ldr, log=result.log, hdr=result.hdr).sun() or {}
+            measured_sun = (list(self._plan_sun_direction), str(probe.get("color") or "#ffffff"))
+            self.log_info("Sun direction from the scene plan (no photographed disc); colour from the env map")
         lighting = SceneLighting(
             ldr=result.ldr, log=result.log, hdr=result.hdr, measured_sun=measured_sun,
         )
@@ -332,6 +342,20 @@ class PanoramaLightingStage(PipelineStage):
                 note = (f"sun: sharpest draw az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f} is inside the plan window "
                         f"az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev})")
                 rec.update({"used": list(chosen_az_el), "source": "measured", "note": note})
+        elif self.config.plan_sun_override:
+            # Every draw disagrees with the plan. The disc is almost never in frame, so
+            # "inferred" from shadow direction is the best evidence a sun claim can
+            # have, while LuxDiT's own direction is an estimate too (Rainier: az -178
+            # el 42, 150 deg outside the photographed cone, against low light from the
+            # left that the photo's shadows show). The plan's direction is used for
+            # the key light; the env map (sky, ambient) is still the sharpest draw.
+            el, az = math.radians(float(pel)), math.radians(float(paz))
+            self._plan_sun_direction = [round(math.cos(el) * math.sin(az), 5), round(math.sin(el), 5),
+                                        round(math.cos(el) * math.cos(az), 5)]
+            note = (f"sun: no LuxDiT draw inside the plan window az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev}); "
+                    f"key light aimed at the plan's az {paz:g} el {pel:g}, env map from the sharpest draw"
+                    + (f" (az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f})" if chosen_az_el else ""))
+            rec.update({"used": [paz, pel], "source": "plan", "note": note})
         else:
             note = (f"sun: no LuxDiT draw inside the plan window az {paz:g}+/-{az_tol:g} el {pel:g}+/-{el_tol:g} ({pev}); "
                     f"keeping the sharpest" + (f" at az {chosen_az_el[0]:.0f} el {chosen_az_el[1]:.0f}" if chosen_az_el else ""))

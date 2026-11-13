@@ -77,6 +77,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         borrow_mesh_classes: list[str] | None = None,
         mesh_near_distance_m: float = 15.0,
         mesh_shape_min_ratio: float = 1.4,
+        species_mesh_near_distance_m: float = 60.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
@@ -108,6 +109,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # looks like billboards" (user, 2026-10-19) was the near trees.
         self.mesh_near_distance_m = float(mesh_near_distance_m)
         self.mesh_shape_min_ratio = float(mesh_shape_min_ratio)
+        # A Species Assets mesh (procedural, coloured from the photo) is the point of
+        # the near field: it stays a mesh this far out, whatever its hull ratio.
+        self.species_mesh_near_distance_m = float(species_mesh_near_distance_m)
         self.far_landmark_classes = frozenset(
             far_landmark_classes if far_landmark_classes is not None
             else ["tower", "monument", "landmark", "statue", "skyscraper", "lighthouse"]
@@ -1016,6 +1020,12 @@ class SceneGenerationStage(PipelineStage):
             # Used only to give an unbucketed instance a plausible variant to
             # render -- see the `bucket is None` branch below.
             class_variants: dict[str, list[int]] = {}
+            # Bucket meshes the species layer replaced (see SpeciesAssetsStage).
+            species_info = context.input_object(ContextKey.SPECIES_MESHES) or {}
+            species_keys = set(species_info.keys())
+            if species_keys:
+                self.log_info(f"Species meshes: {len(species_keys)} bucket(s) kept as meshes to "
+                              f"{self.config.species_mesh_near_distance_m:.0f} m")
             for pool_key in billboard_pools:
                 pool_class, _, pool_bucket = pool_key.rpartition("::")
                 if pool_class and pool_bucket.isdigit():
@@ -1210,6 +1220,8 @@ class SceneGenerationStage(PipelineStage):
                     scale, rejection, _gate = mesh_instance_scale(
                         extents, width, height, min_height_fraction=self.config.min_mesh_height_fraction,
                     )
+                    if rejection is not None and recon_key in species_keys and _gate in ("aspect", "sheet"):
+                        rejection = None  # see the placement gate below: one plant vs a clump box
                     if rejection is None:
                         origin_y = terrain_y - float(recon_mesh.mesh.bounds[0][1]) * scale
                         levels.append(("mesh", recon_key, (scale, scale, scale), origin_y,
@@ -1619,6 +1631,16 @@ class SceneGenerationStage(PipelineStage):
                 # overwrite category_mesh/mesh_key -- the runtime LOD set needs
                 # every representation the instance has, not just the one chosen
                 # for the start position.
+                if mesh_key in species_keys:
+                    # A species bucket with variants: this instance wears one of them,
+                    # deterministically per index.
+                    n_variants = int((species_info.get(mesh_key) or {}).get("variants", 1) or 1)
+                    if n_variants > 1:
+                        k = int(np.random.default_rng((self.seed, idx, 7)).integers(n_variants))
+                        if k > 0:
+                            variant_mesh = context.input_mesh(f"{mesh_key}_v{k}")
+                            if variant_mesh is not None:
+                                mesh_key, category_mesh = f"{mesh_key}_v{k}", variant_mesh
                 recon_mesh, recon_key = category_mesh, mesh_key
 
                 # Optional far-LOD mesh for classes a camera-facing billboard
@@ -1651,9 +1673,11 @@ class SceneGenerationStage(PipelineStage):
                 if card_mesh is not None and cls in self.config.card_preferred_classes:
                     near = float(np.hypot(float(position[0]) - float(camera_position[0]),
                                           float(position[2]) - float(camera_position[2])))
+                    is_species = recon_key in species_keys
                     keep_mesh = (
-                        recon_mesh is not None and near <= self.config.mesh_near_distance_m
-                        and mesh_shape_ratio(recon_key, recon_mesh) >= self.config.mesh_shape_min_ratio
+                        recon_mesh is not None
+                        and near <= (self.config.species_mesh_near_distance_m if is_species else self.config.mesh_near_distance_m)
+                        and (is_species or mesh_shape_ratio(recon_key, recon_mesh) >= self.config.mesh_shape_min_ratio)
                     )
                     if keep_mesh:
                         near_mesh_kept[cls] = near_mesh_kept.get(cls, 0) + 1
@@ -1724,6 +1748,13 @@ class SceneGenerationStage(PipelineStage):
                         # A landmark moved out along its ray is meant to be big.
                         max_size_m=(1.2 * max(width, height)) if landmark_ground_y is not None else None,
                     )
+
+                    if mesh_rejection is not None and mesh_key in species_keys and mesh_gate in ("aspect", "sheet"):
+                        # A species mesh is one plant; the detection box is often a
+                        # clump of them (Rainier: a 4.3:1 box of pasqueflower heads).
+                        # The shape gates compare a reconstruction's silhouette to the
+                        # box it was cut from and do not apply; size gates still do.
+                        mesh_rejection, mesh_gate = None, None
 
                     record = _mesh_geometry_record(
                         mesh_geometry, mesh_key, cls, mesh_extents, idx, mesh_scale
