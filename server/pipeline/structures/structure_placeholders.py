@@ -235,6 +235,12 @@ class StructurePlaceholdersStage(PipelineStage):
         camera_xz = (float(cam[0]), float(cam[2]))
         far_clip = float(scene.far_clip_plane or 0.0)
         max_d = cfg.far_clip_fraction * far_clip if far_clip > 0 else None
+        # The far-field backdrop shell stands at the depth ceiling (Paris: 531 m, band
+        # floor 478 m); anything placed beyond it is painted over. A structure stands
+        # in front of the shell, at the far-field start at most.
+        far_start = float(context.input_object(ContextKey.FAR_FIELD_START_M) or 0.0)
+        if far_start > 0.0:
+            max_d = min(max_d, far_start) if max_d else far_start
 
         def ground_y(local_x: float, local_z: float) -> Optional[float]:
             hits = [y for y in (mesh_y_at(local_x, local_z, m) for m in (terrain_mesh, water_mesh) if m is not None)
