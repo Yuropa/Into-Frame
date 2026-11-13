@@ -202,6 +202,23 @@ Lighting launched as `hybrid3` at 18:42.
   1564 / share 0.31. Three LuxDiT draws are not enough to pin the intensity, which is
   another reason the exposure should be fitted to the photograph rather than drawn.
 
+**hybrid3b** (Rainier from Panorama Lighting with the fix, 21:36-23:00): key light
+az -75 el 20 at 2.60x (x2.12 on this draw's 1.23x). Judge 0.12 -> 0.23 (4/6, failed
+must a2 again: "magenta paintbrush is essentially absent"), colour dE 24.7 -> 17.3,
+black 0.03 -> 0.01, DINO global 0.377 (t1 with the sun from behind: 0.528, judge
+0.32, dE 15.4). Render mean RGB 44/59/73 -> 70/83/90 against t1's 102/115/116. The
+scene is no longer night, but the judge's "flat, desaturated, bluish" is right: lit
+from the front-left, the camera sees the shaded side of every plant and tree, and the
+only fill is 0.45 of a blue sky, so the paintbrush bucket (bloom 5 % of its pixels
+under the cut-out's foliage, built as a spike) reads grey-violet instead of magenta.
+Lit from behind the camera, as every run before tonight was, the same meshes read as
+flowers. Decision: `plan_sun_override` is **off by default** until the section 7
+exposure fit exists (ground bounce in the ambient, exposure fitted to the
+photograph's lit surfaces); the override, the irradiance preservation and the
+elevation floor stay in the code behind the flag. The Rainier cache holds the
+hybrid3b state; a run with the flag off reproduces t1's lighting (modulo the LuxDiT
+draw).
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
