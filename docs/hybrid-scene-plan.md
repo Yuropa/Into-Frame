@@ -39,8 +39,51 @@ Built and tested on the cached Paris and Rainier runs:
 - **Setup**: `anthropic` and `keyring` in `requirements/requirements.txt`; `setup.sh`
   checks both import and tells the user how to store the key. `scripts/hybrid-run.sh`
   reruns cached scenes from Panorama Lighting with the priors and checks them.
-- Not started: 2b import test, phase 3 atmosphere/motion, phase 5 species layer,
-  phase 6 selectors, client capture.
+- **2b import test, half done**: `scratch/species_test/export_species.py` builds three
+  lupine variants, a paintbrush and a subalpine fir procedurally in headless Blender 5.2
+  (3-11 k triangles each, CPU, seconds) and re-saves them through `Mesh.save` under
+  `scratch/species_test/frame/`. The Unity drop-in and the comparison against our cards
+  (every one of Rainier's 1778 flower instances is a card) are still to do.
+- Not started: phase 3 atmosphere/motion, phase 5 species layer, phase 6 selectors,
+  client capture.
+
+### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
+
+| scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
+|---|---|---|---|---|---|---|
+| Paris | round11b | 0.769 -> 0.737 | 0.561 -> 0.569 | 14.8 -> 10.5 | 0.27 (3/6 acceptance) | river 89 -> 110 m; tower 169 -> 557 m; camera 11.8 m kept (plan 11) |
+| Rainier | round11 | 0.470 -> 0.496 | 0.446 -> 0.463 | 16.5 -> 17.8 | 0.12 (4/6 acceptance) | camera 1.0 -> 1.2 m (plan, inferred); no water |
+
+Paris: 74 min, Rainier: 87 min, both exit 0. Spend for the night: two plan readings
+($0.19) plus three judge calls ($0.003).
+
+What it shows:
+
+- The plumbing works end to end: cached plans hit, no cascade from Captioning, every
+  prior logged its decision and published it, scene-check carries them into the history.
+- The Paris priors did what they were meant to. The river is visibly wider and the
+  tower now stands behind the far tree line at a believable size; colour dE improved
+  more than in any earlier round. DINO global dropped a little, which §12 already treats
+  as a regression guard rather than a target.
+- **The sun window never fired.** In both scenes all three LuxDiT draws fell outside
+  the plan window, so the measured direction was kept. For Rainier that is the wrong
+  call: LuxDiT puts the sun behind the camera and high (az -178, el 42; the stage itself
+  logs that this is 150 deg outside the photographed cone, so it is a guess as well),
+  while the photo's shadows show low light from the left, which is what the plan says
+  (az -85, el 8). Sun direction is never "visible" in the schema's sense unless the disc
+  is in frame, so the §4 rule "inferred and outside tolerance -> keep measured" makes
+  this prior a no-op. Proposed change: for the sun, let an inferred reading clamp the
+  draw into the window when the plan's `because` cites shadow direction and no draw
+  lands inside it; log both. Not changed yet, this is a trust-rule decision.
+- Rainier rendered darker and bluer than round 11 (the delighting and terrain textures
+  reran under the new LuxDiT draw), which is where the dE loss comes from; the plan
+  touched nothing in Rainier except the camera height.
+- The judge grades the pyrender frame and it shows: for Paris it reports the camera at
+  water level and the river flat, both renderer artefacts (the camera is 11.8 m up).
+  The absolute scores (0.27, 0.12) are not comparable to the harness's 0.60-0.77 until
+  the §9 client capture exists. The failed must items are real though: no stone bridge,
+  no crowded boat with a wake, and for Rainier no dense magenta/blue flower mass, which
+  is the species layer of phase 5.
 
 ## 0. The one-paragraph version
 
