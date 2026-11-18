@@ -2283,7 +2283,7 @@ stages:
     plan_size_tolerance: 2.0
     plan_bands: true
     plan_band_region: {forest: tree}
-    plan_band_rows: 3
+    plan_band_rows: 6            # rows stand behind the first, up the slope, until their tops reach the mask's skyline
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
     # Floor on a category mesh's own vertical extent as a fraction of its largest

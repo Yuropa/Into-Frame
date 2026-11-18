@@ -344,6 +344,44 @@ pixels. The hybrid3b lighting (plan sun at 2.6x, warm) in the Rainier cache wash
 every render since; `band2` reruns Rainier from Panorama Lighting with the override
 off (launched 17:50), then Paris from Scene Generation.
 
+**`band2` (19:15) and the forest that is not a forest (user).** Rainier with the
+override off: DINO global 0.406 (band1 0.382), layout 0.454 (0.374), ΔE 15.2 (18.6),
+judge 0.17 (0.13), no failed musts. Better on every number, and the user is right that
+it does not read: "the forest still isn't looking like a forest compared to the photo
+and the flowers colors aren't right". Three causes, measured on the cache:
+
+1. *The species reference colour was wrong before the bucket was ever read.* The plan's
+   crop hint for the lousewort holds pale-yellow spikes, olive stems and a paintbrush;
+   k-means on it returned the olive, and the guided re-read then selected olive pixels
+   in every bucket. The plan's own colour words were unused. Now `word_guided_colour`
+   reads the hint around each word's anchor (hue ±25°, lightness ±18, lit half,
+   chroma-rich median): paintbrush [157,46,85], lousewort [223,217,110], lupine
+   [89,88,155] with white [176,187,214], fir [34,55,31]. A flower bucket is then
+   matched by *which species' colour is found in its crops* (≥3 % of pixels, lightness
+   down-weighted 0.15 in the distance: the hint's heads sit in shade, the crops' in
+   sun), and its bloom is the species' photographed colour with one agreeing bucket
+   tone behind it. Rainier: lupine dE 12, paintbrush 17, lousewort 6 and its greener
+   bucket 19; the stalk bucket (750 members) keeps its card at 29.
+2. *Most mid-field flowers were never the species mesh.* 1,699 of the ~2,000 placed
+   flowers took the bucket's card (bake-time `min_mesh_angular_px`), and the card was
+   the photo crop's cutout: delit, matted with meadow, pale whatever the palette said.
+   `species/card.py` rasterises the species mesh itself (painter's fill of its
+   palette-coloured faces, 6 ms, no GPU) and the stage publishes it as
+   `category_mesh_<class>_<bucket>_card`, so the plant keeps its colours at every
+   distance; tree buckets get one too.
+3. *The band was one row.* Each column's tree was as tall as the mask's band, so the
+   forest was a line of 2.7 m cones at the slope's foot. A forest is several crowns
+   deep: trees are now 0.55 of the band's height (floor 0.08 × plan size), rows stand
+   behind the first up the slope until their tops reach the column's mask top as seen
+   from the camera (a vertical ray gives the terrain height; nothing stands above the
+   photographed skyline), the lateral step is 0.3 crown and band trees carry their own
+   overlap separation 0.45. Rainier: 585 firs of 1.4–1.5 m, 3.3 rows deep, 412 placed.
+
+Not touched: the firs render khaki in pyrender because a dark-green albedo under the
+2.0-intensity warm sun with no exposure control goes olive; that is section 7 and the
+judge's "flat, muted" lighting complaint. Replays must run in the `frame` env. `band3`
+(Rainier from Species Assets) is queued behind band2's Paris run.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |

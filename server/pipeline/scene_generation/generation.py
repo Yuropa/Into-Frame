@@ -84,7 +84,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         plan_size_tolerance: float = 2.0,
         plan_bands: bool = True,
         plan_band_region: dict[str, str] | None = None,
-        plan_band_rows: int = 2,
+        plan_band_rows: int = 6,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # The scene plan's standing height for a class replaces CLASS_HEIGHT_RANGE_M
@@ -1302,11 +1302,27 @@ class SceneGenerationStage(PipelineStage):
                         wz = -lx * math.sin(yaw_rad) + lz * math.cos(yaw_rad) + camera_xz[1]
                         return wx, wz, float(math.hypot(lx, lz))
 
+                    def ground_y(wx: float, wz: float):
+                        """The terrain's height under a world point, relative to the camera."""
+                        if ray_mesh is None:
+                            return None
+                        dx, dz = wx - camera_xz[0], wz - camera_xz[1]
+                        lx = dx * math.cos(yaw_rad) - dz * math.sin(yaw_rad)
+                        lz = dx * math.sin(yaw_rad) + dz * math.cos(yaw_rad)
+                        try:
+                            locs, _, _ = ray_mesh.ray.intersects_location(
+                                np.array([[lx, 1000.0, lz]]), np.array([[0.0, -1.0, 0.0]]), multiple_hits=False)
+                        except Exception:
+                            return None
+                        if locs is None or len(locs) == 0:
+                            return None
+                        return float(locs[0][1])
+
                     new_instances, summary = band_instances(
                         np.asarray(region_map.depth), int(region_value), ground_hit,
                         size_m=band[2], size_band=(band[0], band[1]), far_m=usable_far_m,
                         cls=bcls, bucket=band_bucket, rows=self.config.plan_band_rows, seed=self.seed,
-                        camera_xz=(float(camera_xz[0]), float(camera_xz[1])),
+                        camera_xz=(float(camera_xz[0]), float(camera_xz[1])), ground_y=ground_y,
                     )
                     for meta in new_instances:
                         context.add_object(f"metadata_{object_count}", meta)
@@ -1318,7 +1334,7 @@ class SceneGenerationStage(PipelineStage):
                         f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) from {summary['columns']} column(s)"
                         f" in {summary['spans']} span(s) (bucket {band_bucket}; {summary['thin']} thin, {summary['missed']} off"
                         f" the terrain, {summary['beyond']} beyond {usable_far_m:.0f} m): distance {summary['distance_m']} m,"
-                        f" height {summary['height_m']} m, the band's angle implies {summary['implied_m']} m")
+                        f" height {summary['height_m']} m, {summary['rows']} rows deep, the band's angle implies {summary['implied_m']} m")
                     plan.overrides.append({
                         "field": f"{region_name} band: {bcls}", "measured": None, "measured_source": "painted copies",
                         "plan": band[2], "evidence": band[3], "because": "",
@@ -1732,6 +1748,9 @@ class SceneGenerationStage(PipelineStage):
                     min_separation = self.config.overlap_min_separation_overrides.get(
                         cls, self.config.overlap_min_separation
                     )
+                    # A plan band authors its own spacing: a forest's crowns overlap.
+                    if metadata.get("overlap_min_separation") is not None:
+                        min_separation = float(metadata["overlap_min_separation"])
                     blocker = None
                     if occ_n:
                         reach = np.maximum(occ_r[:occ_n] + radius, 1e-9)

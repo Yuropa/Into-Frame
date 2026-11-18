@@ -31,12 +31,16 @@ from logging import Logger
 from pathlib import Path
 from typing import Any, Optional
 
+import numpy as np
 from PIL import Image as PILImage
+from skimage import color as skcolor
 
 from pipeline.pipeline_context import ContextKey, PipelineContext
 from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration
 from pipeline.scene_plan import ScenePlan
-from pipeline.species.palette import anchors_from_words, measure_palette, palette_distance, chroma_rich_colour
+from pipeline.species.palette import (anchors_from_words, measure_palette, palette_distance, chroma_rich_colour,
+                                      word_guided_colour, hue_distance, _rgb01_from_images, _lab)
+from pipeline.species.card import species_card
 from scene.mesh import Mesh
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -136,6 +140,19 @@ class SpeciesAssetsStage(PipelineStage):
             if box[2] - box[0] >= 4 and box[3] - box[1] >= 4:
                 region = photo.convert("RGBA").crop(box)
                 pal = measure_palette([region], seed=self.seed)
+                # The plan's colour words say which of the hint's pixels are the
+                # bloom: the lousewort's hint holds pale-yellow spikes, olive stems
+                # and a paintbrush, and its k-means bloom was the olive.
+                words = [w for w in (species.get("colours") or []) if isinstance(w, str)]
+                px = _rgb01_from_images([region], seed=self.seed)
+                named = []
+                for word, anchor in zip(words, anchors_from_words(words)):
+                    c = word_guided_colour(px, anchor)
+                    if c is not None and all(float(np.linalg.norm(_lab([c]) - _lab([o]))) > 6.0 for o in named):
+                        named.append(c)
+                if named:
+                    pal = {**pal, "bloom": named, "bloom_shares": [round(1.0 / len(named), 3)] * len(named)}
+                    return pal, "crop_hint+words"
                 if pal["bloom"] or pal["foliage"]:
                     return pal, "crop_hint"
         anchors = anchors_from_words(species.get("colours") or [])
@@ -144,6 +161,62 @@ class SpeciesAssetsStage(PipelineStage):
         return None, "none"
 
     # ── matching ────────────────────────────────────────────────────────────
+    @staticmethod
+    def _reference(pal: Optional[dict], src: str) -> Optional[list[int]]:
+        """The colour that names a species: its first word-guided photo colour,
+        else the most saturated of its palette."""
+        bloom = list((pal or {}).get("bloom") or [])
+        if not bloom:
+            return None
+        return list(bloom[0]) if src.endswith("+words") else chroma_rich_colour(bloom)
+
+    def _match_flower(self, context: PipelineContext, members: list[int], pal: dict,
+                      candidates: list[tuple[dict, dict, str]]) -> tuple[Optional[dict], Optional[float], str, dict]:
+        """(species, dE, how, palette): the species whose photographed colour is
+        found in the bucket's own crops. For each candidate the crops are read
+        around that colour (guided_bloom); the species whose colour is present in
+        at least min_share of the pixels and nearest to what was found wins. The
+        palette returned carries the species' photographed colour as the bloom,
+        with one of the bucket's own agreeing tones behind it."""
+        if pal["bloom_fraction"] < 0.02 or not pal["bloom"]:
+            return None, None, "bucket has no bloom pixels", pal
+        best = None
+        for sp, spal, src in candidates:
+            reference = self._reference(spal, src)
+            if reference is None:
+                continue
+            guided = self._bucket_palette(context, members, "flower", bloom_reference=reference)
+            lab_ref = _lab([reference])[0]
+            grey = float(np.hypot(lab_ref[1], lab_ref[2])) < 15.0
+            # Snow and sky qualify for a white or silver species: it needs a bigger share.
+            min_share = 0.15 if grey else 0.03
+            if guided["guided_fraction"] < min_share or not guided["bloom"]:
+                continue
+            # Lightness down-weighted: the hint's heads sit in the meadow's shade,
+            # the crops' in the sun (the paintbrush was 20 dE away, 17 of it L).
+            d = hue_distance(guided["bloom"][0], reference)
+            if best is None or d < best[1]:
+                best = (sp, d, src, reference, guided)
+        if best is None:
+            return None, None, "no candidate species' colour is found in the bucket's crops", pal
+        sp, d, src, reference, guided = best
+        lab_ref = _lab([reference])[0]
+        if d > self.config.match_max_delta_e:
+            return None, d, f"nearest species '{sp.get('name')}' is dE {d:.0f} away", pal
+        # The bloom IS the species' photographed colour. The bucket's own crops
+        # (masked, delit, a patch of meadow around each head) add a second tone
+        # only where they agree with it within 18 dE; else a darker step of it.
+        agreeing = [c for c in guided["bloom"]
+                    if 4.0 < float(np.linalg.norm(_lab([c])[0] - lab_ref)) <= 18.0][:1]
+        if not agreeing:
+            darker = skcolor.lab2rgb(np.array([[lab_ref[0] - 10.0, lab_ref[1], lab_ref[2]]], dtype=np.float32)
+                                     .reshape(1, 1, 3)).reshape(3)
+            agreeing = [[int(round(float(v) * 255)) for v in np.clip(darker, 0, 1)]]
+        bloom = [list(reference)] + agreeing
+        how = f"its colour {reference} found in {guided['guided_fraction']:.2f} of the crops' px, dE {d:.0f} ({src})"
+        self.log_info(f"  bucket of {len(members)}: the bucket's own {guided['bloom'][:2]} -> bloom {bloom}")
+        return sp, d, how, {**guided, "bloom": bloom, "bloom_shares": [0.7, 0.3]}
+
     def _match(self, cls: str, bucket_pal: dict, candidates: list[tuple[dict, dict, str]]) -> tuple[Optional[dict], Optional[float], str]:
         """(species, dE, how) for the bucket; candidates are (species, palette, source)."""
         best = None
@@ -287,24 +360,14 @@ class SpeciesAssetsStage(PipelineStage):
         for (cls, bucket), members in sorted(groups.items()):
             key = f"category_mesh_{cls}_{bucket}"
             pal = self._bucket_palette(context, members, cls)
-            sp, de, how = self._match(cls, pal, candidates.get(cls, []))
+            if cls == "flower":
+                sp, de, how, pal = self._match_flower(context, members, pal, candidates.get(cls, []))
+            else:
+                sp, de, how = self._match(cls, pal, candidates.get(cls, []))
             if sp is None:
                 self.log_info(f"  {key} ({len(members)} members): keeps its card -- {how}")
                 self.advance_progress(task)
                 continue
-            if cls == "flower":
-                # Measured again with the species' own colour selecting the bloom
-                # pixels: the masked crops carry stems, soil and snow, and the first
-                # reading of the paintbrush bucket was crimson, brown and pink in
-                # equal rows. The colours are still the bucket's own pixels.
-                ref_pal = next((p for s_, p, _ in candidates.get(cls, []) if s_ is sp), None)
-                reference = chroma_rich_colour((ref_pal or {}).get("bloom") or [])
-                if reference is not None:
-                    guided = self._bucket_palette(context, members, cls, bloom_reference=reference)
-                    if guided["bloom"]:
-                        self.log_info(f"  {key}: bloom re-read around the species' {reference}: "
-                                      f"{pal['bloom'][:2]} -> {guided['bloom'][:2]} ({guided['bloom_fraction']:.2f} of px)")
-                        pal = guided
             self.log_info(f"  {key} ({len(members)} members): '{sp.get('name')}' by {how}; "
                           f"bloom {pal['bloom'][:2]} foliage {pal['foliage'][:1]} ({pal['pixels']} px)")
             entry = self._spec_entry(key, sp, pal, seed=self.seed + bucket * 17 + (0 if cls == "flower" else 101),
@@ -343,6 +406,18 @@ class SpeciesAssetsStage(PipelineStage):
             for k in range(1, len(meshes)):
                 vkey = f"{key}_v{k}"
                 context.add_mesh(vkey, meshes[k])
+            # The bucket's far card, rasterised from the species mesh so the plant
+            # keeps its colours beyond the mesh distance (the photo crop's card was
+            # delit meadow with a pale head: see species/card.py).
+            try:
+                from pipeline.grass_cover.cards import crossed_card_mesh
+                picture = species_card(mesh.mesh)
+                card = crossed_card_mesh(picture, plane_count=3, aspect=picture.width / max(picture.height, 1))
+                context.add_mesh(f"{key}_card", card)
+                published[key]["card"] = f"{key}_card"
+                self.log_info(f"  {key}_card: {picture.width}x{picture.height} card from the species mesh")
+            except Exception as exc:
+                self.log_warning(f"  {key}: no species card ({exc}); the crop card stands in")
                 published[vkey] = {"variant_of": key, "variant": k, "faces": meshes[k].face_count}
             self.log_info(f"  {key}: {entry['form']} {ext[0]:.2f}x{ext[1]:.2f}x{ext[2]:.2f} m, {mesh.face_count} faces, "
                           f"{len(meshes)} variant(s)")

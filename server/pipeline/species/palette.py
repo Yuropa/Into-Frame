@@ -8,6 +8,8 @@ anything.
 """
 from __future__ import annotations
 
+import math
+
 from typing import Iterable, Optional
 
 import numpy as np
@@ -138,7 +140,55 @@ def guided_bloom(rgb01: np.ndarray, reference: list[int], hue_tol_deg: float = 3
     dh = np.abs(((hsv[:, 0] - ref_hsv[0]) * 360.0 + 180.0) % 360.0 - 180.0)
     chroma = np.hypot(lab[:, 1], lab[:, 2])
     keep = (dh <= hue_tol_deg) & (chroma >= chroma_floor * ref_chroma) & (hsv[:, 2] > 0.1)
+    # Not much darker than the reference (a shaded head is 25-30 L down from a
+    # lit one; the hint's pale-yellow lousewort is L 86, a bucket of its smaller
+    # spikes L 57), and never the foliage band unless the reference itself is
+    # green: a lousewort read around an olive reference came back olive, the
+    # stems and leaves inside the hue tolerance.
+    keep &= lab[:, 0] >= ref_lab[0] - 32.0
+    ref_hue = float(ref_hsv[0] * 360.0)
+    if not (85.0 <= ref_hue <= 170.0):
+        # 85, not the foliage band's own 68: a lousewort's greener spikes sit at
+        # 68-85 deg and are the bloom its pale-yellow reference describes.
+        hue = hsv[:, 0] * 360.0
+        keep &= ~((hue >= 85.0) & (hue <= 170.0))
     return rgb01[keep]
+
+
+def hue_distance(a: list[int], b: list[int], l_weight: float = 0.15) -> float:
+    """CIE76 distance with the lightness axis down-weighted: the same bloom
+    photographed in sun and in shade differs mostly in L (the lousewort's smaller
+    spikes are 29 L below the hint's, 12 dE off in a and b)."""
+    la, lb = _lab([a])[0], _lab([b])[0]
+    return float(math.sqrt(l_weight * (la[0] - lb[0]) ** 2 + (la[1] - lb[1]) ** 2 + (la[2] - lb[2]) ** 2))
+
+
+def word_guided_colour(rgb01: np.ndarray, anchor: list[int], hue_tol_deg: float = 25.0,
+                       l_tol: float = 18.0, chroma_share: float = 0.4, min_px: int = 32) -> Optional[list[int]]:
+    """The colour, in these pixels, of the thing the plan's colour word names: the
+    pixels within hue_tol_deg of the word's anchor and near its lightness, read as
+    the chroma-rich median of their lit half. A near-grey anchor (white, silver)
+    selects by low chroma and lightness instead. None when fewer than min_px
+    pixels qualify. The plan's crop hint for the lousewort holds pale-yellow
+    spikes, olive stems and a paintbrush: 'pale yellow' says which is the bloom."""
+    if rgb01.shape[0] == 0:
+        return None
+    ref = np.asarray(anchor, dtype=np.float32).reshape(1, 1, 3) / 255.0
+    ref_hsv = skcolor.rgb2hsv(ref).reshape(3)
+    ref_lab = skcolor.rgb2lab(ref).reshape(3)
+    ref_chroma = float(np.hypot(ref_lab[1], ref_lab[2]))
+    hsv = skcolor.rgb2hsv(rgb01.reshape(-1, 1, 3)).reshape(-1, 3)
+    lab = skcolor.rgb2lab(rgb01.reshape(-1, 1, 3)).reshape(-1, 3)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    if ref_chroma < 15.0:
+        keep = (chroma < 18.0) & (np.abs(lab[:, 0] - ref_lab[0]) <= l_tol + 7.0)
+    else:
+        dh = np.abs(((hsv[:, 0] - ref_hsv[0]) * 360.0 + 180.0) % 360.0 - 180.0)
+        keep = (dh <= hue_tol_deg) & (np.abs(lab[:, 0] - ref_lab[0]) <= l_tol) & (chroma >= chroma_share * ref_chroma)
+    if int(keep.sum()) < min_px:
+        return None
+    clusters = kmeans_lab(_lit_half(rgb01[keep], 0.6), 1, 0, chroma_rich=True)
+    return clusters[0][0] if clusters else None
 
 
 def chroma_rich_colour(colours: list[list[int]]) -> Optional[list[int]]:
@@ -160,8 +210,10 @@ def measure_palette(images: Iterable[PILImage.Image], k_bloom: int = 3, k_foliag
     parts = split_parts(px)
     n = int(px.shape[0])
     bloom_px = parts["bloom"]
+    guided_fraction = 0.0
     if bloom_reference is not None:
         guided = guided_bloom(px, bloom_reference)
+        guided_fraction = float(guided.shape[0]) / n if n else 0.0
         if guided.shape[0] >= 32:
             bloom_px = guided
     bloom = kmeans_lab(_lit_half(bloom_px, lit_share), k_bloom, seed, chroma_rich=True)
@@ -172,13 +224,14 @@ def measure_palette(images: Iterable[PILImage.Image], k_bloom: int = 3, k_foliag
         "foliage": [c for c, _ in foliage], "foliage_shares": [round(s, 3) for _, s in foliage],
         "stem": [c for c, _ in stem],
         "bloom_fraction": round(float(bloom_px.shape[0]) / n, 4) if n else 0.0,
+        "guided_fraction": round(guided_fraction, 4),
         "foliage_fraction": round(float(parts["foliage"].shape[0]) / n, 4) if n else 0.0,
         "pixels": n,
     }
 
 
 def anchors_from_words(words: Iterable[str]) -> list[list[int]]:
-    """Bloom anchors for the plan's colour words (matching only)."""
+    """Bloom anchors for the plan's colour words."""
     out = []
     for w in words:
         key = str(w).strip().lower()

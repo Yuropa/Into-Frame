@@ -7,8 +7,8 @@ and the painter copied it over the meadow), so the band is placed from the regio
 map's own shape instead: in every column that shows forest, the band's bottom edge
 is cast onto the reconstructed terrain and a tree stands where that ray lands, as
 tall as the column's forest band allows at that distance. The mask's clumps become
-clumps (tall columns get a second and third row behind, thin columns a short tree
-or none) and its gaps stay gaps. Each tree is an ordinary synthetic instance for
+clumps (rows stand behind the first, up the slope, until their tops reach the
+mask's skyline; thin columns get a short tree or none) and its gaps stay gaps. Each tree is an ordinary synthetic instance for
 Scene Generation's placement loop: snapped to the ground, overlap-tested, dressed
 with the class's bucket assets.
 """
@@ -22,6 +22,10 @@ import numpy as np
 GroundHit = Callable[[float, float], Optional[tuple[float, float, float]]]
 """(theta_rad, elevation_rad) -> (world_x, world_z, horizontal distance) where the
 ray from the camera meets the terrain, or None when it misses."""
+
+GroundY = Callable[[float, float], Optional[float]]
+"""(world_x, world_z) -> the terrain's height there relative to the camera, or
+None off the terrain."""
 
 
 def _column_edges(mask: np.ndarray, smooth_px: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -56,20 +60,26 @@ def band_instances(
     far_m: float,
     cls: str,
     bucket: Optional[int],
-    rows: int = 3,
-    step_fraction: float = 0.4,
+    rows: int = 6,
+    step_fraction: float = 0.3,
     min_fill: float = 0.35,
     near_fraction: float = 0.0,
     camera_xz: tuple[float, float] = (0.0, 0.0),
+    ground_y: Optional[GroundY] = None,
+    crown_fraction: float = 0.55,
+    min_separation: float = 0.45,
     seed: int = 0,
 ) -> tuple[list[dict], dict]:
     """Synthetic instances following the region's shape in the region map.
 
     Returns (instances, summary). A tree is authored where a column's band bottom
-    lands on the terrain; its height is the column's band height at that distance,
-    clamped to size_band; a column whose band is less than min_fill solid (a crown
-    seen through gaps) is skipped; a column whose band stands more than one tree
-    tall gets rows behind it, up the slope."""
+    lands on the terrain; a column whose band is less than min_fill solid (a crown
+    seen through gaps) is skipped. The trees are crown_fraction of the band's
+    height at that distance (a forest is several crowns deep, not one row of
+    trees as tall as the band), and rows stand behind the first, up the slope,
+    until a row's tops reach the column's band top as seen from the camera --
+    the photographed skyline; nothing stands above it, on the mountain. With no
+    ground_y the rows are counted from the band's angle instead."""
     mask = np.asarray(region_map) == int(region_value)
     h, w = mask.shape
     top, bot, count = _column_edges(mask, smooth_px=max(3, w // 170))
@@ -77,10 +87,11 @@ def band_instances(
     rng = np.random.default_rng((seed, 11))
     near_floor = near_fraction * far_m
     instances: list[dict] = []
-    stats = {"columns": 0, "thin": 0, "missed": 0, "beyond": 0, "placed": 0, "spans": 0,
+    stats = {"columns": 0, "thin": 0, "missed": 0, "beyond": 0, "placed": 0, "spans": 0, "rows": [],
              "distance_m": [], "height_m": [], "implied_m": []}
     col = 0
     in_span = False
+    column_i = 0
     while col < w:
         if not np.isfinite(top[col]) or not np.isfinite(bot[col]) or bot[col] <= top[col]:
             in_span = False
@@ -134,38 +145,54 @@ def band_instances(
         # floor applies only where the plan size could be true (at or beyond the
         # implied distance); nearer, the band is a model of a far treeline and a
         # full-size tree would cover the mountain behind it.
-        floor = lo if dist >= 0.5 * implied else min(lo, max(0.5, 0.15 * size_m))
-        height = float(np.clip(dist * ang, floor, hi)) * float(rng.uniform(0.85, 1.15))
-        height = float(np.clip(height, floor, hi))
-        n_rows = int(np.clip(round(dist * ang / max(height, 1e-3)), 1, max(1, rows)))
-        for r in range(n_rows):
-            # Rows behind, up the slope, staggered by half a step; the loop snaps them.
-            back = r * 0.6 * height
+        floor = lo if dist >= 0.5 * implied else min(lo, max(0.5, 0.08 * size_m))
+        band_h = dist * ang
+        height = float(np.clip(crown_fraction * band_h, floor, hi))
+        column_i += 1
+        emergent = column_i % 6 == 0
+        n_rows_flat = int(np.clip(round(band_h / max(height, 1e-3)), 1, max(1, rows)))
+        placed_rows = 0
+        for r in range(max(1, rows)):
+            back = r * crown_fraction * height
             d_r = dist + back
             jitter = float(rng.uniform(-0.3, 0.3)) * step_fraction * height
             theta_r = theta + (jitter + (0.5 * step_fraction * height if r % 2 else 0.0)) / max(d_r, 1e-3)
             xr = x + back * math.sin(theta_r) + (jitter * math.cos(theta_r))
             zr = z + back * math.cos(theta_r) - (jitter * math.sin(theta_r))
-            h_r = float(np.clip(height * float(rng.uniform(0.85, 1.15)), lo, hi))
+            h_r = height * float(rng.uniform(0.8, 1.25)) * (1.35 if (emergent and r == 0) else 1.0)
+            h_r = float(np.clip(h_r, min(floor, lo), hi))
+            if r > 0:
+                if ground_y is not None:
+                    y_r = ground_y(xr, zr)
+                    if y_r is None or d_r > 2.0 * far_m:
+                        break
+                    if math.atan2(y_r + h_r, d_r) > el_top:
+                        break
+                elif r >= n_rows_flat:
+                    break
             meta = {
                 "class": cls, "synthetic": True, "source": "plan_band", "metric_size": True,
                 "world_position": [float(xr), 0.0, float(zr)],
                 "world_width": float(0.5 * h_r), "world_height": h_r,
                 "score": 0.0, "band_row": r, "band_column": int(col),
+                "overlap_min_separation": float(min_separation),
             }
             if bucket is not None:
                 meta["bucket"] = int(bucket)
             instances.append(meta)
             stats["placed"] += 1
+            placed_rows += 1
+        stats["rows"].append(placed_rows)
         stats["distance_m"].append(dist)
         stats["height_m"].append(height)
         stats["implied_m"].append(implied)
-        # Next tree one crown further along the band at this distance.
+        # Next tree a fraction of a crown further along the band at this distance.
         step_rad = step_fraction * height / max(dist, 1e-3)
         col += max(1, int(round(step_rad / (2.0 * math.pi) * w * float(rng.uniform(0.85, 1.15)))))
     summary = {
         "spans": stats["spans"], "columns": stats["columns"], "thin": stats["thin"], "missed": stats["missed"],
         "beyond": stats["beyond"], "placed": stats["placed"],
+        "rows": round(float(np.mean(stats["rows"])), 1) if stats["rows"] else None,
         "distance_m": [round(float(v), 1) for v in np.percentile(stats["distance_m"], [5, 50, 95])] if stats["distance_m"] else None,
         "height_m": [round(float(v), 1) for v in np.percentile(stats["height_m"], [5, 50, 95])] if stats["height_m"] else None,
         "implied_m": [round(float(v), 0) for v in np.percentile(stats["implied_m"], [5, 50, 95])] if stats["implied_m"] else None,
