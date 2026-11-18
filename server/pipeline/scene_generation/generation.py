@@ -85,6 +85,10 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         plan_bands: bool = True,
         plan_band_region: dict[str, str] | None = None,
         plan_band_rows: int = 6,
+        plan_population: bool = True,
+        plan_population_classes: list[str] | None = None,
+        plan_population_near_m: float = 15.0,
+        species_min_mesh_angular_px: float = 40.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # The scene plan's standing height for a class replaces CLASS_HEIGHT_RANGE_M
@@ -98,6 +102,17 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         self.plan_bands = bool(plan_bands)
         self.plan_band_region = dict(plan_band_region if plan_band_region is not None else {"forest": "tree"})
         self.plan_band_rows = int(plan_band_rows)
+        # The painted population of these classes is re-dealt across the plan's
+        # species by density and where (plan_population.py): the painter copies each
+        # bucket as often as its detections suggest, and on Rainier a junk bucket
+        # was the meadow's most common flower.
+        self.plan_population = bool(plan_population)
+        self.plan_population_classes = list(plan_population_classes if plan_population_classes is not None else ["flower"])
+        self.plan_population_near_m = float(plan_population_near_m)
+        # A species mesh (one plant, a few hundred faces, its own card beyond the
+        # runtime LOD) is worth keeping as geometry far smaller on screen than a
+        # reconstruction: a 0.4 m flower at 15 m is 1.5 deg, 52 px at 34 px/deg.
+        self.species_min_mesh_angular_px = float(species_min_mesh_angular_px)
         # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
         # size, borrowing a sibling bucket's when their own has none, and given no
         # camera-facing billboard LOD.
@@ -1114,6 +1129,11 @@ class SceneGenerationStage(PipelineStage):
             # Bucket meshes the species layer replaced (see SpeciesAssetsStage).
             species_info = context.input_object(ContextKey.SPECIES_MESHES) or {}
             species_keys = set(species_info.keys())
+
+            def is_species_key(key: str) -> bool:
+                """A species bucket mesh or one of its variants (a `_v{k}` key the
+                context may hold from an earlier build of the bucket)."""
+                return key in species_keys or re.sub(r"_v\d+$", "", key) in species_keys
             if species_keys:
                 self.log_info(f"Species meshes: {len(species_keys)} bucket(s) kept as meshes to "
                               f"{self.config.species_mesh_near_distance_m:.0f} m")
@@ -1334,12 +1354,61 @@ class SceneGenerationStage(PipelineStage):
                         f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) from {summary['columns']} column(s)"
                         f" in {summary['spans']} span(s) (bucket {band_bucket}; {summary['thin']} thin, {summary['missed']} off"
                         f" the terrain, {summary['beyond']} beyond {usable_far_m:.0f} m): distance {summary['distance_m']} m,"
-                        f" height {summary['height_m']} m, {summary['rows']} rows deep, the band's angle implies {summary['implied_m']} m")
+                        f" height {summary['height_m']} m: {summary['tips']} skyline tips ({summary['lone']} lone crowns)"
+                        f" and {summary['fill']} fill {summary['rows']} rows deep; the band's angle implies {summary['implied_m']} m")
                     plan.overrides.append({
                         "field": f"{region_name} band: {bcls}", "measured": None, "measured_source": "painted copies",
                         "plan": band[2], "evidence": band[3], "because": "",
                         "used": len(new_instances), "source": "plan",
                         "note": f"{len(new_instances)} {bcls}(s) from {summary['columns']} columns; distance {summary['distance_m']} m",
+                    })
+
+            if self.config.plan_population and plan is not None and species_info:
+                from pipeline.scene_generation.plan_population import relabel_population
+                yaw_rad = math.radians(float(scene.skybox_rotation or 0.0))
+                half_fov = self._captured_half_fov_deg(context)
+
+                def bearing_frac_of(wx: float, wz: float) -> tuple[float, float]:
+                    dx, dz = wx - camera_xz[0], wz - camera_xz[1]
+                    lx = dx * math.cos(yaw_rad) - dz * math.sin(yaw_rad)
+                    lz = dx * math.sin(yaw_rad) + dz * math.cos(yaw_rad)
+                    bearing = math.degrees(math.atan2(lx, lz))
+                    return bearing / max(half_fov, 1.0), float(math.hypot(dx, dz))
+
+                species_bucket: dict[tuple[str, str], int] = {}
+                for key, info in species_info.items():
+                    if not isinstance(info, dict) or info.get("variant_of") or not info.get("species"):
+                        continue
+                    km = re.match(r"category_mesh_(\w+?)_(\d+)$", key)
+                    if km:
+                        species_bucket.setdefault((km.group(1), str(info["species"])), int(km.group(2)))
+                for pcls in self.config.plan_population_classes:
+                    plan_species = [sp for sp in plan.items("species", "inferred")
+                                    if normalize_category(sp.get("class")) == pcls]
+                    buckets = {name: b for (c, name), b in species_bucket.items() if c == pcls}
+                    painted = []
+                    for idx in range(object_count):
+                        m = extra_metadata.get(idx) or context.input_object(f"metadata_{idx}") or {}
+                        if m.get("synthetic") and not m.get("source") and normalize_category(m.get("class")) == pcls:
+                            painted.append((idx, m))
+                    if not plan_species or not buckets or not painted:
+                        self.log_info(f"Scene Plan: {pcls} population kept as painted ({len(painted)} painted,"
+                                      f" {len(plan_species)} plan species, {len(buckets)} with a species mesh)")
+                        continue
+                    relabelled, psum = relabel_population(
+                        painted, plan_species, buckets, bearing_frac_of,
+                        near_m=self.config.plan_population_near_m, rng=np.random.default_rng((self.seed, 23)),
+                    )
+                    for idx, meta in relabelled.items():
+                        extra_metadata[idx] = meta
+                    self.log_info(f"Scene Plan: {pcls} population re-dealt from the plan: {len(relabelled)} of"
+                                  f" {len(painted)} painted copies; by bucket before {psum['before']}; by species after"
+                                  f" {psum['after']}; weights {{{', '.join(f'{k}: {v['weight']:g} ({v['where']})' for k, v in psum['species'].items())}}}"
+                                  + (f"; no mesh for {psum['unplaced']}" if psum['unplaced'] else ""))
+                    plan.overrides.append({
+                        "field": f"{pcls} population", "measured": psum["before"], "measured_source": "painted copies",
+                        "plan": psum["after"], "evidence": "visible", "because": "species density and where",
+                        "used": len(relabelled), "source": "plan",
                     })
 
             occ_x = np.zeros(object_count, dtype=np.float64)
@@ -1403,12 +1472,12 @@ class SceneGenerationStage(PipelineStage):
                     scale, rejection, _gate = mesh_instance_scale(
                         extents, width, height, min_height_fraction=self.config.min_mesh_height_fraction,
                     )
-                    if rejection is not None and recon_key in species_keys and _gate in ("aspect", "sheet"):
+                    if rejection is not None and is_species_key(recon_key) and _gate in ("aspect", "sheet"):
                         rejection = None  # see the placement gate below: one plant vs a clump box
                     if rejection is None:
                         origin_y = terrain_y - float(recon_mesh.mesh.bounds[0][1]) * scale
                         levels.append(("mesh", recon_key, (scale, scale, scale), origin_y,
-                                       self.config.species_lod_mesh_screen_fraction if recon_key in species_keys
+                                       self.config.species_lod_mesh_screen_fraction if is_species_key(recon_key)
                                        else self.config.lod_mesh_screen_fraction))
                 if card_mesh is not None:
                     ext = card_mesh.mesh.bounds[1] - card_mesh.mesh.bounds[0]
@@ -1610,6 +1679,8 @@ class SceneGenerationStage(PipelineStage):
                 # the billboard and the category mesh are both pictures of the bloom,
                 # and stretching one axis alone would shear them.
                 metric_height = self.config.metric_height_m.get(cls) if cls else None
+                if metadata.get("source") == "plan_population":
+                    metric_height = None  # sized from the plan's species (plan_population.py)
                 if metric_height and height > 1e-6:
                     jitter = 1.0 + float(rng.uniform(
                         -self.config.metric_height_jitter, self.config.metric_height_jitter
@@ -1829,7 +1900,7 @@ class SceneGenerationStage(PipelineStage):
                 # overwrite category_mesh/mesh_key -- the runtime LOD set needs
                 # every representation the instance has, not just the one chosen
                 # for the start position.
-                if mesh_key in species_keys:
+                if is_species_key(mesh_key):
                     # A species bucket with variants: this instance wears one of them,
                     # deterministically per index.
                     n_variants = int((species_info.get(mesh_key) or {}).get("variants", 1) or 1)
@@ -1871,7 +1942,7 @@ class SceneGenerationStage(PipelineStage):
                 if card_mesh is not None and cls in self.config.card_preferred_classes:
                     near = float(np.hypot(float(position[0]) - float(camera_position[0]),
                                           float(position[2]) - float(camera_position[2])))
-                    is_species = recon_key in species_keys
+                    is_species = is_species_key(recon_key)
                     keep_mesh = (
                         recon_mesh is not None
                         and near <= (self.config.species_mesh_near_distance_m if is_species else self.config.mesh_near_distance_m)
@@ -1910,9 +1981,11 @@ class SceneGenerationStage(PipelineStage):
                     height, camera_distance, self.config.viewer_px_per_degree,
                     viewer_move_radius_m=self.config.viewer_move_radius_m,
                 )
+                mesh_gate_px = (self.config.species_min_mesh_angular_px if is_species_key(recon_key)
+                                else self.config.min_mesh_angular_px)
                 use_mesh = (
                     category_mesh is not None
-                    and (always_mesh or rendered_px >= self.config.min_mesh_angular_px)
+                    and (always_mesh or rendered_px >= mesh_gate_px)
                 )
                 using_card = False
                 if not use_mesh and card_mesh is not None:
@@ -1947,7 +2020,7 @@ class SceneGenerationStage(PipelineStage):
                         max_size_m=(1.2 * max(width, height)) if landmark_ground_y is not None else None,
                     )
 
-                    if mesh_rejection is not None and mesh_key in species_keys and mesh_gate in ("aspect", "sheet"):
+                    if mesh_rejection is not None and is_species_key(mesh_key) and mesh_gate in ("aspect", "sheet"):
                         # A species mesh is one plant; the detection box is often a
                         # clump of them (Rainier: a 4.3:1 box of pasqueflower heads).
                         # The shape gates compare a reconstruction's silhouette to the

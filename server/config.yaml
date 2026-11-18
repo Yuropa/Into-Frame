@@ -556,6 +556,13 @@ stages:
     # visible, and is only logged when inferred and in disagreement.
     plan_prior: true
     plan_height_tolerance: 0.25
+    # The far field from the plan (docs/hybrid-scene-plan.md section 5): a monotone
+    # remap in log depth takes the forest band to the distance the plan's tree size
+    # implies from its angular height, and a far landmark to its plan distance. The
+    # depth models saturate past the near field (Rainier: treeline 11-29 m, mountain
+    # 25-104 m), so without this the treeline is a 1.4 m scale model at 14 m.
+    plan_far_anchor: true
+    plan_far_min_ratio: 1.5
     max_extrapolation_factor: 20.0 # caps raw-prediction values beyond the fitted (near-field-only)
                                  # range at this many times the farthest/nearest fitted median
                                  # metric depth, instead of an unbounded log-space extrapolation —
@@ -2284,6 +2291,17 @@ stages:
     plan_bands: true
     plan_band_region: {forest: tree}
     plan_band_rows: 6            # rows stand behind the first, up the slope, until their tops reach the mask's skyline
+    # The painted population of these classes is re-dealt across the plan's species by
+    # density ("dense" 1, "patchy" 0.35, "sparse" 0.12) and where (side of the frame,
+    # foreground within plan_population_near_m); the painted positions stay. Rainier:
+    # a junk bucket was 3,470 of 4,280 painted flowers, the paintbrush 23.
+    plan_population: true
+    plan_population_classes: [flower]
+    plan_population_near_m: 15.0
+    # A species mesh stays geometry down to this many screen px (min_mesh_angular_px
+    # gates reconstructions): a 0.4 m flower is a mesh to ~15 m, a 1.4 m band fir to 25 m,
+    # and the runtime LOD (species_lod_mesh_screen_fraction) takes over beyond.
+    species_min_mesh_angular_px: 40.0
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
     # Floor on a category mesh's own vertical extent as a fraction of its largest

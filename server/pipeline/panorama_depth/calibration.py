@@ -1,6 +1,7 @@
 from typing import Any, Optional
 from logging import Logger
 
+import math
 import numpy as np
 from util.captured_cone import PANORAMA_PITCH_KEY
 import torch
@@ -43,6 +44,8 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         max_camera_height_m: float = 60.0,
         plan_prior: bool = True,
         plan_height_tolerance: float = 0.25,
+        plan_far_anchor: bool = True,
+        plan_far_min_ratio: float = 1.5,
         waterline_anchor: bool = True,
         waterline_min_plane_m: float = 15.0,
         waterline_captured_only: bool = False,
@@ -138,6 +141,16 @@ class PanoramaDepthCalibrationConfiguration(PipelineStageConfiguration):
         # bounds a measured one when the claim is visible, and is only logged when it
         # is inferred and disagrees with a measurement that passed sanity.
         self.plan_prior = bool(plan_prior)
+        # The far field from the plan (docs/hybrid-scene-plan.md section 5): the depth
+        # model saturates past the near field (Rainier: the treeline at 11-29 m, the
+        # mountain at 25-104 m, the plateau 104 m), so a monotone remap in log depth
+        # takes the forest band to the distance the plan's tree size implies from
+        # its angular height, and a far landmark (a mountain) to its plan distance.
+        # Identity below 0.4 x the forest's measured depth; the near field keeps the
+        # camera-height anchor. Off unless the implied distance is at least
+        # plan_far_min_ratio x the measured one.
+        self.plan_far_anchor = bool(plan_far_anchor)
+        self.plan_far_min_ratio = float(plan_far_min_ratio)
         self.plan_height_tolerance = float(plan_height_tolerance)
         # Scale whatever stands in the water to the distance where its waterline
         # row meets the water plane (see _waterline_scale). Shark Fin's sea stack
@@ -467,6 +480,137 @@ def _saturation_plateau(depth: np.ndarray, sky_mask: Optional[np.ndarray]) -> fl
     return float(filtered[valid].max())
 
 
+_FAR_LANDMARK_WORDS = ("mountain", "peak", "summit", "ridge", "volcano", "massif", "hill", "range", "glacier")
+
+
+def plan_far_knots(
+    depth: np.ndarray,
+    region_map: Optional[np.ndarray],
+    sky_mask: Optional[np.ndarray],
+    plan,
+    columns: Optional[tuple[float, float]],
+    min_ratio: float = 1.5,
+) -> tuple[list[tuple[float, float]], dict]:
+    """Depth knots (measured_m, plan_m) the far field should be remapped through.
+
+    Forest: in each photographed column showing forest (region FOREST), the band's
+    angular height and the plan's tree size imply a distance; the knot is the
+    median implied distance against the median measured depth of those pixels.
+    A far landmark (a mountain the plan puts kilometres away): the TERRAIN pixels
+    above the horizon within 25 deg of its bearing, their median measured depth
+    against its plan distance. Returns ([], stats) when there is nothing to do."""
+    from pipeline.panorama_segmentation.panorama_region_result import RegionType
+
+    stats: dict = {}
+    if plan is None or region_map is None:
+        return [], stats
+    h, w = depth.shape
+    rm = np.asarray(region_map)
+    if rm.shape != depth.shape:
+        from PIL import Image as _PILImage
+        rm = np.asarray(_PILImage.fromarray(rm.astype(np.uint8)).resize((w, h), _PILImage.NEAREST))
+    rm = np.rint(rm).astype(np.int32)
+    valid = np.isfinite(depth) & (depth > 0)
+    if sky_mask is not None and np.asarray(sky_mask).shape == depth.shape:
+        valid &= ~np.asarray(sky_mask, dtype=bool)
+    if columns is None:
+        c0, c1 = 0, w
+    else:
+        c0, c1 = int(max(0, math.floor(columns[0]))), int(min(w, math.ceil(columns[1])))
+    col_mask = np.zeros(w, dtype=bool)
+    col_mask[c0:c1] = True
+    knots: list[tuple[float, float]] = []
+
+    sp = plan.size_prior("tree")
+    forest = (rm == int(RegionType.FOREST)) & valid
+    if sp is not None and forest[:, col_mask].any():
+        size_m = float(sp[0])
+        rows = np.arange(h)[:, None]
+        has = forest.any(axis=0) & col_mask
+        top = np.where(has, np.where(forest, rows, h).min(axis=0), np.nan).astype(float)
+        bot = np.where(has, np.where(forest, rows, -1).max(axis=0), np.nan).astype(float)
+        count = forest.sum(axis=0).astype(float)
+        measured, implied = [], []
+        smooth = max(3, w // 170)
+        pad = smooth // 2
+        for c in range(c0, c1):
+            win_t = top[max(0, c - pad):c + pad + 1]
+            win_b = bot[max(0, c - pad):c + pad + 1]
+            win_t, win_b = win_t[np.isfinite(win_t)], win_b[np.isfinite(win_b)]
+            if win_t.size < pad or win_b.size < pad or count[c] < 3:
+                continue
+            t, b = float(np.median(win_t)), float(np.median(win_b))
+            if (count[c] / max(b - t + 1.0, 1.0)) < 0.35:
+                continue
+            el_t, el_b = (0.5 - t / h) * math.pi, (0.5 - b / h) * math.pi
+            ang = math.tan(min(max(el_t, -1.2), 1.2)) - math.tan(min(max(el_b, -1.2), 1.2))
+            if ang <= 1e-4:
+                continue
+            d = depth[:, c][forest[:, c]]
+            if d.size == 0:
+                continue
+            measured.append(float(np.median(d)))
+            implied.append(size_m / ang)
+        if len(measured) >= max(8, (c1 - c0) // 40):
+            m_f, p_f = float(np.median(measured)), float(np.median(implied))
+            stats["forest"] = {"columns": len(measured), "measured_m": round(m_f, 1), "implied_m": round(p_f, 1),
+                               "tree_m": size_m, "species": sp[2]}
+            if p_f >= min_ratio * m_f:
+                knots.append((m_f, p_f))
+
+    terrain = (rm == int(RegionType.TERRAIN)) & valid
+    for lm in plan.items("landmarks", "inferred"):
+        words = " ".join(str(lm.get(k) or "") for k in ("class", "phrase", "name")).lower()
+        dist = lm.get("distance_m")
+        bearing = lm.get("bearing_deg")
+        if not any(wd in words for wd in _FAR_LANDMARK_WORDS) or not isinstance(dist, (int, float)) or dist < 500:
+            continue
+        if not isinstance(bearing, (int, float)):
+            continue
+        cc = (float(bearing) / 360.0 + 0.5) * w
+        half = 25.0 / 360.0 * w
+        lm_cols = np.zeros(w, dtype=bool)
+        lm_cols[max(0, int(cc - half)):min(w, int(cc + half))] = True
+        m = terrain & lm_cols[None, :]
+        m[h // 2:, :] = False  # above the horizon
+        if m.sum() < 200:
+            continue
+        m_m = float(np.median(depth[m]))
+        stats.setdefault("landmarks", []).append({"name": lm.get("name"), "measured_m": round(m_m, 1), "plan_m": float(dist),
+                                                  "pixels": int(m.sum())})
+        if float(dist) >= min_ratio * m_m:
+            knots.append((m_m, float(dist)))
+    # Monotone in both coordinates, nearest first.
+    knots.sort()
+    out: list[tuple[float, float]] = []
+    for m, p in knots:
+        if out and (m <= out[-1][0] * 1.05 or p <= out[-1][1] * 1.05):
+            continue
+        out.append((m, p))
+    return out, stats
+
+
+def apply_far_knots(depth: np.ndarray, knots: list[tuple[float, float]]) -> np.ndarray:
+    """Remap depth through the knots: identity up to 0.4 x the first knot's measured
+    depth, then piecewise linear in log-log through the knots, the last segment's
+    slope continued beyond them. Strictly monotone, continuous."""
+    if not knots:
+        return depth
+    d0 = max(1.0, 0.4 * knots[0][0])
+    xs = [math.log(d0)] + [math.log(m) for m, _ in knots]
+    ys = [math.log(d0)] + [math.log(p) for _, p in knots]
+    d = np.asarray(depth, dtype=np.float64)
+    pos = np.isfinite(d) & (d > 0)
+    ld = np.log(np.where(pos, d, 1.0))
+    out = np.interp(ld, xs, ys)
+    beyond = ld > xs[-1]
+    if beyond.any():
+        slope = (ys[-1] - ys[-2]) / max(xs[-1] - xs[-2], 1e-6)
+        out[beyond] = ys[-1] + slope * (ld[beyond] - xs[-1])
+    result = np.where(pos & (ld > xs[0]), np.exp(out), d)
+    return result.astype(np.float32)
+
+
 def _compress_far_range(
     depth: np.ndarray,
     max_depth_m: float,
@@ -669,6 +813,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             if measured is not None:
                 estimate = measured
                 camera_height = measured["meters"]
+        plan = None
         if cfg.plan_prior:
             from pipeline.scene_plan import ScenePlan
             plan = ScenePlan.from_context(context)
@@ -762,6 +907,34 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         # this map instead, at a scale the grid cannot hold. Ridge chains whose
         # metric depth lies beyond the grid are handed to that stage too (see
         # TerrainReconstructionStage.ridge_max_metric_depth_m).
+        far_knots: list[tuple[float, float]] = []
+        if cfg.plan_far_anchor and plan is not None:
+            region_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+            cone_cols = None
+            try:
+                from util.captured_cone import captured_cone_from_context
+                cone_ = captured_cone_from_context(context, calibrated_arr.shape[1], calibrated_arr.shape[0])
+                if cone_ is not None:
+                    cone_cols = cone_.u_range
+            except Exception:
+                cone_cols = None
+            far_knots, far_stats = plan_far_knots(
+                calibrated_arr, np.asarray(region_depth.depth) if region_depth is not None else None,
+                sky_mask, plan, cone_cols, min_ratio=cfg.plan_far_min_ratio,
+            )
+            if far_knots:
+                calibrated_arr = apply_far_knots(calibrated_arr, far_knots)
+                self.log_info("Scene Plan: far field remapped through "
+                              + ", ".join(f"{m:.0f} m -> {p:.0f} m" for m, p in far_knots)
+                              + f" (identity below {0.4 * far_knots[0][0]:.0f} m); " + str(far_stats))
+                plan.overrides.append({
+                    "field": "far field depth", "measured": [m for m, _ in far_knots], "measured_source": "panorama depth",
+                    "plan": [p for _, p in far_knots], "evidence": "visible", "because": "forest band angle and landmark distances",
+                    "used": [p for _, p in far_knots], "source": "plan", "note": str(far_stats),
+                })
+                plan.publish(context, "calibration")
+            else:
+                self.log_info(f"Scene Plan: far field left as measured; {far_stats}")
         metric = Depth(calibrated_arr.astype(np.float32))
         context.add_depth(ContextKey.PANORAMA_DEPTH_METRIC, metric)
         non_sky = calibrated_arr
@@ -820,6 +993,8 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             calibrated_object_arr = calibrated_object_arr * anchor_scale
             if waterline_scale is not None:
                 calibrated_object_arr = calibrated_object_arr * waterline_scale
+            if far_knots:
+                calibrated_object_arr = apply_far_knots(calibrated_object_arr, far_knots)
             if max_depth_m is not None:
                 # The identical curve PANORAMA_DEPTH got above -- it's a pure
                 # function of max_depth_m, so both maps place the same real-world

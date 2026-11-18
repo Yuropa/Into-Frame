@@ -395,6 +395,51 @@ width* and lupine *patchy, lower right*. Density from the plan's species density
 `where` is the next build, ahead of the world depth. Paris band2 (from Scene
 Generation): 0.776 / 0.594 / 13.6, judge 0.23 (0.17); unchanged geometry.
 
+**`band4` (23:40, Rainier from Scene Generation) -- "shouldn't more of the flowers be
+3D objects?" and "we really need to be placing/clustering the trees better" (user).**
+Measured first. (1) The most-painted flower bucket (3,470 of 4,280 painted copies) is a
+junk bucket: its photographed crops are a trail, grass blobs and mountain strips, and
+it had matched the yellow lousewort on 4 % pixel support; the paintbrush bucket had 23
+copies. (2) Two-thirds of the species instances wear a variant key (`_v1`, `_v2`) that
+`SPECIES_MESHES` did not list, so they went through the reconstruction gate
+(surface/hull 0.3-0.9 < 1.4, "card at every distance"); the rest fell under the 120 px
+bake gate, a 0.4 m flower beyond 6 m. 1,899 flower cards, 114 meshes. (3) Every band
+fir was 1.44 m: the band floor (8 % of the plan size) held every tree in a 25 m world,
+the 0.8-1.25 height spread was clipped away under it, and one tree per column every
+0.3 crown is a picket fence; the judge: "uniform, evenly spaced spires".
+Built: `plan_population.py` -- the painted positions stay and each copy is re-dealt a
+species by the plan's density (dense 1, patchy 0.35, sparse 0.12) and `where` (side of
+the frame, foreground within 15 m), and takes the species size (paintbrush 2,783,
+lousewort 941, lupine 556; pasqueflower and bistort have no mesh). `is_species_key`
+treats a variant as its bucket; `species_min_mesh_angular_px` 40 gates species meshes
+(a 0.4 m flower to ~15 m, a band fir to 25 m): 369 flower cards, 0 tree cards.
+`plan_bands.py` rewritten: the mask's top edge is the skyline, its local maxima
+(`find_peaks`, 0.25 deg prominence) are crown tips and each gets a tree exactly as tall
+as the tip needs where that column's foot meets the terrain; a mask component narrower
+than 2.5x its height is a lone crown and gets no fill; between tips the stands are
+filled in rows under the skyline and thinned by a slow random field along the band
+(clumps and gaps). Rainier: 63 tips (9 lone), 388 fill, 2.8 rows.
+Result: DINO global 0.482 (band3 0.464), layout 0.460 (0.476), ΔE 15.0 (16.4), judge
+0.31 (0.31), 6/6 acceptance and no failed must. The paintbrush reads as the dominant
+magenta across the meadow; the lousewort spikes are where the photo has them. Still
+wrong, and all one cause: the treeline is a scale model. The depth model saturates at
+104 m on Rainier (forest at 11-29 m, mountain at 25-104 m), so the "forest" is 1.4-2.8 m
+spires at 7-25 m with 0.4 m flowers in front, and the summit is the grid's clipped edge.
+
+**Far field from the plan (`band5`, launched 23:41 from Panorama Depth Calibration).**
+Section 5, built: `plan_far_knots` in the calibration stage measures, per photographed
+column with forest, the band's angular height against the plan's tree size (18 m fir
+-> implied 209 m, measured 24 m) and, for a far landmark (mountain words, plan
+distance >= 500 m), the TERRAIN pixels above the horizon within 25 deg of its bearing
+(summit: measured 104 m, plan 9000; the icefall 6000). `apply_far_knots` remaps both
+depth maps monotonically in log-log through those knots, identity below 0.4x the first
+(9 m), the last slope continued. Then the existing machinery does the rest: the
+saturation plateau is 6000 m, the far field starts at 4200 m, the grid becomes 400 m
+across (depth ceiling 200 m), the summit goes to the far-field shell instead of the
+clipped grid edge, and the plan band stands at ~190 m with 9-36 m firs. Risk: the
+stretch between 9 and 24 m measured is x3.4 in log slope, so depth noise there becomes
+terrain relief; the Treeline Backdrop (min 40 m) may now also stand its ribbon up.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
