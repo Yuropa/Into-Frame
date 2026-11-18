@@ -2272,7 +2272,18 @@ stages:
     stage: SceneGenerationStage
     keys:
       panorama: panorama_sky
-    species_mesh_near_distance_m: 60.0   # a Species Assets mesh stays a mesh this far out (cards beyond)
+    species_mesh_near_distance_m: 120.0  # a Species Assets mesh stays a mesh this far out (cards beyond); covers a 100 m world so a plan band of conifers is geometry, not khaki delit cards
+    # Scene Plan sizes as the height gate (docs/hybrid-scene-plan.md): a class the plan gives a
+    # standing height for uses [size/tol, size*tol] instead of CLASS_HEIGHT_RANGE_M; a detection
+    # outside it moves along its ray until it stands inside (at most to the furthest ground),
+    # a painted copy outside it is dropped. A plan region (forest) becomes a band of plan-sized
+    # instances at the furthest ground the world has, in plan_band_rows staggered rows.
+    plan_size_anchor: true
+    plan_size_classes: [tree, building, person]
+    plan_size_tolerance: 2.0
+    plan_bands: true
+    plan_band_region: {forest: tree}
+    plan_band_rows: 3
     eye_height_meters: 1.8   # target world-space depth of the terrain center below the viewer;
                               # sent to the client, which pushes the whole scene down to match
     # Floor on a category mesh's own vertical extent as a fraction of its largest
@@ -2506,6 +2517,7 @@ stages:
     # IS for clients without LOD support.
     runtime_lods: true
     lod_mesh_screen_fraction: 0.06
+    species_lod_mesh_screen_fraction: 0.02   # a Species Assets mesh (a plant, 600-2900 faces, photo-coloured) stays geometry to 2 % of the screen height; its card is a photo crop with the meadow in its matte
     card_preferred_classes: [flower, tree]   # the card replaces the reconstruction whenever the group has one: a tree card is its reference view (needles, colour), the mesh a faceted dark cone
     skip_far_objects: true       # a detection too small for its class at the depth's distance is a far object (Rainier's trees on the mountain flank): left to the backdrop
     sliver_min_box_px: 8.0       # a detection box thinner than this, or

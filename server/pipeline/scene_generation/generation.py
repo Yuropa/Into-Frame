@@ -59,6 +59,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         runtime_lods: bool = True,
         card_preferred_classes: "list[str] | None" = None,
         lod_mesh_screen_fraction: float = 0.12,
+        species_lod_mesh_screen_fraction: float = 0.02,
         lod_card_screen_fraction: float = 0.025,
         lod_billboard_screen_fraction: float = 0.003,
         lod_exempt_classes: list[str] | None = None,
@@ -78,8 +79,25 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         mesh_near_distance_m: float = 15.0,
         mesh_shape_min_ratio: float = 1.4,
         species_mesh_near_distance_m: float = 60.0,
+        plan_size_anchor: bool = True,
+        plan_size_classes: list[str] | None = None,
+        plan_size_tolerance: float = 2.0,
+        plan_bands: bool = True,
+        plan_band_region: dict[str, str] | None = None,
+        plan_band_rows: int = 2,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # The scene plan's standing height for a class replaces CLASS_HEIGHT_RANGE_M
+        # with [size/tol, size*tol]: a detection outside it is moved along its ray
+        # until it stands inside (unproject_bbox_equirect), a painted copy outside it
+        # is dropped, and a plan region (forest) becomes a band of plan-sized
+        # instances at the furthest ground the world has (plan_bands.py).
+        self.plan_size_anchor = bool(plan_size_anchor)
+        self.plan_size_classes = list(plan_size_classes if plan_size_classes is not None else ["tree", "building", "person"])
+        self.plan_size_tolerance = float(plan_size_tolerance)
+        self.plan_bands = bool(plan_bands)
+        self.plan_band_region = dict(plan_band_region if plan_band_region is not None else {"forest": "tree"})
+        self.plan_band_rows = int(plan_band_rows)
         # See categories.ALWAYS_MESH_CATEGORIES: placed as a reconstruction at any
         # size, borrowing a sibling bucket's when their own has none, and given no
         # camera-facing billboard LOD.
@@ -147,6 +165,11 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         # while TRELLIS made Rainier's flowers leafy stalks with specks of bloom.
         self.card_preferred_classes = frozenset(str(c).lower() for c in (card_preferred_classes or []))
         self.lod_mesh_screen_fraction = float(lod_mesh_screen_fraction)
+        # A species mesh is a plant, cheap (600-2900 faces) and coloured from the
+        # photo; its card is a photo crop with the meadow in its matte. Keep the mesh
+        # to a smaller screen height than a reconstruction (Rainier: 1,650 of 2,200
+        # mid-field flowers were cards at 10-28 m and read as blobs).
+        self.species_lod_mesh_screen_fraction = float(species_lod_mesh_screen_fraction)
         self.lod_card_screen_fraction = float(lod_card_screen_fraction)
         self.lod_billboard_screen_fraction = float(lod_billboard_screen_fraction)
         # Ground cover is thousands of instances sharing one card; a LODGroup and
@@ -777,11 +800,14 @@ class SceneGenerationStage(PipelineStage):
     def _plan_landmark_distance(self, context: PipelineContext, metadata: dict, cls: str, offset) -> Optional[float]:
         """The Scene Plan's distance for this landmark, matched by class word and bearing
         (within 25 deg), when the claim is visible or inferred; None otherwise."""
-        try:
-            from pipeline.scene_plan import ScenePlan
-            plan = ScenePlan.from_context(context)
-        except Exception:
-            return None
+        plan = getattr(self, "_plan", None)
+        if plan is None:
+            try:
+                from pipeline.scene_plan import ScenePlan
+                plan = ScenePlan.from_context(context)
+            except Exception:
+                return None
+            self._plan = plan
         if plan is None:
             return None
         bearing = float(np.degrees(np.arctan2(float(offset[0]), float(offset[2]))))
@@ -810,7 +836,6 @@ class SceneGenerationStage(PipelineStage):
                                "measured_source": "landmark_distance_fraction", "plan": dist,
                                "evidence": lm.get("evidence"), "because": lm.get("because", ""),
                                "used": dist, "source": "plan", "note": "pushed along its ray to the plan distance"})
-        plan.publish(context, "scene_generation")
         return dist
 
     def run(self, context: PipelineContext) -> PipelineContext:
@@ -1014,6 +1039,42 @@ class SceneGenerationStage(PipelineStage):
             unphotographed_skipped = 0
             far_skipped = 0
             far_start_m = float(context.input_object(ContextKey.FAR_FIELD_START_M) or 0.0)
+            # Scene plan sizes (docs/hybrid-scene-plan.md): the plan is the first input
+            # to the height gate, CLASS_HEIGHT_RANGE_M the fallback. Rainier's treeline
+            # landed at 7-27 m as 2 m saplings and the painter copied it over the
+            # meadow; with the fir's 18 m the same boxes stand at the back of the world.
+            plan = None
+            size_bands: dict[str, tuple[float, float, float, str]] = {}
+            if self.config.plan_size_anchor or self.config.plan_bands:
+                try:
+                    from pipeline.scene_plan import ScenePlan
+                    plan = ScenePlan.from_context(context)
+                except Exception:
+                    plan = None
+            self._plan = plan
+            if plan is not None and self.config.plan_size_anchor:
+                tol = max(1.0, self.config.plan_size_tolerance)
+                for pcls in self.config.plan_size_classes:
+                    sp = plan.size_prior(pcls)
+                    if sp is None:
+                        continue
+                    size_m, ev, pname = sp
+                    size_bands[pcls] = (size_m / tol, size_m * tol, size_m, ev)
+                    self.log_info(f"Scene Plan: {pcls} stands {size_m:g} m ({ev}, {pname}); height band "
+                                  f"{size_m / tol:.1f}-{size_m * tol:.1f} m replaces the class range {class_height_range(pcls)}")
+            # The furthest an object can stand on reconstructed ground: the far-field
+            # start when a backdrop shell stands there, else the terrain grid's reach.
+            terrain_reach = 0.0
+            if terrain_mesh is not None and len(terrain_mesh.mesh.vertices):
+                tv = np.asarray(terrain_mesh.mesh.vertices, dtype=float)
+                terrain_reach = float(np.abs(tv[:, [0, 2]]).max())
+            usable_far_m = 0.95 * float(scene.far_clip_plane)
+            if terrain_reach > 0.0:
+                usable_far_m = min(usable_far_m, 0.95 * terrain_reach)
+            if far_start_m > 0.0:
+                usable_far_m = min(usable_far_m, far_start_m)
+            painted_outside_band: dict[str, int] = {}
+            anchored_classes: dict[str, list[tuple[float, float]]] = {}
 
             # Which visual variants each class actually has, taken from the pool
             # keys Panorama Asset Generation just wrote ("{class}::{bucket}").
@@ -1067,10 +1128,12 @@ class SceneGenerationStage(PipelineStage):
             def unproject_box(box, cls=None):
                 """Bbox -> (world position, width, height), in whichever space this run has."""
                 if panorama_depth is not None and panorama is not None:
+                    band = size_bands.get(normalize_category(cls)) if cls else None
                     return unproject_bbox_equirect(
                         box, panorama.width, panorama.height,
                         pano_depth=panorama_depth, extrinsics=extrinsics,
-                        height_range_m=class_height_range(cls),
+                        height_range_m=(band[0], band[1]) if band else class_height_range(cls),
+                        max_distance_m=usable_far_m if band else None,
                     )
                 return unproject_bbox(
                     box, input.width, input.height,
@@ -1159,6 +1222,58 @@ class SceneGenerationStage(PipelineStage):
             # still capped at DistributionSynthesisStage's max_instances_per_group
             # (12,000) -- enough that an interpreted inner loop would dominate the
             # whole stage.
+            # Plan bands: a region the plan says is there (forest) and the region map
+            # shows becomes a band of plan-sized instances at the furthest ground the
+            # world has, replacing the painter's copies of mis-scaled exemplars.
+            # Instances this stage authors itself (plan bands). Kept beside the
+            # context because an object added here is this stage's OUTPUT and
+            # input_object() does not see it until the stage completes.
+            extra_metadata: dict[int, dict] = {}
+            if self.config.plan_bands and plan is not None and size_bands:
+                from pipeline.scene_generation.plan_bands import band_instances
+                from pipeline.panorama_segmentation.panorama_region_result import RegionType
+                region_map = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+                plan_cats = plan.categories("inferred")
+                for region_name, bcls in self.config.plan_band_region.items():
+                    band = size_bands.get(bcls)
+                    region_value = getattr(RegionType, region_name.upper(), None)
+                    if band is None or region_map is None or region_value is None:
+                        continue
+                    if region_name not in plan_cats:
+                        self.log_info(f"Scene Plan: no {region_name} in the plan; no {bcls} band")
+                        continue
+                    band_bucket = None
+                    for key in sorted(species_keys):
+                        m = re.match(rf"category_mesh_{bcls}_(\d+)$", key)
+                        if m:
+                            band_bucket = int(m.group(1))
+                            break
+                    if band_bucket is None and class_variants.get(bcls):
+                        band_bucket = int(class_variants[bcls][0])
+                    new_instances, spans = band_instances(
+                        np.asarray(region_map.depth), int(region_value), extrinsics,
+                        size_m=band[2], size_band=(band[0], band[1]), far_m=usable_far_m,
+                        cls=bcls, bucket=band_bucket, rows=self.config.plan_band_rows, seed=self.seed,
+                    )
+                    for meta in new_instances:
+                        context.add_object(f"metadata_{object_count}", meta)
+                        extra_metadata[object_count] = meta
+                        object_count += 1
+                    if new_instances:
+                        context.add_object(count_key, int(object_count))
+                    self.log_info(
+                        f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) in {len(spans)} span(s)"
+                        f" (bucket {band_bucket}, up to {usable_far_m:.0f} m): " + "; ".join(
+                            f"{sp['from_deg']:.0f}..{sp['to_deg']:.0f} deg at {sp['distance_m']:.0f} m"
+                            f" ({sp['count']} x {sp['height_m'] or 0:.0f} m; band {sp['angular_height_deg']:.1f} deg"
+                            f" implies {sp['implied_distance_m']:.0f} m)" for sp in spans))
+                    plan.overrides.append({
+                        "field": f"{region_name} band: {bcls}", "measured": None, "measured_source": "painted copies",
+                        "plan": band[2], "evidence": band[3], "because": "",
+                        "used": len(new_instances), "source": "plan",
+                        "note": f"{len(new_instances)} {bcls}(s) in {len(spans)} span(s) at <= {usable_far_m:.0f} m",
+                    })
+
             occ_x = np.zeros(object_count, dtype=np.float64)
             occ_z = np.zeros(object_count, dtype=np.float64)
             occ_r = np.zeros(object_count, dtype=np.float64)
@@ -1176,7 +1291,7 @@ class SceneGenerationStage(PipelineStage):
             rejected_examples: list[str] = []
 
             def _placement_rank(i: int) -> tuple[int, float, int]:
-                m = context.input_object(f"metadata_{i}") or {}
+                m = extra_metadata.get(i) or context.input_object(f"metadata_{i}") or {}
                 return (1 if m.get("synthetic") else 0, -float(m.get("score") or 0.0), i)
 
             placement_order = sorted(range(object_count), key=_placement_rank)
@@ -1225,7 +1340,8 @@ class SceneGenerationStage(PipelineStage):
                     if rejection is None:
                         origin_y = terrain_y - float(recon_mesh.mesh.bounds[0][1]) * scale
                         levels.append(("mesh", recon_key, (scale, scale, scale), origin_y,
-                                       self.config.lod_mesh_screen_fraction))
+                                       self.config.species_lod_mesh_screen_fraction if recon_key in species_keys
+                                       else self.config.lod_mesh_screen_fraction))
                 if card_mesh is not None:
                     ext = card_mesh.mesh.bounds[1] - card_mesh.mesh.bounds[0]
                     sx = float(width) / (float(ext[0]) or 1.0)
@@ -1271,7 +1387,7 @@ class SceneGenerationStage(PipelineStage):
 
             generation_task = self.create_progress(object_count, "Creating Objects…")
             for idx in placement_order:
-                metadata = context.input_object(f"metadata_{idx}") or {}
+                metadata = extra_metadata.get(idx) or context.input_object(f"metadata_{idx}") or {}
 
                 # Normalized for the same reason Panorama Asset Generation normalizes
                 # it (see normalize_category): post-typing detections carry free-text
@@ -1338,6 +1454,13 @@ class SceneGenerationStage(PipelineStage):
                     position = (syn_x, 0.0, syn_z)
                     width = metadata["world_width"]
                     height = metadata["world_height"]
+                    band = size_bands.get(cls)
+                    if band and metadata.get("source") != "plan_band" and not (band[0] <= float(height) <= band[1]):
+                        # A copy of an exemplar the depth mis-sized: the far forest
+                        # the plan band stands in for.
+                        painted_outside_band[cls] = painted_outside_band.get(cls, 0) + 1
+                        self.advance_progress(generation_task)
+                        continue
                 else:
                     # A missing box here means metadata_{idx} is an incomplete/stale cache
                     # entry (e.g. a resumed run whose OBJECT_COUNT outran what actually got
@@ -1367,6 +1490,10 @@ class SceneGenerationStage(PipelineStage):
                         self.advance_progress(generation_task)
                         continue
                     position, width, height = result
+                    if cls in size_bands:
+                        anchored_classes.setdefault(cls, []).append((
+                            float(np.hypot(position[0] - camera_position[0], position[2] - camera_position[2])),
+                            float(height)))
 
                     # A far object the depth brought near (see CLASS_TYPICAL_HEIGHT_M):
                     # at its angular height it would have to stand beyond the
@@ -2066,6 +2193,24 @@ class SceneGenerationStage(PipelineStage):
                 f"Far objects: {far_skipped} detection(s) left to the far backdrop -- at their angular size "
                 f"a typical one of their class would stand beyond the far-field start {far_start_m:.0f} m"
             )
+        for acls, pairs in sorted(anchored_classes.items()):
+            d = np.array([p[0] for p in pairs]); h = np.array([p[1] for p in pairs])
+            lo, hi, size_m, ev = size_bands[acls]
+            self.log_info(
+                f"Scene Plan: {len(pairs)} {acls} detection(s) unprojected inside the plan's {lo:.1f}-{hi:.1f} m band: "
+                f"distance {np.percentile(d, 5):.0f}/{np.median(d):.0f}/{np.percentile(d, 95):.0f} m, "
+                f"height {np.percentile(h, 5):.1f}/{np.median(h):.1f}/{np.percentile(h, 95):.1f} m"
+                + (f"; {painted_outside_band[acls]} painted {acls} copies outside the band dropped" if painted_outside_band.get(acls) else "")
+            )
+            if self._plan is not None:
+                self._plan.overrides.append({
+                    "field": f"object height (m): {acls}", "measured": round(float(np.median(h)), 2),
+                    "measured_source": "angular size x depth, inside the band", "plan": size_m, "evidence": ev, "because": "",
+                    "used": [round(lo, 1), round(hi, 1)], "source": "plan",
+                    "note": f"{len(pairs)} detection(s) at {np.median(d):.0f} m median; {painted_outside_band.get(acls, 0)} painted copies dropped",
+                })
+        if self._plan is not None:
+            self._plan.publish(context, "scene_generation")
 
         if faced_photographer:
             self.log_info(f"Facing the photographer: {faced_photographer} photographed object(s) turned so the reconstructed side the photo shows faces the capture point")

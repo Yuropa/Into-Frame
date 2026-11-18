@@ -159,6 +159,37 @@ class ScenePlan:
                 vocab[name.lower()] = cat
         return vocab
 
+    # Species sizes by the class they stand for: a species 4 m or taller is a tree,
+    # one under 1.5 m a flower (the plan's species entries carry no category).
+    _SIZE_CLASSES = {"tree": (4.0, None), "flower": (0.05, 1.5), "bush": (0.5, 4.0)}
+
+    def size_prior(self, cls: str, min_evidence: str = "inferred") -> Optional[tuple[float, str, str]]:
+        """(size_m, evidence, name): the standing height the plan gives this class,
+        from its species sizes and from objects/landmarks of the category (a forest
+        entry counts for tree). The strongest evidence level wins, then the median."""
+        cands: list[tuple[float, str, str]] = []
+        rng = self._SIZE_CLASSES.get(cls)
+        if rng:
+            for it in self.items("species", min_evidence):
+                s = it.get("size_m")
+                if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0 \
+                        and s >= rng[0] and (rng[1] is None or s < rng[1]):
+                    cands.append((float(s), str(it.get("evidence")), str(it.get("name") or "")))
+        for kind in ("objects", "landmarks"):
+            for it in self.items(kind, min_evidence):
+                cat = self.category_of(it, kind)
+                if cat != cls and not (cls == "tree" and cat == "forest"):
+                    continue
+                s = it.get("size_m") if kind == "objects" else it.get("height_m")
+                if isinstance(s, (int, float)) and not isinstance(s, bool) and s > 0:
+                    cands.append((float(s), str(it.get("evidence")), str(it.get("name") or cat)))
+        if not cands:
+            return None
+        rank = {"visible": 2, "inferred": 1}
+        best = max(rank.get(e, 0) for _, e, _ in cands)
+        top = sorted([c for c in cands if rank.get(c[1], 0) == best], key=lambda c: c[0])
+        return top[(len(top) - 1) // 2]
+
     def categories(self, min_evidence: str = "visible") -> set[str]:
         """Object categories the plan says are in the photograph."""
         return {cat for _, _, cat in self.entries(min_evidence)}

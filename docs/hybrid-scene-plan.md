@@ -219,6 +219,71 @@ elevation floor stay in the code behind the flag. The Rainier cache holds the
 hybrid3b state; a run with the flag off reproduces t1's lighting (modulo the LuxDiT
 draw).
 
+### Size-anchored placement and plan bands (2026-11-18)
+
+The user's reading of hybrid3: objects do not feel placed, the scale is off (the
+trees above all), the structure has not improved, 3DCodeVerse's scenes had better
+structure. Measured in the scenes (mesh extents x placed scale, distance from the
+camera):
+
+| scene | what | count | distance | height | plan |
+|---|---|---|---|---|---|
+| Rainier | "trees" (buckets 0-2) | 1294 | 25-120 m | 1.8-2.8 m | subalpine fir 18 m, forest 20 m |
+| Rainier | lone fir | 3 | 31-52 m | 9-10 m | 12 m at 25 m |
+| Rainier | flowers | 1944 | 1-28 m | 0.4-0.6 m | 0.35-0.7 m |
+| Paris | trees | 23 | 83-160 m | 7-17 m | plane 18 m, willow 12 m |
+| Paris | boats | 7 | 69-139 m | 6 m tall | 18 boats, the near one 45 m |
+
+The treeline was thirteen hundred 2 m shrubs over a flat band at 25-120 m: an
+object's size is its angular size times the depth model's distance, monocular depth
+compresses the far field (Rainier's world is 100 m deep: depth ceiling 100 m, terrain
+grid 200 m across, far-field start 73 m, no backdrop shell), so the far firs landed
+close and shrank to match, and Distribution Synthesis copied them over the meadow.
+Nothing in a single step was wrong; the scene had no composition. The harness had
+one because its planner's reading (layout, counts, sizes, distances) was the scene.
+Ours holds the same reading and used it for four numbers, the detector vocabulary
+and two placeholders; Scene Generation still gave depth the last word on every
+position and size.
+
+Built (`e3a540b`.. on the branch):
+
+- **Plan sizes as the height gate** (`ScenePlan.size_prior`, Scene Generation
+  `plan_size_anchor`). A class the plan gives a standing height for (species 4 m or
+  taller count as tree, objects/landmarks of the category, a forest entry counts for
+  tree; strongest evidence, then the median) replaces `CLASS_HEIGHT_RANGE_M` with
+  [size/2, size x 2]. `unproject_bbox_equirect` already moved a detection along its
+  ray to the nearest edge of the class range; it now does so to the plan's band and
+  stops at the furthest reconstructed ground (`usable_far_m`: the far-field start, or
+  0.95 x the terrain grid's reach). A painted copy outside the band is dropped. Rainier:
+  38 tree detections now stand at 25-73 m, 6.4-9 m tall (the band floor is 9 m; at the
+  73 m cap their angle allows 6-9 m), 1915 painted copies dropped. Paris: tree band
+  6-24 m, 25 detections untouched at 85-162 m, 2 copies dropped.
+- **Plan bands** (`plan_bands.py`, `plan_band_region: {forest: tree}`). A region
+  the plan names and the region map shows becomes a band: per contiguous span of
+  forest columns, the band's angular height over the plan size gives the distance
+  it implies (Rainier spans: 112-450 m), the band stands at min(that, usable far),
+  three staggered rows of plan-sized conifers at 0.4 x size spacing, heights from the
+  column's angle clamped to the band, every one an ordinary synthetic instance for
+  the placement loop (ground snap, overlap test, bucket assets). Rainier: 164
+  authored, 141 placed, in 6 spans at 73 m. Paris has no forest entry in its plan, so
+  no band (its quays are tree-lined and the region map calls 225 degrees of the
+  outpainted ring forest; the plan is the gate that keeps that from becoming a wall).
+- **Species meshes further out**: `species_mesh_near_distance_m` 60 -> 120 (the band
+  conifers were rendering as their delit crop cards, khaki), and a species mesh keeps
+  its geometry to 2 % of the screen height (`species_lod_mesh_screen_fraction`),
+  because its card is a photo crop with the meadow in its matte: 1,650 of 2,200
+  mid-field flowers were cards at 10-28 m and read as blobs; now 1,983 of 2,182
+  instances render as meshes.
+
+Finding that sets the next step: the world is as deep as the depth model's plateau
+(Rainier 100 m), while the plan says the summit is 9 km off and the treeline's own
+angle says 112-450 m. Inside a 100 m world the treeline can only stand at 73 m, 9 m
+tall, angularly right and metrically a model. The structural fix is the depth
+ceiling from plan evidence (the size-anchored distance of the far band, the
+landmark distances) feeding Panorama Depth Calibration's far range, which is a
+2-3 h cascade per scene and a terrain-quality question at a 400-800 m grid; Paris
+already runs at 400 m. Not done this round.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
