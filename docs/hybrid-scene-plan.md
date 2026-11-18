@@ -379,8 +379,21 @@ and the flowers colors aren't right". Three causes, measured on the cache:
 
 Not touched: the firs render khaki in pyrender because a dark-green albedo under the
 2.0-intensity warm sun with no exposure control goes olive; that is section 7 and the
-judge's "flat, muted" lighting complaint. Replays must run in the `frame` env. `band3`
-(Rainier from Species Assets) is queued behind band2's Paris run.
+judge's "flat, muted" lighting complaint. Replays must run in the `frame` env.
+
+**`band3` (19:48, Rainier from Species Assets).** DINO global 0.464 (band2 0.406),
+layout 0.476 (0.454), ΔE 16.4 (15.2), judge 0.31 (0.17; t1's 0.32 is the branch's best).
+The sheet now has a dark conifer band with clumps and a lone spire fir at the left,
+lupine and yellow spikes in the species' photographed colours, and no khaki: the tree
+and flower cards are the species' own. 569 band firs (185 meshes, 238 species cards at
+25 m where 1.4 m falls under `min_mesh_angular_px`). The judge's remaining majors are
+the smooth clipped summit (world depth, section 5) and a failed must: "the magenta
+paintbrush that dominates the photo's foreground is almost absent". That is density:
+the paintbrush bucket has 33 members and placed 5 meshes, the lupine bucket's painted
+copies placed 920 cards, while the plan says paintbrush *dense, across the whole
+width* and lupine *patchy, lower right*. Density from the plan's species density and
+`where` is the next build, ahead of the world depth. Paris band2 (from Scene
+Generation): 0.776 / 0.594 / 13.6, judge 0.23 (0.17); unchanged geometry.
 
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
