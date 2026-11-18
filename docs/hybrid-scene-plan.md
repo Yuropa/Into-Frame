@@ -311,6 +311,39 @@ near tour boat (366 px, score 0.59) is then dropped for lying inside their reach
 the plan's boat sizes (45/35/30/15 m by count) are the prior that should replace
 the kind length.
 
+**The trees up the mountain (user, 2026-11-18 evening).** Horizontal rays from the
+camera meet Rainier's reconstructed terrain at 25 m on every photographed bearing:
+the meadow is 25 m deep in this world and the mountain's flank rises from there,
+so a tree pushed to 73 m along its ray stood 20 m up the flank, and the band at a
+fixed 73 m was a picket line, not the photo's clumps. Changed: the band walks every
+forest column of the region map, casts the band's bottom edge onto the terrain and
+stands a tree where it lands (the mask's clumps and gaps are the band's; a column
+less than 35 % solid is skipped; a column taller than one tree gets rows behind, up
+the slope); a ground-reach measurement (the median horizontal-ray hit, 25 m here)
+caps both the band and the size anchor; a tree's height is what its angle allows
+where it stands, with the plan's floor only at or beyond half the implied distance.
+Rainier now: 74 band trees at 7-25 m, 2.7-3.1 m tall, the 38 detections at 25 m,
+2-9 m. That is the faithful diorama and it reads as a model, because it is one: the
+treeline's angle says 112-450 m, the plan's summit 9 km, the depth model's meadow 25 m.
+No placement rule fixes that. The next build is the world's depth (section 5: a
+plan-constrained ground out to the treeline's foot, the mountain as a far shell at
+its implied distance), and until then the scale of Rainier is the depth model's.
+
+**Flowers not as colourful (user).** The bucket palettes averaged highlight and
+shadow pixels and counted the lousewort's pale yellow (hue 53-65 deg) as foliage,
+so its "bloom" was the soil and stems left over, and the paintbrush bucket's three
+rows were crimson, brown and pink. A flower bucket now re-reads its bloom around
+the species' own colour measured at the plan's crop hint (pixels within 30 deg of
+that hue and at least 0.45 of its chroma), each cluster represented by the Lab
+median of its more saturated half; foliage starts at 68 deg; a bucket further than
+20 dE from every species keeps its card (a shrub/fir-fragment bucket of 3,468
+members had matched lousewort at 29, the pasqueflower seed heads paintbrush at
+25). Paintbrush bloom [132,53,75]/[108,76,63]/[191,71,90] -> [202,62,86]/[151,43,80];
+lousewort [198,154,128] -> [176,177,63]. Every colour is still the bucket's own
+pixels. The hybrid3b lighting (plan sun at 2.6x, warm) in the Rainier cache washed
+every render since; `band2` reruns Rainier from Panorama Lighting with the override
+off (launched 17:50), then Paris from Scene Generation.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
