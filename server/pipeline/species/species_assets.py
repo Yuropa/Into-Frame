@@ -36,7 +36,7 @@ from PIL import Image as PILImage
 from pipeline.pipeline_context import ContextKey, PipelineContext
 from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration
 from pipeline.scene_plan import ScenePlan
-from pipeline.species.palette import anchors_from_words, measure_palette, palette_distance
+from pipeline.species.palette import anchors_from_words, measure_palette, palette_distance, chroma_rich_colour
 from scene.mesh import Mesh
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -109,7 +109,8 @@ class SpeciesAssetsStage(PipelineStage):
                 groups.setdefault((cls, int(bucket)), []).append(idx)
         return groups
 
-    def _bucket_palette(self, context: PipelineContext, members: list[int], cls: str = "flower") -> dict:
+    def _bucket_palette(self, context: PipelineContext, members: list[int], cls: str = "flower",
+                        bloom_reference: Optional[list[int]] = None) -> dict:
         crops: list[PILImage.Image] = []
         # Photographed detections first: Distribution Synthesis's painted instances
         # carry the class and bucket too, but no crop of their own.
@@ -123,7 +124,8 @@ class SpeciesAssetsStage(PipelineStage):
                 crops.append(crop.image)
         # Conifer foliage is dark by nature; the lit-side filter that keeps a bloom
         # from being darkened twice would turn it olive.
-        return measure_palette(crops, seed=self.seed, lit_share=0.6 if cls == "flower" else 0.9)
+        return measure_palette(crops, seed=self.seed, lit_share=0.6 if cls == "flower" else 0.9,
+                               bloom_reference=bloom_reference)
 
     def _species_palette(self, photo: PILImage.Image, species: dict) -> tuple[Optional[dict], str]:
         hint = species.get("crop_hint")
@@ -290,6 +292,19 @@ class SpeciesAssetsStage(PipelineStage):
                 self.log_info(f"  {key} ({len(members)} members): keeps its card -- {how}")
                 self.advance_progress(task)
                 continue
+            if cls == "flower":
+                # Measured again with the species' own colour selecting the bloom
+                # pixels: the masked crops carry stems, soil and snow, and the first
+                # reading of the paintbrush bucket was crimson, brown and pink in
+                # equal rows. The colours are still the bucket's own pixels.
+                ref_pal = next((p for s_, p, _ in candidates.get(cls, []) if s_ is sp), None)
+                reference = chroma_rich_colour((ref_pal or {}).get("bloom") or [])
+                if reference is not None:
+                    guided = self._bucket_palette(context, members, cls, bloom_reference=reference)
+                    if guided["bloom"]:
+                        self.log_info(f"  {key}: bloom re-read around the species' {reference}: "
+                                      f"{pal['bloom'][:2]} -> {guided['bloom'][:2]} ({guided['bloom_fraction']:.2f} of px)")
+                        pal = guided
             self.log_info(f"  {key} ({len(members)} members): '{sp.get('name')}' by {how}; "
                           f"bloom {pal['bloom'][:2]} foliage {pal['foliage'][:1]} ({pal['pixels']} px)")
             entry = self._spec_entry(key, sp, pal, seed=self.seed + bucket * 17 + (0 if cls == "flower" else 101),

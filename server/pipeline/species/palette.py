@@ -56,7 +56,9 @@ def split_parts(rgb01: np.ndarray) -> dict[str, np.ndarray]:
         return {"bloom": rgb01, "foliage": rgb01, "stem": rgb01}
     hsv = skcolor.rgb2hsv(rgb01.reshape(-1, 1, 3)).reshape(-1, 3)
     h, s, v = hsv[:, 0] * 360.0, hsv[:, 1], hsv[:, 2]
-    foliage = (h >= 50.0) & (h <= 170.0) & (s > 0.12) & (v > 0.08)
+    # 68 deg, not 50: a pale yellow bloom (lousewort, 53-65 deg) was counted as
+    # foliage and its bucket's "bloom" was the soil and stems left over.
+    foliage = (h >= 68.0) & (h <= 170.0) & (s > 0.12) & (v > 0.08)
     bloom = (~foliage) & (v > 0.15) & ((s > 0.25) | ((s < 0.18) & (v > 0.72)))
     fol = rgb01[foliage]
     stem = fol
@@ -66,8 +68,12 @@ def split_parts(rgb01: np.ndarray) -> dict[str, np.ndarray]:
     return {"bloom": rgb01[bloom], "foliage": fol, "stem": stem}
 
 
-def kmeans_lab(rgb01: np.ndarray, k: int, seed: int = 0, iters: int = 20) -> list[tuple[list[int], float]]:
-    """[(rgb 0-255, share), ...] by descending share; k is capped by the pixel count."""
+def kmeans_lab(rgb01: np.ndarray, k: int, seed: int = 0, iters: int = 20,
+               chroma_rich: bool = False) -> list[tuple[list[int], float]]:
+    """[(rgb 0-255, share), ...] by descending share; k is capped by the pixel count.
+    chroma_rich: each cluster is represented by the Lab median of its more saturated
+    half rather than its mean, so a bloom's highlights and shadows do not average
+    into pastel."""
     n = rgb01.shape[0]
     if n == 0:
         return []
@@ -91,7 +97,13 @@ def kmeans_lab(rgb01: np.ndarray, k: int, seed: int = 0, iters: int = 20) -> lis
         share = float((labels == j).mean())
         if share <= 0.0:
             continue
-        rgb = skcolor.lab2rgb(centres[j].reshape(1, 1, 3)).reshape(3)
+        centre = centres[j]
+        if chroma_rich:
+            sel = lab[labels == j]
+            chroma = np.hypot(sel[:, 1], sel[:, 2])
+            rich = sel[chroma >= np.median(chroma)] if len(sel) >= 4 else sel
+            centre = np.median(rich, axis=0)
+        rgb = skcolor.lab2rgb(centre.reshape(1, 1, 3)).reshape(3)
         out.append(([int(round(float(c) * 255.0)) for c in np.clip(rgb, 0, 1)], share))
     out.sort(key=lambda t: -t[1])
     return out
@@ -109,21 +121,57 @@ def _lit_half(px: np.ndarray, keep: float = 0.6) -> np.ndarray:
     return px[lum >= cut]
 
 
+def guided_bloom(rgb01: np.ndarray, reference: list[int], hue_tol_deg: float = 30.0,
+                 chroma_floor: float = 0.45) -> np.ndarray:
+    """The pixels that are the bloom the reference colour describes: within
+    hue_tol_deg of its hue and at least chroma_floor of its Lab chroma. A masked
+    crop of a flower carries stems, soil and snow; the species' own colour, read
+    from the photograph at the plan's crop hint, says which pixels to keep."""
+    if rgb01.shape[0] == 0:
+        return rgb01
+    ref = np.asarray(reference, dtype=np.float32).reshape(1, 1, 3) / 255.0
+    ref_hsv = skcolor.rgb2hsv(ref).reshape(3)
+    ref_lab = skcolor.rgb2lab(ref).reshape(3)
+    ref_chroma = float(np.hypot(ref_lab[1], ref_lab[2]))
+    hsv = skcolor.rgb2hsv(rgb01.reshape(-1, 1, 3)).reshape(-1, 3)
+    lab = skcolor.rgb2lab(rgb01.reshape(-1, 1, 3)).reshape(-1, 3)
+    dh = np.abs(((hsv[:, 0] - ref_hsv[0]) * 360.0 + 180.0) % 360.0 - 180.0)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    keep = (dh <= hue_tol_deg) & (chroma >= chroma_floor * ref_chroma) & (hsv[:, 2] > 0.1)
+    return rgb01[keep]
+
+
+def chroma_rich_colour(colours: list[list[int]]) -> Optional[list[int]]:
+    """The most saturated of a palette's colours (Lab chroma), or None."""
+    if not colours:
+        return None
+    lab = _lab(colours)
+    chroma = np.hypot(lab[:, 1], lab[:, 2])
+    return list(colours[int(np.argmax(chroma))])
+
+
 def measure_palette(images: Iterable[PILImage.Image], k_bloom: int = 3, k_foliage: int = 2, seed: int = 0,
-                    lit_share: float = 0.6) -> dict:
+                    lit_share: float = 0.6, bloom_reference: Optional[list[int]] = None) -> dict:
     """Palette of the given crops: {"bloom": [[r,g,b],...], "bloom_shares": [...],
-    "foliage": [...], "stem": [...], "bloom_fraction": f, "pixels": n}."""
+    "foliage": [...], "stem": [...], "bloom_fraction": f, "pixels": n}.
+    bloom_reference: a colour the bloom is known to be (the species' own, read from
+    the photograph); the bloom pixels are then the crop's pixels of that hue."""
     px = _rgb01_from_images(images, seed=seed)
     parts = split_parts(px)
     n = int(px.shape[0])
-    bloom = kmeans_lab(_lit_half(parts["bloom"], lit_share), k_bloom, seed)
+    bloom_px = parts["bloom"]
+    if bloom_reference is not None:
+        guided = guided_bloom(px, bloom_reference)
+        if guided.shape[0] >= 32:
+            bloom_px = guided
+    bloom = kmeans_lab(_lit_half(bloom_px, lit_share), k_bloom, seed, chroma_rich=True)
     foliage = kmeans_lab(_lit_half(parts["foliage"], lit_share), k_foliage, seed)
     stem = kmeans_lab(parts["stem"], 1, seed)
     return {
         "bloom": [c for c, _ in bloom], "bloom_shares": [round(s, 3) for _, s in bloom],
         "foliage": [c for c, _ in foliage], "foliage_shares": [round(s, 3) for _, s in foliage],
         "stem": [c for c, _ in stem],
-        "bloom_fraction": round(float(parts["bloom"].shape[0]) / n, 4) if n else 0.0,
+        "bloom_fraction": round(float(bloom_px.shape[0]) / n, 4) if n else 0.0,
         "foliage_fraction": round(float(parts["foliage"].shape[0]) / n, 4) if n else 0.0,
         "pixels": n,
     }

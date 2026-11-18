@@ -2244,7 +2244,7 @@ stages:
     blender_path: ~/.local/bin/blender-5.2
     classes: [flower, tree]
     max_members: 12              # crops measured per bucket palette
-    match_max_delta_e: 40.0      # a bucket further than this from every plan species keeps its card
+    match_max_delta_e: 20        # a bucket further than this from every species keeps its card (shrub fragments matched lousewort at 29, pasqueflower heads matched paintbrush at 25)
     variants: 3                  # procedural variants per flower bucket (Scene Generation spreads instances over them)
     tree_variants: 2
     timeout_s: 600

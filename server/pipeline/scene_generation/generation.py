@@ -797,6 +797,15 @@ class SceneGenerationStage(PipelineStage):
             SemanticKey.OUTPUT: ContextKey.SCENE
         })
 
+    @staticmethod
+    def _captured_half_fov_deg(context: PipelineContext) -> float:
+        intr = context.input_intrinsics(ContextKey.INTRINSICS)
+        fov = float(getattr(intr, "fov", 0.0) or 0.0) if intr is not None else 0.0
+        if fov <= 0.0:
+            return 0.0
+        from pipeline.panorama.placement import placement_fov_deg
+        return placement_fov_deg(fov) / 2.0
+
     def _plan_landmark_distance(self, context: PipelineContext, metadata: dict, cls: str, offset) -> Optional[float]:
         """The Scene Plan's distance for this landmark, matched by class word and bearing
         (within 25 deg), when the claim is visible or inferred; None otherwise."""
@@ -1073,6 +1082,27 @@ class SceneGenerationStage(PipelineStage):
                 usable_far_m = min(usable_far_m, 0.95 * terrain_reach)
             if far_start_m > 0.0:
                 usable_far_m = min(usable_far_m, far_start_m)
+            # Where the ground stops being ground: the reconstructed terrain climbs
+            # into the compressed far field (Rainier: the mountain's flank rises from
+            # 25 m, so a tree pushed out to 73 m along its ray stood 20 m up it).
+            # Horizontal rays from the camera across the photographed bearings; the
+            # median distance at which they meet the terrain is the slope's foot.
+            ground_reach_m = None
+            if terrain_mesh is not None:
+                try:
+                    half = self._captured_half_fov_deg(context)
+                    bearings = np.radians(np.linspace(-half, half, 25)) if half > 0 else np.radians(np.linspace(-180, 180, 36, endpoint=False))
+                    yaw0 = math.radians(float(scene.skybox_rotation or 0.0))
+                    dirs = np.stack([np.sin(bearings - yaw0), np.zeros_like(bearings), np.cos(bearings - yaw0)], axis=1)
+                    locs, ray_idx, _ = terrain_mesh.mesh.ray.intersects_location(np.zeros_like(dirs), dirs, multiple_hits=False)
+                    hits = [float(np.hypot(l[0], l[2])) for l in locs] if locs is not None and len(locs) else []
+                    if len(hits) >= max(3, len(bearings) // 3):
+                        ground_reach_m = float(np.median(hits))
+                        self.log_info(f"Ground reach: the terrain rises to the camera's height {ground_reach_m:.0f} m out "
+                                      f"(median of {len(hits)}/{len(bearings)} horizontal rays); objects stand no further")
+                        usable_far_m = min(usable_far_m, ground_reach_m)
+                except Exception as exc:
+                    self.log_info(f"Ground reach not measured: {exc}")
             painted_outside_band: dict[str, int] = {}
             anchored_classes: dict[str, list[tuple[float, float]]] = {}
 
@@ -1250,10 +1280,33 @@ class SceneGenerationStage(PipelineStage):
                             break
                     if band_bucket is None and class_variants.get(bcls):
                         band_bucket = int(class_variants[bcls][0])
-                    new_instances, spans = band_instances(
-                        np.asarray(region_map.depth), int(region_value), extrinsics,
+                    # Where a panorama ray meets the reconstructed ground. The terrain
+                    # mesh is in its native frame (+Z = panorama theta 0, camera at the
+                    # origin), so the ray needs no rotation; the hit is turned into
+                    # world XZ by undoing terrain_local_xz.
+                    yaw_rad = math.radians(float(scene.skybox_rotation or 0.0))
+                    ray_mesh = terrain_mesh.mesh if terrain_mesh is not None else None
+
+                    def ground_hit(theta: float, el: float):
+                        if ray_mesh is None:
+                            return None
+                        d = np.array([[math.cos(el) * math.sin(theta), math.sin(el), math.cos(el) * math.cos(theta)]])
+                        try:
+                            locs, _, _ = ray_mesh.ray.intersects_location(np.zeros((1, 3)), d, multiple_hits=False)
+                        except Exception:
+                            return None
+                        if locs is None or len(locs) == 0:
+                            return None
+                        lx, lz = float(locs[0][0]), float(locs[0][2])
+                        wx = lx * math.cos(yaw_rad) + lz * math.sin(yaw_rad) + camera_xz[0]
+                        wz = -lx * math.sin(yaw_rad) + lz * math.cos(yaw_rad) + camera_xz[1]
+                        return wx, wz, float(math.hypot(lx, lz))
+
+                    new_instances, summary = band_instances(
+                        np.asarray(region_map.depth), int(region_value), ground_hit,
                         size_m=band[2], size_band=(band[0], band[1]), far_m=usable_far_m,
                         cls=bcls, bucket=band_bucket, rows=self.config.plan_band_rows, seed=self.seed,
+                        camera_xz=(float(camera_xz[0]), float(camera_xz[1])),
                     )
                     for meta in new_instances:
                         context.add_object(f"metadata_{object_count}", meta)
@@ -1262,16 +1315,15 @@ class SceneGenerationStage(PipelineStage):
                     if new_instances:
                         context.add_object(count_key, int(object_count))
                     self.log_info(
-                        f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) in {len(spans)} span(s)"
-                        f" (bucket {band_bucket}, up to {usable_far_m:.0f} m): " + "; ".join(
-                            f"{sp['from_deg']:.0f}..{sp['to_deg']:.0f} deg at {sp['distance_m']:.0f} m"
-                            f" ({sp['count']} x {sp['height_m'] or 0:.0f} m; band {sp['angular_height_deg']:.1f} deg"
-                            f" implies {sp['implied_distance_m']:.0f} m)" for sp in spans))
+                        f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) from {summary['columns']} column(s)"
+                        f" in {summary['spans']} span(s) (bucket {band_bucket}; {summary['thin']} thin, {summary['missed']} off"
+                        f" the terrain, {summary['beyond']} beyond {usable_far_m:.0f} m): distance {summary['distance_m']} m,"
+                        f" height {summary['height_m']} m, the band's angle implies {summary['implied_m']} m")
                     plan.overrides.append({
                         "field": f"{region_name} band: {bcls}", "measured": None, "measured_source": "painted copies",
                         "plan": band[2], "evidence": band[3], "because": "",
                         "used": len(new_instances), "source": "plan",
-                        "note": f"{len(new_instances)} {bcls}(s) in {len(spans)} span(s) at <= {usable_far_m:.0f} m",
+                        "note": f"{len(new_instances)} {bcls}(s) from {summary['columns']} columns; distance {summary['distance_m']} m",
                     })
 
             occ_x = np.zeros(object_count, dtype=np.float64)
