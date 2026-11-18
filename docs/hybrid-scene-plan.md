@@ -284,6 +284,33 @@ landmark distances) feeding Panorama Depth Calibration's far range, which is a
 2-3 h cascade per scene and a terrain-quality question at a 400-800 m grid; Paris
 already runs at 400 m. Not done this round.
 
+**band1 results** (both scenes from Scene Generation, 16:17-16:49):
+
+| scene | dino_global | dino_layout | colour dE | judge |
+|---|---|---|---|---|
+| Paris (vs hybrid3) | 0.755 -> 0.777 | 0.575 -> 0.594 | 13.8 -> 13.6 | 0.21 -> 0.17 |
+| Rainier (vs hybrid3b) | 0.377 -> 0.382 | 0.423 -> 0.374 | 17.3 -> 18.6 | 0.23 -> 0.13 |
+
+Paris is the best Paris on every measured metric (the 7 m saplings on the quays
+moved out to the 6 m floor; nothing else changed), and the judge's complaints are the
+boats, the bridge and the water as before. Rainier's treeline now stands where a
+treeline stands -- 141 firs of 9-10 m at 73 m along the forest spans, in front of the
+dome, replacing 1,915 knee-high copies over the meadow -- and the judge marks it
+down: "tan spire conifers are uniform copies ... no dark forest band", the meadow
+"sparse" (the mid-field flowers that read as blobs were cards with visual mass;
+as 0.5 m meshes at 10-28 m they are correct and thin), the lone fir "absent or very
+small" (its 10 m stands inside the band now). The structure is right and the
+picture is not, which is the honest state of this round: scale and placement are
+fixed in the measured sense, and what the eye wants next is density (the plan's
+"dense" paintbrush against our sparse mid-field), a dark measured conifer colour
+under the client's light rather than the check renderer's, variation (one conifer
+bucket with two variants), and the lone fir treated as the landmark the plan says it
+is. The Paris boats are their own fix: every hull is forced to its kind's 24.5 m
+(0.7-1.4x the kind prior), several are quarter-turned across the river, and the
+near tour boat (366 px, score 0.59) is then dropped for lying inside their reach;
+the plan's boat sizes (45/35/30/15 m by count) are the prior that should replace
+the kind length.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
