@@ -20,6 +20,9 @@ class Scene:
         # Optional grass field (pipeline/grass_cover/grass_field.py): image asset
         # keys and blade parameters, in the terrain grid's own frame.
         self.grass_field = None  # Optional[dict]
+        # Haze for the client's fog (pipeline/lighting/exposure_fit.py): the plan's
+        # haze distances and the skybox's own horizon colour.
+        self.atmosphere = None  # Optional[dict]
 
     def add_object(self, object: Object3D):
         self.objects.append(object)
@@ -40,6 +43,7 @@ class Scene:
             "terrainCenterY":  self.terrain_center_y,
             "lighting":       self.lighting.encode() if self.lighting is not None else None,
             "grassField":     self.grass_field,
+            "atmosphere":     self.atmosphere,
         }
 
     @classmethod
@@ -61,4 +65,5 @@ class Scene:
         lighting_data       = data.get("lighting")
         obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
         obj.grass_field     = data.get("grassField")
+        obj.atmosphere      = data.get("atmosphere")
         return obj

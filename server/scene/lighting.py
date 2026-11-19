@@ -251,6 +251,13 @@ class SceneLighting:
         # map's sun delivered. The cap is widened by the caller for the same reason.
         self.sun_intensity_scale = float(sun_intensity_scale)
         self.sun_intensity_max = sun_intensity_max
+        # The fit to the photograph (pipeline/lighting/exposure_fit.py): the sun's
+        # final intensity and the client's ambient are scaled so the lit near
+        # field's luminance percentiles match the photograph's at the photo camera.
+        # Applied after the clamp -- the fit was measured on the clamped sun.
+        self.fit_sun_scale = 1.0
+        self.ambient_scale = 1.0
+        self.fit = None  # Optional[dict]
         # (direction, color) measured from the PANORAMA's own sky rather than from
         # the estimated environment map, or None. See sun() and measure_panorama_sun.
         self.measured_sun = measured_sun
@@ -308,7 +315,12 @@ class SceneLighting:
         the sky it came from will disagree.
         """
         if self.hdr is None and self._persisted_sun is not None:
-            return dict(self._persisted_sun)
+            d = dict(self._persisted_sun)
+            base = float(d.get("intensity_base", d.get("intensity", 0.0)) or 0.0)
+            d["intensity_base"] = round(base, 3)
+            d["intensity"] = round(base * self.fit_sun_scale, 3)
+            d["fit_sun_scale"] = round(float(self.fit_sun_scale), 3)
+            return d
         rgb, is_hdr = self._radiance()
         luminance = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
         height, width = luminance.shape
@@ -429,7 +441,9 @@ class SceneLighting:
             # Where direction/colour came from, so a scene that silently fell back
             # to the estimate is distinguishable from one that didn't.
             "direction_source": "panorama" if measured else "envmap",
-            "intensity": round(float(np.clip(unclamped_intensity, 0.0, intensity_max)), 3),
+            "intensity": round(float(np.clip(unclamped_intensity, 0.0, intensity_max)) * self.fit_sun_scale, 3),
+            "intensity_base": round(float(np.clip(unclamped_intensity, 0.0, intensity_max)), 3),
+            "fit_sun_scale": round(float(self.fit_sun_scale), 3),
             "intensity_scale": round(float(self.sun_intensity_scale), 3),
             "peak_ratio": round(peak_ratio, 1),
             # The two numbers _SUN_INTENSITY_SCALE has to be calibrated against, and
@@ -465,6 +479,8 @@ class SceneLighting:
             "width": self.ldr.width,
             "height": self.ldr.height,
             "sun": self.sun(),
+            "ambient_scale": round(float(self.ambient_scale), 3),
+            "fit": self.fit,
         }
 
     @classmethod
@@ -485,6 +501,9 @@ class SceneLighting:
         lighting = cls(_from_b64(data["ldr"]), _from_b64(data["log"]), measured_sun=measured_sun)
         if sun.get("direction") and "intensity" in sun:
             lighting._persisted_sun = dict(sun)
+        lighting.fit = data.get("fit") or None
+        lighting.ambient_scale = float(data.get("ambient_scale") or 1.0)
+        lighting.fit_sun_scale = float((lighting.fit or {}).get("sun_scale") or 1.0)
         return lighting
 
     # The panorama-measured sun has to survive the context cache. PanoramaLightingStage

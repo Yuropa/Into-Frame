@@ -921,6 +921,10 @@ def main() -> int:
     ap.add_argument("--sun-scale", type=float, default=2.0, help="directional light intensity per unit of the scene's sun intensity")
     ap.add_argument("--ambient", type=float, default=0.45, help="ambient as a fraction of the sky's mean colour")
     ap.add_argument("--exposure", type=float, default=1.0)
+    ap.add_argument("--light-passes", action="store_true",
+                    help="for the photo view also write photo_pass_{sun,amb,unlit}.npy: the frame lit by the sun alone, "
+                         "the ambient alone and by nothing (what Exposure Fit fits the light scales on)")
+    ap.add_argument("--no-fit", action="store_true", help="ignore the run's Exposure Fit (render at the unfitted light scales)")
     ap.add_argument("--no-shadows", action="store_true")
     ap.add_argument("--sun-az-el", default=None, help="debug: aim the sun at 'az,el' degrees instead of the scene's direction")
     ap.add_argument("--save-depth", action="store_true", help="also write <view>_depth.npy (metres, 0 where only sky)")
@@ -943,6 +947,21 @@ def main() -> int:
     scene_path = run_dir / "Scene Generation" / "scene.json"
     scene = json.loads(scene_path.read_text())
     log(f"scene: {len(scene['objects'])} objects (loaded in {time.time() - t0:.1f} s)")
+    # The fitted light scales (pipeline/lighting/exposure_fit.py). A scene.json
+    # written after the fit carries them in lighting.fit with the sun's intensity
+    # already scaled; Scene Generation's (read above) does not, so the fit file
+    # scales both here.
+    fit = (scene.get("lighting") or {}).get("fit")
+    fit_path = run_dir / "Exposure Fit" / "exposure_fit.json"
+    if not args.no_fit:
+        if fit:
+            args.ambient *= float(fit.get("ambient_scale") or 1.0)
+            log(f"exposure fit (scene): ambient x{float(fit.get('ambient_scale') or 1.0):.2f}, sun already x{float(fit.get('sun_scale') or 1.0):.2f}")
+        elif fit_path.exists():
+            fit = json.loads(fit_path.read_text())
+            args.sun_scale *= float(fit.get("sun_scale") or 1.0)
+            args.ambient *= float(fit.get("ambient_scale") or 1.0)
+            log(f"exposure fit (file): sun x{float(fit.get('sun_scale') or 1.0):.2f}, ambient x{float(fit.get('ambient_scale') or 1.0):.2f}")
 
     intr = context.input_intrinsics(ContextKey.INTRINSICS)
     photo = context.input_image(ContextKey.INPUT)
@@ -971,8 +990,22 @@ def main() -> int:
     for view in [v.strip() for v in args.views.split(",") if v.strip()]:
         Rv, pos = view_pose(R, t, view)
         t1 = time.time()
+        zfar = float(scene.get("farClipPlane") or 300.0) * 1.5
+        if args.light_passes and view == "photo":
+            # The frame is linear in the lights: U (nothing lit: the emissive
+            # photo content), S (sun only), A (ambient only) let a fit solve
+            # clip(U + s (S - U) + a (A - U)) against the photograph.
+            base_sun, base_amb = args.sun_scale, args.ambient
+            for tag, sun_scale, ambient in (("sun", base_sun, 0.0), ("amb", 0.0, base_amb), ("unlit", 0.0, 0.0)):
+                args.sun_scale, args.ambient = sun_scale, ambient
+                ps_pass, _ = builder.build(pos, vfov)
+                ps_pass.add(pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=zfar), pose=gl_camera_pose(Rv, pos))
+                c_pass, _ = renderer.render(ps_pass, flags=flags)
+                np.save(out / f"photo_pass_{tag}.npy", (c_pass[..., :3].astype(np.float32) / 255.0).astype(np.float16))
+            args.sun_scale, args.ambient = base_sun, base_amb
+            log(f"photo: light passes written (sun, ambient, unlit)")
         ps, stats = builder.build(pos, vfov)
-        cam = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=float(scene.get("farClipPlane") or 300.0) * 1.5)
+        cam = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=zfar)
         ps.add(cam, pose=gl_camera_pose(Rv, pos))
         colour, depth = renderer.render(ps, flags=flags)
         colour = colour[..., :3].astype(np.float32)

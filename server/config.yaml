@@ -2578,6 +2578,22 @@ stages:
     ao_resolution: 512
     min_faces_for_geometric_ao: 100   # below this a mesh is a card: image-derived maps only
     max_texture_size: 1024
+
+  # The scene's lights fitted to the photograph (pipeline/lighting/exposure_fit.py):
+  # the photo view rendered by scripts/render-scene.py in three passes (sun alone,
+  # ambient alone, nothing lit), then the sun and ambient scales that bring the lit
+  # near field's luminance percentiles to the photograph's. Written to the scene's
+  # lighting (the sun's intensity scaled, lighting.fit, lighting.ambient_scale) and
+  # to exposure_fit.json, which the check renderer applies. Also the plan's haze
+  # distances and the skybox's horizon colour as scene.atmosphere for the client's fog.
+  - name: Exposure Fit
+    stage: ExposureFitStage
+    enabled: true
+    width: 480
+    near_m: 60.0          # the lit geometry the fit sees: the grid and placed objects, not the shell
+    scale_min: 0.25
+    scale_max: 4.0
+
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false

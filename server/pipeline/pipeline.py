@@ -32,6 +32,7 @@ from pipeline.captioning.captioning import CaptioningStage
 from pipeline.scene_plan.scene_plan import ScenePlanStage
 from pipeline.species.species_assets import SpeciesAssetsStage
 from pipeline.structures.structure_placeholders import StructurePlaceholdersStage
+from pipeline.lighting.exposure_fit import ExposureFitStage
 from pipeline.heightmap.heightmap import HeightMapStage, HeightMapConfiguration
 from pipeline.panorama_depth.depth import PanoramaDepthStage
 from pipeline.panorama_depth.calibration import PanoramaDepthCalibrationStage
@@ -349,6 +350,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "ScenePlanStage": ScenePlanStage,
     "SpeciesAssetsStage": SpeciesAssetsStage,
     "StructurePlaceholdersStage": StructurePlaceholdersStage,
+    "ExposureFitStage": ExposureFitStage,
     "DepthStage": DepthStage,
     "PanoramaStage": PanoramaStage,
     "PanoramaToCubemapStage": PanoramaToCubemapStage,

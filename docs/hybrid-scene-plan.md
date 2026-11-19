@@ -559,6 +559,71 @@ Depth Calibration follows. Still open after that, in order: exposure (section 7:
 paintbrush, faint lupine, grey-brown ground, flat snow), the trail, conifer variation,
 haze.
 
+**`band16` (10:00, Rainier from Panorama Depth Calibration): judge 0.26, 5/6, no failed
+must.** The mountain's lower flank is now on the shell (5,163 faces), but ragged sky shows
+between the spires and the mountain's foot on both sides: the photographed treeline's own
+canopy pixels, remapped to 150-200 m, lie flat on the ground at the grid's edge -- the
+Treeline Backdrop ribbon used to stand exactly those up, and band7 switched it off. The
+lift now takes the far part of the forest too (forest pixels remapped beyond half the
+grid), so the shell carries the photograph's own treeline at its radius and the plan
+band's trees stand in front of it. `band17` from Panorama Depth Calibration follows.
+
+**`band17` (11:20, Rainier from Panorama Depth Calibration): judge 0.26, 5/6, no failed
+must; dino 0.504/0.560, dE 14.0.** The flank's gaps closed, but two new things: a pale blue
+strip under the shell's treeline, and flat-topped pale blocks at the horizon left and
+right. The strip is a phantom hill: the depth model reads a tree's lower rows nearer than
+its top, so under a canopy lifted at 100-180 m the same trees' lower rows (13-93 m) stayed
+in the grid as a low mound at the horizon with the skybox between it and the shell. The
+lift now takes the whole per-column run of forest rows under a far canopy pixel (315k px,
+192k lifted, against 180k/56k). The blocks are the removed near firs: Panorama Foreground
+Inpainting left faint grey-blue spires where they stood against the sky, the terrain
+regions typed them terrain, and the forest lift stood them up on the shell. The backdrop's
+ghost rule (removed-object pixels typed sky or built are left off the shell) now also
+drops removed-object pixels whose nearest surviving neighbour is sky, whatever the
+inpainted texture was typed (8,068 px). `band18` from Panorama Depth Calibration follows.
+
+**`band18` (12:57, Rainier from Panorama Depth Calibration): judge 0.26, 5/6, no failed
+must; DINO 0.482 / 0.580 (band17 0.504 / 0.560), colour dE 12.4 (14.0).** The phantom hill
+and the ghost spires are gone (315,204 landform px above the treeline are far, 191,856 of
+them lifted; 8,888 removed-object px left to their models; shell 4,067 vertices). What the
+sheet still shows, read off the render's depth buffer: a line of sky 0.3 deg tall under the
+whole treeline and a wedge of sky 1.3 deg tall at the right edge. The line is the gap
+between the two domains: the lifted treeline's foot stands at eye level on the horizon row
+of the shell (283 m), the grid's edge is 1 m lower at 200 m, and the ground skirt that was
+built for exactly this (Paris) puts its vertices on stride rows, 0.7 deg apart and only
+below the horizon, so it never catches a wedge that narrow (0 skirt vertices). The wedge at
+the right is a forest on a slope behind a rise in the meadow: its lowest pixel is above the
+horizon (150-190 m by the depth map, under the 200 m far start, so not on the shell), no
+ray from its band lands on the terrain (151 of the forest band's 401 columns "off the
+terrain"), and the region map's blob there is narrower than 2.5x its height, so it counted
+as one lone crown: one tree. Two fixes. (1) A foot curtain on the backdrop: per column the
+vertex under the shell's lowest one is moved onto the ray to the grid's edge point (the
+edge's own ground height along that azimuth) and takes the panorama row that ray sees; the
+pixels between the foot and that row stand opaque, less sky, removed objects, water and
+anything measured nearer than half the grid's edge. Rainier: 373 vertices, 2,089 px, wedge
+0.27 deg median, 2.3 max; a test render against the band18 scene shows the line and the
+wedge closed, the photographed forest standing in the wedge. (2) The forest band foots a
+column whose rays all miss by the calibrated depth at its lowest pixel (capped at the usable
+far distance), and a component counts as a stand when it is wider than two of the plan's
+crowns at its measured distance. Rainier, standalone: 99 columns footed by the depth map,
+18 trees at bearings 24-30 deg at 190-208 m, 3-13 m tall, where there were none; elsewhere
+the band is unchanged (209 vs 196 trees in the cone, median 98 m / 3.4 m). `band19` from Far
+Field Backdrop follows, carrying both and the exposure fit of section 7.
+
+**`band19` (14:15, Rainier from Far Field Backdrop): judge 0.31, 5/6, no failed must;
+DINO 0.493 / 0.587 (band18 0.482 / 0.580), colour dE 12.3 (12.4).** Back to band15's
+score with every horizon artefact gone from the judge's list: no strip, no blocks, no
+patch. The forest band placed 982 trees from 424 columns, 95 footed by the depth map (59
+still off the terrain); the right edge has its forested hill and its trees. The exposure
+fit (section 7) ran on 68,400 near pixels: sun x0.81, ambient x1.23, percentile error
+0.044 -> 0.019, sun intensity 2.0 -> 1.62 for the client. The judge's list is now content:
+the mountain painterly (major), the flowers low-poly with oversized yellow spikes (major),
+the snow a grey sheet without the trail, the conifers uniform narrow cones in a row, and
+the light "cool and even" (moderate) -- the fit matched the near field's luminance
+percentiles but lowered the sun to do it, and what the judge misses is the warm low sun's
+highlights, not the exposure. Next: the sun's colour and direction against the plan's
+warmth (section 7), conifer variation, and the flower materials.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
@@ -793,6 +858,16 @@ tonemapping is off, and the pyrender frame scene-check grades has neither.
   matching the rendered frame's luminance histogram to the photo's at the photo camera.
   Fit once per scene after SceneGeneration, stored on the Scene, verified by the colour
   ΔE already in scene-check.
+  *Status (band19):* built as the Exposure Fit stage (`server/pipeline/lighting/exposure_fit.py`,
+  after Material Maps). It renders the photo view three ways (sun only, ambient only,
+  unlit) at 480 px with `scripts/render-scene.py --light-passes --no-fit`, fits sun and
+  ambient scales to the photograph's luminance percentiles over pixels nearer than 60 m
+  (the photographed far field carries its own light), and stores them on the scene's
+  lighting (`lighting.sun.intensity` scaled, `lighting.ambient_scale`, `lighting.fit`) and
+  the plan's atmosphere on `scene.atmosphere`. No tonemapper: it would alter the
+  photographed content. Rainier: sun x0.81, ambient x1.23, error 0.044 -> 0.019. The Unity
+  client consumes the scaled sun intensity; `ambient_scale` and `atmosphere` are written
+  but not yet read by SceneParamManager.
 - **Sun warmth.** The plan's `warmth` is a check on the LuxDiT sun colour; a golden-hour
   photo with a white sun fails sanity and takes the next lighting sample.
 - **Shadows.** Shadow distance is 10 m on the quality tier; raise it to cover the species
