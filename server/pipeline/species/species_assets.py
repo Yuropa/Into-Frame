@@ -84,6 +84,10 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         tree_variants: int = 2,
         timeout_s: int = 600,
         min_evidence: str = "visible",
+        atlas: bool = True,
+        atlas_image_px: int = 768,
+        atlas_steps: int = 28,
+        atlas_guidance: float = 3.5,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.blender_path = Path(os.path.expanduser(blender_path))
@@ -95,6 +99,13 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         self.tree_variants = max(1, int(tree_variants))
         self.timeout_s = int(timeout_s)
         self.min_evidence = str(min_evidence)
+        # Textured parts (pipeline/species/atlas.py): FLUX paints each species' head,
+        # leaf or spray from the plan's words, BiRefNet cuts it out, the cutout takes
+        # the bucket's measured colour, and the builder stands the parts up as cards.
+        self.atlas = bool(atlas)
+        self.atlas_image_px = int(atlas_image_px)
+        self.atlas_steps = int(atlas_steps)
+        self.atlas_guidance = float(atlas_guidance)
 
 
 class SpeciesAssetsStage(PipelineStage):
@@ -250,7 +261,10 @@ class SpeciesAssetsStage(PipelineStage):
         form = species_form(species)
         size = species.get("size_m")
         height = float(size) if isinstance(size, (int, float)) and size > 0 else (12.0 if form == "conifer" else 0.4)
-        width = height * (0.22 if form == "conifer" else 0.6 if form == "shrub" else 0.45)
+        # A spike's head is a few centimetres across, not half its height: the
+        # lousewort (0.7 m) stood 0.31 m wide and the judge called the yellow
+        # spikes oversized.
+        width = height * {"conifer": 0.22, "shrub": 0.6, "raceme": 0.3, "seedhead": 0.2, "spike": 0.15}.get(form, 0.45)
         foliage = bucket_pal["foliage"] or bucket_pal["stem"] or bucket_pal["bloom"][:1]
         stem = bucket_pal["stem"] or foliage
         # A conifer or a tuft has no bloom: its "bloom" pixels are the snow and sky
@@ -317,6 +331,25 @@ class SpeciesAssetsStage(PipelineStage):
                     self.log_warning(f"Blender produced no GLB for {e['id']}")
         return out
 
+    @staticmethod
+    def _cutout_material(mesh: Mesh) -> None:
+        """The atlas cards are cutouts: alpha-masked, two-sided, whatever the
+        exporter wrote for the clipped material."""
+        mat = getattr(getattr(mesh.mesh, "visual", None), "material", None)
+        if mat is None:
+            return
+        for attr, val in (("alphaMode", "MASK"), ("alphaCutoff", 0.5), ("doubleSided", True)):
+            try:
+                setattr(mat, attr, val)
+            except Exception:
+                pass
+
+    def model_names(self) -> list[str]:
+        if self.config.atlas:
+            from pipeline.species.atlas import SpeciesAtlas
+            return SpeciesAtlas.model_names()
+        return []
+
     # ── stage ───────────────────────────────────────────────────────────────
     def run(self, context: PipelineContext) -> PipelineContext:
         plan = ScenePlan.from_context(context)
@@ -376,6 +409,27 @@ class SpeciesAssetsStage(PipelineStage):
             matches[key] = (sp, pal, how, de, members)
             self.advance_progress(task)
 
+        if self.config.atlas and entries:
+            from pipeline.species.atlas import SpeciesAtlas
+            from util.device_utils import DeviceStrategy, preferred_device
+            device, dtype = preferred_device(DeviceStrategy.MEMORY)
+            gen = SpeciesAtlas(device, dtype, self.config.cache_dir, self.config.log,
+                               image_px=self.config.atlas_image_px, steps=self.config.atlas_steps,
+                               guidance=self.config.atlas_guidance, seed=self.seed)
+            work = (self.temp or self.output) / "atlas"
+            try:
+                for entry in entries:
+                    sp, pal, _how, _de, _members = matches[entry["id"]]
+                    info = gen.build(entry, sp, pal, work)
+                    if info and info.get("parts"):
+                        entry.update({"atlas": info["atlas"], "parts": info["parts"],
+                                      "palette_origin": info.get("palette_origin"), "palette_px": info.get("palette_px")})
+                        self.log_info(f"  {entry['id']}: atlas parts {', '.join(info['parts'])} "
+                                      f"({Path(info['atlas']).parent.name})")
+                    else:
+                        self.log_info(f"  {entry['id']}: no atlas; flat palette")
+            finally:
+                gen.close()
         built = self._build(entries)
         for entry in entries:
             key = entry["id"]
@@ -385,7 +439,10 @@ class SpeciesAssetsStage(PipelineStage):
             meshes = []
             for k, path in enumerate(paths):
                 try:
-                    meshes.append(Mesh.load(path))
+                    loaded = Mesh.load(path)
+                    if entry.get("atlas"):
+                        self._cutout_material(loaded)
+                    meshes.append(loaded)
                 except Exception as exc:
                     self.log_warning(f"  {key}: could not load {path.name}: {exc}")
             if not meshes:
