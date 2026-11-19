@@ -445,6 +445,14 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         # intrinsic_delight_strength), so the one surface that is lit by the client
         # with a photograph of the sun already in it stops being the odd one out.
         delight_panorama_layer: bool = True,
+        # Snow keeps its brightness through the delighting: the model reads a
+        # sunlit snow patch as light on a grey surface and divides it out (Rainier:
+        # the mid-ground patches went from L 84 to L 57, "a grey-blue sheet that
+        # looks like water"), when snow's albedo IS near white. Pixels the original
+        # panorama typed SNOW keep at least this fraction of their lit lightness,
+        # with their chroma (the blue of the sky on them) reduced to snow_lift_chroma.
+        snow_lift: float = 0.92,
+        snow_lift_chroma: float = 0.6,
         # Publish a delit copy of the object-removed panorama for the treeline strip
         # and far-field backdrop, at this strength (0 disables).
         environment_delight_strength: float = 0.75,
@@ -616,6 +624,8 @@ class TerrainTextureGenerationConfiguration(PipelineStageConfiguration):
         self.panorama_far_ring_radius_m = float(panorama_far_ring_radius_m)
         self.panorama_far_ring_feather_m = float(panorama_far_ring_feather_m)
         self.delight_panorama_layer = bool(delight_panorama_layer)
+        self.snow_lift = float(snow_lift)
+        self.snow_lift_chroma = float(snow_lift_chroma)
         self.environment_delight_strength = float(environment_delight_strength)
         self.tile_size = tile_size
         self.blend_map_size = blend_map_size
@@ -1159,7 +1169,11 @@ class TerrainTextureGenerationStage(PipelineStage):
                 band_px=cfg.wrap_seam_band_px, log_fn=self.log_info,
             )
             pano_tile = self._inlay_photo(context, pano_tile, cfg)
-            pano_tile = self._delight_panorama_tile(pano_tile, cfg)
+            snow_types = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
+            pano_tile = self._delight_panorama_tile(
+                pano_tile, cfg,
+                snow_mask=(np.asarray(snow_types.depth).astype(np.int64) == int(RegionType.SNOW)) if snow_types is not None else None,
+            )
             # The ORIGINAL-photo typing, not the terrain-scoped one, because this has
             # to describe the pixels this layer actually paints. _ground_colour_panorama
             # above puts the original photograph's pixels back wherever foreground
@@ -2355,6 +2369,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _delight_panorama_tile(
         self, tile: PIL.Image.Image, cfg: "TerrainTextureGenerationConfiguration",
+        snow_mask: "np.ndarray | None" = None,
     ) -> PIL.Image.Image:
         """The panorama layer with its low-frequency shading divided out, so the
         client's own sun and sky light it the way they light every delit object
@@ -2388,7 +2403,35 @@ class TerrainTextureGenerationStage(PipelineStage):
             f"Panorama layer delit at strength {cfg.intrinsic_delight_strength:.2f} "
             "(shading only, colour preserved)"
         )
+        if snow_mask is not None and cfg.snow_lift > 0 and snow_mask.any():
+            delit = self._lift_snow(tile, delit, snow_mask, cfg.snow_lift, cfg.snow_lift_chroma)
         return delit
+
+    def _lift_snow(self, lit: PIL.Image.Image, delit: PIL.Image.Image, snow_mask: np.ndarray,
+                   keep: float, chroma: float) -> PIL.Image.Image:
+        """Snow pixels keep at least `keep` of their lit lightness and `chroma` of
+        their chroma (Lab), feathered 3 px at the mask's edge."""
+        from skimage import color as skcolor
+        w, h = delit.size
+        mask = np.asarray(PIL.Image.fromarray((snow_mask * 255).astype(np.uint8)).resize((w, h), PIL.Image.BILINEAR),
+                          dtype=np.float32) / 255.0
+        # Feathered at the edge, whole in the middle: the blur alone left the
+        # patch's core at 0.7 and the lift short of its target.
+        mask = np.clip(gaussian_filter(mask, 3.0) * 1.6, 0.0, 1.0)
+        if mask.max() <= 0:
+            return delit
+        lit_lab = skcolor.rgb2lab(np.asarray(lit.convert("RGB").resize((w, h), PIL.Image.LANCZOS), dtype=np.float32) / 255.0)
+        out_lab = skcolor.rgb2lab(np.asarray(delit.convert("RGB"), dtype=np.float32) / 255.0)
+        target = out_lab.copy()
+        target[..., 0] = np.maximum(out_lab[..., 0], keep * lit_lab[..., 0])
+        target[..., 1:] = out_lab[..., 1:] * chroma
+        lab = out_lab + (target - out_lab) * mask[..., None]
+        before = float(np.median(out_lab[..., 0][mask > 0.5])) if (mask > 0.5).any() else float("nan")
+        after = float(np.median(lab[..., 0][mask > 0.5])) if (mask > 0.5).any() else float("nan")
+        rgb = np.clip(skcolor.lab2rgb(lab), 0.0, 1.0)
+        self.log_info(f"Snow kept its brightness through the delighting: {int((mask > 0.5).sum())} px, "
+                      f"L {before:.0f} -> {after:.0f} (lit {float(np.median(lit_lab[..., 0][mask > 0.5])):.0f})")
+        return PIL.Image.fromarray((rgb * 255).astype(np.uint8), "RGB")
 
     def _supersample_patch(
         self,
