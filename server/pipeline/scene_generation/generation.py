@@ -1347,11 +1347,21 @@ class SceneGenerationStage(PipelineStage):
                             return None
                         return float(locs[0][1])
 
+                    def ground_at(theta: float, dist: float) -> tuple[float, float]:
+                        """World XZ of a point `dist` out along panorama bearing theta."""
+                        lx, lz = dist * math.sin(theta), dist * math.cos(theta)
+                        wx = lx * math.cos(yaw_rad) + lz * math.sin(yaw_rad) + camera_xz[0]
+                        wz = -lx * math.sin(yaw_rad) + lz * math.cos(yaw_rad) + camera_xz[1]
+                        return wx, wz
+
+                    band_depth = context.input_depth(ContextKey.PANORAMA_DEPTH_METRIC)
                     new_instances, summary = band_instances(
                         np.asarray(region_map.depth), int(region_value), ground_hit,
                         size_m=band[2], size_band=(band[0], band[1]), far_m=usable_far_m,
                         cls=bcls, bucket=band_bucket, rows=self.config.plan_band_rows, seed=self.seed,
                         camera_xz=(float(camera_xz[0]), float(camera_xz[1])), ground_y=ground_y,
+                        depth=np.asarray(band_depth.depth, dtype=np.float64) if band_depth is not None else None,
+                        ground_at=ground_at,
                     )
                     for meta in new_instances:
                         context.add_object(f"metadata_{object_count}", meta)
@@ -1362,7 +1372,8 @@ class SceneGenerationStage(PipelineStage):
                     self.log_info(
                         f"Scene Plan: {region_name} band -> {len(new_instances)} {bcls}(s) from {summary['columns']} column(s)"
                         f" in {summary['spans']} span(s) (bucket {band_bucket}; {summary['thin']} thin, {summary['missed']} off"
-                        f" the terrain, {summary['beyond']} beyond {usable_far_m:.0f} m): distance {summary['distance_m']} m,"
+                        f" the terrain, {summary['depth_feet']} footed by the depth map, {summary['beyond']} beyond"
+                        f" {usable_far_m:.0f} m): distance {summary['distance_m']} m,"
                         f" height {summary['height_m']} m: {summary['tips']} skyline tips ({summary['lone']} lone crowns)"
                         f" and {summary['fill']} fill {summary['rows']} rows deep; the band's angle implies {summary['implied_m']} m")
                     plan.overrides.append({

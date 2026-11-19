@@ -93,6 +93,7 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
         skirt_min_depth_fraction: float = 0.7,
+        foot_curtain: bool = True,
         horizon_water_deg: float = 5.0,
         water_apron: bool = True,
         water_apron_min_fraction: float = 0.15,
@@ -147,6 +148,11 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # skirt behind the stack as photo rectangles). Kept only when its depth
         # is at least this fraction of the distance it would be drawn at.
         self.skirt_min_depth_fraction = float(skirt_min_depth_fraction)
+        # The shell's foot joined to the grid's edge at full resolution (see the
+        # foot curtain in run): the skirt's vertices sit on stride rows, and the
+        # wedge between the foot's ray and the ray to the grid's edge is narrower
+        # than one.
+        self.foot_curtain = bool(foot_curtain)
         # Water the panorama shows at or above the geometric horizon, up to this
         # many degrees, goes to the shell whatever its depth (see run).
         self.horizon_water_deg = float(horizon_water_deg)
@@ -408,11 +414,21 @@ class FarFieldBackdropStage(PipelineStage):
         # it in the object-removed panorama, and the shell would carry that ghost
         # as a flat stepped silhouette right behind the model. Sky- and built-typed
         # pixels under the occluder mask are left off the shell.
+        occ = None
         occluder = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
         if occluder is not None and type_depth is not None and far.any():
             occ = np.asarray(occluder.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
             types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
             ghost = far & occ & np.isin(types_full, [int(RegionType.SKY), int(RegionType.BUILT)])
+            # ...and the pixels of a removed object whose nearest surviving
+            # neighbour is sky, whatever the inpainted texture was typed: a near
+            # fir removed from against the sky left a faint grey-blue spire the
+            # terrain regions typed terrain, which the shell then stood up as a
+            # flat-topped pale block at the horizon (Rainier band17).
+            if occ.any():
+                from scipy.ndimage import distance_transform_edt
+                _, (ri, ci) = distance_transform_edt(occ, return_indices=True)
+                ghost |= far & occ & (types_full[ri, ci] == int(RegionType.SKY))
             if ghost.any():
                 far &= ~ghost
                 self.log_info(f"Far-field backdrop: {int(ghost.sum())} px of removed objects left to their 3D models")
@@ -574,13 +590,81 @@ class FarFieldBackdropStage(PipelineStage):
                 f"Far-field backdrop: ground skirt of {int(skirt.sum())} vertices "
                 f"(edge height {float(np.median(edge_y)):.1f} m) between the grid's edge and the shell"
             )
+        # ── foot curtain: the shell's foot down to the grid's edge ──────────
+        # The skirt's vertices stand on stride rows (0.7 deg at 2048 rows) and
+        # only below the horizon, and the wedge between the shell's foot ray and
+        # the ray to the grid's edge is narrower than that, or above the horizon
+        # altogether: on Rainier (band18) the lifted treeline's foot stood at eye
+        # level on the horizon row while the grid's edge, 1 m lower at 200 m, lay
+        # 0.3 deg under it -- a line of sky between the shell and the ground
+        # under the whole treeline -- and at the right edge a forest whose foot is
+        # hidden behind a rise in the meadow left 1.3 deg of sky. Per column, the
+        # vertex under the shell's lowest one is moved onto the ray to the grid's
+        # edge point (the edge's own ground height along that azimuth), at the
+        # grid's edge, and takes the panorama row that ray sees; the pixels
+        # between the foot and that row stand opaque on the quads between them.
+        # They are drawn behind where they were photographed (the forest's lower
+        # crowns at 150-190 m, the ground at 200-280 m), which from the capture
+        # camera is exact and from a step aside a parallax error of a few metres.
+        curtain = np.zeros_like(shell)
+        curtain_full = np.zeros((H, W), dtype=bool)
+        row_override = np.full(shell.shape, np.nan)
+        if cfg.foot_curtain and edge_y is not None:
+            lon_c = lon
+            # Horizontal distance to the grid's square edge along each column.
+            e_h = grid_half / np.maximum(np.maximum(np.abs(np.sin(lon_c)), np.abs(np.cos(lon_c))), 1e-6)
+            lat_edge = np.arctan2(edge_y, e_h)
+            row_edge = (0.5 - lat_edge / np.pi) * H
+            has_foot = shell.any(axis=0)
+            # The lowest shell vertex per column (the last True down the column).
+            nr_ = shell.shape[0]
+            i_foot = nr_ - 1 - np.argmax(shell[::-1], axis=0)
+            i_c = i_foot + 1
+            for j in np.where(has_foot)[0]:
+                i = int(i_c[j])
+                if i >= nr_ or shell[i, j] or skirt[i, j]:
+                    continue
+                if lat_edge[j] >= LAT[int(i_foot[j]), j]:
+                    continue  # the grid's edge stands above the foot: no wedge
+                curtain[i, j] = True
+                row_override[i, j] = row_edge[j]
+                X2[i, j] = e_h[j] * np.sin(lon_c[j])
+                Y2[i, j] = edge_y[j]
+                Z2[i, j] = e_h[j] * np.cos(lon_c[j])
+            if curtain.any():
+                # Full-resolution alpha: in each pixel column, from under the
+                # lowest far pixel down to the edge ray's row, leaving sky (above
+                # the skirt's sky floor), removed objects (their models stand in
+                # the scene), water and anything measured nearer than half the
+                # grid's edge (a shrub in front of the gap, not the ground in it).
+                prow = np.arange(H)
+                plat = (0.5 - prow / H) * np.pi
+                pcol = np.minimum(np.arange(W) // s, len(cols) - 1)
+                foot_full = np.where(far.any(axis=0), H - 1 - np.argmax(far[::-1], axis=0), -1)
+                col_has = curtain.any(axis=0)[pcol]
+                in_wedge = (prow[:, None] > foot_full[None, :]) & (prow[:, None] <= row_edge[pcol][None, :])
+                curtain_full = in_wedge & col_has[None, :] & ~far
+                if sky is not None:
+                    curtain_full &= ~sky | (plat < -np.radians(cfg.skirt_sky_below_deg))[:, None]
+                if occ is not None:
+                    curtain_full &= ~occ
+                curtain_full &= ~water_covered
+                if tl is not None:
+                    curtain_full &= ~tl
+                curtain_full &= ~(np.isfinite(depth) & (depth < 0.5 * e_h[pcol][None, :]))
+                gap_deg = np.degrees(LAT[i_foot[curtain.any(axis=0)], np.where(curtain.any(axis=0))[0]] - lat_edge[curtain.any(axis=0)])
+                self.log_info(
+                    f"Far-field backdrop: foot curtain of {int(curtain.sum())} vertices joins the shell's foot to the "
+                    f"grid's edge over {int(curtain_full.sum())} px (wedge {float(np.median(gap_deg)):.2f} deg median, "
+                    f"{float(gap_deg.max()):.2f} max)"
+                )
         apron_faces = 0
         if y_water is not None and water_covered.any():
             apron_faces = self._water_apron(
                 context, cfg, water_mesh, y_water, water_covered, t_plane_all, grid_half,
                 cols, W, foot, open_water_cols,
             )
-        valid = shell | skirt
+        valid = shell | skirt | curtain
         X, Y, Z = X2, Y2, Z2
 
         nr, nc = len(rows), len(cols)
@@ -629,7 +713,7 @@ class FarFieldBackdropStage(PipelineStage):
         if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
             colour = panorama
         rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
-        alpha = (far | skirt_full)[row_min:row_max + 1].astype(np.float32)
+        alpha = (far | skirt_full | curtain_full)[row_min:row_max + 1].astype(np.float32)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
         # At the photograph's resolution where it was photographed (see
@@ -643,6 +727,8 @@ class FarFieldBackdropStage(PipelineStage):
             texture = texture.resize((cfg.texture_max_width, max(1, int(texture.height * scale))), PILImage.LANCZOS)
         strip_h = row_max - row_min + 1
         ROW, COL = np.meshgrid(rows, cols, indexing="ij")
+        # A curtain vertex sits on the ray to the grid's edge, between stride rows.
+        ROW = np.where(np.isfinite(row_override), row_override, ROW.astype(np.float64))
         uv = np.stack([
             COL[valid] / W,
             1.0 - (ROW[valid] - row_min) / max(strip_h - 1, 1),
@@ -691,6 +777,7 @@ class FarFieldBackdropStage(PipelineStage):
             texture.save(self.temp / "far_field_strip.png")
             preview = np.asarray(panorama.rgb(), dtype=np.uint8).copy()
             preview[skirt_full] = (preview[skirt_full] * 0.5 + np.array([0, 128, 255]) * 0.5).astype(np.uint8)
+            preview[curtain_full] = (preview[curtain_full] * 0.5 + np.array([255, 0, 200]) * 0.5).astype(np.uint8)
             preview[far] = (preview[far] * 0.5 + np.array([255, 128, 0]) * 0.5).astype(np.uint8)
             PILImage.fromarray(preview).resize((W // 4, H // 4)).save(self.temp / "far_field_overlay.png")
         self.advance_progress(task)

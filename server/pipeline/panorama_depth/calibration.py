@@ -596,7 +596,8 @@ def plan_far_knots(
     return out, stats
 
 
-def far_landform_mask(region_map: Optional[np.ndarray], shape: tuple[int, int]) -> Optional[np.ndarray]:
+def far_landform_mask(region_map: Optional[np.ndarray], shape: tuple[int, int],
+                      depth: Optional[np.ndarray] = None, forest_far_m: Optional[float] = None) -> Optional[np.ndarray]:
     """Landform (TERRAIN, SNOW) pixels standing above the forest's skyline in their
     column, or above the horizon where no forest stands: the mountain. The depth
     model reads its foot at the treeline's own 25-33 m (Rainier), so a depth
@@ -626,7 +627,27 @@ def far_landform_mask(region_map: Optional[np.ndarray], shape: tuple[int, int]) 
     # Where no forest stands, landform above the horizon only.
     above_tree = (rows < top[None, :]) & has[None, :] & ~sky & ~forest
     above_horizon = (rows < h // 2) & ~has[None, :] & landform
-    return above_tree | above_horizon
+    out = above_tree | above_horizon
+    if depth is not None and forest_far_m is not None and depth.shape == (h, w):
+        # The far part of the forest itself -- the photographed treeline, not the
+        # shrubs on the meadow -- goes with the mountain: the shell carries the
+        # photograph's own canopy at its radius and the plan band's trees stand
+        # in front of it. Left in the grid it lay flat on the ground at the
+        # grid's edge and the sky showed between the spires and the mountain's
+        # foot (band16). The whole run of forest rows under a far canopy pixel
+        # goes with it: the depth model reads a tree's lower rows nearer than its
+        # top (Rainier: 13-93 m under a canopy at 100-180 m), and lifted by depth
+        # alone the canopy stood on the shell while its lower rows built a low
+        # phantom hill in the grid with a strip of sky between (band17).
+        far_forest = forest & (depth >= forest_far_m)
+        if far_forest.any():
+            starts = forest & ~np.roll(forest, 1, axis=0)
+            starts[0] = forest[0]
+            run_id = np.cumsum(starts, axis=0) * forest
+            keyed = run_id + np.arange(w)[None, :] * (h + 1)
+            hit = np.unique(keyed[far_forest])
+            out |= forest & np.isin(keyed, hit)
+    return out
 
 
 def apply_far_knots(depth: np.ndarray, knots: list[tuple[float, float]]) -> np.ndarray:
@@ -1020,7 +1041,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             context.add_object(ContextKey.FAR_FIELD_START_M, far_start)
             self.log_info(f"Far field starts at the grid's edge, {far_start:.0f} m (plan-anchored far field)")
             far_force = far_landform_mask(np.asarray(region_depth.depth) if region_depth is not None else None,
-                                          calibrated_arr.shape)
+                                          calibrated_arr.shape, depth=calibrated_arr, forest_far_m=0.5 * float(max_depth_m))
             if far_force is not None and far_force.any():
                 floor_m = 1.1 * float(max_depth_m)
                 lifted = int((far_force & (calibrated_arr < floor_m)).sum())

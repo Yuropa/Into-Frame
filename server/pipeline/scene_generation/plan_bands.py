@@ -92,6 +92,8 @@ def band_instances(
     clump_floor: float = 0.12,
     foot_fraction: float = 0.3,
     seed: int = 0,
+    depth: Optional[np.ndarray] = None,
+    ground_at: Optional[Callable[[float, float], tuple[float, float]]] = None,
 ) -> tuple[list[dict], dict]:
     """Synthetic instances following the region's shape in the region map.
 
@@ -99,7 +101,14 @@ def band_instances(
     as the skyline needs where the column's band foot meets the terrain; the band
     between them is filled with rows behind the foot, tops under the skyline,
     thinned into clumps. A column whose band is less than min_fill solid (a crown
-    seen through gaps) gets no fill."""
+    seen through gaps) gets no fill.
+
+    depth (the calibrated panorama depth, the region map's shape) and ground_at
+    (theta, distance -> world x, z) give a column whose rays all miss the ground
+    a foot anyway: a stand on a slope behind a rise in the meadow shows no foot,
+    its lowest pixel is above the horizon, and no ray from its band lands
+    (Rainier band18: the forest at the right edge, 150-190 m by the depth map,
+    151 of 401 columns off the terrain and the gap under it sky)."""
     from scipy import ndimage, signal
 
     mask = np.asarray(region_map) == int(region_value)
@@ -126,12 +135,27 @@ def band_instances(
         if top_label[c]:
             comp_cols.setdefault(int(top_label[c]), []).append(c)
     stand = np.zeros(w, dtype=bool)
+    # ...or, with the depth map, wider than two of the plan's crowns at the
+    # component's measured distance: a stand on a slope behind a rise shows a
+    # blob of crowns little wider than tall (Rainier band18: the forest at the
+    # right edge, 7 deg wide at 190-220 m, which one tree cannot be).
+    have_depth = depth is not None and depth.shape == (h, w)
+    comp_dist: dict[int, float] = {}
+    if have_depth and comp_cols:
+        labs = list(comp_cols.keys())
+        finite = np.where(np.isfinite(depth), depth, np.nan)
+        med = ndimage.median(finite, labels=labels, index=labs)
+        comp_dist = {lab: float(m) for lab, m in zip(labs, np.atleast_1d(med))}
     for lab, cols in comp_cols.items():
         rows_of = np.where(labels == lab)[0]
         ang_h = (rows_of.max() - rows_of.min() + 1) / h * math.pi
         ang_w = (max(cols) - min(cols) + 1) / w * 2.0 * math.pi
         if ang_w >= 2.5 * ang_h:
             stand[cols] = True
+        elif comp_dist.get(lab) is not None and np.isfinite(comp_dist[lab]):
+            crown_ang = 0.5 * size_m / max(min(comp_dist[lab], far_m), 1.0)
+            if ang_w >= 2.0 * crown_ang:
+                stand[cols] = True
 
     def elevation(row: float) -> float:
         return (0.5 - row / h) * math.pi
@@ -162,6 +186,19 @@ def band_instances(
                     z = camera_xz[1] + (z - camera_xz[1]) * far_m / dist
                     dist = far_m
                 return x, z, dist, el, beyond
+        if have_depth and ground_at is not None:
+            # No ray lands: the band's foot is hidden. Its lowest pixel's own
+            # measured distance stands in, capped at far_m like a landed ray.
+            # The stand's distance floor is a guard against a ray landing on the
+            # meadow in front; a measured distance only has to be most of it.
+            rb = int(min(max(round(float(bot[col])), 0), h - 1))
+            d = float(depth[rb, col])
+            if np.isfinite(d) and d >= max(1.0, near_floor, 0.5 * min_dist):
+                beyond = d > far_m
+                d = min(d, far_m)
+                x, z = ground_at(theta, d)
+                stats["depth_feet"] += 1
+                return x, z, d, el_b, beyond
         return None
 
     def height_floor(dist: float, el_t: float, el_b: float) -> float:
@@ -181,7 +218,7 @@ def band_instances(
 
     instances: list[dict] = []
     stats = {"columns": 0, "thin": 0, "missed": 0, "beyond": 0, "tips": 0, "fill": 0, "lone": 0,
-             "spans": 0, "rows": [], "distance_m": [], "height_m": [], "implied_m": []}
+             "spans": 0, "depth_feet": 0, "rows": [], "distance_m": [], "height_m": [], "implied_m": []}
 
     def emit(x: float, z: float, h_m: float, row: int, col: int, tip: bool) -> None:
         meta = {
@@ -315,7 +352,7 @@ def band_instances(
     summary = {
         "spans": stats["spans"], "columns": stats["columns"], "thin": stats["thin"], "missed": stats["missed"],
         "beyond": stats["beyond"], "placed": len(instances), "tips": stats["tips"], "lone": stats["lone"],
-        "fill": stats["fill"],
+        "fill": stats["fill"], "depth_feet": stats["depth_feet"],
         "rows": round(float(np.mean(stats["rows"])), 1) if stats["rows"] else None,
         "distance_m": pct("distance_m"), "height_m": pct("height_m"),
         "implied_m": [round(float(v), 0) for v in np.percentile(stats["implied_m"], [5, 50, 95])] if stats["implied_m"] else None,
