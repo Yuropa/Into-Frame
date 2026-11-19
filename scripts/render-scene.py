@@ -30,6 +30,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -106,6 +107,20 @@ def cutout_shader_dir() -> str:
     if amb in text and ao_block in text:
         text = text.replace(ao_block, "    // occlusion applied to ambient above")
         text = text.replace(amb, "#ifdef HAS_OCCLUSION_TEX\n    color.xyz += base_color.xyz * ambient_light * texture(material.occlusion_texture, uv_0).r;\n#else\n" + amb + "\n#endif")
+    # Vegetation cards (flagged by material_for with an emissive factor of
+    # 0.001 blue): a leaf or a petal is lit from either side and scatters light
+    # through itself, so the normal faces the viewer and the diffuse term wraps
+    # (half-Lambert) instead of going black side-on to the sun. Rainier band21: a
+    # meadow of upright cards under a 20 deg sun from the left rendered black.
+    n_line = "    vec3 n = normalize(get_normal());"
+    brdf = ("        vec3 res = compute_brdf(n, v, l, roughness, metallic,\n"
+            "                                f0, c_diff, base_color.rgb, radiance);")
+    if n_line in text and brdf in text:
+        text = text.replace(n_line, n_line + "\n    bool veg = material.emissive_factor.b > 0.0005 && material.emissive_factor.b < 0.002;\n"
+                            "    if (!gl_FrontFacing) n = -n;")
+        text = text.replace(brdf, brdf + "\n        if (veg) { res = c_diff * radiance * clamp(dot(n, l) * 0.5 + 0.5, 0.0, 1.0); }")
+    else:
+        print("warning: pyrender's mesh.frag changed; the vegetation wrap-lighting patch did not apply", flush=True)
     frag.write_text(text)
     return str(dst)
 
@@ -185,6 +200,10 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
             cut = float(getattr(src_mat, "alphaCutoff", None) or 0.5) * 255.0
             arr = arr.copy()
             arr[..., 3] = np.where(arr[..., 3] >= cut, 255, 0).astype(np.uint8)
+            # A cutout is vegetation: flag it for the shader's wrapped, two-sided
+            # diffuse (see cutout_shader_dir) through an emissive factor too small
+            # to see. Overridden below for unlit content.
+            kwargs["emissiveFactor"] = [0.0, 0.0, 0.001]
         # The exporter (scene.mesh.Mesh._clamp_samplers) writes a clamp-to-edge
         # sampler for every mesh whose UVs stay inside the texture; glTFast
         # honours it, so this does too. Under REPEAT the top edge of a card
@@ -527,7 +546,10 @@ class SceneBuilder:
                 geom = to_gl(quad())
                 mat = material_for(geom, image=img)
             gl_poses = np.stack([_MIRROR @ p @ _MIRROR for p in poses])
-            ps.add(pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=smooth))
+            pm = pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=smooth)
+            if kind in ("mesh", "mesh_unlit") and casts_no_shadow(key):
+                pm.no_shadow = True
+            ps.add(pm)
 
         # Environment meshes.
         terrain_pose = None
@@ -610,14 +632,16 @@ class SceneBuilder:
             grass = self._grass_field_mesh()
             if grass is not None:
                 g = to_gl(grass)
-                ps.add(pyrender.Mesh(primitives=[pyrender.Primitive(
+                gm = pyrender.Mesh(primitives=[pyrender.Primitive(
                     positions=np.asarray(g.vertices, dtype=np.float32),
                     normals=np.asarray(g.vertex_normals, dtype=np.float32),
                     color_0=grass.metadata["colour"],
                     indices=np.asarray(g.faces, dtype=np.uint32),
                     material=pyrender.MetallicRoughnessMaterial(
                         baseColorFactor=[1.0, 1.0, 1.0, 1.0], metallicFactor=0.0, roughnessFactor=0.9, doubleSided=True),
-                )]), pose=_MIRROR @ terrain_pose @ _MIRROR)
+                )])
+                gm.no_shadow = True
+                ps.add(gm, pose=_MIRROR @ terrain_pose @ _MIRROR)
                 stats["grass_tufts"] = int(grass.metadata["tufts"])
         self._add_sun(ps)
         return ps, stats
@@ -850,6 +874,44 @@ class SceneBuilder:
         self.log(f"  sun: toward {np.round(d, 3)}, intensity {intensity:.2f}")
 
 
+# ── shadows: small vegetation casts none ─────────────────────────────────────────
+# pyrender's directional shadow map spans the whole scene (the grid and the shell
+# to 500 m), so a texel is half a metre: a flower cannot cast a shadow at that
+# resolution, only a blot, and a meadow of cards under a 20 deg sun was its own
+# solid shadow (Rainier band21: the sun pass showed every plant black while the
+# ground around it was lit). Unity does not shadow small vegetation either. A
+# mesh flagged `no_shadow` is hidden during the shadow pass and drawn normally.
+def _patch_shadow_pass() -> None:
+    from pyrender.renderer import Renderer
+    if getattr(Renderer, "_no_shadow_patched", False):
+        return
+    original = Renderer._shadow_mapping_pass
+
+    def _shadow_mapping_pass(self, scene, light_node, flags):
+        hidden = []
+        for node in scene.mesh_nodes:
+            if getattr(node.mesh, "no_shadow", False) and node.mesh.is_visible:
+                node.mesh.is_visible = False
+                hidden.append(node.mesh)
+        try:
+            return original(self, scene, light_node, flags)
+        finally:
+            for mesh in hidden:
+                mesh.is_visible = True
+
+    Renderer._shadow_mapping_pass = _shadow_mapping_pass
+    Renderer._no_shadow_patched = True
+
+
+_NO_SHADOW_CLASSES = ("flower", "plant", "grass", "bush", "shrub", "reed", "moss")
+
+
+def casts_no_shadow(key: str) -> bool:
+    """Small vegetation by its asset key (category_mesh_flower_3_v1, ..._card)."""
+    m = re.match(r"category_mesh_([a-z_]+?)_\d+", key)
+    return bool(m and m.group(1) in _NO_SHADOW_CLASSES)
+
+
 # ── camera and sky ───────────────────────────────────────────────────────────────
 
 def camera_basis(scene: dict) -> tuple[np.ndarray, np.ndarray]:
@@ -908,6 +970,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("run_dir", type=Path)
     ap.add_argument("--out", type=Path, default=None, help="output directory (default: scratch/render/<run-id>)")
+    ap.add_argument("--scene", type=Path, default=None,
+                    help="render this scene.json instead of the newest one in run_dir (the exposure fit's lit copy)")
     ap.add_argument("--config", type=Path, default=ROOT / "server" / "config.yaml")
     ap.add_argument("--width", type=int, default=1200)
     ap.add_argument("--views", default="photo,left,right,step", help="comma list of photo,left,right,back,step,high,down")
@@ -944,9 +1008,12 @@ def main() -> int:
     t0 = time.time()
     context = load_context(run_dir, args.config)
     from pipeline.pipeline_context import ContextKey
-    scene_path = run_dir / "Scene Generation" / "scene.json"
+    # The newest scene.json any stage wrote: Exposure Fit's carries the fitted
+    # light and the sun's colour, Scene Generation's the objects alone.
+    candidates = sorted(run_dir.glob("*/scene.json"), key=lambda p: p.stat().st_mtime)
+    scene_path = args.scene or (candidates[-1] if candidates else run_dir / "Scene Generation" / "scene.json")
     scene = json.loads(scene_path.read_text())
-    log(f"scene: {len(scene['objects'])} objects (loaded in {time.time() - t0:.1f} s)")
+    log(f"scene: {len(scene['objects'])} objects from {scene_path.parent.name} (loaded in {time.time() - t0:.1f} s)")
     # The fitted light scales (pipeline/lighting/exposure_fit.py). A scene.json
     # written after the fit carries them in lighting.fit with the sun's intensity
     # already scaled; Scene Generation's (read above) does not, so the fit file
@@ -981,6 +1048,7 @@ def main() -> int:
     sky = context.input_panorama(scene.get("skybox") or "panorama_sky")
     yaw = float(scene.get("skyboxRotation") or 0.0)
 
+    _patch_shadow_pass()
     renderer = pyrender.OffscreenRenderer(width, height)
     renderer._renderer._program_cache = ShaderProgramCache(shader_dir=cutout_shader_dir())
     flags = pyrender.RenderFlags.NONE if args.no_shadows else pyrender.RenderFlags.SHADOWS_DIRECTIONAL

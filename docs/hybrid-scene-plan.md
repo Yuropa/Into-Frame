@@ -624,6 +624,64 @@ percentiles but lowered the sun to do it, and what the judge misses is the warm 
 highlights, not the exposure. Next: the sun's colour and direction against the plan's
 warmth (section 7), conifer variation, and the flower materials.
 
+**`band20` (20:47, Rainier from Species Assets): judge 0.38, 4/6, must a2 failed ("a dense
+meadow of magenta paintbrush, yellow spikes and purple lupine"); DINO 0.515 / 0.585,
+colour dE 12.7.** The first run with textured species parts (section 6 status): the
+lousewort spikes read as yellow spikes for the first time and the firs as layered spires,
+and the score is the best yet, but the meadow lost its mass: "thin, uniform vertical sticks
+with small coloured tips ... bare brown ground between stalks". Three causes, read off the
+render: FLUX paints a head on a length of stem however the prompt reads, so a head card was
+two thirds stem and the bloom a tip; the head cards were as narrow as the painted twig
+(aspect 0.2-0.3 of their length); and the leaf cards stood in upright planes at random
+bearings, half of them edge-on to a standing camera, as black hairlines. Fixes for band21:
+the head cutout is trimmed from the bottom while its opaque run is under 30% of the widest
+row; heads are a fan of three cards no narrower than half their length (0.4 for racemes,
+0.6 for seed heads); leaves lie across their direction (the leaf plane holds the direction
+and the horizontal), 10-16 of them on a spike; foliage keeps only a quarter of the measured
+lightness shift (the crops were delit in the meadow's shade). And a finding that explains
+"flat lighting" on every band: the cached Panorama Lighting carries LuxDiT's sun at az 176
+el 48, behind the camera and high, for a photograph the plan reads as lit low from the left
+(az -75, el 12, golden) -- the lighting stage's plan window never reached this cache. The
+Exposure Fit stage now aims the key light at the plan's sun (raised to the 20 deg floor)
+when the scene's lies outside the plan's window, colours it for the plan's golden elevation
+(10 deg: #fffeff -> #ffac46), renders its three passes from that scene
+(`render-scene.py --scene`) and fits the strength. `band21` from Species Assets follows.
+
+**`band21` (21:12, Rainier from Species Assets): judge 0.34, 5/6, no failed must; DINO
+0.609 / 0.598 (band20 0.515 / 0.585), colour dE 15.1 (12.7).** The must is back and the
+global DINO jumped, but the judge still saw "uniform thin stalks" and a "muddier, darker"
+frame, and the exposure fit went to sun x0.25, ambient x3.25 (error 0.53 -> 0.19). The
+fit's own passes said why: with the key light now low from the left, the sun-only pass
+showed every plant black while the ground beside it was lit. Two renderer causes. The
+directional shadow map spans the whole scene to 500 m, half a metre a texel, so a meadow
+of cards under a 20 deg sun was one solid self-shadow; and a card's normal faces the
+viewer while the sun is at its side, so Lambert gave it nothing and its back face was
+black. `scripts/render-scene.py` now draws small vegetation (flower, plant, grass, bush
+classes and the grass field) with no shadow casting, as Unity does, and lights cutout
+materials two-sided with a wrapped diffuse (half-Lambert) in place of the BRDF, flagged
+through a 0.001 emissive factor. Unfitted, the sun pass over the meadow rows went from
+p90 0.244 to a meadow of lit yellow spikes, magenta paintbrush and blue lupine. The fit's
+scales are bounded to [0.5, 3]. `band22` from Exposure Fit refits and re-judges band21's
+scene under this renderer. Still open from band21's list: the snow patches as a grey-blue
+sheet (the grid region map has no SNOW type; the patches are the delit photo overlay at
+L~80 under a low sun), the trail, the mountain's texture, and the conifers' even spacing
+(the band's column step now varies 0.5-1.8x a crown).
+
+**`band22` (21:45, Rainier from Exposure Fit, band21's scene under the vegetation-lit
+renderer): judge 0.35, 5/6, no failed must; DINO 0.575 / 0.573, colour dE 14.3.** The
+fit chose sun x1.34 and the ambient floor 0.5 (sun 2.68 for the client), the meadow is lit
+and read as "yellow spikes, red and purple" flowers. What the judge now names: the
+mid-ground snow patches gone to "a flat brown-grey band" (the panorama layer's delit snow
+at L 57 under a 20 deg sun); the conifers "bright uniform yellow-green pillars" (the fir
+spray painted bright green and lit wrapped, keeping only a quarter of the measured
+darkness); the paintbrush "sparse, reads as stems" (FLUX paints Castilleja as a thin
+spike); the ground "dark uniform brown, no grass". For `band23`, from Terrain Texture
+Generation: snow pixels keep 92% of their lit lightness through the panorama layer's
+delighting with their chroma at 60% (`snow_lift`; unit test on the real panorama: L 56
+-> 72 median across the feathered mask, 78 at the core); a conifer spray keeps 80% of
+the measured darkness; the spike head prompt asks for the whole head "full and bushy";
+the forest band's column step varies 0.5-1.8x a crown.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
@@ -812,6 +870,25 @@ in the client, route B below wins by default.
 **What the layer needs regardless of route:** 3 to 4 variants per species, species-true
 colour, the 3-bone sway rig from CategoryMeshRigging, density from the plan as a prior on
 DistributionSynthesis, and a cache keyed by species so a species is generated once, ever.
+
+**Status (2026-11-19, band20).** Route A is built as the Species Assets stage
+(`pipeline/species/`): a procedural skeleton per form (spike, raceme, seedhead, conifer,
+tuft, shrub) in headless Blender 5.2, coloured from the bucket's measured palette, 3
+variants per flower bucket and 2 per tree, the bucket's far card rasterised from the mesh.
+Up to band19 every part was flat-coloured polygons, one swatch per face, and the judge
+called them "low-poly blobs"; the spike form also drew its head at 0.45x the height
+(a 0.7 m lousewort 0.31 m wide: "oversized yellow spikes"). Band20 adds textured parts
+(`species/atlas.py`): FLUX.1-dev paints each species' head, leaf or branch spray from the
+plan's words (Latin name, phrase, colours) isolated on white, BiRefNet cuts it out, the
+cutout's mean Lab colour is shifted to the bucket's photographed colour (the texture keeps
+its detail, the plant keeps the photograph's colour), and the parts go into a 1024 px atlas
+per species with a corner for the stem swatches. The builder stands them up as cards on
+the same skeleton: a head as two crossed cards on the top third of the stem, leaves as
+cards, a fir's branches as a flat spray card and an upright one per twig (7-10 a whorl,
+no narrower than half their length). Spike widths are 0.15x the height, racemes 0.3x,
+seed heads 0.2x. Cached per species, palette and prompt under `cache/species/atlas_*`.
+Rainier's five species took about 50 s each on the 32 GB card; the flowers are 74-114
+triangles, the fir about 1,000.
 
 **Route A, procedural code.** A code-writing call (same model family as the plan, or the
 local coder) is given the species entry, the plan's size and colours, the delit crop and

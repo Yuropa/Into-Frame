@@ -258,6 +258,14 @@ class SceneLighting:
         self.fit_sun_scale = 1.0
         self.ambient_scale = 1.0
         self.fit = None  # Optional[dict]
+        # The elevation the sun's COLOUR is taken at when it differs from the key
+        # light's: a plan sun at 12 deg is raised to the 20 deg floor so the near
+        # field is lit (PanoramaLightingStage), but the light's warmth is the
+        # photograph's low sun's. Set by ExposureFitStage from the plan's sun.
+        self.sun_colour_elevation_deg = None  # Optional[float]
+        # Where the direction came from when a later stage aimed the key light
+        # (ExposureFitStage, the plan's sun): reported in sun()["direction_source"].
+        self.direction_source_override = None  # Optional[str]
         # (direction, color) measured from the PANORAMA's own sky rather than from
         # the estimated environment map, or None. See sun() and measure_panorama_sun.
         self.measured_sun = measured_sun
@@ -320,6 +328,12 @@ class SceneLighting:
             d["intensity_base"] = round(base, 3)
             d["intensity"] = round(base * self.fit_sun_scale, 3)
             d["fit_sun_scale"] = round(float(self.fit_sun_scale), 3)
+            if self.measured_sun is not None and self.direction_source_override:
+                d["direction"] = list(self.measured_sun[0])
+                d["elevation_deg"] = round(float(np.degrees(np.arcsin(np.clip(float(self.measured_sun[0][1]), -1.0, 1.0)))), 2)
+            if self.direction_source_override:
+                d["direction_source"] = self.direction_source_override
+            self._apply_colour_elevation(d)
             return d
         rgb, is_hdr = self._radiance()
         luminance = rgb @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
@@ -424,11 +438,12 @@ class SceneLighting:
             tint = np.array([int(measured[1][i:i + 2], 16) / 255.0 for i in (1, 3, 5)], dtype=np.float64)
         else:
             tint = np.clip(np.asarray(color, dtype=np.float64), 0.0, 1.0)
+        measured_hex = "#{:02x}{:02x}{:02x}".format(*(int(round(float(c) * 255.0)) for c in np.clip(tint, 0.0, 1.0)))
         tint, solar_scale = apply_solar_model(tint, elevation_deg)
         unclamped_intensity *= solar_scale
         unclamped_intensity *= self.sun_intensity_scale
         intensity_max = float(self.sun_intensity_max) if self.sun_intensity_max else _SUN_INTENSITY_MAX
-        return {
+        out = {
             "direction": (
                 list(measured[0]) if measured
                 else [round(float(v), 5) for v in direction]
@@ -436,6 +451,7 @@ class SceneLighting:
             "color": "#{:02x}{:02x}{:02x}".format(
                 *(int(round(float(c) * 255.0)) for c in np.clip(tint, 0.0, 1.0))
             ),
+            "color_measured": measured_hex,
             "elevation_deg": round(elevation_deg, 2),
             "solar_scale": round(float(solar_scale), 3),
             # Where direction/colour came from, so a scene that silently fell back
@@ -458,6 +474,24 @@ class SceneLighting:
             # (the client logs it) can tell the difference.
             "hdr": bool(is_hdr),
         }
+        if self.direction_source_override:
+            out["direction_source"] = self.direction_source_override
+        self._apply_colour_elevation(out)
+        return out
+
+    def _apply_colour_elevation(self, d: dict) -> None:
+        """Recolour the sun for sun_colour_elevation_deg (the photograph's low sun)
+        from the colour measured before the solar model, when one is set."""
+        el = self.sun_colour_elevation_deg
+        if el is None:
+            return
+        src = d.get("color_measured") or d.get("color")
+        if not src:
+            return
+        tint = np.array([int(src[i:i + 2], 16) / 255.0 for i in (1, 3, 5)], dtype=np.float64)
+        tint, _ = apply_solar_model(tint, float(el))
+        d["color"] = "#{:02x}{:02x}{:02x}".format(*(int(round(float(c) * 255.0)) for c in np.clip(tint, 0.0, 1.0)))
+        d["colour_elevation_deg"] = round(float(el), 2)
 
     @property
     def width(self) -> int:
@@ -481,6 +515,8 @@ class SceneLighting:
             "sun": self.sun(),
             "ambient_scale": round(float(self.ambient_scale), 3),
             "fit": self.fit,
+            "sun_colour_elevation_deg": self.sun_colour_elevation_deg,
+            "direction_source_override": self.direction_source_override,
         }
 
     @classmethod
@@ -504,6 +540,11 @@ class SceneLighting:
         lighting.fit = data.get("fit") or None
         lighting.ambient_scale = float(data.get("ambient_scale") or 1.0)
         lighting.fit_sun_scale = float((lighting.fit or {}).get("sun_scale") or 1.0)
+        el = data.get("sun_colour_elevation_deg")
+        lighting.sun_colour_elevation_deg = float(el) if isinstance(el, (int, float)) else None
+        if data.get("direction_source_override") and sun.get("direction") and sun.get("color"):
+            lighting.direction_source_override = str(data["direction_source_override"])
+            lighting.measured_sun = (sun["direction"], sun.get("color_measured") or sun["color"])
         return lighting
 
     # The panorama-measured sun has to survive the context cache. PanoramaLightingStage

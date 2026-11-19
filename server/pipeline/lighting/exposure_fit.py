@@ -23,6 +23,7 @@ Output  exposure_fit.json in this stage's folder (render-scene applies it),
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import sys
@@ -60,6 +61,11 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         grass: bool = False,
         timeout_s: float = 900.0,
         atmosphere: bool = True,
+        sun_warmth: bool = True,
+        plan_sun: bool = True,
+        plan_sun_az_tolerance_deg: float = 35.0,
+        plan_sun_el_tolerance_deg: float = 20.0,
+        plan_sun_min_elevation_deg: float = 20.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.width = int(width)
@@ -72,6 +78,16 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         self.grass = bool(grass)
         self.timeout_s = float(timeout_s)
         self.atmosphere = bool(atmosphere)
+        self.sun_warmth = bool(sun_warmth)
+        # Aim the key light at the plan's sun when the scene's lies outside the
+        # plan's window: Panorama Lighting does this at estimation time, but a
+        # cached lighting from before that rule (Rainier: LuxDiT's sun at az 176
+        # el 48, behind the camera and high, for a photograph lit low from the
+        # left) carries no plan direction, and every run since was lit flat.
+        self.plan_sun = bool(plan_sun)
+        self.plan_sun_az_tolerance_deg = float(plan_sun_az_tolerance_deg)
+        self.plan_sun_el_tolerance_deg = float(plan_sun_el_tolerance_deg)
+        self.plan_sun_min_elevation_deg = float(plan_sun_min_elevation_deg)
 
 
 def fit_light_scales(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit: np.ndarray, near: np.ndarray,
@@ -138,10 +154,12 @@ class ExposureFitStage(PipelineStage):
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(MARKER) is not None
 
-    def _render_passes(self, run_dir: Path, out: Path) -> Optional[str]:
+    def _render_passes(self, run_dir: Path, out: Path, scene_path: Optional[Path] = None) -> Optional[str]:
         cfg: ExposureFitConfiguration = self.config
         cmd = [sys.executable, str(ROOT / "scripts" / "render-scene.py"), str(run_dir), "--out", str(out),
                "--views", "photo", "--width", str(cfg.width), "--save-depth", "--light-passes", "--no-fit"]
+        if scene_path is not None:
+            cmd += ["--scene", str(scene_path)]
         if not cfg.grass:
             cmd.append("--no-grass")
         env = dict(os.environ)
@@ -181,12 +199,58 @@ class ExposureFitStage(PipelineStage):
             scene.atmosphere = atmosphere
             self.log_info(f"Atmosphere: haze {atmosphere['haze_near_m']}-{atmosphere['haze_far_m']} m "
                           f"({atmosphere['evidence']}), horizon colour {atmosphere['haze_color']}")
+        # ── the key light's direction from the plan ─────────────────────────
+        if cfg.plan_sun and plan is not None and scene.lighting is not None:
+            paz, pel = plan.get("sun.azimuth_deg"), plan.get("sun.elevation_deg")
+            sun = scene.lighting.sun() or {}
+            cur = sun.get("direction")
+            if (plan.evidence("sun") in ("visible", "inferred") and isinstance(paz, (int, float))
+                    and isinstance(pel, (int, float)) and cur and sun.get("direction_source") != "plan"):
+                cur_az = math.degrees(math.atan2(float(cur[0]), float(cur[2])))
+                cur_el = math.degrees(math.asin(max(-1.0, min(1.0, float(cur[1])))))
+                daz = (cur_az - float(paz) + 180.0) % 360.0 - 180.0
+                if abs(daz) > cfg.plan_sun_az_tolerance_deg or abs(cur_el - float(pel)) > cfg.plan_sun_el_tolerance_deg:
+                    el_used = max(float(pel), cfg.plan_sun_min_elevation_deg)
+                    el, az = math.radians(el_used), math.radians(float(paz))
+                    direction = [round(math.cos(el) * math.sin(az), 5), round(math.sin(el), 5),
+                                 round(math.cos(el) * math.cos(az), 5)]
+                    colour = sun.get("color_measured") or sun.get("color") or "#ffffff"
+                    scene.lighting.measured_sun = (direction, colour)
+                    scene.lighting.direction_source_override = "plan"
+                    self.log_info(f"Key light aimed at the plan's sun az {paz:g} el {el_used:g} (plan el {pel:g}, "
+                                  f"{plan.evidence('sun')}): the scene's was az {cur_az:.0f} el {cur_el:.0f} "
+                                  f"({sun.get('direction_source')}), outside the window; the fit below sets its strength")
+        # ── the sun's warmth from the plan ──────────────────────────────────
+        # The key light's elevation was raised to light the near field; its colour
+        # is the photographed sun's. The plan's elevation sets it, and its warmth
+        # word lowers it further when the photograph says golden light.
+        if cfg.sun_warmth and plan is not None and scene.lighting is not None:
+            pel = plan.get("sun.elevation_deg")
+            warmth = str(plan.get("sun.warmth") or "").lower()
+            if plan.evidence("sun") in ("visible", "inferred") and isinstance(pel, (int, float)):
+                cap = {"golden": 10.0, "amber": 10.0, "orange": 7.0, "warm": 15.0}
+                el_colour = float(pel)
+                for word, deg in cap.items():
+                    if word in warmth:
+                        el_colour = min(el_colour, deg)
+                before = (scene.lighting.sun() or {}).get("color")
+                sun_el = (scene.lighting.sun() or {}).get("elevation_deg")
+                if sun_el is None or el_colour < float(sun_el) - 0.5:
+                    scene.lighting.sun_colour_elevation_deg = el_colour
+                    after = (scene.lighting.sun() or {}).get("color")
+                    self.log_info(f"Sun colour for the plan's {warmth or 'unstated'} sun at {pel:g} deg "
+                                  f"(colour elevation {el_colour:g}, key light at {sun_el}): {before} -> {after}")
         self.advance_progress(task)
 
         # ── the three light passes of the photo view ────────────────────────
         out = (self.temp or (run_dir / self.name / "build")) / "render"
         out.mkdir(parents=True, exist_ok=True)
-        failure = self._render_passes(run_dir, out)
+        # The passes are lit by THIS scene's sun (direction, colour), not the one
+        # Scene Generation wrote.
+        from pipeline.context_value import JSONEncoder
+        fit_scene = out.parent / "scene_for_fit.json"
+        fit_scene.write_text(json.dumps(scene.encode(), cls=JSONEncoder))
+        failure = self._render_passes(run_dir, out, fit_scene)
         if failure is not None:
             self.log_warning(f"Exposure fit: {failure}")
             context.add_scene(ContextKey.SCENE, scene)

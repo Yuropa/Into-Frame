@@ -2591,8 +2591,8 @@ stages:
     enabled: true
     width: 480
     near_m: 60.0          # the lit geometry the fit sees: the grid and placed objects, not the shell
-    scale_min: 0.25
-    scale_max: 4.0
+    scale_min: 0.5              # the key light stays a key light: band21 fitted sun x0.25, ambient x3.25 against a self-shadowed meadow and went flat
+    scale_max: 3.0
 
   - name: Foreground Inpainting
     stage: ForegroundInpainting
