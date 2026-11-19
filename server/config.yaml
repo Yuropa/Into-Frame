@@ -1497,7 +1497,9 @@ stages:
     # as alpha). A "forest" is a band of unresolved canopy, not a set of trees, so
     # it is not scattered as instances (Distribution Synthesis exclude_types) and
     # this is what represents it instead. See pipeline/terrain/treeline_backdrop.py.
-    min_distance_m: 40.0        # nearer canopy is placed as individual tree instances (detected,
+    min_distance_m: 250.0       # beyond the terrain grid: the plan band (Scene Generation) stands the
+                                # photographed forest as geometry, and the ribbon behind it read as
+                                # "black blob-like lumps between the trees" (band7). Was 40: nearer canopy is placed as individual tree instances (detected,
                                 # outpainted and painted trees, 3D up close); the strip only
                                 # carries the forest beyond. At 6 m it took nearly every tree.
     max_distance_m: 400.0
@@ -1534,7 +1536,7 @@ stages:
   - name: Far Field Backdrop
     stage: FarFieldBackdropStage
     start_m: 0                  # 0 = Panorama Depth Calibration's far-field start (far_fraction)
-    start_radius_m: 0           # world radius the shell begins at; 0 = the grid's half-size
+    start_radius_m: 0           # world radius the shell begins at; 0 = the grid's corner (half x sqrt 2), so no vertex lands inside the grid's square
     far_band_fraction: 0.9      # "far" = depth beyond this fraction of the calibrated map's ceiling (or the
                                 # measured far start, whichever is farther). The old floor was the grid's
                                 # half-size, which the depth ceiling never exceeds, so no scene ever got a
@@ -1543,7 +1545,7 @@ stages:
     scale_m: 0                  # e-folding in depth units; 0 = the saturated band's own width
     close_px: 10                # bridge sky-typed gaps inside a far structure (a lattice tower, a crown)
     stride_px: 8
-    max_depth_ratio: 1.8        # neighbours further apart than this ratio are a silhouette, not a surface
+    max_depth_ratio: 6.0        # neighbours further apart than this ratio (of their rendered radius) are a silhouette, not a surface. Was 1.8: a plan-anchored far field (Panorama Depth Calibration) runs 220-6000 m, 210-500 m in radius, and at 1.8 the mountain tore into stair-stepped blocks with holes (Rainier band7-10)
     feather_px: 3.0
 
   - name: Object Instance Refinement
@@ -1832,7 +1834,7 @@ stages:
     paint_vegetation_in_water: false
     # Ground-cover radius and falloff above; these classes stand 25-150 m out and
     # LODs keep the far ones cheap.
-    class_max_paint_radius_m: {tree: 150.0, boat: 150.0, dock: 100.0, bush: 60.0, rock: 60.0}
+    class_max_paint_radius_m: {tree: 150.0, boat: 150.0, dock: 100.0, bush: 60.0, rock: 60.0, flower: 15.0}  # a 0.4 m flower beyond 15 m is an upright stick on bare ground (the judge: "a crowd of tiny figures"); the meadow beyond is the ground texture's
     class_falloff_exponent: {tree: 1.0, boat: 0.5, dock: 0.5}
     class_density_scale: {tree: 2.0}  # detector recall: a row of canopies is boxed as a few trees
     # Learned placement relative to the water's edge, roads, trails and the forest
@@ -2298,6 +2300,12 @@ stages:
     plan_population: true
     plan_population_classes: [flower]
     plan_population_near_m: 15.0
+    # ...and filled to the plan's density inside that radius across the photographed cone
+    # (plus the margin either side): plants per m2 per density word; the painter spreads
+    # its copies by area, so the foreground held 2/m2 where the photo is a carpet (band10).
+    plan_population_fill: true
+    plan_population_density_m2: {dense: 6.0, patchy: 1.5, sparse: 0.5}
+    plan_population_margin_deg: 20.0
     # A species mesh stays geometry down to this many screen px (min_mesh_angular_px
     # gates reconstructions): a 0.4 m flower is a mesh to ~15 m, a 1.4 m band fir to 25 m,
     # and the runtime LOD (species_lod_mesh_screen_fraction) takes over beyond.
@@ -2520,7 +2528,7 @@ stages:
     # grid, and it starts culling real detections instead of the painted surplus -- 20
     # of 44 real flowers dropped at 1.0 against 14 at 0.8.
     overlap_min_separation_overrides:
-      flower: 0.8
+      flower: 0.4   # was 0.8: a meadow's plants interpenetrate; at 0.8 the painter's 2,259 flowers placed ~700 (band8)
       plant: 0.8
       bush: 0.8
       tree: 0.8

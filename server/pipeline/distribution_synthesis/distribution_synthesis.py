@@ -675,6 +675,27 @@ class DistributionSynthesisStage(PipelineStage):
 
     def run(self, context: PipelineContext) -> PipelineContext:
         cfg: DistributionSynthesisConfiguration = self.config
+        # The plan's species density (docs/hybrid-scene-plan.md): a class the plan
+        # calls dense is painted more than its detections suggest (a flower bed
+        # resolves into a few boxes), a sparse one less. Max over the class's species.
+        plan_density: dict[str, float] = {}
+        try:
+            from pipeline.scene_plan import ScenePlan
+            from pipeline.object_typing.categories import normalize_category
+            _plan = ScenePlan.from_context(context)
+            if _plan is not None:
+                words = {"dense": 2.5, "common": 1.5, "patchy": 1.0, "scattered": 0.8, "sparse": 0.5, "rare": 0.3}
+                for sp in _plan.items("species", "inferred"):
+                    cls = normalize_category(sp.get("class"))
+                    dword = str(sp.get("density") or "").lower()
+                    factor = next((v for k, v in words.items() if k in dword), None)
+                    if cls and factor is not None:
+                        plan_density[cls] = max(plan_density.get(cls, 0.0), factor)
+                if plan_density:
+                    self.log_info(f"Scene Plan: painted density scaled by the species' density words {plan_density}")
+        except Exception as exc:
+            self.log_info(f"Scene Plan density not read: {exc}")
+        self._plan_density = plan_density
 
         distribution = context.input_object_distribution(ContextKey.OBJECT_DISTRIBUTION)
         if distribution is None:
@@ -1018,6 +1039,7 @@ class DistributionSynthesisStage(PipelineStage):
             # canopies merges into a few tree boxes (Paris's quay: "not nearly
             # enough trees"), as a flower bed does into a few bloom boxes.
             exemplar_density *= float(cfg.class_density_scale.get(obj_type, 1.0))
+            exemplar_density *= float((getattr(self, "_plan_density", None) or {}).get(obj_type, 1.0))
             if obj_type in cfg.bloom_classes and len(exemplar_pts) >= 8:
                 # A flower bed resolves into detections only in the nearest metres;
                 # the few seed heads picked out further off stretch the hull across

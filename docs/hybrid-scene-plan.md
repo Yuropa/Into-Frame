@@ -440,6 +440,125 @@ clipped grid edge, and the plan band stands at ~190 m with 9-36 m firs. Risk: th
 stretch between 9 and 24 m measured is x3.4 in log slope, so depth noise there becomes
 terrain relief; the Treeline Backdrop (min 40 m) may now also stand its ribbon up.
 
+**`band5` (01:11, Rainier from Panorama Depth Calibration).** The remap did what it
+said: grid 400 m, far field 4200 m, the treeline ribbon stood up at 166-200 m (Treeline
+Backdrop's 40 m floor was never reached before), and the world reads deep on the sheet:
+the stands at the mountain's foot at a believable scale, snow patches in the mid-ground,
+the lone fir near. DINO global 0.482 -> 0.471, layout 0.460 -> 0.471, ΔE 15.0 -> 14.9,
+judge 0.31 -> 0.29, 6/6. Three things wrong, all measured. (1) The plan band's feet were
+still at 7-15 m (p50 14.6, only the p95 at 126 m): the foot probe took the first ray that
+landed anywhere, and the mask's bottom rows are mid-ground shrubs whose rays land on the
+near meadow; `near_fraction` was 0 so the "far ground" test never fired. Now a stand's foot
+must land at >= 0.3x the distance its angle implies for the plan tree (a lone crown keeps
+its own base). (2) The summit is still the grid's clipped crest: the far field started at
+0.7 x the 6000 m plateau = 4200 m, so Terrain Reconstruction anchored the ridge chain in
+the grid, the Height Map built the compressed flank as a 19-42 m wall at 173-200 m, and
+the shell got 82 faces. When the far field is plan-anchored it now starts at the grid's
+edge (200 m): the ridge chain is handed to the shell and pixels deeper than the grid are
+excluded from it. (3) "A crowd of tiny figures" in the mid-ground: 0.4 m flowers painted
+to 30 m are upright coloured sticks on bare ground at 20-30 m; `class_max_paint_radius_m`
+flower 15. `band6` relaunched from Panorama Depth Calibration at 01:13 with all three.
+Also measured: the object-removed panorama keeps the meadow's green and pink at 10-30 m,
+so the brown mid-ground is the delit terrain albedo under the scene sun with no exposure,
+the same cause as the maroon paintbrush and the khaki firs -- section 7 is next.
+
+**`band6` -> `band7` (02:44, Rainier from Terrain Reconstruction).** band6 showed the
+ridge chain still anchored with the far field at 200 m: the chain runs round the whole
+outpainted 360 along the meadow's horizon (22 m), so its median depth was near and
+the whole chain anchored, mountain included. Terrain Reconstruction now hands a near
+chain's far points (range under the crest saturated or beyond the grid) to the shell
+(1,206 of 4,095 points, bearings -41 to +63) and publishes the anchored chains
+(`MOUNTAIN_RIDGE_CHAINS_ANCHORED`); the Far Field Backdrop leaves landform pixels to
+the terrain only in anchored columns (8,206 px instead of 107,013; shell 2,275 faces
+instead of 82). band6 was stopped and band7 run from Terrain Reconstruction. Result:
+judge 0.22, 4/6, failed must a2 again, and three regressions, all understood. (1) The
+shell tore the mountain into stair-stepped blocks: its silhouette test compared
+depth-map values, and the plan-anchored flank runs 245-6000 m in map units while the
+radius mapping folds it into 200-500 m; now judged on the rendered radius. (2) The band
+stood at 25-154 m (p50 58) with 1.4-9.8 m firs: the foot fix worked but the forest's
+implied 209 m lies beyond the 200 m grid; the forest knot is now capped at 0.75x the
+grid's maximum half (150 m). (3) "No dense field of paintbrush": the painter made
+1,044 flowers (the junk bucket re-clustered to 811 members, the 15 m radius cut the
+rest) and the overlap test kept ~400; the painter's density is learned from the
+detections, so it now scales by the plan's species density words (dense 2.5, patchy
+1, sparse 0.5). Also: the treeline ribbon behind the band read as "black blob-like
+lumps", so the Treeline Backdrop's floor is 250 m while the plan band stands the
+photographed forest. `band8` from Panorama Depth Calibration launched 02:47.
+
+**`band8` (04:13, Rainier from Panorama Depth Calibration): judge 0.03, 4/6.** Worse,
+and the cause is the split itself: the shell takes pixels deeper than the grid (200 m)
+and the grid the rest, but the depth model reads the mountain's foot at the treeline's
+own 25-33 m, so the remap put the lower flank at 150-200 m (flat ground at the grid's
+edge, a sliver from the camera, sky above it) and the 200 m threshold cut a stair-stepped,
+holed boundary through the flank where the log slope amplified the depth noise. The
+radius-space tear test changed nothing (2,144 faces vs 2,275). Fix: the far field is not
+a depth threshold for landform. `far_landform_mask` -- TERRAIN/SNOW pixels above the
+forest's skyline in their column (the horizon where no forest stands) -- is the mountain
+whatever its depth, lifted to 1.1x the grid's half in both maps (99,593 of 126,755
+landform px; 16,859 lifted), so the Height Map excludes it, the ridge handover and the
+shell take it whole. Flowers: 2,259 painted, ~700 placed; `overlap_min_separation_overrides`
+flower 0.8 -> 0.4 (a meadow's plants interpenetrate). `band9` launched 04:15 from
+Panorama Depth Calibration -- and stopped at 04:43: the lift reached only the compressed map,
+the metric map the shell and the ridge handover read had been published before it (shell
+2,144 faces again). Metric map republished after the lift; `band10` launched 04:44.
+
+**`band10` (06:09, Rainier from Panorama Depth Calibration): judge 0.08, 4/6.** The lift
+reached the shell (ridge handover 1,306 points, shell 2,282 faces) and the mountain is
+whole in the far set, but still stair-stepped with holes: the tear test, even on rendered
+radius, sees the lifted flank at 220 m (radius 210) beside the summit at 6000 m (radius
+500), a 2.4x ratio against the 1.8 threshold, so faces between lifted and unlifted
+neighbours are dropped everywhere the depth noise crossed the floor. `max_depth_ratio`
+1.8 -> 6 (inside the far set the only silhouette that matters, against the sky, is the
+alpha's). The flowers: 1,423 paintbrush placed but p10/50/90 at 4.5/11/14 m, 65 within
+3 m -- the painter spreads copies by area, 2.4/m2 flat, where the photograph's foreground
+is a carpet. `fill_population`: the plan's density words become plants per m2 (dense 6,
+patchy 1.5, sparse 0.5), summed over the class's species inside 15 m across the
+photographed cone plus 20 deg either side; the shortfall over the painted copies is
+sampled by area on vegetation cells of the top-down region map, 0.25 m apart, each a
+species by density and where. Rainier: 988 added to 592 painted in 191 m2 (target 9/m2),
+4,010 objects kept. `band11` launched 06:16 from Far Field Backdrop -- and stopped at
+06:17: its shell had 2,387 faces against 2,282, so the ratio was not what dropped the
+blocks. Measured instead: the shell drops any vertex inside the grid's square (|x|, |z|
+< 200 m) and starts at radius 200 m, so at bearings off the axes the lifted flank at
+200-283 m was dropped in blocks (the stair steps and holes since band7). The shell now
+starts at the grid's corner radius, half x sqrt 2. `band12` launched 06:17 from Far
+Field Backdrop and stopped a minute later: the depth threshold had moved with the
+radius (far beyond 283 m, the lifted flank at 220 excluded again); decoupled, far in
+depth stays the grid's half. `band13` launched 06:20.
+
+**`band13` (07:20, Rainier from Far Field Backdrop): judge 0.15, 5/6, no failed must.**
+The foreground is a meadow again: 799 filled + 766 painted flowers in the cone, 4,062
+objects, and a2 (dense paintbrush, yellow spikes, lupine) passes -- the lupine is
+there (279) but reads dark under the flat light. The mountain still had its vertical
+cutouts, with 2,937 faces: not the tear ratio, not the square. Cause found in the
+hand-back: the chain's points at the mountain's foot have the forest (150 m, inside
+the grid) under their crest, so they anchor, and the backdrop then handed *every*
+landform pixel in those columns to the terrain, summit included -- vertical strips cut
+wherever the skyline dipped. Now only pixels at or below the anchored crest in that
+column are the terrain's. `band14` launched 07:21 from Far Field Backdrop -- and
+moved 400 px, so that was not it either; stopped at 07:22. Rasterised the shell from
+the capture camera instead (scratch: shell_raster.png, shell_alpha.png): the mesh only
+has cells whose own vertex pixel is far, so its boundary is a staircase of stride cells
+*inside* the silhouette, and the full-resolution alpha cannot paint what the mesh does
+not cover -- the stepped summit and the sky between the treeline and the mountain's
+foot, since band7. The vertex grid now keeps any cell with a far neighbour (3x3
+maximum filter) so the mesh reaches past the silhouette and the alpha cuts the edge.
+`band15` launched 07:22 from Far Field Backdrop.
+
+**`band15` (08:25, Rainier from Far Field Backdrop): judge 0.31, 5/6, no failed must.**
+The stair-steps are gone: the summit is the photograph's silhouette on the shell, the
+treeline stands at the mountain's foot at a believable scale, the lone fir is at the
+left edge, and the foreground is a dense paintbrush, lousewort and lupine meadow (the
+lupine reads faint). What remains on the mountain: a strip of sky between the treeline
+and the mountain's foot, and the lower flank "smeared and melted". Both are pixels that
+stayed in the grid: the strip between a column's own treeline and the lift's smoothed
+one, remapped to 150-200 m and laid on flat ground at the grid's edge. The lift now
+takes everything that is not sky above the column's own treeline (114,172 px, 8,887
+lifted; landform above the horizon where no forest stands). `band16` from Panorama
+Depth Calibration follows. Still open after that, in order: exposure (section 7: maroon
+paintbrush, faint lupine, grey-brown ground, flat snow), the trail, conifer variation,
+haze.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |

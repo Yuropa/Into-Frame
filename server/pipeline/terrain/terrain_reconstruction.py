@@ -401,6 +401,7 @@ class TerrainReconstructionStage(PipelineStage):
             else max(float(far_start or 0.0), z_half)
         )
         n_far = 0
+        n_far_points = 0
 
         def chain_metric_depth(chain: np.ndarray) -> "float | None":
             """Median metric depth of the panorama pixels this chain was lifted from."""
@@ -469,6 +470,22 @@ class TerrainReconstructionStage(PipelineStage):
                 horiz = horiz[near] * scale
                 n_relifted += int(near.sum())
                 n_far += 1   # the rest of the chain still goes to the far field
+            elif cfg.ridge_anchor_per_point and cone is not None:
+                # The chain as a whole is near -- Rainier's runs round the whole
+                # outpainted 360 along the meadow's horizon at 22 m -- but the
+                # photographed part of it carries the mountain: points whose range
+                # under the crest is saturated or beyond the limit go to the far
+                # field, the rest anchor.
+                r_pt = chain_point_ranges(chain)
+                if r_pt is not None:
+                    far_pt = ~np.isfinite(r_pt) | (r_pt > metric_limit)
+                    if far_pt.any():
+                        n_far_points += int(far_pt.sum())
+                        chain = chain[~far_pt]
+                        horiz = horiz[~far_pt]
+                        if len(chain) < 2:
+                            n_far += 1
+                            continue
             # A chain can clear the median-distance qualification above while
             # still dipping past individual points close to the camera (noisy
             # silhouette tracing) -- anchoring those as hard Dirichlet BCs pins
@@ -496,7 +513,11 @@ class TerrainReconstructionStage(PipelineStage):
             f"{n_far} beyond {metric_limit:.0f} m metric handed to the far-field backdrop"
             + (f"; {n_relifted} photographed point(s) of those re-lifted to their measured range inside the grid"
                if n_relifted else "")
+            + (f"; {n_far_points} point(s) of anchored chains beyond {metric_limit:.0f} m handed to the far-field backdrop"
+               if n_far_points else "")
         )
+        context.add_object(ContextKey.MOUNTAIN_RIDGE_CHAINS_ANCHORED,
+                           [np.asarray(c, dtype=float).tolist() for c in anchored_chains])
 
         # ── Critical-slope envelope ───────────────────────────────────────────
         # The harmonic solve with only crest nodes produces a smooth ramp whose

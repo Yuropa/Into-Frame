@@ -95,6 +95,7 @@ class ContextKey:
     REGION_MAP = "region_map"
     MOUNTAIN_SILHOUETTE = "mountain_silhouette"
     MOUNTAIN_RIDGE_CHAINS = "mountain_ridge_chains"
+    MOUNTAIN_RIDGE_CHAINS_ANCHORED = "mountain_ridge_chains_anchored"  # the chains Terrain Reconstruction anchored, as anchored
     PANORAMA_HORIZON = "panorama_horizon"
     WATER_CHAINS = "water_chains"
     INTERIOR_PEAKS = "interior_peaks"

@@ -490,6 +490,7 @@ def plan_far_knots(
     plan,
     columns: Optional[tuple[float, float]],
     min_ratio: float = 1.5,
+    max_plan_m: Optional[float] = None,
 ) -> tuple[list[tuple[float, float]], dict]:
     """Depth knots (measured_m, plan_m) the far field should be remapped through.
 
@@ -555,6 +556,11 @@ def plan_far_knots(
             m_f, p_f = float(np.median(measured)), float(np.median(implied))
             stats["forest"] = {"columns": len(measured), "measured_m": round(m_f, 1), "implied_m": round(p_f, 1),
                                "tree_m": size_m, "species": sp[2]}
+            if max_plan_m is not None and p_f > max_plan_m:
+                # The band must land on terrain the grid holds (Rainier: 209 m implied,
+                # 200 m grid -> the band stood at 58 m, 3 m firs again).
+                stats["forest"]["capped_m"] = round(max_plan_m, 1)
+                p_f = max_plan_m
             if p_f >= min_ratio * m_f:
                 knots.append((m_f, p_f))
 
@@ -588,6 +594,39 @@ def plan_far_knots(
             continue
         out.append((m, p))
     return out, stats
+
+
+def far_landform_mask(region_map: Optional[np.ndarray], shape: tuple[int, int]) -> Optional[np.ndarray]:
+    """Landform (TERRAIN, SNOW) pixels standing above the forest's skyline in their
+    column, or above the horizon where no forest stands: the mountain. The depth
+    model reads its foot at the treeline's own 25-33 m (Rainier), so a depth
+    threshold alone splits the flank between the grid and the far-field shell
+    (band8: a floating slab with its lower slopes missing); these pixels are the
+    far field whatever their depth."""
+    from pipeline.panorama_segmentation.panorama_region_result import RegionType
+
+    if region_map is None:
+        return None
+    h, w = shape
+    rm = np.asarray(region_map)
+    if rm.shape != (h, w):
+        from PIL import Image as _PILImage
+        rm = np.asarray(_PILImage.fromarray(rm.astype(np.uint8)).resize((w, h), _PILImage.NEAREST))
+    rm = np.rint(rm).astype(np.int32)
+    landform = (rm == int(RegionType.TERRAIN)) | (rm == int(RegionType.SNOW))
+    forest = rm == int(RegionType.FOREST)
+    sky = rm == int(RegionType.SKY)
+    rows = np.arange(h)[:, None]
+    has = forest.any(axis=0)
+    top = np.where(has, np.where(forest, rows, h).min(axis=0), h // 2)
+    # Above the column's own treeline everything that is not sky is the far
+    # side of the forest -- the mountain, and the green knolls at its foot the
+    # region map types as vegetation (band15: a strip of sky between the
+    # treeline and the mountain where those stayed in the grid as flat ground).
+    # Where no forest stands, landform above the horizon only.
+    above_tree = (rows < top[None, :]) & has[None, :] & ~sky & ~forest
+    above_horizon = (rows < h // 2) & ~has[None, :] & landform
+    return above_tree | above_horizon
 
 
 def apply_far_knots(depth: np.ndarray, knots: list[tuple[float, float]]) -> np.ndarray:
@@ -908,6 +947,8 @@ class PanoramaDepthCalibrationStage(PipelineStage):
         # metric depth lies beyond the grid are handed to that stage too (see
         # TerrainReconstructionStage.ridge_max_metric_depth_m).
         far_knots: list[tuple[float, float]] = []
+        far_force = None
+        region_depth = None
         if cfg.plan_far_anchor and plan is not None:
             region_depth = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP)
             cone_cols = None
@@ -921,6 +962,7 @@ class PanoramaDepthCalibrationStage(PipelineStage):
             far_knots, far_stats = plan_far_knots(
                 calibrated_arr, np.asarray(region_depth.depth) if region_depth is not None else None,
                 sky_mask, plan, cone_cols, min_ratio=cfg.plan_far_min_ratio,
+                max_plan_m=0.75 * cfg.grid_half_max_m if cfg.adaptive_grid else None,
             )
             if far_knots:
                 calibrated_arr = apply_far_knots(calibrated_arr, far_knots)
@@ -968,6 +1010,26 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 f"{far_start:.0f} m, clamped to {cfg.grid_half_min_m:.0f}-{cfg.grid_half_max_m:.0f} m); "
                 f"depth ceiling {max_depth_m:.0f} m"
             )
+        if far_knots and cfg.adaptive_grid and finite.size and far_start > max_depth_m:
+            # With the far field metric (plan-anchored), "far" begins where the grid
+            # ends: pixels deeper than the grid's half go to the far-field shell
+            # (Height Map's far exclusion, Terrain Reconstruction's ridge handover)
+            # instead of standing as a wall at the grid's edge, and the mountain's
+            # summit is the shell's silhouette, not the grid's clipped crest.
+            far_start = float(max_depth_m)
+            context.add_object(ContextKey.FAR_FIELD_START_M, far_start)
+            self.log_info(f"Far field starts at the grid's edge, {far_start:.0f} m (plan-anchored far field)")
+            far_force = far_landform_mask(np.asarray(region_depth.depth) if region_depth is not None else None,
+                                          calibrated_arr.shape)
+            if far_force is not None and far_force.any():
+                floor_m = 1.1 * float(max_depth_m)
+                lifted = int((far_force & (calibrated_arr < floor_m)).sum())
+                calibrated_arr = np.where(far_force, np.maximum(calibrated_arr, floor_m), calibrated_arr)
+                self.log_info(f"Far field: {int(far_force.sum())} landform px above the treeline are the far field;"
+                              f" {lifted} of them read nearer than {floor_m:.0f} m and were lifted to it")
+                # The metric map was published above; the shell and the ridge
+                # handover read it, so it must carry the lift too.
+                context.add_depth(ContextKey.PANORAMA_DEPTH_METRIC, Depth(calibrated_arr.astype(np.float32)))
         if max_depth_m is not None:
             calibrated_arr = _compress_far_range(calibrated_arr, max_depth_m)
         calibrated = Depth(calibrated_arr)
@@ -995,6 +1057,9 @@ class PanoramaDepthCalibrationStage(PipelineStage):
                 calibrated_object_arr = calibrated_object_arr * waterline_scale
             if far_knots:
                 calibrated_object_arr = apply_far_knots(calibrated_object_arr, far_knots)
+                if far_force is not None and far_force.shape == calibrated_object_arr.shape:
+                    calibrated_object_arr = np.where(
+                        far_force, np.maximum(calibrated_object_arr, 1.1 * float(max_depth_m)), calibrated_object_arr)
             if max_depth_m is not None:
                 # The identical curve PANORAMA_DEPTH got above -- it's a pure
                 # function of max_depth_m, so both maps place the same real-world

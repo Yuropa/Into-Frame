@@ -108,3 +108,105 @@ def relabel_population(
         out[idx] = new
         summary["after"][sp.get("name")] = summary["after"].get(sp.get("name"), 0) + 1
     return out, summary
+
+
+DENSITY_PER_M2 = {"dense": 6.0, "common": 3.0, "patchy": 1.5, "scattered": 1.0, "sparse": 0.5, "rare": 0.2}
+
+
+def density_per_m2(word: Optional[str], table: Optional[dict] = None) -> float:
+    """Plants per square metre the plan's density word stands for, inside the
+    foreground (the photograph's own flowers: a dense paintbrush meadow is 6-10)."""
+    table = {**DENSITY_PER_M2, **{str(k).lower(): float(v) for k, v in (table or {}).items()}}
+    w = str(word or "").lower()
+    for key, val in table.items():
+        if key in w:
+            return val
+    return 0.0
+
+
+def fill_population(
+    existing_xz: np.ndarray,
+    species: list[dict],
+    species_bucket: dict[str, int],
+    bearing_frac_of: Callable[[float, float], tuple[float, float]],
+    camera_xz: tuple[float, float],
+    near_m: float,
+    bf_max: float,
+    cone_fraction: float,
+    cls: str,
+    rng: np.random.Generator,
+    ok_ground: Optional[Callable[[float, float], bool]] = None,
+    density_table: Optional[dict] = None,
+    min_r: float = 0.7,
+    min_spacing: float = 0.25,
+    off_zone: float = 0.25,
+) -> tuple[list[dict], dict]:
+    """Instances that bring the foreground up to the plan's density.
+
+    The painter copies each bucket as often as its detections suggest and spreads
+    them by area, so the metres in front of the camera -- where the photograph's
+    meadow is a carpet -- held 2 plants/m2 (Rainier band10: 65 of 1,423 paintbrush
+    within 3 m). The plan's density words set a target per species inside near_m
+    across the photographed cone (bf_max half-fields either side); the shortfall is
+    sampled uniformly by area, on ground ok_ground accepts, no nearer than
+    min_spacing to a plant already there, each one a species by density and where."""
+    usable = [sp for sp in species if sp.get("name") in species_bucket]
+    dens = np.array([density_per_m2(sp.get("density"), density_table) for sp in usable], dtype=float)
+    summary = {"target_m2": float(dens.sum()), "existing": 0, "filled": 0, "tried": 0}
+    if not usable or dens.sum() <= 0:
+        return [], summary
+    area = math.pi * (near_m ** 2 - min_r ** 2) * cone_fraction
+    inside = 0
+    cell = max(min_spacing, 1e-3)
+    occupied: dict[tuple[int, int], list[tuple[float, float]]] = {}
+
+    def key_of(x: float, z: float) -> tuple[int, int]:
+        return int(math.floor(x / cell)), int(math.floor(z / cell))
+
+    def occupy(x: float, z: float) -> None:
+        occupied.setdefault(key_of(x, z), []).append((x, z))
+
+    def free(x: float, z: float) -> bool:
+        kx, kz = key_of(x, z)
+        for i in (-1, 0, 1):
+            for j in (-1, 0, 1):
+                for px, pz in occupied.get((kx + i, kz + j), ()):
+                    if (px - x) ** 2 + (pz - z) ** 2 < min_spacing ** 2:
+                        return False
+        return True
+
+    for x, z in np.asarray(existing_xz, dtype=float).reshape(-1, 2):
+        bf, d = bearing_frac_of(float(x), float(z))
+        occupy(float(x), float(z))
+        if d <= near_m and abs(bf) <= bf_max:
+            inside += 1
+    summary["existing"] = inside
+    n_fill = int(max(0.0, round(dens.sum() * area - inside)))
+    out: list[dict] = []
+    tries = 0
+    while len(out) < n_fill and tries < 20 * max(n_fill, 1):
+        tries += 1
+        r = math.sqrt(rng.uniform(min_r ** 2, near_m ** 2))
+        a = rng.uniform(0.0, 2.0 * math.pi)
+        x, z = camera_xz[0] + r * math.cos(a), camera_xz[1] + r * math.sin(a)
+        bf, d = bearing_frac_of(x, z)
+        if abs(bf) > bf_max or not free(x, z):
+            continue
+        if ok_ground is not None and not ok_ground(x, z):
+            continue
+        p = dens * np.array([zone_factor(sp.get("where"), bf, d, near_m, off_zone) for sp in usable])
+        if p.sum() <= 0:
+            continue
+        sp = usable[int(rng.choice(len(usable), p=p / p.sum()))]
+        size = float(sp.get("size_m") or 0.4)
+        h = size * float(rng.uniform(0.75, 1.2))
+        out.append({
+            "class": cls, "synthetic": True, "source": "plan_population", "metric_size": True,
+            "world_position": [float(x), 0.0, float(z)], "world_width": 0.5 * h, "world_height": h,
+            "bucket": int(species_bucket[sp["name"]]), "plan_species": sp.get("name"), "score": 0.0,
+        })
+        occupy(x, z)
+    summary["filled"] = len(out)
+    summary["tried"] = tries
+    summary["area_m2"] = round(area, 1)
+    return out, summary

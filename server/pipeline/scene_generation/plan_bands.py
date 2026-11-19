@@ -90,6 +90,7 @@ def band_instances(
     tip_prominence_deg: float = 0.25,
     clump_period_crowns: float = 5.0,
     clump_floor: float = 0.12,
+    foot_fraction: float = 0.3,
     seed: int = 0,
 ) -> tuple[list[dict], dict]:
     """Synthetic instances following the region's shape in the region map.
@@ -139,14 +140,21 @@ def band_instances(
         """(x, z, dist, el_bot, beyond) for a column: the lowest band row whose ray
         lands on far ground, capped at far_m. Forest pixels below that are
         mid-ground shrubs on the meadow (Rainier: the mask runs down to -4 deg
-        and that ray lands 13 m out), not the treeline."""
+        and that ray lands 13 m out), not the treeline. Far ground for a stand is
+        at least foot_fraction of the distance the band's angle implies for the
+        plan's tree size (a treeline of 18 m firs seen 5 deg tall is not 13 m
+        away); a lone crown stands where its own base lands."""
         el_t, el_b = elevation(top_s[col]), elevation(bot[col])
         theta = (col / w - 0.5) * 2.0 * math.pi
-        n_probe = 8
+        ang = math.tan(min(max(el_t, -1.2), 1.2)) - math.tan(min(max(el_b, -1.2), 1.2))
+        min_dist = near_floor
+        if stand[col] and ang > 1e-4:
+            min_dist = max(min_dist, foot_fraction * size_m / ang)
+        n_probe = 12
         for k in range(n_probe + 1):
             el = el_b + (el_t - el_b) * (k / n_probe)
             probe = ground_hit(theta, el)
-            if probe is not None and probe[2] >= near_floor:
+            if probe is not None and probe[2] >= min_dist:
                 x, z, dist = probe
                 beyond = dist > far_m
                 if beyond:

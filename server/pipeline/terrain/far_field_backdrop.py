@@ -192,7 +192,12 @@ class FarFieldBackdropStage(PipelineStage):
         params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
         grid_half = float(params.get("grid_size_meters", 200.0)) / 2.0
         measured_start = context.input_object(ContextKey.FAR_FIELD_START_M)
-        start_radius = cfg.start_radius_m if cfg.start_radius_m > 0 else grid_half
+        # The shell's innermost radius: the grid's corner, not its half, or every
+        # vertex off the grid's axes at the shell's foot lands inside the square
+        # (|x|, |z| < half) and is dropped below -- with a plan-anchored far field
+        # the mountain's foot stands at the foot radius and lost blocks of flank
+        # at bearings 15-45 deg (Rainier band7-11, "stair-stepped, holes").
+        start_radius = cfg.start_radius_m if cfg.start_radius_m > 0 else grid_half * math.sqrt(2.0)
 
         W, H = panorama.width, panorama.height
         depth = self._fit(metric.depth, H, W, order=1)
@@ -216,7 +221,10 @@ class FarFieldBackdropStage(PipelineStage):
         band_floor = cfg.far_band_fraction * depth_max
         start_m = cfg.start_m if cfg.start_m > 0 else max(float(measured_start or 0.0), band_floor)
         if cfg.start_m <= 0 and cfg.start_at_grid_edge:
-            start_m = float(start_radius)
+            # "Far" in depth is beyond the grid's half (what the grid holds); the
+            # shell's RADIUS starts at the corner (start_radius) so no vertex lands
+            # inside the square -- two different numbers.
+            start_m = float(grid_half)
         self.log_info(
             f"Far-field backdrop: depth ceiling {depth_max:.1f} m, measured far start "
             f"{float(measured_start or 0.0):.1f} m, band floor {band_floor:.1f} m -> far beyond {start_m:.1f} m"
@@ -229,14 +237,41 @@ class FarFieldBackdropStage(PipelineStage):
         # the viewer sees two summits. When any chain was anchored, the landform
         # types are the terrain's; the shell keeps what the grid cannot hold.
         chains = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS) or []
+        anchored = context.input_object(ContextKey.MOUNTAIN_RIDGE_CHAINS_ANCHORED)
         if chains and type_depth is not None:
             types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
             landform = np.isin(types_full, [int(RegionType.TERRAIN), int(RegionType.SNOW)])
+            columns = ""
+            if anchored is not None:
+                # Only the columns where a chain point actually anchored: Terrain
+                # Reconstruction hands a chain's far points to this shell, so the
+                # outpainted horizon anchors round the 360 while the photographed
+                # mountain inside it (Rainier: bearings -41 to +63) stands here.
+                # ...and only the pixels at or below the anchored crest in that
+                # column: a chain point anchored at the treeline's height (its range
+                # under the crest is the forest, inside the grid) says nothing about
+                # the mountain above it, which stays here (band10-13: vertical
+                # cutouts through the summit wherever the skyline dipped).
+                from scipy.ndimage import minimum_filter1d
+                crest_row = np.full(W, H, dtype=np.int64)
+                for ch in anchored:
+                    ch = np.asarray(ch, dtype=float)
+                    if ch.ndim != 2 or len(ch) == 0:
+                        continue
+                    lon = np.arctan2(ch[:, 0], ch[:, 2])
+                    lat = np.arctan2(ch[:, 1], np.hypot(ch[:, 0], ch[:, 2]).clip(1e-6))
+                    cols_a = np.clip(((lon / (2.0 * np.pi) + 0.5) * W).astype(int), 0, W - 1)
+                    rows_a = np.clip(((0.5 - lat / np.pi) * H).astype(int), 0, H - 1)
+                    np.minimum.at(crest_row, cols_a, rows_a)
+                crest_row = minimum_filter1d(crest_row, size=2 * max(1, W // 720) + 1, mode="wrap")
+                col_mask = crest_row < H
+                landform &= (np.arange(H)[:, None] >= crest_row[None, :])
+                columns = f" in {col_mask.mean():.0%} of the columns, below the anchored crest"
             removed = int((far & landform).sum())
             far &= ~landform
             self.log_info(
-                f"Far-field backdrop: {len(chains)} ridge chain(s) anchored in the terrain, "
-                f"{removed} terrain/snow px left to it"
+                f"Far-field backdrop: {len(anchored) if anchored is not None else len(chains)} ridge chain(s) "
+                f"anchored in the terrain{columns}, {removed} terrain/snow px left to it"
             )
         # A built structure that reaches the far band goes to the shell whole. The
         # depth model reads a thin lattice against the sky at its surroundings'
@@ -428,6 +463,15 @@ class FarFieldBackdropStage(PipelineStage):
         cols_w = cols % W
         d_grid = depth[np.ix_(rows, cols_w)]
         far_grid = far[np.ix_(rows, cols_w)]
+        # One cell of margin round the far region: a vertex is kept when any
+        # neighbouring cell is far, so the mesh reaches past the silhouette and
+        # the full-resolution alpha cuts the edge. With only the far cells the
+        # boundary was a staircase of stride cells inside the silhouette --
+        # stepped summit, sky between the treeline and the mountain's foot
+        # (Rainier band7-14). The extra vertices stand at the shell's foot
+        # radius (their depth is under the start) under alpha 0.
+        from scipy.ndimage import maximum_filter
+        far_grid = maximum_filter(far_grid.astype(np.uint8), size=3, mode="wrap").astype(bool)
         lon = (cols / W - 0.5) * 2.0 * np.pi
         lat = (0.5 - rows / H) * np.pi
         LON, LAT = np.meshgrid(lon, lat)
@@ -554,15 +598,15 @@ class FarFieldBackdropStage(PipelineStage):
             return np.maximum(a, b) / np.maximum(np.minimum(a, b), 1e-6) <= cfg.max_depth_ratio
 
         faces = []
+        # Silhouettes are judged on the radius the shell stands at, not the depth
+        # map's value: a plan-anchored far field (Panorama Depth Calibration) runs
+        # 245-6000 m across a mountain flank, which the radius mapping folds into
+        # 200-500 m; in map units neighbouring flank pixels differed by 2x and the
+        # shell tore into stair-stepped blocks (Rainier band7).
+        radius = np.sqrt(X ** 2 + Y ** 2 + Z ** 2)
         for i in range(nr - 1):
             v00, v01, v10, v11 = vid[i, :-1], vid[i, 1:], vid[i + 1, :-1], vid[i + 1, 1:]
-            moved = skirt | grounded
-            sk = moved[i, :-1] | moved[i, 1:] | moved[i + 1, :-1] | moved[i + 1, 1:]
-            dg = np.where(sk[None, :], np.stack([
-                np.sqrt(X[i] ** 2 + Y[i] ** 2 + Z[i] ** 2)[:-1], np.sqrt(X[i] ** 2 + Y[i] ** 2 + Z[i] ** 2)[1:],
-                np.sqrt(X[i + 1] ** 2 + Y[i + 1] ** 2 + Z[i + 1] ** 2)[:-1], np.sqrt(X[i + 1] ** 2 + Y[i + 1] ** 2 + Z[i + 1] ** 2)[1:],
-            ]), np.stack([d_grid[i, :-1], d_grid[i, 1:], d_grid[i + 1, :-1], d_grid[i + 1, 1:]]))
-            d00, d01, d10, d11 = dg
+            d00, d01, d10, d11 = radius[i, :-1], radius[i, 1:], radius[i + 1, :-1], radius[i + 1, 1:]
             t1 = (v00 >= 0) & (v10 >= 0) & (v11 >= 0) & ratio_ok(d00, d10) & ratio_ok(d10, d11) & ratio_ok(d00, d11)
             t2 = (v00 >= 0) & (v11 >= 0) & (v01 >= 0) & ratio_ok(d00, d11) & ratio_ok(d11, d01) & ratio_ok(d00, d01)
             # Winding so the front face looks toward the camera at the origin.

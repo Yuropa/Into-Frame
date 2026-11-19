@@ -88,6 +88,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         plan_population: bool = True,
         plan_population_classes: list[str] | None = None,
         plan_population_near_m: float = 15.0,
+        plan_population_fill: bool = True,
+        plan_population_density_m2: dict[str, float] | None = None,
+        plan_population_margin_deg: float = 20.0,
         species_min_mesh_angular_px: float = 40.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -109,6 +112,12 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         self.plan_population = bool(plan_population)
         self.plan_population_classes = list(plan_population_classes if plan_population_classes is not None else ["flower"])
         self.plan_population_near_m = float(plan_population_near_m)
+        # ...and brought up to the plan's density inside plan_population_near_m across
+        # the photographed cone (plus a margin either side): plants per m2 per density
+        # word, the shortfall sampled by area on vegetation (plan_population.py).
+        self.plan_population_fill = bool(plan_population_fill)
+        self.plan_population_density_m2 = {str(k).lower(): float(v) for k, v in (plan_population_density_m2 or {}).items()}
+        self.plan_population_margin_deg = float(plan_population_margin_deg)
         # A species mesh (one plant, a few hundred faces, its own card beyond the
         # runtime LOD) is worth keeping as geometry far smaller on screen than a
         # reconstruction: a 0.4 m flower at 15 m is 1.5 deg, 52 px at 34 px/deg.
@@ -1401,6 +1410,45 @@ class SceneGenerationStage(PipelineStage):
                     )
                     for idx, meta in relabelled.items():
                         extra_metadata[idx] = meta
+                    if self.config.plan_population_fill:
+                        from pipeline.scene_generation.plan_population import fill_population
+                        from pipeline.panorama_segmentation.panorama_region_result import RegionType
+                        region_map_td = context.input_depth(ContextKey.REGION_MAP)
+                        grid_m = float((context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}).get("grid_size_meters", 0.0))
+
+                        def ok_ground(wx: float, wz: float) -> bool:
+                            if region_map_td is None or grid_m <= 0.0:
+                                return True
+                            dx, dz = wx - camera_xz[0], wz - camera_xz[1]
+                            lx = dx * math.cos(yaw_rad) - dz * math.sin(yaw_rad)
+                            lz = dx * math.sin(yaw_rad) + dz * math.cos(yaw_rad)
+                            rm = np.asarray(region_map_td.depth)
+                            rr = int((lz + grid_m / 2.0) / grid_m * rm.shape[0])
+                            cc = int((lx + grid_m / 2.0) / grid_m * rm.shape[1])
+                            if not (0 <= rr < rm.shape[0] and 0 <= cc < rm.shape[1]):
+                                return False
+                            return int(round(float(rm[rr, cc]))) == int(RegionType.VEGETATION)
+
+                        existing_xz = np.array([[float(m["world_position"][0]), float(m["world_position"][2])]
+                                                for _, m in painted if m.get("world_position")], dtype=float)
+                        bf_max = 1.0 + self.config.plan_population_margin_deg / max(half_fov, 1.0)
+                        cone_fraction = min(1.0, 2.0 * (half_fov + self.config.plan_population_margin_deg) / 360.0)
+                        filled, fsum = fill_population(
+                            existing_xz, plan_species, buckets, bearing_frac_of,
+                            (float(camera_xz[0]), float(camera_xz[1])), self.config.plan_population_near_m,
+                            bf_max, cone_fraction, pcls, np.random.default_rng((self.seed, 29)),
+                            ok_ground=ok_ground, density_table=self.config.plan_population_density_m2,
+                        )
+                        for meta in filled:
+                            context.add_object(f"metadata_{object_count}", meta)
+                            extra_metadata[object_count] = meta
+                            object_count += 1
+                        if filled:
+                            context.add_object(count_key, int(object_count))
+                        self.log_info(f"Scene Plan: {pcls} foreground filled to the plan's density: {fsum['filled']} added"
+                                      f" to {fsum['existing']} painted within {self.config.plan_population_near_m:.0f} m"
+                                      f" across the cone ({fsum.get('area_m2')} m2 at {fsum['target_m2']:g}/m2;"
+                                      f" {fsum['tried']} samples)")
                     self.log_info(f"Scene Plan: {pcls} population re-dealt from the plan: {len(relabelled)} of"
                                   f" {len(painted)} painted copies; by bucket before {psum['before']}; by species after"
                                   f" {psum['after']}; weights {{{', '.join(f'{k}: {v['weight']:g} ({v['where']})' for k, v in psum['species'].items())}}}"
