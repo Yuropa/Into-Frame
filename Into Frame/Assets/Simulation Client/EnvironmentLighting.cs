@@ -36,6 +36,7 @@ public class EnvironmentLighting : MonoBehaviour
 
     private Material  _envMaterial;
     private Texture2D _envTexture;
+    private float     _ambientScale = 1f;
 
     public void Apply(SceneLightingData data, PanoramaSkybox panorama = null)
     {
@@ -44,6 +45,10 @@ public class EnvironmentLighting : MonoBehaviour
             Debug.LogWarning("[EnvironmentLighting] GameObject inactive — skipping ambient probe update");
             return;
         }
+        // The server fits the ambient against the photograph (its near field's
+        // luminance percentiles, with the sun's scale); without it the probe lights
+        // the ground at the panorama's own exposure whatever the sun was scaled to.
+        _ambientScale = (data != null && data.ambient_scale > 0f) ? Mathf.Clamp(data.ambient_scale, 0.25f, 4f) : 1f;
         if (useEstimatedEnvironmentMap)
         {
             if (data == null || string.IsNullOrEmpty(data.ldr))
@@ -80,7 +85,14 @@ public class EnvironmentLighting : MonoBehaviour
             int id = reflectionProbe.RenderProbe();
             yield return new WaitUntil(() => reflectionProbe.IsFinishedRendering(id));
         }
-        Debug.Log("[EnvironmentLighting] Ambient probe rendered from the panorama skybox");
+        ApplyAmbientScale();
+        Debug.Log($"[EnvironmentLighting] Ambient probe rendered from the panorama skybox (ambient x{_ambientScale:0.00})");
+    }
+
+    private void ApplyAmbientScale()
+    {
+        RenderSettings.ambientIntensity = _ambientScale;
+        if (reflectionProbe != null) reflectionProbe.intensity = _ambientScale;
     }
 
     private IEnumerator ApplyFromEstimate(SceneLightingData data)
@@ -123,6 +135,7 @@ public class EnvironmentLighting : MonoBehaviour
         }
 
         RenderSettings.skybox = savedSkybox;
+        ApplyAmbientScale();
 
         Debug.Log("[EnvironmentLighting] Reflection probe updated from estimated environment map");
     }

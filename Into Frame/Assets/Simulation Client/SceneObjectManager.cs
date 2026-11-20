@@ -629,6 +629,7 @@ public class SceneObjectManager : MonoBehaviour
         // container.name is "[mesh] <id> (<objectName>)" — pattern match on the full string
         terrainMaterialManager?.RegisterMeshLoaded(container, container.name);
         waterMaterialManager?.RegisterMeshLoaded(container, container.name);
+        if (IsSmallVegetation(container.name)) DisableShadows(container);
         // The treeline strip and backdrop are textured from the DELIT panorama (the
         // server divides the photographed shading out) and carry normals for the
         // client's own sun, so they are lit like everything in front of them. Turn
@@ -648,6 +649,27 @@ public class SceneObjectManager : MonoBehaviour
     // Unlit left _BaseMap empty and the strip rendered as white quads with no
     // cutout. Carry the texture and the cutoff across by hand, and keep the strip
     // double-sided and alpha-clipped.
+    // Flowers, grass and shrubs cast no shadows (the server's check renderer agrees:
+    // render-scene.py casts_no_shadow). Thousands of alpha-cut cards in the shadow
+    // map self-shadow into black plants at the 0.5 m/texel the map affords the
+    // meadow, and their real shadows are a few centimetres wide. Trees keep theirs.
+    static readonly string[] NoShadowClasses = { "flower", "plant", "grass", "bush", "shrub", "reed", "moss" };
+
+    private static bool IsSmallVegetation(string name)
+    {
+        if (string.IsNullOrEmpty(name)) return false;
+        var lower = name.ToLowerInvariant();
+        foreach (var c in NoShadowClasses)
+            if (lower.Contains(c)) return true;
+        return false;
+    }
+
+    private static void DisableShadows(GameObject root)
+    {
+        foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            r.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
+    }
+
     private static void MakeUnlit(GameObject root)
     {
         var unlit = Shader.Find("Universal Render Pipeline/Unlit");

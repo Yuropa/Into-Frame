@@ -334,6 +334,9 @@ public class SceneLightingData
     public int    width;
     public int    height;
     public SunData sun;   // dominant directional light, or null when overcast
+    // Exposure Fit's multiplier on the ambient (sky) light, fitted with the sun's
+    // against the photograph's near field (server ExposureFitStage). Absent/0 -> 1.
+    public float   ambient_scale;
 }
 
 // Key light extracted from the environment map (server SceneLighting.sun).
@@ -372,6 +375,17 @@ public class SceneParams
     public ExtrinsicsParams extrinsics;
     public SceneLightingData lighting;
     public GrassFieldData   grassField;   // null/empty when the server built no grass field
+    public AtmosphereData   atmosphere;   // the plan's haze; null -> no fog
+}
+
+// The scene plan's atmosphere (server Scene Plan stage): linear haze from
+// haze_near_m to haze_far_m in haze_color. Applied as Unity's linear fog.
+[Serializable]
+public class AtmosphereData
+{
+    public float  haze_near_m;
+    public float  haze_far_m;
+    public string haze_color;   // "#rrggbb"
 }
 
 // Grass Cover's blade field (server/pipeline/grass_cover/grass_field.py): two image

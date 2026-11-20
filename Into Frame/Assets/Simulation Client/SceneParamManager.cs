@@ -45,6 +45,7 @@ public class SceneParamManager : MonoBehaviour
         // into their albedo, got lit a second time from the wrong angle and read
         // as a different colour and exposure from the terrain around them.
         ApplySun(p.lighting != null ? p.lighting.sun : null, p.skyboxRotation);
+        ApplyAtmosphere(p.atmosphere);
 
 
         Camera cam = camera != null ? camera.GetComponent<Camera>() : Camera.main;
@@ -162,6 +163,29 @@ public class SceneParamManager : MonoBehaviour
 
         Debug.Log($"[SceneParamManager] Sun: dir {toSun}, intensity {sun.intensity}, color {sun.color}"
                   + (sun.hdr ? "" : " (no HDR merge — intensity/colour approximate)"));
+    }
+
+    /// <summary>
+    /// The plan's haze as linear fog: nothing in the lit scene (terrain, instances,
+    /// grass) carried any atmospheric depth, while the far-field backdrop and the
+    /// skybox have the photograph's. Ends past the shell so the shell itself only
+    /// takes a touch of it; the backdrop is unlit and unfogged either way.
+    /// </summary>
+    private void ApplyAtmosphere(AtmosphereData a)
+    {
+        if (a == null || a.haze_far_m <= 0f || a.haze_far_m <= a.haze_near_m)
+        {
+            RenderSettings.fog = false;
+            return;
+        }
+        Color c = new Color(0.6f, 0.7f, 0.85f);
+        if (!string.IsNullOrEmpty(a.haze_color)) ColorUtility.TryParseHtmlString(a.haze_color, out c);
+        RenderSettings.fog = true;
+        RenderSettings.fogMode = FogMode.Linear;
+        RenderSettings.fogColor = c;
+        RenderSettings.fogStartDistance = Mathf.Max(0f, a.haze_near_m);
+        RenderSettings.fogEndDistance = a.haze_far_m;
+        Debug.Log($"[SceneParamManager] Haze: {a.haze_near_m}-{a.haze_far_m} m, {a.haze_color}");
     }
 
     private void Update()
