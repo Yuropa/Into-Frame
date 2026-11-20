@@ -567,7 +567,12 @@ class SceneBuilder:
             if name == "terrain":
                 terrain_pose = pose
                 tm = tm.copy()
-                baked = self._terrain_texture(tm)
+                baked = None if self.args.flat_terrain else self._terrain_texture(tm)
+                if self.args.flat_terrain:
+                    # Geometry alone: flat grey, faceted, so steps and folds in the
+                    # height map show without the texture hiding them.
+                    self._pano_pass = None; self._plate_passes = []; self._terrain_pbr = None
+                    tm.visual = trimesh.visual.ColorVisuals(tm, face_colors=[170, 170, 170, 255])
                 if baked is not None:
                     tex, uv = baked
                     tm.visual = trimesh.visual.TextureVisuals(uv=uv)
@@ -925,6 +930,10 @@ def view_pose(R: np.ndarray, t: np.ndarray, view: str) -> tuple[np.ndarray, np.n
     """Camera rotation (columns right, up, forward) and position in the server frame."""
     yaw = {"photo": 0.0, "left": 45.0, "right": -45.0, "back": 180.0, "step": 0.0, "high": 0.0, "down": 0.0}.get(view, 0.0)
     pitch = {"high": -20.0, "down": 40.0}.get(view, 0.0)
+    if view.startswith("orbit:"):
+        # A frame of the slow pan: "orbit:<yaw degrees>", the capture camera turned
+        # about its own up axis.
+        yaw = float(view.split(":", 1)[1])
     cy, sy = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
     Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
     cp, sp = math.cos(math.radians(pitch)), math.sin(math.radians(pitch))
@@ -977,6 +986,9 @@ def main() -> int:
     ap.add_argument("--views", default="photo,left,right,step", help="comma list of photo,left,right,back,step,high,down")
     ap.add_argument("--terrain-texture", type=int, default=2048, help="baked terrain texture size (px)")
     ap.add_argument("--no-grass", action="store_true")
+    ap.add_argument("--orbit", type=int, default=0, help="render N frames of a full turn about the capture camera and encode orbit.mp4")
+    ap.add_argument("--fps", type=int, default=24, help="frame rate of orbit.mp4")
+    ap.add_argument("--flat-terrain", action="store_true", help="debug: terrain as flat grey facets, no texture")
     ap.add_argument("--no-pbr-maps", action="store_true", help="ignore normal/occlusion/metallic-roughness textures on assets")
     ap.add_argument("--material", type=Path, default=None, help="use this saved splat_material directory instead of the run's")
     ap.add_argument("--only", default="", help="render only placed objects whose name contains this (environment meshes always render)")
@@ -1055,7 +1067,11 @@ def main() -> int:
 
     builder = SceneBuilder(context, scene, args, log)
     results = {}
-    for view in [v.strip() for v in args.views.split(",") if v.strip()]:
+    views = [v.strip() for v in args.views.split(",") if v.strip()]
+    if args.orbit > 0:
+        views = [f"orbit:{(360.0 * i / args.orbit):.4f}" for i in range(args.orbit)]
+    for vi, view in enumerate(views):
+        fname = f"orbit_{vi:04d}" if view.startswith("orbit:") else view
         Rv, pos = view_pose(R, t, view)
         t1 = time.time()
         zfar = float(scene.get("farClipPlane") or 300.0) * 1.5
@@ -1084,11 +1100,17 @@ def main() -> int:
             bg = render_sky(sky.image, yaw, Rv, width, height, fx, fy, cx, cy)
             colour = np.where((depth <= 0.0)[..., None], bg, colour)
         img = PILImage.fromarray(colour, "RGB")
-        img.save(out / f"{view}.png")
+        img.save(out / f"{fname}.png")
         if args.save_depth:
-            np.save(out / f"{view}_depth.npy", depth.astype(np.float16))
+            np.save(out / f"{fname}_depth.npy", depth.astype(np.float16))
         results[view] = img
-        log(f"{view}: {stats} in {time.time() - t1:.1f} s -> {out / f'{view}.png'}")
+        log(f"{fname}: {stats} in {time.time() - t1:.1f} s -> {out / f'{fname}.png'}")
+    if args.orbit > 0:
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from frames_to_mp4 import encode as encode_mp4
+        frames = sorted(out.glob("orbit_*.png"))
+        mp4 = encode_mp4(frames, out / "orbit.mp4", args.fps)
+        log(f"orbit: {len(frames)} frames at {args.fps} fps -> {mp4}")
 
     if "photo" in results and photo is not None:
         ph = photo.image.convert("RGB").resize((width, height), PILImage.LANCZOS)

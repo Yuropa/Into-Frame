@@ -24,6 +24,7 @@ import sys
 import zlib
 
 import bpy
+import numpy as np
 
 SWATCH = 8          # swatches per row and column
 TEX = 64            # texture size (SWATCH * 8 px)
@@ -141,6 +142,7 @@ class Builder:
         self.face_swatch = []
         self.face_rect = []       # None, or the atlas rect the face's corners map to
         self.parts = {}           # atlas parts: name -> {"uv": [...], "aspect": w/h}
+        self.soft = set()         # vertices (leaf tips) free to overshoot the drawn width
 
     def pick(self, part):
         return self.rng.choice(self.swatches[part])
@@ -178,7 +180,8 @@ class Builder:
         horiz = v_norm(v_cross(d, (0.0, 0.0, 1.0))) if abs(d[2]) < 0.98 else (1.0, 0.0, 0.0)
         info = self.parts[name]
         width = length * max(float(info.get("aspect") or 0.3), min_aspect)
-        self.card_part(base, d, horiz, length, name, width=width)
+        v0 = self.card_part(base, d, horiz, length, name, width=width)
+        self.soft.update(range(v0, v0 + 4))
 
     def head_part(self, base, up, length, name, planes=3, roll=0.0, min_aspect=0.5):
         """A flower head as a fan of cards no narrower than min_aspect of its length."""
@@ -304,14 +307,14 @@ def form_spike(b, spec, rng, h, w):
     r = max(0.0025, w * 0.02)
     b.polyline_tube(stem, r * 1.3, r * 0.6, "stem")
     # Leaves on the lower two thirds.
-    for i in range(rng.randint(10, 16) if b.has_part("leaf") else rng.randint(6, 11)):
+    for i in range(rng.randint(16, 24) if b.has_part("leaf") else rng.randint(6, 11)):
         f = rng.uniform(0.08, 0.62)
         base = _along(stem, f)
         a = rng.uniform(0, 2 * math.pi)
         up = rng.uniform(0.35, 0.8)
         d = (math.cos(a), math.sin(a), up)
         if b.has_part("leaf"):
-            b.leaf_part(base, d, rng.uniform(0.25, 0.4) * h, "leaf")
+            b.leaf_part(base, d, rng.uniform(0.3, 0.5) * h, "leaf")
         else:
             b.leaf(base, d, rng.uniform(0.25, 0.4) * h, rng.uniform(0.03, 0.06) * w / 0.2, "foliage", droop=0.3)
     if b.has_part("head"):
@@ -619,24 +622,33 @@ def normalise_size(b, h, w):
     zmax = max(v[2] for v in b.verts) or 1.0
     s = h / zmax
     b.verts = [(v[0] * s, v[1] * s, v[2] * s) for v in b.verts]
-    xs = [v[0] for v in b.verts]; ys = [v[1] for v in b.verts]
+    # Leaf cards may reach past the drawn width without squeezing the whole
+    # plant: measured on them, the paintbrush's head came out 4.5 cm across.
+    firm = [v for i, v in enumerate(b.verts) if i not in b.soft] or b.verts
+    xs = [v[0] for v in firm]; ys = [v[1] for v in firm]
     extent = max(max(xs) - min(xs), max(ys) - min(ys)) or 1.0
     if extent > w * 1.1:
         k = w * 1.05 / extent
         b.verts = [(v[0] * k, v[1] * k, v[2]) for v in b.verts]
 
 
-def atlas_with_palette(atlas_path, pixels, sp, out_path):
+def atlas_with_palette(atlas_path, pixels, sp, out_path, tint=None):
     """The species' atlas with this variant's 64x64 palette written into its
-    reserved corner, saved beside the GLB and used as the material's image."""
+    reserved corner, saved beside the GLB and used as the material's image.
+    `tint` (r, g, b multipliers) varies the painting per variant: every copy
+    of a plant in one colour read as a stamped sprite (band24)."""
     try:
         img = bpy.data.images.load(atlas_path)
         w, h = img.size
         ATLAS["size"] = w
         ATLAS["origin"] = tuple(sp.get("palette_origin") or (w // 2, h - TEX))
         ATLAS["px"] = int(sp.get("palette_px") or TEX)
-        buf = [0.0] * (w * h * 4)
-        img.pixels.foreach_get(buf)
+        arr = np.empty(w * h * 4, dtype=np.float32)
+        img.pixels.foreach_get(arr)
+        if tint is not None:
+            px = arr.reshape(-1, 4)
+            px[:, :3] = np.clip(px[:, :3] * np.asarray(tint, dtype=np.float32), 0.0, 1.0)
+        buf = arr.tolist()
         ox, oy = ATLAS["origin"]
         scale = ATLAS["px"] / TEX
         for y in range(ATLAS["px"]):
@@ -680,7 +692,12 @@ def main():
             ATLAS["active"] = False
             atlas_path = sp.get("atlas")
             if atlas_path and os.path.exists(atlas_path) and sp.get("parts"):
-                png_path = atlas_with_palette(atlas_path, pixels, sp, os.path.join(out_dir, f"{sp['id']}_v{k}_atlas.png"))
+                # Variant 0 is the painting as made; the others a touch lighter or
+                # darker and warmer or cooler.
+                lit = rng.uniform(0.88, 1.12) if k else 1.0
+                warm = rng.uniform(-0.05, 0.05) if k else 0.0
+                tint = (lit * (1.0 + warm), lit, lit * (1.0 - warm))
+                png_path = atlas_with_palette(atlas_path, pixels, sp, os.path.join(out_dir, f"{sp['id']}_v{k}_atlas.png"), tint=tint)
                 ATLAS["active"] = png_path is not None
             b = Builder(rng, swatches)
             if ATLAS["active"]:

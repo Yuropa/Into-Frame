@@ -139,7 +139,8 @@ def build_grass_field(
 
 def photo_meadow_colour(photo_rgb: np.ndarray, bottom_fraction: float = 0.3) -> "np.ndarray | None":
     """The sunlit green of the meadow at the photograph's foot: green-dominant
-    pixels of its bottom rows, their 55-75th percentile brightness band. The
+    pixels of its bottom rows, their 65-88th percentile brightness band (the
+    sunlit leaves, not the shade between them: band23's blades came out olive). The
     ground the viewer stands in, read from the one image that really shows it
     (the panorama's matching rows blend into generated ground)."""
     a = np.asarray(photo_rgb, dtype=np.float32)[..., :3]
@@ -149,6 +150,6 @@ def photo_meadow_colour(photo_rgb: np.ndarray, bottom_fraction: float = 0.3) -> 
         return None
     g = b[green]
     lum = g.mean(axis=1)
-    lo, hi = np.percentile(lum, [55.0, 75.0])
+    lo, hi = np.percentile(lum, [65.0, 88.0])
     band = g[(lum >= lo) & (lum <= hi)]
     return np.median(band if len(band) else g, axis=0)

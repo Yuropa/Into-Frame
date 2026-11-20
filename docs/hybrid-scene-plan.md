@@ -682,6 +682,127 @@ delighting with their chroma at 60% (`snow_lift`; unit test on the real panorama
 the measured darkness; the spike head prompt asks for the whole head "full and bushy";
 the forest band's column step varies 0.5-1.8x a crown.
 
+**`band23` (21:53, Rainier from Terrain Texture Generation): judge 0.45, 5/6, no failed
+must; DINO 0.535 / 0.588, colour dE 13.8.** The best judged yet. Snow lifted L 62 -> 77
+(lit 84) over 38621 px and dropped from a major to a minor ("flat grey-blue strip, no
+trail": the trail across it is the one failed acceptance). The fit chose sun x0.52 and
+ambient x2.19 under the plan's golden sun. The one major left is the flowers: "yellow
+spikes dominate, paintbrush and lupine thin sticks and specks". Seen on the atlases and
+the species cards: the "full and bushy" head prompt painted the lousewort as a dandelion
+head as wide as tall (aspect 1.03) on 529 plants of 0.7 m, while the paintbrush's head
+(painted well, aspect 0.53) stands 4.5 cm wide because `normalise_size` squeezes the whole
+plant to its nominal width (0.15 of the height, reached by its leaf tips) -- 1535 magenta
+slivers. The grass blades draw, but olive and thinned to hairlines (anchor colour from the
+55-75th percentile of the photo's green, the check renderer capped at 25000 tufts). For
+`band24`, from Terrain Texture Generation: the spike head prompt leaves the shape to
+the species, "in its true proportions" (atlas v6: "much taller than wide" made the
+paintbrush a 0.3 sliver as surely as "full and bushy" made the lousewort a dandelion);
+the painted head's aspect sets the plant's width (capped at 0.35 of the height); leaf
+cards are free of the width squeeze (`Builder.soft`); 16-24 leaf cards of 0.3-0.5 of the
+height per spike; the grass anchor takes the 65-88th percentile band; the check draws up
+to 60000 tufts. And the mid-ground: the panorama layer's texel gate (`panorama_max_texel_m`
+0.6) stripped the photograph off every flat texel past ~15 m from the 0.9 m eye, so the
+knolls, the snow patches and the trail at 40-100 m were the bare-soil vegetation tile --
+the brown smear under the treeline in every band so far. The gate is 4 m now: a pixel
+stretched 2-4 m along the view ray is exact from the capture point and moves 4% at 50 m
+for a 2 m step. The Unity client now reads what the last rounds added: `lighting.ambient_scale`
+goes to the ambient intensity and the reflection probe (clamped 0.25-4), the plan's
+`atmosphere` is linear fog from `haze_near_m` to `haze_far_m` in `haze_color`, and
+instances named for flower/plant/grass/bush/shrub/reed/moss cast no shadows (the check
+renderer's rule). Unverified in the editor: the ambient scale is fitted against the check
+renderer's ambient term, so in Unity it is a first guess, not a calibration.
+
+**`band24` (23:26, Rainier from Terrain Texture Generation): judge 0.25, 5/6; DINO
+0.512 / 0.562, colour dE 16.4.** Worse. The flowers are bold now (the paintbrush a
+magenta head, the lousewort a narrow spike, broad leaves) but "cartoon colors": the
+bloom recolour pulled the lousewort's painted cream to the plan's pure yellow, and the
+fit went to sun x1.40 with the ambient at its 0.5 floor. The mid-ground is still brown,
+and the snow strip is gone. The blend maps say the texel gate worked -- the panorama
+layer is at full weight from 35 to 80 m along the photo's bearing -- so the terrain was
+rendered bare (`render-scene.py --flat-terrain`, new): **the mid-ground is a pit.** The
+height map falls from -1.6 m at 10 m to -3.7 m at 15 m and stays at -3.9 m to 95 m; the
+snow patch's region is a trench whose far wall faces away from the camera. The depth
+model reads the meadow through the gaps between the foreground plants, and those
+pixels, on rays 8-10 deg below the horizon, land 15-30 m out and 3 m down. For `band25`,
+from Height Map: a near drop floor (`near_drop_floor_m` 0.5, slope 5%, radius 45 m,
+skipped when the plan's terrain is a ridge or a coast) lifts any ground within 45 m
+that lies below the camera's own ground by more than 0.5 m + 5% of its distance, and
+clears the lifted cells' cached panorama UV so the mesh samples by position; the bloom
+recolour keeps 40% of the painting's own colour (atlas v7).
+
+**Toon shading** (the user's read of band24, and right): three causes in the check
+render. The matte leaves the atlas black under alpha 0, and the renderer's bilinear
+filter (and every resize) mixes that black into the edge, an ink line around every
+leaf and head; measured on the paintbrush atlas, the 2 px band outside the opaque
+region averages (105, 88, 99) against (174, 134, 156) just inside. `alpha_bleed`
+(atlas.py) gives every transparent pixel the nearest opaque colour, on each cut before
+its resize and on the whole atlas before it is saved (atlas v8). Every copy of a plant
+was the one painting in the one colour: variant k > 0 now takes a lightness factor
+0.88-1.12 and a warm-cool shift of up to 5% on its atlas (`atlas_with_palette(tint)`),
+seeded like its palette. The third cause, wrapped lighting with no shadows on flat cards,
+stays: a flat card is uniform under any Lambert, and its shape has to come from the
+painting. `band25` was already running when the bleed landed, so its Species Assets
+build the tint but not the bleed; `band26` from Species Assets carries both.
+
+**`band25` (00:59, Rainier from Height Map): judge 0.30, 5/6; DINO 0.526 / 0.559,
+colour dE 14.3.** The near drop floor lifted 75,615 cells (0.68 m median, 3.5 m max,
+9-45 m out); the bare geometry is a smooth slope now with one small hole left at the
+snow patch. The fit went sun x0.68, ambient x1.40. The judge reads the mid-ground as "a
+dark, flat water-like surface": it is not water (two water pixels in the cone; the plan
+says none) but the delit meadow relit at a 20 deg sun on near-flat ground, with the sun
+dimmed by a fit whose near-field percentiles the bright yellow flowers dominate, and the
+lifted snow (L 77) lit the same way comes out dim grey. The texture is right (the
+equirect layer shows green meadow, white snow and the trail) and the weight is right
+(1.0 from 35 to 80 m); what is wrong is the photometry of a delit ground under a
+grazing key light. Not chased tonight: the fit should weigh the ground, not the plants,
+and the panorama layer's delighting strength is a trade against the client lighting it
+again. The flowers are "repeated sprites with cartoonish leaves" still (band25 built
+without the atlas bleed; band26 has it).
+
+**`band26` (02:37, Rainier from Species Assets: atlas bleed, plan-only species): judge
+0.34, 5/6; DINO 0.516 / 0.559, colour dE 18.7.** The ink outlines are gone (the atlas
+bleed fills the RGB under every transparent texel before resampling, so the cutout
+edge no longer averages toward the black the painter left there) and the plan's
+flowers the detector never boxed (lousewort, paintbrush) stand as meshes from the plan
+alone. The yellow is now the fault: the recolour toward the photographed bloom colour
+pushed the lousewort and the leaves past the photograph's chroma (dE up from 14.3),
+so `band27` (atlas v9) runs the same round with the chroma scaled 0.8 on blooms and
+0.85 on leaves and the leaves half a stop darker.
+
+**The overnight regeneration (`final`, Paris and Shark Fin from Panorama Lighting)
+found three faults, fixed on the morning of 2026-11-20.** Shark Fin had no v2 plan,
+and the reading failed: the Anthropic SDK (2.8) no longer takes a `temperature`
+argument for this model family, so the plan client sends none and leans on the
+reading cache for repeatability. Without a plan the run continued, re-ran Depth
+Generation and Panorama from a stale cache, and died in WorldGen's depth-model load:
+`haodongli/DA-2` carries no `config.json`, and under `HF_HUB_OFFLINE` the hub mixin's
+look-up of it is refused rather than skipped; the loader now resolves the cached
+snapshot directory first. Paris ran through (judge 0.05 against band2's 0.23, DINO
+layout 0.547 against 0.594) and lost its far bank: the treeline ribbon now starts at
+250 m because the plan band stands the near forest as species geometry, but that only
+holds where the plan's tree species have a procedural form, and `species_form` read
+the London plane as a conifer by its class fallback while the willow fell to "shrub",
+so Species Assets skipped both and the bank was a row of flat cards at 100 m. A tree
+without conifer words is now `broadleaf` (no form), and the Treeline Backdrop starts
+its ribbon at `min_distance_no_form_m` (40 m, the pre-band value) when no tree
+species of the plan has a form; a CPU replay on the Paris run gives the band back
+(223/256 bins, 76-197 m, as in hybrid3). Paris reruns from Treeline Backdrop
+(`final2`), Shark Fin from the plan (`final2`), both after band27.
+
+**`band27` (07:58, Rainier from Species Assets, atlas v9): judge 0.33, 5/6; DINO
+0.602 / 0.573, colour dE 15.1.** The best DINO of the series and the colour error
+back where band25 had it; the judge's list is the photometry list (snow patches
+absent and the mid-ground "a dark, flat wet strip", no trail, flat light, no haze)
+plus the flowers' regularity and the conifers' sameness. **Paris `final2` (08:25,
+from Treeline Backdrop): judge 0.27, 4/7; DINO 0.798 / 0.585, colour dE 14.0**, the
+best Paris on every number, the far bank a treeline again; what remains is the
+boat (a1 still fails: a blurred shape, no passengers), the flat water and the
+barges as "melted shapes". **Shark Fin `final2` read its plan** (coast, camera 22 m,
+sun az 45 el 2, no species, 5 landmarks) and then died at Panorama Lighting: CUDA out
+of memory on GPU 0, the 16 GB card, where two pan renders (the band27 Rainier pan
+and the Paris pan) sat while the stage loaded. Pan renders are not light enough to
+overlap a run; `final3` waits for an idle GPU.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |

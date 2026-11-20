@@ -32,6 +32,8 @@ fi
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate frame
 export HF_HUB_OFFLINE=1
+# The check renderer draws up to this many grass tufts (25000 thins the near meadow to hairlines).
+export RENDER_GRASS_MAX=60000
 logdir="$ROOT/scratch/hybrid/$label"; mkdir -p "$logdir"
 chain="$logdir/chain.log"
 say() { echo "$(date '+%H:%M:%S') $*" | tee -a "$chain"; }

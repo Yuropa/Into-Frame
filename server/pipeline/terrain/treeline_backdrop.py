@@ -58,6 +58,7 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         min_distance_m: float = 6.0,
         max_distance_m: float = 400.0,
+        min_distance_no_form_m: float = 40.0,
         min_height_m: float = 1.0,
         max_depth_spread: float = 1.6,
         bin_px: int = 16,
@@ -76,6 +77,7 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         # pipeline (detected trees, painted trees); the backdrop takes over beyond.
         self.min_distance_m = float(min_distance_m)
         self.max_distance_m = float(max_distance_m)
+        self.min_distance_no_form_m = float(min_distance_no_form_m)
         # A vertical run of vegetation must stand at least this tall (its angular
         # height times its depth) to count as canopy rather than ground cover.
         self.min_height_m = float(min_height_m)
@@ -134,6 +136,25 @@ class TreelineBackdropStage(PipelineStage):
         depth = self._fit(depth_depth.depth, H, W, order=1)
         vegetation = np.rint(type_map).astype(np.int32) == int(RegionType.FOREST)
 
+        # The plan band (Scene Generation) stands the photographed forest as species
+        # geometry only where the plan's tree species have a procedural form. A
+        # broadleaf band (Paris's planes and willows) keeps its cards, sparse and
+        # flat at 100 m, so the ribbon carries that canopy from where the placed
+        # trees thin out, as it did before the plan bands (final: 0 bins, the far
+        # bank a row of cut-outs; hybrid3 with the ribbon from 40 m: 223 bins).
+        min_distance = cfg.min_distance_m
+        if cfg.min_distance_no_form_m > 0:
+            from pipeline.scene_plan import ScenePlan
+            from pipeline.species.species_assets import species_form
+            plan = ScenePlan.from_context(context)
+            trees = [sp for sp in (plan.items("species") if plan is not None else [])
+                     if str(sp.get("class", "")).lower() == "tree"]
+            if not any(species_form(sp) == "conifer" for sp in trees):
+                min_distance = cfg.min_distance_no_form_m
+                names = ", ".join(str(sp.get("name")) for sp in trees) or "none named"
+                self.log_info(f"Treeline backdrop: the plan's tree species ({names}) have no procedural form; "
+                              f"the ribbon starts at {min_distance:g} m, not {cfg.min_distance_m:g} m")
+
         # Canopy the object removal took away. Far trees are detected as objects
         # and removed from the terrain panorama like near ones, and where
         # ObjectClear repaints them as sky or stone the ribbon loses them: Paris's
@@ -156,10 +177,10 @@ class TreelineBackdropStage(PipelineStage):
             obj_depth = context.input_depth(ContextKey.PANORAMA_OBJECT_DEPTH)
             if obj_depth is not None:
                 od = self._fit(obj_depth.depth, H, W, order=1)
-                restored &= np.isfinite(od) & (od >= cfg.min_distance_m)
+                restored &= np.isfinite(od) & (od >= min_distance)
             if restored.any():
-                fill = float(cfg.min_distance_m + 0.9 * (min(cfg.max_distance_m, 100.0) - cfg.min_distance_m))
-                ok = np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= cfg.max_distance_m)
+                fill = float(min_distance + 0.9 * (min(cfg.max_distance_m, 100.0) - min_distance))
+                ok = np.isfinite(depth) & (depth >= min_distance) & (depth <= cfg.max_distance_m)
                 depth = np.where(restored & ~ok, fill, depth)
                 vegetation = vegetation | restored
                 self.log_info(f"Treeline backdrop: {int(restored.sum())} px of canopy restored where objects were removed")
@@ -173,7 +194,7 @@ class TreelineBackdropStage(PipelineStage):
         grid_half = float(params.get("grid_size_meters", 200.0)) / 2.0
         far_start = context.input_object(ContextKey.FAR_FIELD_START_M)
         max_distance = min(max_distance, max(float(far_start or 0.0), grid_half))
-        far = vegetation & np.isfinite(depth) & (depth >= cfg.min_distance_m) & (depth <= max_distance)
+        far = vegetation & np.isfinite(depth) & (depth >= min_distance) & (depth <= max_distance)
         row_angle = math.pi / H
         top = np.full(W, -1, dtype=np.int32)
         bottom = np.full(W, -1, dtype=np.int32)

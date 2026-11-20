@@ -45,9 +45,12 @@ _CELLS = [(0, 0), (CELL_PX, 0), (0, CELL_PX)]
 # the bottom so the card's up axis is the image's.
 PARTS: dict[str, list[tuple[str, str, str]]] = {
     "spike": [
-        ("head", "bloom", "the whole flower head of {name} ({phrase}) seen from the side, {colours}, full and bushy, "
-                          "every bract and floret in sharp focus, upright with its base at the bottom, isolated on a "
-                          "plain white background, macro photograph, soft even daylight, no stem below the head"),
+        # Shape words are left to the species ("full and bushy" made the lousewort a
+        # dandelion; "much taller than wide" made the paintbrush a sliver).
+        ("head", "bloom", "the whole flower spike of {name} ({phrase}) seen from the side, {colours}, in its "
+                          "true proportions, its bracts and florets packed close around the stem, every bract in "
+                          "sharp focus, upright with its base at the bottom, isolated on a plain white "
+                          "background, macro photograph, soft even daylight, no stem below the spike"),
         ("leaf", "foliage", "a single green leaf of a wild alpine meadow plant, about three times longer than wide, "
                             "upright with its base at the bottom, isolated on a plain white background, photograph, "
                             "sharp focus, soft even daylight"),
@@ -83,10 +86,29 @@ PARTS: dict[str, list[tuple[str, str, str]]] = {
 }
 
 
-def recolour(rgba: np.ndarray, target_rgb, strength: float = 0.85, lightness: float = 0.5) -> np.ndarray:
+def alpha_bleed(rgba: np.ndarray, cutoff: int = 128) -> np.ndarray:
+    """Every transparent pixel takes the colour of the nearest opaque one. The
+    matte leaves the background black under alpha 0, and the renderer's bilinear
+    filter (and every resize) mixes that black into the edge: an ink line around
+    every leaf and head, the "toon shading" of band24."""
+    from scipy import ndimage
+    a = rgba[..., 3]
+    opaque = a >= cutoff
+    if not opaque.any() or opaque.all():
+        return rgba
+    idx = ndimage.distance_transform_edt(~opaque, return_distances=False, return_indices=True)
+    out = rgba.copy()
+    out[..., :3] = rgba[..., :3][idx[0], idx[1]]
+    return out
+
+
+def recolour(rgba: np.ndarray, target_rgb, strength: float = 0.85, lightness: float = 0.5,
+             chroma: float = 1.0) -> np.ndarray:
     """Shift the opaque pixels' mean colour (Lab) to the target: the whole of the
     chroma, `lightness` of the lightness difference, each scaled by strength.
-    Per-pixel variation (the texture) is kept."""
+    Per-pixel variation (the texture) is kept. `chroma` < 1 then pulls every
+    opaque pixel toward grey by that factor: a painting lit again by the scene's
+    sun reads oversaturated (band26's "oversaturated yellow spikes")."""
     out = rgba.astype(np.float32).copy()
     alpha = out[..., 3] > 64
     if alpha.sum() < 16:
@@ -98,6 +120,8 @@ def recolour(rgba: np.ndarray, target_rgb, strength: float = 0.85, lightness: fl
     delta = tgt - mean
     delta[0] *= lightness
     lab[alpha] += strength * delta
+    if chroma != 1.0:
+        lab[alpha, 1:] *= chroma
     shifted = np.clip(skcolor.lab2rgb(lab.reshape(-1, 1, 3)).reshape(rgb.shape), 0.0, 1.0)
     out[..., :3] = shifted * 255.0
     return np.clip(out, 0, 255).astype(np.uint8)
@@ -216,7 +240,7 @@ class SpeciesAtlas:
         targets = {"bloom": (palette.get("bloom") or [None])[0], "foliage": (palette.get("foliage") or [None])[0]}
         key = hashlib.sha256(json.dumps({
             "form": form, "prompts": prompts, "targets": targets, "px": self.image_px, "steps": self.steps,
-            "guidance": self.guidance, "seed": self.seed, "v": 4,
+            "guidance": self.guidance, "seed": self.seed, "v": 9,
         }, sort_keys=True, default=str).encode()).hexdigest()[:16]
         cached = self.cache_dir / f"atlas_{key}"
         if (cached / "atlas.png").exists() and (cached / "parts.json").exists():
@@ -245,8 +269,17 @@ class SpeciesAtlas:
                 # A conifer's spray takes most of the measured darkness: a subalpine
                 # fir is near black in the photograph, and the painted spray lit by the
                 # scene's sun read as "bright yellow-green pillars" (band22).
-                lightness = 0.5 if pal == "bloom" else (0.8 if part == "spray" else 0.25)
-                cut = PILImage.fromarray(recolour(np.asarray(cut), target, lightness=lightness), "RGBA")
+                # A leaf takes nearly half the measured darkness: at a quarter the
+                # painted leaves stayed FLUX's bright yellow-green (band26).
+                lightness = 0.5 if pal == "bloom" else (0.8 if part == "spray" else 0.45)
+                chroma = 0.8 if pal == "bloom" else (1.0 if part == "spray" else 0.85)
+                # A bloom keeps 40% of the painting's own colour: the plan's colour
+                # words made the lousewort's cream spike a pure yellow (band24,
+                # "cartoon colors"), and FLUX knows what the named species looks like.
+                strength = 0.6 if pal == "bloom" else 0.85
+                cut = PILImage.fromarray(recolour(np.asarray(cut), target, strength=strength, lightness=lightness,
+                                                  chroma=chroma), "RGBA")
+            cut = PILImage.fromarray(alpha_bleed(np.asarray(cut)), "RGBA")
             w, h = cut.size
             scale = min((CELL_PX - 8) / w, (CELL_PX - 8) / h)
             cut = cut.resize((max(1, int(w * scale)), max(1, int(h * scale))), PILImage.LANCZOS)
@@ -261,6 +294,7 @@ class SpeciesAtlas:
         if not parts:
             return None
         cached.mkdir(parents=True, exist_ok=True)
+        atlas = PILImage.fromarray(alpha_bleed(np.asarray(atlas)), "RGBA")
         atlas.save(cached / "atlas.png")
         info = {"parts": parts, "palette_origin": list(PALETTE_ORIGIN), "palette_px": PALETTE_PX, "size": ATLAS_PX}
         (cached / "parts.json").write_text(json.dumps(info, indent=1))

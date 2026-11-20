@@ -71,6 +71,9 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         standing_min_drop_m: float = 3.0,
         standing_pedestal_radius_m: float = 3.0,
         standing_ring_m: tuple[float, float] = (7.0, 10.0),
+        near_drop_floor_m: float = 0.5,
+        near_drop_slope: float = 0.05,
+        near_drop_radius_m: float = 45.0,
         anchor_water_plane: bool = True,
         anchor_water_min_fraction: float = 0.02,
         bank_reach_m: float = 15.0,
@@ -256,6 +259,16 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.standing_min_drop_m = float(standing_min_drop_m)
         self.standing_pedestal_radius_m = float(standing_pedestal_radius_m)
         self.standing_ring_m = (float(standing_ring_m[0]), float(standing_ring_m[1]))
+        # The ground within near_drop_radius_m may not fall below the camera's own
+        # ground by more than near_drop_floor_m + near_drop_slope x distance. The
+        # depth model reads the far meadow through the gaps between foreground
+        # plants, and those pixels, on rays 8-10 deg below the horizon, land 15-30 m
+        # out and 3 m down: Rainier's mid-ground was a pit with a 2 m wall at 12 m
+        # (band24), the snow patch and the trail folded into its far side. The plan
+        # gates it: a viewer on a ridge or a coast may really look down a drop.
+        self.near_drop_floor_m = float(near_drop_floor_m)
+        self.near_drop_slope = float(near_drop_slope)
+        self.near_drop_radius_m = float(near_drop_radius_m)
         # Water scenes with a photo-measured camera height: the height was measured
         # to the water plane, so the water IS at -camera_height. The depth-derived
         # map put Paris's river at -8.1 m under a 12.1 m camera and its quays at
@@ -656,6 +669,62 @@ class HeightMapStage(PipelineStage):
                 )
             elif np.isfinite(ring_y):
                 self.log_info(f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out lies {ring_y:+.2f} m, within {cfg.standing_min_drop_m:.0f} m of eye height")
+
+        if cfg.near_drop_floor_m > 0.0 and cfg.near_drop_radius_m > 0.0:
+            plan_obj = context.input_object(ContextKey.SCENE_PLAN) or {}
+            plan_body = plan_obj.get("plan") if isinstance(plan_obj, dict) and isinstance(plan_obj.get("plan"), dict) else plan_obj
+            kind = str(((plan_body or {}).get("terrain") or {}).get("kind") or "") if isinstance(plan_body, dict) else ""
+            if kind in ("ridge", "coast"):
+                self.log_info(f"Near drop floor: the plan's terrain is a {kind}; the ground may fall away, nothing lifted")
+            else:
+                n = cfg.grid_resolution
+                axis = (np.arange(n, dtype=np.float32) + 0.5) / n * grid_size - grid_size / 2.0
+                zz, xx = np.meshgrid(axis, axis, indexing="ij")
+                rr = np.hypot(xx, zz)
+                floor = (-float(camera_height) - cfg.near_drop_floor_m - cfg.near_drop_slope * rr).astype(np.float32)
+                # Feathered out over the last fifth of the radius, so the floor's edge is
+                # never a step of its own.
+                R1 = float(cfg.near_drop_radius_m)
+                R0 = 0.8 * R1
+                t = np.clip((R1 - rr) / max(R1 - R0, 1e-6), 0.0, 1.0)
+                t = t * t * (3.0 - 2.0 * t)
+                finite = np.isfinite(height_array)
+                lifted_to = np.where(finite, floor * t + np.where(finite, height_array, floor) * (1.0 - t), floor)
+                low = finite & (rr <= R1) & (height_array < lifted_to)
+                if low.any() and region_type_mask is not None:
+                    # Water lies as low as it lies (Paris: the river 6 m under the
+                    # quay the viewer stands on). Each low cell is typed by the
+                    # panorama pixel along the ray to its own position.
+                    from pipeline.panorama_segmentation.panorama_region_result import RegionType as _RT2
+                    tm2 = np.asarray(region_type_mask)
+                    th2, tw2 = tm2.shape
+                    li = np.where(low)
+                    lon = np.arctan2(xx[li], zz[li])
+                    lat = np.arctan2(height_array[li], np.maximum(rr[li], 1e-6))
+                    row = np.clip(((0.5 - lat / np.pi) * (th2 - 1)).astype(np.intp), 0, th2 - 1)
+                    col = np.clip(((lon / (2.0 * np.pi) + 0.5) * (tw2 - 1)).astype(np.intp), 0, tw2 - 1)
+                    is_water = np.rint(tm2[row, col]).astype(np.int32) == int(_RT2.WATER)
+                    if is_water.any():
+                        keep = np.zeros_like(low)
+                        keep[li[0][~is_water], li[1][~is_water]] = True
+                        self.log_info(f"Near drop floor: {int(is_water.sum()):,} low cell(s) are water and stay low")
+                        low = keep
+                if low.any():
+                    lift = (lifted_to - height_array)[low]
+                    r_low = rr[low]
+                    height_array = np.where(low, lifted_to, height_array).astype(height_array.dtype)
+                    # The lifted cell's own panorama pixel was the far ground seen past
+                    # the plants, not this ground: the mesh falls back to its position.
+                    pano_uv_u_array = np.where(low, np.nan, pano_uv_u_array).astype(pano_uv_u_array.dtype)
+                    pano_uv_v_array = np.where(low, np.nan, pano_uv_v_array).astype(pano_uv_v_array.dtype)
+                    self.log_info(
+                        f"Near drop floor: {int(low.sum()):,} cell(s) within {R1:.0f} m lay below the camera's ground "
+                        f"({-camera_height:+.2f} m) by more than {cfg.near_drop_floor_m:.1f} m + {cfg.near_drop_slope:.0%} of "
+                        f"their distance -- lifted by {float(np.median(lift)):.2f} m median, {float(lift.max()):.2f} m max, "
+                        f"{float(r_low.min()):.0f}-{float(r_low.max()):.0f} m out ({kind or 'no plan kind'})"
+                    )
+                else:
+                    self.log_info(f"Near drop floor: no ground within {R1:.0f} m below the floor ({kind or 'no plan kind'})")
 
         height_map = Depth(height_array)
         context.add_depth(output_key, height_map)

@@ -49,6 +49,8 @@ MARKER = "species_assets_complete"
 
 _FORM_WORDS = [
     ("conifer", r"\b(fir|spruce|pine|conifer|spire|hemlock|cedar|larch|evergreen)\b"),
+    # No procedural form yet: a tree that is not a conifer keeps its cards.
+    ("broadleaf", r"\b(plane|platanus|oak|maple|beech|birch|poplar|aspen|elm|chestnut|linden|lime|deciduous|broad-?leaf|broad-?leaved)\b"),
     ("raceme", r"\b(lupin|lupine|raceme|foxglove|delphinium|larkspur|pea.flower)\b"),
     ("seedhead", r"\b(seed.?head|anemone|pasque|fuzzy|dandelion|clock)\b"),
     ("tuft", r"\b(grass|sedge|tussock|rush|carex)\b"),
@@ -63,7 +65,9 @@ def species_form(species: dict) -> str:
         if re.search(pattern, text):
             return form
     cls = str(species.get("class", "")).lower()
-    return {"tree": "conifer", "grass": "tuft", "shrub": "shrub", "reed": "tuft", "moss": "tuft"}.get(cls, "spike")
+    # A tree without conifer words is broadleaf, which has no procedural form (the
+    # London plane read as a conifer here and would have stood as a fir).
+    return {"tree": "broadleaf", "grass": "tuft", "shrub": "shrub", "reed": "tuft", "moss": "tuft"}.get(cls, "spike")
 
 
 class SpeciesAssetsConfiguration(PipelineStageConfiguration):
@@ -88,6 +92,7 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         atlas_image_px: int = 768,
         atlas_steps: int = 28,
         atlas_guidance: float = 3.5,
+        plan_only_species: bool = True,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.blender_path = Path(os.path.expanduser(blender_path))
@@ -106,6 +111,7 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         self.atlas_image_px = int(atlas_image_px)
         self.atlas_steps = int(atlas_steps)
         self.atlas_guidance = float(atlas_guidance)
+        self.plan_only_species = bool(plan_only_species)
 
 
 class SpeciesAssetsStage(PipelineStage):
@@ -277,6 +283,17 @@ class SpeciesAssetsStage(PipelineStage):
         }
 
     @staticmethod
+    def _apply_head_width(entry: dict) -> None:
+        """The built plant is squeezed to width_m, so the painted head sets it:
+        the paintbrush's bracted head is a quarter of its height across, not the
+        spike ratio's seventh (band23: 4.5 cm heads read as magenta slivers)."""
+        head = (entry.get("parts") or {}).get("head")
+        frac = {"spike": 0.38 * 1.12, "raceme": 0.52 * 1.06, "seedhead": 0.3}.get(entry.get("form"))
+        if head and frac:
+            head_w = frac * float(head.get("aspect") or 0.5) * entry["height_m"]
+            entry["width_m"] = round(min(max(entry["width_m"], head_w), 0.35 * entry["height_m"]), 3)
+
+    @staticmethod
     def _entry_hash(entry: dict) -> str:
         return hashlib.sha256(json.dumps(entry, sort_keys=True).encode()).hexdigest()[:16]
 
@@ -409,6 +426,27 @@ class SpeciesAssetsStage(PipelineStage):
             matches[key] = (sp, pal, how, de, members)
             self.advance_progress(task)
 
+        if self.config.plan_only_species:
+            # A plan species no bucket matched (Rainier: the pasqueflower seed heads,
+            # the bistort) still gets a mesh, from the plan's words and crop hint
+            # alone, under a bucket of its own, so Scene Generation's re-deal can
+            # hand it its share of the painted population.
+            matched_names = {m[0].get("name") for m in matches.values()}
+            used = [b for (c, b) in groups if c == "flower"]
+            next_bucket = (max(used) + 1) if used else 0
+            for sp, spal, src in candidates.get("flower", []):
+                if sp.get("name") in matched_names or not spal or not spal.get("bloom"):
+                    continue
+                key = f"category_mesh_flower_{next_bucket}"
+                pal = {**spal, "bloom": spal["bloom"], "foliage": spal.get("foliage") or [[72, 96, 46]],
+                       "stem": spal.get("stem") or [], "pixels": int(spal.get("pixels") or 0), "bloom_fraction": 1.0}
+                entry = self._spec_entry(key, sp, pal, seed=self.seed + next_bucket * 17, variants=self.config.variants)
+                entries.append(entry)
+                matches[key] = (sp, pal, f"the plan alone ({src})", None, [])
+                self.log_info(f"  {key}: '{sp.get('name')}' from the plan alone, no bucket of its own; "
+                              f"bloom {pal['bloom'][:2]} ({src})")
+                next_bucket += 1
+
         if self.config.atlas and entries:
             from pipeline.species.atlas import SpeciesAtlas
             from util.device_utils import DeviceStrategy, preferred_device
@@ -424,6 +462,7 @@ class SpeciesAssetsStage(PipelineStage):
                     if info and info.get("parts"):
                         entry.update({"atlas": info["atlas"], "parts": info["parts"],
                                       "palette_origin": info.get("palette_origin"), "palette_px": info.get("palette_px")})
+                        self._apply_head_width(entry)
                         self.log_info(f"  {entry['id']}: atlas parts {', '.join(info['parts'])} "
                                       f"({Path(info['atlas']).parent.name})")
                     else:

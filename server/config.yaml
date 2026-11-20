@@ -747,6 +747,15 @@ stages:
     viewer_eye_height_m: 1.7
     standing_min_drop_m: 3.0
     standing_pedestal_radius_m: 3.0
+    # The ground within near_drop_radius_m may not lie below the camera's own ground
+    # by more than near_drop_floor_m + near_drop_slope x its distance. The depth model
+    # reads the far meadow through the gaps between the foreground plants, and those
+    # pixels land 15-30 m out and 3 m down: Rainier's mid-ground was a pit with a 2 m
+    # wall at 12 m, the snow patch and the trail folded into its far side (band24).
+    # Skipped when the plan's terrain is a ridge or a coast. 0 disables.
+    near_drop_floor_m: 0.5
+    near_drop_slope: 0.05
+    near_drop_radius_m: 45.0
                                  # cells required in a dense_mask/any_forward_mask cell's own
                                  # despike_window before it can be flagged at all — protects a
                                  # real, sparsely-surrounded sample (e.g. an isolated distant
@@ -1310,7 +1319,12 @@ stages:
     # Distance x pixel angle / sin(grazing angle against the height map's surface):
     # flat ground at 30 m from a 1.8 m eye is ~0.8 m per pixel (the pinwheel); a
     # 45-degree mountain face at 100 m is ~0.2 m and keeps its photographed snow.
-    panorama_max_texel_m: 0.6
+    # 0.6 stripped the photograph off every flat texel past ~15 m from a 0.9 m eye:
+    # Rainier's mid-ground (the green knolls, the snow patches, the trail at 40-100 m)
+    # became the bare-soil vegetation tile, a brown smear under the treeline (band23).
+    # A pixel stretched 2-4 m along the view ray is exact from the capture point and
+    # moves 4% at 50 m for a 2 m step, so the photograph stays to ~4 m per pixel.
+    panorama_max_texel_m: 4.0
     # The far ring -- unobserved terrain beyond this radius, i.e. the ridge envelope
     # and the outpainted dome -- keeps the projected panorama regardless of the
     # gates above. On the 2026-10-14 Rainier run the region map labelled 70-91% of
@@ -1503,6 +1517,9 @@ stages:
                                 # outpainted and painted trees, 3D up close); the strip only
                                 # carries the forest beyond. At 6 m it took nearly every tree.
     max_distance_m: 400.0
+    min_distance_no_form_m: 40.0 # ...but only a conifer band has a procedural form; where the plan's
+                                # tree species are broadleaf (Paris's planes and willows keep their
+                                # cards) the ribbon starts here, as before the plan bands. 0 disables.
     min_height_m: 1.0           # a run of vegetation must stand this tall to be canopy. In
                                 # SCENE metres: the calibrated panorama depth puts the
                                 # Rainier treeline at 10-12 m, so its trees stand 1-3 m
