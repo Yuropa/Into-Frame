@@ -803,6 +803,20 @@ of memory on GPU 0, the 16 GB card, where two pan renders (the band27 Rainier pa
 and the Paris pan) sat while the stage loaded. Pan renders are not light enough to
 overlap a run; `final3` waits for an idle GPU.
 
+**Shark Fin `final3` (09:42, from the plan; 54 min): judge 0.18, 2/6 (a2 cliff, a3
+beach fail); DINO 0.267 / 0.472 (round11: 0.218 / 0.476), colour dE 23.4 (24.7).**
+The first Shark Fin under the plan. The geometry reads: the fin, the cove, the far
+shelf, the cliffs as rounded mounds without the cave. The light does not: the plan
+puts the sun at 2 deg elevation, golden, and the Exposure Fit asked for the cap (sun
+x3.00, ambient x3.00; the render's near field p50 0.059 against the photograph's
+0.307) and stopped there, so the cliffs that the photograph shows lit gold from the
+right stand dark, the sea is black under the horizon glow, and the sun's reflection on
+the water plane is a glowing pillar the judge counts against it. Not chased today:
+whether the plan's sun elevation should be trusted at 2 deg (the photograph's cliff
+faces are lit, which a 2 deg sun behind the fin cannot do) is the trust-rule
+decision the sun-window prior is waiting on, and the fit's 3x cap is too low for a
+sunset exposure.
+
 ### First full runs (`hybrid1`, night of 2026-11-13, both from Panorama Lighting)
 
 | scene | vs | dino_global | dino_layout | colour dE | judge | priors applied |
