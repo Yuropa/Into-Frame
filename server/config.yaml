@@ -2294,6 +2294,29 @@ stages:
     mcubes_resolution: 128      # marching-cubes grid for the exported mesh
     max_mesh_faces: 8000        # same face budget as Panorama Asset Generation
 
+  - name: Population Fit
+    stage: PopulationFitStage
+    # A statistical population model per class, fitted to the photograph's detections
+    # (docs/agentic-scene-graph-plan.md §5): log-linear intensity in terrain features
+    # (forest edge, water edge, slope, elevation, greenness, bloom colour) with a detection-
+    # effort offset, Thomas clustering from the exemplars' spacing, a left/right hold-out.
+    # The model is always written (population_models; the scene graph shows it). The DRAW
+    # replaces Distribution Synthesis's painted instances of a class only where
+    # class_overrides.<class>.enabled is true; Scene Generation then needs no change.
+    # CPU, seconds. Knobs the agent edits: class_overrides.<class>.{enabled,
+    # density_multiplier, cluster_radius_m, cluster_size, max_distance_m, seed}.
+    classes: [flower]
+    class_overrides:
+      flower:
+        enabled: false
+    cell_m: 1.0                 # fit/draw grid cell (the terrain grid is ~0.1 m)
+    ridge: 1.0                  # L2 penalty on the standardised coefficients
+    detect_min_px: 20.0         # an exemplar-sized object this many pixels tall is reliably detected
+    detect_gamma: 1.5           # how fast detection effort falls with distance past that
+    max_distance_m: 60.0        # the draw stops here (per class via class_overrides)
+    max_instances: 20000
+    plan_density_words: true    # the plan's dense/patchy/sparse words scale the draw as in Distribution Synthesis
+
   - name: Scene Generation
     stage: SceneGenerationStage
     keys:

@@ -301,67 +301,21 @@ _PENALTY = {"minor": 0.02, "major": 0.06, "severe": 0.12}
 _WEIGHTS = {"layout": 0.25, "geometry": 0.2, "materials": 0.15, "lighting": 0.15, "atmosphere": 0.1, "realism": 0.15}
 
 
-def judge(photo: Image.Image, render: Image.Image, plan: dict | None, model_id: str, out: Path) -> dict | None:
-    """Vision-model verdict on the photo view. Returns the verdict dict (also written to out/verdict.json)."""
-    import os
+def judge(photo: Image.Image, render: Image.Image, plan: dict | None, model_id: str, out: Path,
+          run: Path | None = None) -> dict | None:
+    """Vision-model verdict on the photo view (server/agent/critique.py): issues targeted at
+    scene-graph nodes when the run carries scene_graph.json; Anthropic or an OpenAI-compatible
+    server by the model id's prefix. Written to out/verdict.json."""
     sys.path.insert(0, str(ROOT / "server"))
-    from pipeline.scene_plan.client import PlanModel, SpendLedger, NoApiError, SpendCapError, image_to_jpeg_b64
-    pm = PlanModel(model_id, timeout_s=300, retries=1)
-    if pm.no_api:
-        print("  judge: paid calls are off (FRAME_NO_API); skipped")
-        return None
-    acceptance = (plan or {}).get("acceptance") or []
-    acc_text = "\n".join(f"- {a.get('id')} [{a.get('priority')}]: {a.get('text')}" for a in acceptance) or "- (none)"
-    user = ("The first image is the photograph, the second the render from its camera. Acceptance items read from the "
-            f"photograph:\n{acc_text}\n\nRecord your verdict by calling the judge tool.")
-    import anthropic
-    from pipeline.scene_plan.client import resolve_anthropic_key, estimate_usd, ModelReply
-    key = resolve_anthropic_key()
-    if not key:
-        print("  judge: no Anthropic key; skipped")
-        return None
-    b1, _, _ = image_to_jpeg_b64(photo, 1024)
-    b2, _, _ = image_to_jpeg_b64(render, 1024)
-    client = anthropic.Anthropic(api_key=key, timeout=300, max_retries=1)
-    ledger = SpendLedger(ROOT / "cache" / "scene_plan", run_cap_usd=2.0)
-    try:
-        ledger.check(0.05, "scene-check judge")
-        msg = client.messages.create(
-            model=pm.model, max_tokens=2500, system=JUDGE_SYSTEM,
-            tools=[{"name": "judge", "description": "Record the verdict.", "input_schema": JUDGE_SCHEMA}],
-            tool_choice={"type": "auto"},
-            messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b1}},
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b2}},
-                {"type": "text", "text": user}]}])
-    except (NoApiError, SpendCapError) as exc:
-        print(f"  judge: {exc}")
-        return None
-    except Exception as exc:
-        print(f"  judge failed: {type(exc).__name__}: {exc}")
-        return None
-    data = next((b.input for b in msg.content if getattr(b, "type", "") == "tool_use"), None)
-    if not isinstance(data, dict):
-        print("  judge: no tool call in the reply")
-        return None
-    usd = estimate_usd(pm.model, msg.usage.input_tokens, msg.usage.output_tokens)
-    ledger.record("scene-check judge", ModelReply(data, pm.model, "anthropic", msg.usage.input_tokens,
-                                                  msg.usage.output_tokens, usd, 0.0), out.name, "judge")
-    rubric = data.get("rubric", {})
-    base = sum(_WEIGHTS[k] * float(rubric.get(k, 0)) / 5.0 for k in _WEIGHTS)
-    penalty = min(0.3, sum(_PENALTY.get(i.get("severity"), 0.0) for i in data.get("issues", [])))
-    musts = {a.get("id") for a in acceptance if a.get("priority") == "must"}
-    failed_must = [a["id"] for a in data.get("acceptance", []) if a.get("id") in musts and not a.get("pass")]
-    score = max(0.0, base - penalty)
-    if failed_must:
-        score = min(score, 0.6)
-    passed = sum(1 for a in data.get("acceptance", []) if a.get("pass"))
-    verdict = {"model": pm.model, "score": round(score, 3), "rubric_score": round(base, 3), "penalty": round(penalty, 3),
-               "failed_must": failed_must, "acceptance_pass": f"{passed}/{len(data.get('acceptance', []))}",
-               "summary": data.get("summary"), "issues": data.get("issues", []), "acceptance": data.get("acceptance", []),
-               "rubric": rubric, "usd": round(usd, 4)}
-    (out / "verdict.json").write_text(json.dumps(verdict, indent=2))
-    return verdict
+    from agent.critique import judge as _judge
+    graph = None
+    if run is not None and (run / "scene_graph.json").exists():
+        try:
+            from pipeline.scene_graph import SceneGraph
+            graph = SceneGraph.load(run)
+        except Exception as exc:
+            print(f"  judge: scene graph not loaded ({exc}); untargeted issues")
+    return _judge(photo, render, plan, model_id, out, graph=graph)
 
 
 # ── sheet ───────────────────────────────────────────────────────────────────────
@@ -449,7 +403,7 @@ def main() -> int:
             record["plan"] = {k: plan[k] for k in ("model", "source", "camera", "sun", "water", "terrain")}
             record["plan_overrides"] = plan["overrides"]
         if args.judge:
-            verdict = judge(photo, now["photo"], plan, args.judge_model, out)
+            verdict = judge(photo, now["photo"], plan, args.judge_model, out, run)
             if verdict is not None:
                 record["judge"] = verdict["score"]
                 record["acceptance_pass"] = verdict["acceptance_pass"]
@@ -458,7 +412,7 @@ def main() -> int:
                       f"{', must failed: ' + ', '.join(verdict['failed_must']) if verdict['failed_must'] else ''}); "
                       f"acceptance {verdict['acceptance_pass']}; {verdict['summary']}", flush=True)
                 for i in verdict["issues"]:
-                    print(f"    {i.get('severity'):6s} {i.get('kind'):11s} {i.get('target')}: {i.get('text')}")
+                    print(f"    {i.get('severity'):6s} {i.get('kind'):11s} {i.get('node') or '-'} {i.get('target')}: {i.get('text')}")
 
         hist_path = base / "history.jsonl"
         history = [json.loads(l) for l in hist_path.read_text().splitlines() if l.strip()] if hist_path.exists() else []

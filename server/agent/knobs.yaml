@@ -1,0 +1,550 @@
+# The edit vocabulary (docs/agentic-scene-graph-plan.md §3, §4): every attribute an agent
+# may change on a scene-graph node, and what the change drives. `targets` are config keys
+# of stages (written into a derived config.yaml) or fields of the cached Scene Plan
+# (`plan:` dotted path under plan); `{class}` binds to the node id's class. `rerun` is the
+# stage the pipeline reruns from; `cost` says what that costs today (expensive = before
+# Object Completion, so ~1 to 3 h on this box; medium = from Panorama Asset Generation,
+# ~20 to 60 min; cheap = minutes).
+knobs:
+  # ── light ───────────────────────────────────────────────────────────────────
+  - id: sun.elevation
+    node: sun
+    attr: elevation_deg
+    type: float
+    min: 1
+    max: 85
+    unit: deg
+    rerun: Panorama Lighting
+    cost: expensive
+    targets:
+      - {plan: sun.elevation_deg}
+      - {stage: Panorama Lighting, key: plan_sun_override, value: true}
+    doc: the sun's elevation; overrides the measured sun. Low values make grazing light and dark ground.
+  - id: sun.azimuth
+    node: sun
+    attr: azimuth_deg
+    type: float
+    min: -180
+    max: 180
+    unit: deg
+    rerun: Panorama Lighting
+    cost: expensive
+    targets:
+      - {plan: sun.azimuth_deg}
+      - {stage: Panorama Lighting, key: plan_sun_override, value: true}
+    doc: the sun's azimuth, 0 ahead, positive to the right (clockwise); overrides the measured sun.
+  - id: sun.warmth
+    node: sun
+    attr: warmth
+    type: choice
+    choices: [cool, neutral, golden]
+    rerun: Panorama Lighting
+    cost: expensive
+    targets:
+      - {plan: sun.warmth}
+    doc: the sun's colour temperature word the lighting stage keys its colour from.
+  - id: sun.min_elevation
+    node: sun
+    attr: plan_min_elevation_deg
+    type: float
+    min: 0
+    max: 60
+    unit: deg
+    rerun: Panorama Lighting
+    cost: expensive
+    targets:
+      - {stage: Panorama Lighting, key: plan_sun_min_elevation_deg}
+    doc: the lowest elevation the plan's sun is allowed to pull the measured sun down to.
+  - id: sun.max_intensity
+    node: sun
+    attr: plan_max_intensity
+    type: float
+    min: 0.5
+    max: 12
+    rerun: Panorama Lighting
+    cost: expensive
+    targets:
+      - {stage: Panorama Lighting, key: plan_sun_max_intensity}
+    doc: cap on the sun intensity the plan window may set.
+  - id: sun.exposure_scale_max
+    node: sun
+    attr: exposure_scale_max
+    type: float
+    min: 1
+    max: 12
+    rerun: Exposure Fit
+    cost: cheap
+    targets:
+      - {stage: Exposure Fit, key: scale_max}
+    doc: the largest sun/ambient multiplier Exposure Fit may apply. Raise when the render stays darker than the photo at the cap (Shark Fin hit 3.0).
+  - id: sun.exposure_scale_min
+    node: sun
+    attr: exposure_scale_min
+    type: float
+    min: 0.05
+    max: 1
+    rerun: Exposure Fit
+    cost: cheap
+    targets:
+      - {stage: Exposure Fit, key: scale_min}
+    doc: the smallest multiplier Exposure Fit may apply.
+  - id: sun.exposure_near_m
+    node: sun
+    attr: exposure_near_m
+    type: float
+    min: 5
+    max: 400
+    unit: m
+    rerun: Exposure Fit
+    cost: cheap
+    targets:
+      - {stage: Exposure Fit, key: near_m}
+    doc: Exposure Fit matches luminance percentiles over pixels nearer than this; larger includes the far terrain.
+
+  # ── camera ──────────────────────────────────────────────────────────────────
+  - id: camera.height
+    node: camera
+    attr: height_m
+    type: float
+    min: 0.3
+    max: 60
+    unit: m
+    rerun: Panorama Depth Calibration
+    cost: expensive
+    targets:
+      - {plan: camera.height_m}
+      - {stage: Panorama Depth Calibration, key: camera_height_meters}
+      - {stage: Height Map, key: camera_height_meters}
+      - {stage: Region Map, key: camera_height_meters}
+    doc: the camera's height above the ground under it; sets the metric scale of everything.
+
+  # ── atmosphere ──────────────────────────────────────────────────────────────
+  - id: atmosphere.haze_near
+    node: atmosphere
+    attr: haze_near_m
+    type: float
+    min: 50
+    max: 20000
+    unit: m
+    rerun: Exposure Fit
+    cost: cheap
+    targets:
+      - {plan: atmosphere.haze_near_m}
+    doc: where haze starts (client fog); smaller = hazier scene.
+  - id: atmosphere.haze_far
+    node: atmosphere
+    attr: haze_far_m
+    type: float
+    min: 200
+    max: 100000
+    unit: m
+    rerun: Exposure Fit
+    cost: cheap
+    targets:
+      - {plan: atmosphere.haze_far_m}
+    doc: where haze is full (client fog).
+
+  # ── water and terrain ───────────────────────────────────────────────────────
+  - id: water.width
+    node: water
+    attr: width_m
+    type: float
+    min: 1
+    max: 5000
+    unit: m
+    rerun: Region Map
+    cost: expensive
+    targets:
+      - {plan: water.width_m}
+    doc: the water body's width the region map is fitted to.
+  - id: water.level
+    node: water
+    attr: level_below_camera_m
+    type: float
+    min: 0
+    max: 200
+    unit: m
+    rerun: Region Map
+    cost: expensive
+    targets:
+      - {plan: water.level_below_camera_m}
+    doc: how far the water surface sits below the camera.
+  - id: ground.near_drop_floor
+    node: ground
+    attr: near_drop_floor_m
+    type: float
+    min: 0
+    max: 5
+    unit: m
+    rerun: Height Map
+    cost: expensive
+    targets:
+      - {stage: Height Map, key: near_drop_floor_m}
+    doc: the near ground may not drop more than this below the camera's footing.
+  - id: ground.smooth_sigma
+    node: ground
+    attr: smooth_sigma
+    type: float
+    min: 1
+    max: 64
+    rerun: Height Map
+    cost: expensive
+    targets:
+      - {stage: Height Map, key: smooth_sigma}
+    doc: height-map smoothing in cells; larger = smoother, less relief.
+
+  # ── backdrops ───────────────────────────────────────────────────────────────
+  - id: treeline.min_distance
+    node: treeline
+    attr: min_distance_m
+    type: float
+    min: 10
+    max: 1000
+    unit: m
+    rerun: Treeline Backdrop
+    cost: expensive
+    targets:
+      - {stage: Treeline Backdrop, key: min_distance_m}
+    doc: nearest distance the forest ribbon may start at when the plan's trees have a procedural form.
+  - id: treeline.min_distance_no_form
+    node: treeline
+    attr: min_distance_no_form_m
+    type: float
+    min: 0
+    max: 1000
+    unit: m
+    rerun: Treeline Backdrop
+    cost: expensive
+    targets:
+      - {stage: Treeline Backdrop, key: min_distance_no_form_m}
+    doc: nearest distance of the ribbon when no plan tree has a procedural form (broadleaf scenes).
+  - id: treeline.max_distance
+    node: treeline
+    attr: max_distance_m
+    type: float
+    min: 50
+    max: 3000
+    unit: m
+    rerun: Treeline Backdrop
+    cost: expensive
+    targets:
+      - {stage: Treeline Backdrop, key: max_distance_m}
+    doc: farthest distance of the ribbon.
+  - id: treeline.min_height
+    node: treeline
+    attr: min_height_m
+    type: float
+    min: 0.2
+    max: 30
+    unit: m
+    rerun: Treeline Backdrop
+    cost: expensive
+    targets:
+      - {stage: Treeline Backdrop, key: min_height_m}
+    doc: the lowest silhouette the ribbon keeps.
+  - id: far_field.far_m
+    node: far_field
+    attr: far_m
+    type: float
+    min: 100
+    max: 20000
+    unit: m
+    rerun: Far Field Backdrop
+    cost: expensive
+    targets:
+      - {stage: Far Field Backdrop, key: far_m}
+    doc: radius of the far-field shell.
+
+  # ── populations: Distribution Synthesis (expensive) ─────────────────────────
+  - id: pop.density_scale
+    node: pop_{class}
+    attr: density_scale
+    type: float
+    min: 0.05
+    max: 10
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: "class_density_scale.{class}"}
+    doc: multiplier on the painted density of this class (detector-recall compensation).
+  - id: pop.max_paint_radius
+    node: pop_{class}
+    attr: max_paint_radius_m
+    type: float
+    min: 2
+    max: 400
+    unit: m
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: "class_max_paint_radius_m.{class}"}
+    doc: hard cutoff distance this class is painted to.
+  - id: pop.falloff_exponent
+    node: pop_{class}
+    attr: falloff_exponent
+    type: float
+    min: 0
+    max: 4
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: "class_falloff_exponent.{class}"}
+    doc: radial density falloff beyond the full-density radius; 0 = flat.
+  - id: pop.min_full_density_radius
+    node: pop_{class}
+    attr: min_full_density_radius_m
+    type: float
+    min: 1
+    max: 200
+    unit: m
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: "class_min_full_density_radius_m.{class}"}
+    doc: radius of full density around the camera for this class.
+  - id: pop.bloom_max_boost
+    node: pop_flower
+    attr: bloom_max_boost
+    type: float
+    min: 1
+    max: 12
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: bloom_max_boost}
+    doc: cap on the flower recall boost from saturated non-green blobs.
+  - id: pop.bloom_max_density
+    node: pop_flower
+    attr: bloom_max_density_m2
+    type: float
+    min: 1
+    max: 80
+    unit: per m2
+    rerun: Distribution Synthesis
+    cost: expensive
+    targets:
+      - {stage: Distribution Synthesis, key: bloom_max_density_m2}
+    doc: cap on painted flower density after the boost.
+
+  # ── populations: Population Fit (the fitted model; cheap redraws) ──────────
+  - id: fit.enabled
+    node: pop_{class}
+    attr: fit_enabled
+    type: bool
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.enabled"}
+    doc: replace this class's painted instances with a draw from the fitted density model.
+  - id: fit.density_multiplier
+    node: pop_{class}
+    attr: fit_density_multiplier
+    type: float
+    min: 0.05
+    max: 10
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.density_multiplier"}
+    doc: multiplier on the fitted intensity before the draw.
+  - id: fit.cluster_radius
+    node: pop_{class}
+    attr: fit_cluster_radius_m
+    type: float
+    min: 0.2
+    max: 20
+    unit: m
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.cluster_radius_m"}
+    doc: Thomas-process cluster radius; smaller = tighter clumps.
+  - id: fit.cluster_size
+    node: pop_{class}
+    attr: fit_cluster_size
+    type: float
+    min: 1
+    max: 60
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.cluster_size"}
+    doc: mean instances per cluster; 1 = no clustering (Poisson).
+  - id: fit.max_distance
+    node: pop_{class}
+    attr: fit_max_distance_m
+    type: float
+    min: 2
+    max: 400
+    unit: m
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.max_distance_m"}
+    doc: farthest distance the fitted model draws to.
+  - id: fit.seed
+    node: pop_{class}
+    attr: fit_seed
+    type: int
+    min: 0
+    max: 1000000000
+    rerun: Population Fit
+    cost: medium
+    targets:
+      - {stage: Population Fit, key: "class_overrides.{class}.seed"}
+    doc: a new seed redraws the same model.
+
+  # ── grass ───────────────────────────────────────────────────────────────────
+  - id: grass.tufts_per_m2
+    node: grass
+    attr: tufts_per_m2
+    type: float
+    min: 1
+    max: 200
+    unit: per m2
+    rerun: Grass Cover
+    cost: expensive
+    targets:
+      - {stage: Grass Cover, key: tufts_per_m2}
+    doc: grass blade density on the client.
+  - id: grass.max_radius
+    node: grass
+    attr: max_radius_m
+    type: float
+    min: 5
+    max: 150
+    unit: m
+    rerun: Grass Cover
+    cost: expensive
+    targets:
+      - {stage: Grass Cover, key: max_radius_m}
+    doc: how far from the camera grass is drawn.
+  - id: grass.density_floor
+    node: grass
+    attr: density_floor_fraction
+    type: float
+    min: 0
+    max: 1
+    rerun: Grass Cover
+    cost: expensive
+    targets:
+      - {stage: Grass Cover, key: density_floor_fraction}
+    doc: minimum grass density on cells that pass the greenness test.
+
+  # ── placement (Scene Generation and assets; medium) ─────────────────────────
+  - id: world.population_near_m
+    node: world
+    attr: population_near_m
+    type: float
+    min: 2
+    max: 100
+    unit: m
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: plan_population_near_m}
+    doc: radius within which the plan's species population is filled in around the camera.
+  - id: world.population_density_dense
+    node: world
+    attr: population_density_dense_m2
+    type: float
+    min: 0.1
+    max: 40
+    unit: per m2
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: plan_population_density_m2.dense}
+    doc: instances per m2 for a species the plan calls dense (patchy and sparse scale below it).
+  - id: world.population_density_patchy
+    node: world
+    attr: population_density_patchy_m2
+    type: float
+    min: 0.05
+    max: 20
+    unit: per m2
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: plan_population_density_m2.patchy}
+    doc: instances per m2 for a species the plan calls patchy.
+  - id: world.size_tolerance
+    node: world
+    attr: size_tolerance
+    type: float
+    min: 1
+    max: 6
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: plan_size_tolerance}
+    doc: how far (x) a placed object's height may stray from the plan's size before it is dropped.
+  - id: world.species_mesh_near_m
+    node: world
+    attr: species_mesh_near_distance_m
+    type: float
+    min: 5
+    max: 400
+    unit: m
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: species_mesh_near_distance_m}
+    doc: procedural species meshes are used nearer than this, cards beyond.
+  - id: world.band_rows
+    node: world
+    attr: band_rows
+    type: int
+    min: 1
+    max: 20
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: plan_band_rows}
+    doc: rows of trees in a plan band (forest edge).
+  - id: world.overlap_min_separation
+    node: world
+    attr: overlap_min_separation
+    type: float
+    min: 0
+    max: 1
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: overlap_min_separation}
+    doc: fraction of radius two placed objects must keep apart; lower = denser packing allowed.
+  - id: world.species_variants
+    node: world
+    attr: species_variants
+    type: int
+    min: 1
+    max: 8
+    rerun: Species Assets
+    cost: medium
+    targets:
+      - {stage: Species Assets, key: variants}
+    doc: procedural variants per species mesh; more breaks up sameness.
+  - id: world.billboard_distance
+    node: world
+    attr: billboard_distance_m
+    type: float
+    min: 5
+    max: 500
+    unit: m
+    rerun: Panorama Asset Generation
+    cost: medium
+    targets:
+      - {stage: Panorama Asset Generation, key: billboard_distance_m}
+    doc: beyond this distance detections become billboards rather than meshes.
+  - id: pop.metric_height
+    node: pop_{class}
+    attr: metric_height_m
+    type: float
+    min: 0.05
+    max: 60
+    unit: m
+    rerun: Scene Generation
+    cost: medium
+    targets:
+      - {stage: Scene Generation, key: "metric_height_m.{class}"}
+    doc: the placed height of this class's instances (flowers default 0.5 m; the critic calls Rainier's oversized). Aspect is kept.
