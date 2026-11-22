@@ -81,7 +81,7 @@ MODEL_DIR="$HOME/models/$REPO"
 say "weights -> $MODEL_DIR"
 mkdir -p "$MODEL_DIR"
 # hf download resumes partial files; an interrupted run just continues.
-"$HF" download "$REPO" --include "$WEIGHTS_GLOB" "$MMPROJ_GLOB" --local-dir "$MODEL_DIR"
+"$HF" download "$REPO" --include "$WEIGHTS_GLOB" --include "$MMPROJ_GLOB" --local-dir "$MODEL_DIR"
 FIRST_SHARD=$(ls "$MODEL_DIR"/$WEIGHTS_GLOB | sort | head -1)
 MMPROJ=$(ls "$MODEL_DIR"/$MMPROJ_GLOB | head -1)
 [ -f "$FIRST_SHARD" ] && [ -f "$MMPROJ" ] || die "download incomplete (no shard or no mmproj under $MODEL_DIR)"
