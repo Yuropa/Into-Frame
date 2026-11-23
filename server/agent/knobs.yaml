@@ -335,7 +335,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Population Fit, key: "class_overrides.{class}.enabled"}
-    doc: replace this class's painted instances with a draw from the fitted density model.
+    doc: WHERE instances of this class stand, not what they look like. Replaces the painted placement with a draw from a density model fitted to the photographed exemplars' terrain features (water edge, forest edge, slope). Needs 8+ photographed exemplars; no effect on mesh detail, passengers or textures.
   - id: fit.density_multiplier
     node: pop_{class}
     attr: fit_density_multiplier
@@ -346,7 +346,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Population Fit, key: "class_overrides.{class}.density_multiplier"}
-    doc: multiplier on the fitted intensity before the draw.
+    doc: multiplier on the fitted intensity before the draw (more or fewer instances of this class, same placement pattern).
   - id: fit.cluster_radius
     node: pop_{class}
     attr: fit_cluster_radius_m
@@ -358,7 +358,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Population Fit, key: "class_overrides.{class}.cluster_radius_m"}
-    doc: Thomas-process cluster radius; smaller = tighter clumps.
+    doc: Thomas-process cluster radius of the fitted draw; smaller = tighter clumps. Only matters when fit_enabled.
   - id: fit.cluster_size
     node: pop_{class}
     attr: fit_cluster_size
@@ -369,7 +369,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Population Fit, key: "class_overrides.{class}.cluster_size"}
-    doc: mean instances per cluster; 1 = no clustering (Poisson).
+    doc: mean instances per cluster of the fitted draw; 1 = no clustering (Poisson). Only matters when fit_enabled.
   - id: fit.max_distance
     node: pop_{class}
     attr: fit_max_distance_m
@@ -381,7 +381,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Population Fit, key: "class_overrides.{class}.max_distance_m"}
-    doc: farthest distance the fitted model draws to.
+    doc: farthest distance the fitted model draws to. Only matters when fit_enabled.
   - id: fit.seed
     node: pop_{class}
     attr: fit_seed
@@ -523,7 +523,7 @@ knobs:
     cost: medium
     targets:
       - {stage: Species Assets, key: variants}
-    doc: procedural variants per species mesh; more breaks up sameness.
+    doc: procedural variants per species mesh; more breaks up sameness of the plan's species trees. Nothing in this vocabulary changes the detail of a photographed object's mesh.
   - id: world.billboard_distance
     node: world
     attr: billboard_distance_m
