@@ -202,7 +202,8 @@ class AgentLoop:
                               + ("allowed." if cfg.allow_expensive else "NOT allowed this session (not in the vocabulary)."))
             (rdir / "prompt.txt").write_text(user)
             try:
-                proposal, usage = propose(cfg.model, user, self.images_for(current_label), base_url=cfg.base_url)
+                proposal, usage = propose(cfg.model, user, self.images_for(current_label), base_url=cfg.base_url,
+                                         raw_path=self.out / f"round_{r}" / "proposal_raw.txt")
             except Exception as exc:
                 rec.outcome = f"orchestrator failed: {type(exc).__name__}: {exc}"
                 self.rounds.append(rec)

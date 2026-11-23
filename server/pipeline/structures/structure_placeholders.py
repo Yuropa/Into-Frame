@@ -42,6 +42,15 @@ from scene.object import Object3D, vec3
 
 MARKER = "structure_placeholders_complete"
 
+# Placed meshes of these classes stand for any plan building or bridge at their bearing.
+STRUCTURE_CLASSES = {"building", "bridge", "tower", "monument", "landmark", "statue", "skyscraper", "lighthouse",
+                     "structure", "church", "cathedral", "castle", "dome", "arch", "house", "palace", "temple"}
+_STOP_WORDS = {"the", "of", "a", "an", "de", "la", "le", "du", "des", "les", "and", "block"}
+
+
+def _name_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 2 and w not in _STOP_WORDS}
+
 
 class StructurePlaceholdersConfiguration(PipelineStageConfiguration):
     def __init__(
@@ -251,15 +260,15 @@ class StructurePlaceholdersStage(PipelineStage):
                 return height_map_y_at(local_x, local_z, height_map, grid_m)
             return None
 
-        # What Scene Generation already placed as a mesh, by class and bearing.
-        placed: list[tuple[str, float]] = []
+        # What Scene Generation already placed as a mesh, by class, bearing and name.
+        placed: list[tuple[str, float, float, float, str]] = []
         for obj in scene.objects:
             if obj.source_index is None or not obj.mesh:
                 continue
             m = context.input_object(f"metadata_{obj.source_index}") or {}
             lx, lz = terrain_local_xz(obj.position["x"], obj.position["z"], yaw, camera_x=camera_xz[0], camera_z=camera_xz[1])
             placed.append((str(m.get("class", "")).lower(), self._bearing_of_local(lx, lz), float(math.hypot(lx, lz)),
-                           float(m.get("world_height") or 0.0)))
+                           float(m.get("world_height") or 0.0), str(m.get("name") or m.get("phrase") or "").lower()))
 
         task = self.create_progress(len(landmarks), "Structure placeholders…")
         for lm in landmarks:
@@ -274,12 +283,22 @@ class StructurePlaceholdersStage(PipelineStage):
             # A tree landmark counts as present only when a placed tree of comparable
             # height stands near its bearing and distance (a 2 m sapling at 15 m is not
             # the 9 m lone fir the plan names).
-            near = [p for p in placed if p[0] == category and self._dbearing(p[1], bearing) <= tol
+            # A built structure counts as present when a mesh of its category, of any structure
+            # class, or carrying its name stands near its bearing: the plan may file the Eiffel
+            # Tower under "building" while its detection is a "tower" landmark card, and a 115 m
+            # block in front of that card hid the whole skyline (Paris mac1, 2026-11-23).
+            name_words = _name_words(name) | _name_words(str(lm.get("phrase") or ""))
+            def _same_thing(p) -> bool:
+                if category == "tree":
+                    return p[0] == category
+                return p[0] == category or p[0] in STRUCTURE_CLASSES or bool(name_words & _name_words(p[4]))
+            near = [p for p in placed if _same_thing(p) and self._dbearing(p[1], bearing) <= tol
                     and (category != "tree" or (abs(p[2] - distance) <= max(10.0, 0.5 * distance)
                                                 and p[3] >= 0.5 * height))]
             if near:
-                self.log_info(f"  '{name}' ({category}, bearing {bearing:.0f}): a placed {category} mesh already stands "
-                              f"within {tol:.0f} deg" + (f" at {near[0][2]:.0f} m, {near[0][3]:.1f} m tall" if category == "tree" else "")
+                self.log_info(f"  '{name}' ({category}, bearing {bearing:.0f}): a placed {near[0][0] or category} mesh"
+                              + (f" '{near[0][4]}'" if near[0][4] else "") + f" already stands within {tol:.0f} deg"
+                              + (f" at {near[0][2]:.0f} m, {near[0][3]:.1f} m tall" if category == "tree" else "")
                               + "; skipped")
                 records.append({"name": name, "category": category, "status": "already placed"})
                 self.advance_progress(task)

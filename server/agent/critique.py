@@ -88,9 +88,23 @@ def _node_lines(graph) -> list[str]:
     return out
 
 
+def _dicts(items) -> list[dict]:
+    """Only the dict entries of a model-written list; a string entry becomes {'text': it}."""
+    out = []
+    for i in items or []:
+        if isinstance(i, dict):
+            if "text" not in i and "description" in i:
+                i = dict(i, text=i["description"])
+            out.append(i)
+        elif isinstance(i, str):
+            out.append({"text": i})
+    return out
+
+
 def score_verdict(data: dict, acceptance: list[dict], model: str, usd: float) -> dict:
-    rubric = data.get("rubric", {})
-    base = sum(_WEIGHTS[k] * float(rubric.get(k, 0)) / 5.0 for k in _WEIGHTS)
+    data = dict(data, issues=_dicts(data.get("issues")), acceptance=_dicts(data.get("acceptance")))
+    rubric = data.get("rubric") if isinstance(data.get("rubric"), dict) else {}
+    base = sum(_WEIGHTS[k] * float(rubric.get(k) or 0) / 5.0 for k in _WEIGHTS)
     penalty = min(0.3, sum(_PENALTY.get(i.get("severity"), 0.0) for i in data.get("issues", [])))
     musts = {a.get("id") for a in acceptance if a.get("priority") == "must"}
     failed_must = [a["id"] for a in data.get("acceptance", []) if a.get("id") in musts and not a.get("pass")]
@@ -131,7 +145,7 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
             data, usage = _anthropic(pm, b1, b2, user, schema)
             usd = estimate_usd(pm.model, usage[0], usage[1])
         else:
-            data, usage = _openai(pm, b1, b2, user, schema)
+            data, usage = _openai(pm, b1, b2, user, schema, raw_path=out / "judge_raw.txt")
             usd = 0.0
     except (NoApiError, SpendCapError) as exc:
         print(f"  judge: {exc}")
@@ -174,7 +188,7 @@ def _anthropic(pm, b1: str, b2: str, user: str, schema: dict):
     return data, (msg.usage.input_tokens, msg.usage.output_tokens)
 
 
-def _openai(pm, b1: str, b2: str, user: str, schema: dict):
+def _openai(pm, b1: str, b2: str, user: str, schema: dict, raw_path=None):
     import httpx
     base = (pm.base_url or os.environ.get("OPENAI_BASE_URL") or "http://localhost:8000/v1").rstrip("/")
     key = os.environ.get("OPENAI_API_KEY", "none")
@@ -187,16 +201,45 @@ def _openai(pm, b1: str, b2: str, user: str, schema: dict):
     strict = dict(body, response_format={"type": "json_schema",
                                          "json_schema": {"name": "judge", "schema": schema, "strict": True}})
     last = None
-    for payload in (strict, body):
+    for mode, payload in (("json_schema", strict), ("plain", body)):
         try:
             r = httpx.post(f"{base}/chat/completions", json=payload, timeout=pm.timeout_s,
                            headers={"Authorization": f"Bearer {key}"})
             r.raise_for_status()
             j = r.json()
             text = j["choices"][0]["message"]["content"].strip()
-            text = text.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+            if raw_path is not None:
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                raw_path.write_text(f"[{mode}]\n{text}\n")
+            data = parse_json_object(text, required=("rubric", "issues"))
             u = j.get("usage", {})
-            return json.loads(text), (int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0)))
+            return data, (int(u.get("prompt_tokens", 0)), int(u.get("completion_tokens", 0)))
         except Exception as exc:
-            last = exc
+            last = f"{mode}: {type(exc).__name__}: {str(exc)[:300]}"
+            print(f"  judge: {last}")
+            if raw_path is not None:
+                raw_path.parent.mkdir(parents=True, exist_ok=True)
+                with raw_path.open("a") as f:
+                    f.write(f"[{mode} failed] {last}\n")
     raise RuntimeError(f"OpenAI-compatible critique failed: {last}")
+
+
+def parse_json_object(text: str, required: tuple[str, ...]) -> dict:
+    """The JSON object in a model's reply: fences stripped, a leading/trailing remark cut,
+    a single-key wrapper ({"verdict": {...}}) unwrapped. Raises when no object holds any of
+    the required keys, so the caller tries its next request mode rather than scoring zeros."""
+    t = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+    try:
+        data = json.loads(t)
+    except json.JSONDecodeError:
+        a, b = t.find("{"), t.rfind("}")
+        if a < 0 or b <= a:
+            raise
+        data = json.loads(t[a:b + 1])
+    if isinstance(data, dict) and not any(k in data for k in required) and len(data) == 1:
+        inner = next(iter(data.values()))
+        if isinstance(inner, dict):
+            data = inner
+    if not isinstance(data, dict) or not any(k in data for k in required):
+        raise ValueError(f"reply has none of {required}: {t[:200]!r}")
+    return data

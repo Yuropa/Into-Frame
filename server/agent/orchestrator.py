@@ -85,7 +85,7 @@ def build_user(graph_text: str, knobs_text: str, check: Optional[dict], verdict:
 
 
 def propose(model_id: str, user: str, images: list[Image.Image], base_url: Optional[str] = None,
-            timeout_s: float = 600.0) -> tuple[dict, dict]:
+            timeout_s: float = 600.0, raw_path: Optional[Path] = None) -> tuple[dict, dict]:
     """Returns (proposal, usage{input_tokens, output_tokens, usd, seconds, model})."""
     sys.path.insert(0, str(ROOT / "server"))
     from pipeline.scene_plan.client import PlanModel, image_to_jpeg_b64, estimate_usd, resolve_anthropic_key
@@ -124,18 +124,22 @@ def propose(model_id: str, user: str, images: list[Image.Image], base_url: Optio
         strict = dict(body, response_format={"type": "json_schema", "json_schema": {"name": "propose", "schema": PROPOSAL_SCHEMA, "strict": True}})
         last = None
         data = None
-        for payload in (strict, body):
+        from agent.critique import parse_json_object
+        for mode, payload in (("json_schema", strict), ("plain", body)):
             try:
                 r = httpx.post(f"{base}/chat/completions", json=payload, timeout=timeout_s, headers={"Authorization": f"Bearer {key}"})
                 r.raise_for_status()
                 j = r.json()
-                text = j["choices"][0]["message"]["content"].strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-                data = json.loads(text)
+                text = j["choices"][0]["message"]["content"].strip()
+                if raw_path is not None:
+                    raw_path.parent.mkdir(parents=True, exist_ok=True)
+                    raw_path.write_text(f"[{mode}]\n{text}\n")
+                data = parse_json_object(text, required=("edits", "diagnosis"))
                 u = j.get("usage", {})
                 usage = {"input_tokens": int(u.get("prompt_tokens", 0)), "output_tokens": int(u.get("completion_tokens", 0)), "usd": 0.0}
                 break
             except Exception as exc:
-                last = exc
+                last = f"{mode}: {type(exc).__name__}: {exc}"
         if data is None:
             raise RuntimeError(f"OpenAI-compatible propose failed: {last}")
     usage.update({"seconds": round(time.time() - t0, 1), "model": f"{pm.provider}:{pm.model}"})
