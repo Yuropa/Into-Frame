@@ -122,14 +122,34 @@ if [ "$LAUNCHD" = 1 ]; then
   <key>StandardErrorPath</key><string>$CFG/llama-server.log</string>
 </dict></plist>
 EOF
-    launchctl bootout "gui/$(id -u)/link.jford.into-frame.llama-server" 2>/dev/null || true
-    launchctl bootstrap "gui/$(id -u)" "$PLIST"
-    echo "started under launchd; log: $CFG/llama-server.log"
-    echo "stop:  launchctl bootout gui/$(id -u)/link.jford.into-frame.llama-server"
-else
+    LABEL=link.jford.into-frame.llama-server
+    DOMAIN="gui/$(id -u)"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    sleep 1
+    if launchctl bootstrap "$DOMAIN" "$PLIST" 2>"$CFG/bootstrap.err"; then
+        echo "started under launchd; log: $CFG/llama-server.log"
+        echo "stop:  launchctl bootout $DOMAIN/$LABEL"
+    elif launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+        # error 5 with the job present: it was already loaded; restart it on the new script
+        launchctl kickstart -k "$DOMAIN/$LABEL"
+        echo "agent was already loaded; restarted; log: $CFG/llama-server.log"
+    else
+        # error 5 with no job: usually an ssh session with no GUI login to bootstrap into
+        echo "launchctl bootstrap failed: $(cat "$CFG/bootstrap.err")"
+        echo "Starting llama-server in the background instead. To install the agent so it survives"
+        echo "reboots, run this once from a Terminal on the Mac's own screen:"
+        echo "    launchctl bootstrap $DOMAIN $PLIST"
+        LAUNCHD=0
+    fi
+fi
+if [ "$LAUNCHD" = 0 ]; then
     say "starting llama-server in the background (no launchd)"
-    nohup bash "$SERVE" >> "$CFG/llama-server.log" 2>&1 &
-    echo "pid $!; log: $CFG/llama-server.log"
+    if pgrep -x llama-server >/dev/null; then
+        echo "llama-server already running (pid $(pgrep -x llama-server | head -1)); leaving it"
+    else
+        nohup bash "$SERVE" >> "$CFG/llama-server.log" 2>&1 &
+        echo "pid $!; log: $CFG/llama-server.log"
+    fi
 fi
 
 # 4. wait, then one timed vision call --------------------------------------------------
