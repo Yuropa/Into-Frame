@@ -113,8 +113,9 @@ class AgentLoop:
     def observe(self, r: int, label: Optional[str] = None) -> tuple[Optional[dict], Optional[dict], str]:
         label = label or self.check_label(r)
         if not (self.check_dir(label) / "check.json").exists():
+            extra = ["--base-url", self.cfg.base_url] if self.cfg.base_url else None
             rc = runner.run_check(self.cfg.scene, label, self.cfg.judge_model, self.out / f"round_{r}" / "check.log",
-                                  grass=self.cfg.grass)
+                                  grass=self.cfg.grass, extra=extra)
             if rc != 0:
                 self.say(f"scene-check failed (exit {rc}); see round_{r}/check.log")
         check, verdict = runner.read_check(self.cfg.scene, label)

@@ -257,7 +257,9 @@ class PopulationFitStage(PipelineStage):
         models: dict[str, Any] = {}
         count = int(context.input_object(ContextKey.OBJECT_COUNT) or 0)
         next_idx = count
-        for cls in cfg.classes:
+        # every configured class, plus any class an override names: the agent enables a class
+        # by setting class_overrides.<class>.enabled, which must fit it even if `classes` omits it
+        for cls in sorted(set(cfg.classes) | set(cfg.class_overrides)):
             ex = self._exemplars(dist, cls)
             if ex is None or len(ex["points"]) < cfg.min_exemplars:
                 self.log_info(f"  {cls}: {0 if ex is None else len(ex['points'])} exemplars, under {cfg.min_exemplars}; skipped")
