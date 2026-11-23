@@ -615,7 +615,12 @@ the focus verdict only asked "resolved". Two conclusions. The loop's mechanics n
 (propose, apply, render, judge, keep or revert, about 40 s and $0.07 a round), and the
 keep rule was too strict: the judge's focus now also answers `improved`, and a clear
 step toward the photograph with no fall in the whole-frame score is kept so the next
-round builds on it (commit 8d1c4c2; a Paris rerun, fix3, tests it). Second, the issues
+round builds on it (commit 8d1c4c2). The Paris rerun on that rule (fix3, 6 attempts,
+$0.45) kept its first edit of the night: the Pont d'Iéna moved to 450 m and scaled to
+180 m long, judge 0.04 -> 0.11, snapshot fix3; three later rounds were reverted for a
+"new severe issue" the judge had not listed as severe before, which says the severity
+labels are noisy from one call to the next and the revert rule should compare the same
+issue's severity, not the count. Second, the issues
 that remain are content, in every scene: the tour boat with its crowd, the stone arches,
 the golden cliff, the beach, the meadow with its snow patches and trail, the full dark
 fir. No move, scale or swap of the meshes a run already holds can answer them, which is
