@@ -343,12 +343,18 @@ class FixLoop:
         sev_after = sum(1 for i in after.get("issues", []) if i.get("severity") == "severe")
         if sev_after > sev_before:
             return False, f"new severe issue: " + "; ".join(i.get("target", "") for i in after.get("issues", []) if i.get("severity") == "severe")
-        if not f.get("resolved"):
-            return False, f"focus not resolved: {f.get('evidence', '')}"
         if float(after.get("score") or 0) < float(before.get("score") or 0) - self.cfg.score_drop:
             return False, f"score fell {before.get('score')} -> {after.get('score')}"
         reg = str(f.get("regressions") or "").strip()
-        return True, "issue resolved" + (f"; judge notes: {reg}" if reg and reg.lower() not in ("none", "''", "nothing") else "")
+        notes = f"; judge notes: {reg}" if reg and reg.lower() not in ("none", "''", "nothing") else ""
+        if f.get("resolved"):
+            return True, "issue resolved" + notes
+        # A clear step toward the photograph with no regression is kept too, so the next round
+        # builds on it instead of starting over (Paris fix2 round 4 lifted the judge 0.04 -> 0.2
+        # and was thrown away for not finishing the bridge).
+        if f.get("improved") and float(after.get("score") or 0) >= float(before.get("score") or 0):
+            return True, "improved, not resolved; kept as a step" + notes
+        return False, f"focus not resolved: {f.get('evidence', '')}"
 
     def accept(self, applied: list[dict], r: int) -> None:
         from agent.editor import load_edits, save_edits

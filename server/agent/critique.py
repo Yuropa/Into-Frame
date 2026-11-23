@@ -61,8 +61,9 @@ def focus_schema(node_ids: Optional[list[str]] = None) -> dict:
     """judge_schema plus a verdict on one targeted issue (the fix loop's question)."""
     s = judge_schema(node_ids)
     s["required"] = list(s["required"]) + ["focus"]
-    s["properties"]["focus"] = {"type": "object", "additionalProperties": False, "required": ["resolved", "evidence", "regressions"],
+    s["properties"]["focus"] = {"type": "object", "additionalProperties": False, "required": ["resolved", "improved", "evidence", "regressions"],
                                 "properties": {"resolved": {"type": "boolean", "description": "the targeted issue is fixed in this render (gone, or reduced to minor)"},
+                                               "improved": {"type": "boolean", "description": "the target region is clearly closer to the photograph than in the previous render, even if the issue stands (a step worth keeping)"},
                                                "evidence": {"type": "string", "description": "what you see at the target region now, one sentence"},
                                                "regressions": {"type": "string", "description": "anything the change made worse elsewhere, or ''"}}}
     return s
@@ -93,7 +94,8 @@ def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: O
                      f"[{focus.get('severity')}/{focus.get('kind')}] {focus.get('target')}: {focus.get('text')}"
                      + (f" (photo region x {box[0]:.2f} y {box[1]:.2f} w {box[2]:.2f} h {box[3]:.2f})." if box and len(box) == 4 else ".")
                      + " The third and fourth images are the photograph and the render cropped to that region. "
-                     "Say in `focus` whether it is resolved, what the region shows now, and what the edit made worse elsewhere.")
+                     "Say in `focus` whether it is resolved, whether the region is at least clearly closer to the photograph "
+                     "than before (improved), what the region shows now, and what the edit made worse elsewhere.")
     parts.append("Record your verdict with the judge tool / as the JSON object.")
     return "\n\n".join(parts)
 
