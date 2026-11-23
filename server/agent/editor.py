@@ -6,9 +6,10 @@ action on that file, not a stage parameter, so applying one costs a JSON edit an
 render (scripts/render-scene.py --scene), never a pipeline rerun:
 
     place         a mesh the run already holds (category_mesh_boat_0, category_mesh_tree_1_card,
-                  landmark_card_6 ...) at a position, with a height in metres and a yaw
+                  landmark_card_6 ...) at a position, with a height or length in metres and a yaw
     move          an object to a position, or by a delta
-    scale         an object to a height in metres, or by a factor
+    scale         an object to a height or a length (longest horizontal extent) in metres,
+                  or by a factor; the footprint centre and the base stay where they were
     rotate        an object to a yaw, or by a delta
     remove        an object
     swap_mesh     an object's mesh key
@@ -126,6 +127,9 @@ class Editor:
             hits = [o for o in self.objects if str(o.get("id")) == t]
             if not hits:
                 hits = [o for o in self.objects if o.get("name") == t]
+            if not hits and len(t) >= 6:
+                # The fixer's listing prints ids as their first eight characters.
+                hits = [o for o in self.objects if str(o.get("id")).startswith(t)]
         if not hits:
             raise EditError(f"no object matches '{target}'")
         if len(hits) > 1:
@@ -313,6 +317,37 @@ class Editor:
         ext = float(b[1][1] - b[0][1])
         return float(height_m) / ext if ext > 1e-6 else fallback
 
+    def _scale_for_length(self, mesh: str, length_m: float, fallback: float) -> float:
+        b = self.mesh_bounds(mesh)
+        if b is None:
+            return fallback
+        ext = float(max(b[1][0] - b[0][0], b[1][2] - b[0][2]))
+        return float(length_m) / ext if ext > 1e-6 else fallback
+
+    def _scale_for(self, mesh: str, a: dict, fallback: float) -> Optional[float]:
+        """The uniform scale an action's height_m or length_m asks for; None when it gives neither."""
+        if a.get("height_m") is not None:
+            return self._scale_for_height(mesh, float(a["height_m"]), fallback)
+        if a.get("length_m") is not None:
+            return self._scale_for_length(mesh, float(a["length_m"]), fallback)
+        return None
+
+    def object_extent(self, o: dict) -> Optional[tuple[float, float, np.ndarray]]:
+        """(length_m, height_m, world centre) of a placed object from its mesh bounds and transform.
+        Honest for meshes whose vertices carry world coordinates (structure placeholders sit at the
+        origin with scale 1), where the object's position says nothing about where it is."""
+        b = self.mesh_bounds(str(o.get("mesh") or ""))
+        if b is None:
+            return None
+        sc = _v(o.get("scale"), (1, 1, 1))
+        lo, hi = b[0] * sc, b[1] * sc
+        ext = hi - lo
+        c = (lo + hi) / 2.0
+        yaw = math.radians(float(_v(o.get("rotation"))[1]))
+        cy, sy = math.cos(yaw), math.sin(yaw)
+        centre = _v(o.get("position")) + np.array([cy * c[0] + sy * c[2], c[1], -sy * c[0] + cy * c[2]])
+        return float(max(ext[0], ext[2])), float(ext[1]), centre
+
     # ── actions ──────────────────────────────────────────────────────────────
     def apply(self, action: dict, who: str = "agent") -> dict:
         kind = str(action.get("action") or "")
@@ -339,12 +374,11 @@ class Editor:
         cls = str(a.get("class") or mesh.replace("category_mesh_", "").split("_")[0])
         on = str(a.get("on") or ("water" if cls in WATER_CLASSES else "ground"))
         p, how = self.resolve_at(a.get("at") or {}, on)
-        height = a.get("height_m")
-        if height is None:
+        height = a.get("height_m") if a.get("height_m") is not None else a.get("length_m")
+        scale = self._scale_for(mesh, a, 1.0)
+        if scale is None:
             like = [o for o in self.objects if o.get("mesh") == mesh]
             scale = float(_v(like[0].get("scale"), (1, 1, 1))[1]) if like else 1.0
-        else:
-            scale = self._scale_for_height(mesh, float(height), 1.0)
         yaw = float(a.get("yaw_deg") or 0.0)
         y = self._place_y(mesh, scale, float(p[1])) if a.get("at", {}).get("snap", True) and on != "none" else float(p[1])
         o = {"id": str(uuid.uuid4()), "position": _xyz([p[0], y, p[2]]), "rotation": _xyz([0.0, yaw, 0.0]),
@@ -355,7 +389,9 @@ class Editor:
         far = float(self.scene.get("farClipPlane") or 0.0)
         warn = f"; beyond the far clip ({far:.0f} m), it will not draw" if far and dist > far else ""
         return {"id": o["id"], "name": o["name"], "mesh": mesh, "position": o["position"], "scale": round(scale, 4),
-                "note": f"{o['name']} ({mesh}) at {dist:.1f} m bearing {b:.1f} deg, height {height if height is not None else 'as others'} m; {how}{warn}"}
+                "note": f"{o['name']} ({mesh}) at {dist:.1f} m bearing {b:.1f} deg, "
+                        + (f"{'length' if a.get('height_m') is None and a.get('length_m') is not None else 'height'} {height} m" if height is not None else "size as others")
+                        + f"; {how}{warn}"}
 
     def _do_move(self, a: dict) -> dict:
         o = self.find(a.get("target"))
@@ -377,21 +413,27 @@ class Editor:
         o = self.find(a.get("target"))
         self._guard(o, a)
         old = _v(o.get("scale"), (1, 1, 1))
-        if a.get("height_m") is not None:
-            s = self._scale_for_height(str(o.get("mesh") or ""), float(a["height_m"]), float(old[1]))
-        elif a.get("factor") is not None:
+        s = self._scale_for(str(o.get("mesh") or ""), a, float(old[1]))
+        if s is None:
+            if a.get("factor") is None:
+                raise EditError("scale needs height_m, length_m or factor")
             s = float(old[1]) * float(a["factor"])
-        else:
-            raise EditError("scale needs height_m or factor")
-        # Keep the base where it was.
+        # Keep the footprint centre and the base where they were (a mesh whose vertices sit away
+        # from its origin would otherwise slide as it scales).
+        before = self.object_extent(o)
         b = self.mesh_bounds(str(o.get("mesh") or ""))
         base_y = float(_v(o.get("position"))[1]) + (float(b[0][1]) * float(old[1]) if b is not None else 0.0)
         o["scale"] = _xyz([s, s, s])
         pos = _v(o.get("position"))
         o["position"] = _xyz([pos[0], base_y - (float(b[0][1]) * s if b is not None else 0.0), pos[2]])
-        h = (float(b[1][1] - b[0][1]) * s) if b is not None else None
+        after = self.object_extent(o)
+        if before is not None and after is not None:
+            d = before[2] - after[2]
+            pos = _v(o.get("position"))
+            o["position"] = _xyz([pos[0] + d[0], pos[1], pos[2] + d[2]])
+        size = f" ({after[0]:.1f} m long, {after[1]:.1f} m tall)" if after is not None else ""
         return {"id": o["id"], "name": o.get("name"), "old_scale": round(float(old[1]), 4), "scale": round(s, 4),
-                "note": f"{o.get('name')} scale {float(old[1]):.3f} -> {s:.3f}" + (f" ({h:.1f} m tall)" if h else "")}
+                "note": f"{o.get('name')} scale {float(old[1]):.3f} -> {s:.3f}{size}"}
 
     def _do_rotate(self, a: dict) -> dict:
         o = self.find(a.get("target"))
@@ -419,8 +461,12 @@ class Editor:
         oldb, newb = self.mesh_bounds(str(old or "")), self.mesh_bounds(mesh)
         s = float(_v(o.get("scale"), (1, 1, 1))[1])
         if oldb is not None and newb is not None and a.get("keep_height", True):
-            h = float(oldb[1][1] - oldb[0][1]) * s
-            s = self._scale_for_height(mesh, h, s)
+            # Keep the object's size in metres across the swap: its length when it is longer than
+            # tall (boats, bridges), else its height. `keep`: "length" | "height" overrides.
+            oldl = float(max(oldb[1][0] - oldb[0][0], oldb[1][2] - oldb[0][2])) * s
+            oldh = float(oldb[1][1] - oldb[0][1]) * s
+            keep = str(a.get("keep") or ("length" if oldl > oldh else "height"))
+            s = self._scale_for_length(mesh, oldl, s) if keep == "length" else self._scale_for_height(mesh, oldh, s)
             base_y = float(_v(o.get("position"))[1]) + float(oldb[0][1]) * float(_v(o.get("scale"), (1, 1, 1))[1])
             pos = _v(o.get("position"))
             o["position"] = _xyz([pos[0], base_y - float(newb[0][1]) * s, pos[2]])

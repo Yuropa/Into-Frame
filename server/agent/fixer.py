@@ -49,14 +49,16 @@ FIX_SCHEMA = {
             "properties": {
                 "action": {"type": "string", "enum": ["place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun", "set_light"]},
                 "target": {"type": "string", "description": "object id, unique name or thing_<sourceIndex> (move/scale/rotate/remove/swap_mesh)"},
-                "mesh": {"type": "string", "description": "a mesh key from the list (place/swap_mesh)"},
+                "mesh": {"type": "string", "description": "a mesh key from the list (place/swap_mesh); a swap keeps the object's length in metres when it is longer than tall, else its height"},
                 "class": {"type": "string"}, "name": {"type": "string"},
                 "at": {"type": "object", "additionalProperties": False,
                        "properties": {"photo_box": {"type": "array", "items": {"type": "number"}, "description": "[x, y, w, h] fractions of the PHOTOGRAPH where the object should appear; the editor casts the box's bottom centre onto the terrain or water"},
                                       "bearing_deg": {"type": "number"}, "distance_m": {"type": "number"},
                                       "world": {"type": "array", "items": {"type": "number"}},
                                       "delta": {"type": "array", "items": {"type": "number"}, "description": "[dx, dy, dz] metres, move only; x right, y up, z forward"}}},
-                "height_m": {"type": "number"}, "yaw_deg": {"type": "number"}, "delta_deg": {"type": "number"}, "factor": {"type": "number"},
+                "height_m": {"type": "number", "description": "place/scale: the object's vertical height in metres"},
+                "length_m": {"type": "number", "description": "place/scale: the object's longest horizontal extent in metres; use this for boats, bridges, buildings and anything wider than it is tall"},
+                "yaw_deg": {"type": "number"}, "delta_deg": {"type": "number"}, "factor": {"type": "number"},
                 "on": {"type": "string", "enum": ["ground", "water", "none"]},
                 "haze_near_m": {"type": "number"}, "haze_far_m": {"type": "number"},
                 "azimuth_deg": {"type": "number"}, "elevation_deg": {"type": "number"}, "intensity": {"type": "number"}, "color": {"type": "string"},
@@ -77,10 +79,13 @@ this run can place, the history of earlier attempts at this issue, and the actio
 Rules. Address only the stated issue, with one to three actions. Positions come from the PHOTOGRAPH: give an \
 object's photo_box (fractions of the photograph's width and height) where it should stand and let the editor \
 find the ground; give bearing and distance only when the thing has no footprint in the photograph. Sizes in \
-metres, from the plan or from what the class can be. Place only mesh keys from the list; a missing object with \
-no suitable mesh is a give_up. Do not touch the terrain, water, treeline or backdrop meshes. Do not repeat an \
-attempt the history says failed. When the issue cannot be answered with these actions, set give_up and say what \
-would be needed."""
+metres, from the plan or from what the class can be: height_m for things taller than wide, length_m for boats, \
+bridges and buildings (each object's listing gives its current length and height). Place only mesh keys from \
+the list; a missing object with no suitable mesh is a give_up. Do not touch the terrain, water, treeline or \
+backdrop meshes. A region that renders black or far darker than the photograph while its surface is present \
+is usually the exposure fit, not missing content: try set_light (sun_scale, ambient_scale above 1) before \
+giving up on it. Do not repeat an attempt the history says failed. When the issue cannot be answered with \
+these actions, set give_up and say what would be needed."""
 
 
 def _bool(v) -> bool:
@@ -431,14 +436,16 @@ def objects_text(editor, run: Path, photo_size) -> str:
         if editor.is_env(o):
             lines.append(f"{o.get('name')} (environment mesh, not editable)")
             continue
-        b, dist = editor.bearing_distance([o["position"]["x"], o["position"]["y"], o["position"]["z"]])
+        ext = editor.object_extent(o)
+        b, dist = editor.bearing_distance(ext[2] if ext is not None else [o["position"]["x"], o["position"]["y"], o["position"]["z"]])
         m = meta.get(str(o.get("sourceIndex")), {})
         pb = m.get("photo_box")
         box = f" photo_box [{pb[0] / W:.3f}, {pb[1] / H:.3f}, {pb[2] / W:.3f}, {pb[3] / H:.3f}]" if pb and W else ""
         h = m.get("world_height")
         src = f" thing_{o.get('sourceIndex')}" if o.get("sourceIndex") is not None else ""
-        lines.append(f"{o.get('name')} id {str(o.get('id'))[:8]}{src}: mesh {o.get('mesh')}, bearing {b:.1f} deg, {dist:.1f} m"
-                     + (f", {float(h):.1f} m tall" if h is not None else f", scale {float(o['scale']['y']):.2f}") + box)
+        size = (f", {ext[0]:.1f} m long x {ext[1]:.1f} m tall" if ext is not None
+                else (f", {float(h):.1f} m tall" if h is not None else f", scale {float(o['scale']['y']):.2f}"))
+        lines.append(f"{o.get('name')} id {str(o.get('id'))[:8]}{src}: mesh {o.get('mesh')}, bearing {b:.1f} deg, {dist:.1f} m{size}{box}")
     return "\n".join(lines)
 
 
