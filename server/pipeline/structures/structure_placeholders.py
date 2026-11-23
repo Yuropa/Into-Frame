@@ -45,6 +45,8 @@ MARKER = "structure_placeholders_complete"
 # Placed meshes of these classes stand for any plan building or bridge at their bearing.
 STRUCTURE_CLASSES = {"building", "bridge", "tower", "monument", "landmark", "statue", "skyscraper", "lighthouse",
                      "structure", "church", "cathedral", "castle", "dome", "arch", "house", "palace", "temple"}
+# Plan categories that any placed structure satisfies (the plan could not say what kind).
+GENERIC_STRUCTURE = {"building", "structure", "landmark", "monument"}
 _STOP_WORDS = {"the", "of", "a", "an", "de", "la", "le", "du", "des", "les", "and", "block"}
 
 
@@ -289,9 +291,15 @@ class StructurePlaceholdersStage(PipelineStage):
             # block in front of that card hid the whole skyline (Paris mac1, 2026-11-23).
             name_words = _name_words(name) | _name_words(str(lm.get("phrase") or ""))
             def _same_thing(p) -> bool:
+                # The same class, the same name, or -- only for a generic plan category
+                # (building, structure, landmark) -- any placed structure. A specific one
+                # (bridge, tower) is not stood in for by another kind: the Pont d'Iéna was
+                # skipped on 2026-11-23 because the Eiffel card stood 20 deg away.
                 if category == "tree":
                     return p[0] == category
-                return p[0] == category or p[0] in STRUCTURE_CLASSES or bool(name_words & _name_words(p[4]))
+                if p[0] == category or bool(name_words & _name_words(p[4])):
+                    return True
+                return category in GENERIC_STRUCTURE and p[0] in STRUCTURE_CLASSES
             near = [p for p in placed if _same_thing(p) and self._dbearing(p[1], bearing) <= tol
                     and (category != "tree" or (abs(p[2] - distance) <= max(10.0, 0.5 * distance)
                                                 and p[3] >= 0.5 * height))]
