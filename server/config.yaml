@@ -2636,6 +2636,15 @@ stages:
     scale_min: 0.5              # the key light stays a key light: band21 fitted sun x0.25, ambient x3.25 against a self-shadowed meadow and went flat
     scale_max: 3.0
 
+  - name: Scene Edits
+    stage: SceneEditsStage
+    # Replays the agent's accepted scene actions (<run>/scene_edits.json, written by
+    # scripts/scene-edit.py --accept; server/agent/editor.py) on the scene, so the later
+    # stages and the archive carry them and a rerun puts them back. No file: pass-through.
+    # Dirty whenever that file changed since it last ran.
+    enabled: true
+    strict: false                # true: a refused action fails the stage instead of being skipped
+
   - name: Foreground Inpainting
     stage: ForegroundInpainting
     enabled: false

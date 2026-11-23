@@ -110,12 +110,11 @@ def geometry_flags(run: Path) -> dict:
     import trimesh
     from scene.mesh import Mesh
 
-    # The latest stage's scene wins, as in the context (Structure Placeholders appends
-    # objects after Scene Generation).
-    scene_file = run / "Scene Generation" / "scene.json"
-    for stage_dir in _stage_dirs_in_order(run):
-        if (stage_dir / "scene.json").exists():
-            scene_file = stage_dir / "scene.json"
+    # The newest scene.json any stage wrote, the one render-scene draws (Structure
+    # Placeholders appends objects after Scene Generation; Scene Edits, replayed into
+    # the run by scripts/scene-edit.py --accept, is newer than a stale Scene Animation).
+    cands = sorted(run.glob("*/scene.json"), key=lambda p: p.stat().st_mtime)
+    scene_file = cands[-1] if cands else run / "Scene Generation" / "scene.json"
     scene = json.loads(scene_file.read_text())
     glbs: dict[str, Path] = {}
     order_file = run / "_stage_order.json"

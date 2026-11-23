@@ -230,6 +230,9 @@ class PipelineContext():
         # "person" crops and eleven "aircraft" back into a meadow scene.
         self._disabled_stages: set[str] = set()
         self._dirty_state: set[str] = set()
+        # The run directory load() read, so a stage can find run-level files beside the
+        # stage folders (<run>/scene_edits.json) wherever its own output is sent (replay).
+        self.loaded_from: Optional[Path] = None
         self._dirty_stage_state: dict[str, set[str]] = {}
         # Stages that are re-running this session and whose previously-cached output
         # must therefore not survive into it. See reset_stage().
@@ -707,6 +710,7 @@ class PipelineContext():
         self._stage_order.insert(insert_pos, name)
 
     def load(self, path: Path, stage_order: list[str], full_stage_order: Optional[list[str]] = None):
+        self.loaded_from = Path(path)
         if not path.exists():
             return
 

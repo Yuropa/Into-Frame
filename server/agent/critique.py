@@ -39,9 +39,11 @@ def judge_schema(node_ids: Optional[list[str]] = None) -> dict:
         "properties": {
             "summary": {"type": "string", "description": "two sentences: what the render shows vs the photograph"},
             "issues": {"type": "array", "items": {"type": "object", "additionalProperties": False,
-                       "required": ["target", "node", "kind", "severity", "text"],
+                       "required": ["target", "node", "kind", "severity", "text", "photo_box"],
                        "properties": {"target": {"type": "string", "description": "the thing the issue is about, in words"},
                                       "node": node,
+                                      "photo_box": {"type": "array", "items": {"type": "number"}, "maxItems": 4,
+                                                    "description": "where in the PHOTOGRAPH the issue is: [x, y, w, h] as fractions of its width and height (0-1), the region the render should match; [] when it has no place (overall lighting, style)"},
                                       "kind": {"type": "string", "enum": ISSUE_KINDS},
                                       "severity": {"type": "string", "enum": SEVERITY},
                                       "text": {"type": "string"}}}},
@@ -61,7 +63,8 @@ thing they are about, judge each acceptance item from what is visible, then scor
 indistinguishable from a photograph of the place). The render is a game-engine frame, not a photo: judge whether it \
 reads as the same place with believable geometry, surfaces, light and air, not pixel identity. When a list of \
 scene-graph nodes is given, name the node each issue is about in `node` (exactly as listed), or '' if none fits. \
-Content marked generated (behind the camera, outpainted) is a hypothesis: do not grade it against the photograph."""
+Content marked generated (behind the camera, outpainted) is a hypothesis: do not grade it against the photograph. \
+Give each issue its place in the photograph as `photo_box` fractions, so the fix can be measured there."""
 
 
 def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: Optional[str]) -> str:

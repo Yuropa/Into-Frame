@@ -25,6 +25,9 @@ class Object3D():
         # Drawn without scene lighting: the texture already carries the light it
         # was photographed in (the far-field backdrop). False -> lit as usual.
         self.unlit = False
+        # Set by the agent's scene editor on an object it placed (agent/editor.py):
+        # {"who", "class"}; absent on everything the pipeline placed.
+        self.agent = None
         self.name = ""
         self.position = vec3()
         self.rotation = vec3()
@@ -129,6 +132,8 @@ class Object3D():
             data["lods"] = self.lods
         if self.unlit:
             data["unlit"] = True
+        if self.agent:
+            data["agent"] = self.agent
         return data
 
     @classmethod
@@ -172,4 +177,5 @@ class Object3D():
         obj.physics_mesh = data.get("physicsMesh", "")
         obj.lods = list(data.get("lods") or [])
         obj.unlit = bool(data.get("unlit", False))
+        obj.agent = data.get("agent")
         return obj
