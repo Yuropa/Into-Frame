@@ -302,7 +302,7 @@ _WEIGHTS = {"layout": 0.25, "geometry": 0.2, "materials": 0.15, "lighting": 0.15
 
 
 def judge(photo: Image.Image, render: Image.Image, plan: dict | None, model_id: str, out: Path,
-          run: Path | None = None) -> dict | None:
+          run: Path | None = None, base_url: str | None = None) -> dict | None:
     """Vision-model verdict on the photo view (server/agent/critique.py): issues targeted at
     scene-graph nodes when the run carries scene_graph.json; Anthropic or an OpenAI-compatible
     server by the model id's prefix. Written to out/verdict.json."""
@@ -315,7 +315,7 @@ def judge(photo: Image.Image, render: Image.Image, plan: dict | None, model_id: 
             graph = SceneGraph.load(run)
         except Exception as exc:
             print(f"  judge: scene graph not loaded ({exc}); untargeted issues")
-    return _judge(photo, render, plan, model_id, out, graph=graph)
+    return _judge(photo, render, plan, model_id, out, graph=graph, base_url=base_url)
 
 
 # ── sheet ───────────────────────────────────────────────────────────────────────
@@ -365,6 +365,7 @@ def main() -> int:
     ap.add_argument("--grass", action="store_true", help="render grass blades (slow)")
     ap.add_argument("--judge", action="store_true", help="vision-model verdict on the photo view (cents per check)")
     ap.add_argument("--judge-model", default="anthropic:claude-haiku-5-5")
+    ap.add_argument("--base-url", default=None, help="OpenAI-compatible server for an openai:<model> judge")
     args = ap.parse_args()
     label = args.label or dt.datetime.now().strftime("%m%d-%H%M")
     scorer = Scorer()
@@ -403,7 +404,7 @@ def main() -> int:
             record["plan"] = {k: plan[k] for k in ("model", "source", "camera", "sun", "water", "terrain")}
             record["plan_overrides"] = plan["overrides"]
         if args.judge:
-            verdict = judge(photo, now["photo"], plan, args.judge_model, out, run)
+            verdict = judge(photo, now["photo"], plan, args.judge_model, out, run, base_url=args.base_url)
             if verdict is not None:
                 record["judge"] = verdict["score"]
                 record["acceptance_pass"] = verdict["acceptance_pass"]

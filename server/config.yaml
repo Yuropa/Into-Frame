@@ -24,7 +24,8 @@ stages:
     # is read ONCE, ever. Consumers (Panorama Lighting, Panorama Depth Calibration, Region
     # Map, Scene Generation) apply it only through ScenePlan.prior(): a visible claim bounds
     # a measurement, an inferred one stands in for a missing or insane one, invented is text.
-    model: anthropic:claude-opus-5-5      # or openai:<model> with base_url for a local server
+    model: openai:qwen3-vl                # Qwen3-VL-235B on the Mac Studio (scripts/local-models/); or anthropic:claude-opus-5-5
+    base_url: http://joshs-mac-studio.local:8000/v1
     max_usd_per_run: 2.0                  # paid calls past this fail the stage, never silently
     no_api: false                         # true (or FRAME_NO_API=1): a cache miss is an error, no call
     refresh: false                        # true: ignore the cache and read the photograph again (billed)
