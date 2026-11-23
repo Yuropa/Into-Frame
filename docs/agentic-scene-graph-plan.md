@@ -586,6 +586,46 @@ Queued for the night, unattended: Paris rebuilt from Inventory Review (label and
 snapshot opus2), the fix loop on it (fix1, 12 rounds, $10 cap), a check and snapshot of
 the result, then the same loop on Rainier from its opus1 baseline.
 
+Night of 2026-11-23, the loops run and what they found. Paris rebuilt from Inventory
+Review (snapshot opus2): DINO 0.774 against opus1's 0.840, layout 0.580, judge 0.04. The
+gate's decisions were right, but the one tour-boat box it kept was rebuilt from its
+reference view into a small rusty work boat, so the judge's severe issue stayed "tour
+boat missing"; the gate removes fragments, it does not make the kept object better. The
+first live fix loop (fix1 on Paris) ran three rounds and kept nothing, for reasons that
+were the loop's own: the fixer's listing printed object ids as eight-character prefixes
+and the editor matched full ids only, so rounds 2 and 3 were refused outright; round 1
+swapped the boat's mesh (the swap kept height, so the length doubled) and asked for a
+16 m tall boat because the vocabulary had no length, and the judge saw a slab across
+the frame. Fixed (commit 4e37b50): id prefixes resolve; scale and place take length_m;
+a swap keeps a long object's length; scaling keeps the footprint centre, which matters
+for the structure placeholders, whose vertices carry world coordinates (the Pont d'Iéna
+was listed at "0 m, bearing -91"); the listing gives each object's length x height and
+the bearing and distance of its world centre; the prompt says to try set_light before
+giving up on a black region. The three loops then ran cleanly on the fixed code, 15
+attempts in all, $0.90, none kept: Shark Fin (5 attempts, judge 0.0 -> 0.0) placed three
+rock meshes for the missing headland, which the judge called dark wedges, gave up on the
+cliff and the beach as content, and lifted sun and ambient without taking the fin out of
+silhouette; Rainier (6 attempts, 0.2 -> 0.2) tried set_light at 1.15 / 0.8, too timid to
+tell, gave up on the meadow, the trail and the snow as content, and placed a fir for the
+missing left one from the only tree mesh, which the judge rejected as a pale sparse
+spire; Paris (4 attempts, 0.04 -> 0.04) swapped and sized the boat, gave up on it as
+content, and moved and scaled the Pont d'Iéna into its photo box, which lifted the
+whole-frame judge from 0.04 to 0.2 with no regression and was still thrown away because
+the focus verdict only asked "resolved". Two conclusions. The loop's mechanics now hold
+(propose, apply, render, judge, keep or revert, about 40 s and $0.07 a round), and the
+keep rule was too strict: the judge's focus now also answers `improved`, and a clear
+step toward the photograph with no fall in the whole-frame score is kept so the next
+round builds on it (commit 8d1c4c2; a Paris rerun, fix3, tests it). Second, the issues
+that remain are content, in every scene: the tour boat with its crowd, the stone arches,
+the golden cliff, the beach, the meadow with its snow patches and trail, the full dark
+fir. No move, scale or swap of the meshes a run already holds can answer them, which is
+what the proposal's content actions are for (place-from-photo through object completion,
+regenerate a texture, a terrain patch) and the next thing to build. Also for the
+morning: Iceland's opus1 render is broken in the first pass (white cut-outs where the
+hikers were removed, a large green block at the right, a floating grey line), and the
+Exposure Fit's halving of sun and ambient on Rainier is a first-pass decision for the
+lighting review gate rather than something to undo in the loop.
+
 How to run in the morning:
 
 ```
@@ -610,6 +650,9 @@ scripts/scene-edit.py Paris --actions a.json --label try1 --render [--accept]
 scripts/fix-loop.py Paris --label fix1 --rounds 12 --max-usd 10 [--baseline opus1] [--dry-run]
 scripts/replay-stage.py output/<uuid> "Inventory Review"          # the gate's decisions, boxes.png, review.json (dry; --save to apply)
 scripts/hybrid-run.sh Paris --from "Inventory Review" --label opus2 --snapshot opus2
+# the fix loop on a built scene (needs a scene-check label as the round-0 baseline), then freeze it
+scripts/fix-loop.py Paris --label fixN --rounds 12 --max-usd 10 --baseline opus2
+scripts/scene-check.py Paris --label fixN --grass --judge && scripts/scene-snapshot.py save Paris --tag fixN --check fixN
 ```
 
 Reports land in `scratch/agent/<label>/report.md`; every round's proposal, derived config
