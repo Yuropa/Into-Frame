@@ -512,6 +512,25 @@ is committed.
 Not built: finish tools (§8), the expansion tool (§11), motion attributes and the client
 side (§12), the Style node beyond a placeholder (§9), the asset bake-off (§10).
 
+Night of 2026-11-23, Paris on the Mac Studio (Qwen3-VL-235B Q4_K_M, 52 tok/s, a plan read
+in 32 s): the plan read, the judge and the orchestrator all run there, and `config.yaml`
+now points the Scene Plan stage at it. The Paris rebuild from Panorama Lighting took 74 min
+and came out blank (DINO 0.10): the Qwen plan filed the Eiffel Tower under "building", so
+Structure Placeholders built a 115 m block at 191 m in front of the landmark card. Fixed
+(a placed card of any structure class, or the same name, counts as the structure) and
+rebuilt: DINO 0.79, dE 11, judge 0.17 then 0.29 on the same scene (the local judge's
+noise). Two agent loops ran, five rounds in all, none an improvement: the local
+orchestrator enabled the boat and tree fits expecting passengers and detail (the fit only
+moves synthetic instances, and the knob docs now say so), and a 15 m boat height made 56 m
+barges. Also fixed on the way: the loop never passed the Mac's address to its judge,
+Population Fit ignored classes the agent enabled, the judge scored zeros on an off-shape
+plain-JSON reply (strict json_schema fails intermittently on llama-server; replies are now
+validated, unwrapped, retried and kept raw), a graph re-export dropped `pop_boat` after
+the fit drew 3 boats, and the Mac idle-slept mid-loop (connection timeouts; the serve
+script now runs llama-server under `caffeinate -i`, which the Mac has to pick up). The
+Qwen plan is thinner than Opus's: water width, level and banks, haze and the place name
+come back null, and the species changes between reads (willow 8 m, plane 15 m).
+
 How to run in the morning:
 
 ```
