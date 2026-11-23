@@ -707,8 +707,19 @@ class _Exporter:
         for i, m in inst:
             by_class.setdefault(str(m.get("class") or "none").lower(), []).append((i, m))
         region_counts = {c: len(v) for c, v in by_class.items() if c in REGION_CLASSES}
+        # A class the pipeline treats as a population stays one however few instances the
+        # current draw left (the boat fit on Paris drew 3 and pop_boat vanished from the
+        # re-export, so the loop could not annotate its own edit): a fitted model, a
+        # Population Fit class or override, or a Distribution Synthesis class override.
+        pm_early = self.run.obj("population_models", warn=False)
+        fit_early = self.run.stage_by_name.get("Population Fit") or {}
+        ds_early = self.run.stage_by_name.get("Distribution Synthesis") or {}
+        pipeline_pops = set(pm_early.keys() if isinstance(pm_early, dict) else [])
+        pipeline_pops |= set(fit_early.get("classes") or []) | set((fit_early.get("class_overrides") or {}).keys())
+        pipeline_pops |= set((ds_early.get("class_overrides") or {}).keys())
         self.pop_classes = {c for c, v in by_class.items()
-                            if c not in REGION_CLASSES and (c in POPULATION_CLASSES or len(v) >= POPULATION_MIN)}
+                            if c not in REGION_CLASSES and (c in POPULATION_CLASSES or c in pipeline_pops
+                                                            or len(v) >= POPULATION_MIN)}
         self.g.meta["instance_classes"] = {c: len(v) for c, v in sorted(by_class.items(), key=lambda kv: -len(kv[1]))}
         self.g.meta["region_classes_skipped"] = region_counts
 

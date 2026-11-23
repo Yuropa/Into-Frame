@@ -285,7 +285,10 @@ class AgentLoop:
             self.rounds.append(rec)
             self.say(f"round {r}: {rec.scores}; {rec.outcome}; {rec.seconds / 60:.0f} min")
             for a in plan.applied:
-                self.graph.annotate(a["node"], f"r{r} {a['attr']}={a['value']}: {rec.outcome}", f"agent r{r}")
+                if a["node"] in self.graph.nodes:
+                    self.graph.annotate(a["node"], f"r{r} {a['attr']}={a['value']}: {rec.outcome}", f"agent r{r}")
+                else:
+                    self.say(f"    node {a['node']} is gone from the re-exported graph; outcome not annotated")
             if no_gain >= cfg.patience:
                 self.say(f"no improvement for {no_gain} rounds; stopping")
                 break
