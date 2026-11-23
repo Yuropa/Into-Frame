@@ -57,6 +57,17 @@ def judge_schema(node_ids: Optional[list[str]] = None) -> dict:
     }
 
 
+def focus_schema(node_ids: Optional[list[str]] = None) -> dict:
+    """judge_schema plus a verdict on one targeted issue (the fix loop's question)."""
+    s = judge_schema(node_ids)
+    s["required"] = list(s["required"]) + ["focus"]
+    s["properties"]["focus"] = {"type": "object", "additionalProperties": False, "required": ["resolved", "evidence", "regressions"],
+                                "properties": {"resolved": {"type": "boolean", "description": "the targeted issue is fixed in this render (gone, or reduced to minor)"},
+                                               "evidence": {"type": "string", "description": "what you see at the target region now, one sentence"},
+                                               "regressions": {"type": "string", "description": "anything the change made worse elsewhere, or ''"}}}
+    return s
+
+
 SYSTEM = """You grade a real-time 3D reconstruction of a photograph. You see the photograph first, then the \
 render from the same camera. Observe before you score: say what the render shows, list concrete issues with the \
 thing they are about, judge each acceptance item from what is visible, then score the rubric 0-5 (5 = \
@@ -67,7 +78,8 @@ Content marked generated (behind the camera, outpainted) is a hypothesis: do not
 Give each issue its place in the photograph as `photo_box` fractions, so the fix can be measured there."""
 
 
-def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: Optional[str]) -> str:
+def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: Optional[str],
+               focus: Optional[dict] = None) -> str:
     acc = "\n".join(f"- {a.get('id')} [{a.get('priority')}]: {a.get('text')}" for a in acceptance) or "- (none)"
     parts = ["The first image is the photograph, the second the render from its camera.",
              f"Acceptance items read from the photograph:\n{acc}"]
@@ -75,6 +87,13 @@ def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: O
         parts.append("Scene-graph nodes (id <type/kind> name):\n" + "\n".join(node_lines))
     if style:
         parts.append(f"The input is {style}: grade whether the render belongs in that image, not photorealism.")
+    if focus:
+        box = focus.get("photo_box")
+        parts.append("FOCUS. The last edit targeted this issue: "
+                     f"[{focus.get('severity')}/{focus.get('kind')}] {focus.get('target')}: {focus.get('text')}"
+                     + (f" (photo region x {box[0]:.2f} y {box[1]:.2f} w {box[2]:.2f} h {box[3]:.2f})." if box and len(box) == 4 else ".")
+                     + " The third and fourth images are the photograph and the render cropped to that region. "
+                     "Say in `focus` whether it is resolved, what the region shows now, and what the edit made worse elsewhere.")
     parts.append("Record your verdict with the judge tool / as the JSON object.")
     return "\n\n".join(parts)
 
@@ -118,14 +137,31 @@ def score_verdict(data: dict, acceptance: list[dict], model: str, usd: float) ->
     return {"model": model, "score": round(score, 3), "rubric_score": round(base, 3), "penalty": round(penalty, 3),
             "failed_must": failed_must, "acceptance_pass": f"{passed}/{len(data.get('acceptance', []))}",
             "summary": data.get("summary"), "issues": data.get("issues", []),
-            "acceptance": data.get("acceptance", []), "rubric": rubric, "usd": round(usd, 4)}
+            "acceptance": data.get("acceptance", []), "rubric": rubric, "usd": round(usd, 4),
+            "focus": data.get("focus") if isinstance(data.get("focus"), dict) else None}
+
+
+def crop_box(im: Image.Image, box: list, margin: float = 0.25, min_side: int = 384) -> Image.Image:
+    """The photo region [x, y, w, h] (fractions) with a margin, upscaled to a readable size."""
+    W, H = im.size
+    x, y, w, h = [float(v) for v in box]
+    mx, my = w * margin, h * margin
+    x0, y0 = max(0.0, x - mx), max(0.0, y - my)
+    x1, y1 = min(1.0, x + w + mx), min(1.0, y + h + my)
+    c = im.crop((int(x0 * W), int(y0 * H), max(int(x1 * W), int(x0 * W) + 8), max(int(y1 * H), int(y0 * H) + 8)))
+    if min(c.size) < min_side:
+        s = min_side / min(c.size)
+        c = c.resize((int(c.width * s), int(c.height * s)), Image.LANCZOS)
+    return c
 
 
 def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_id: str, out: Path,
           graph=None, style: Optional[str] = None, base_url: Optional[str] = None,
-          ledger_cap_usd: float = 2.0) -> Optional[dict]:
+          ledger_cap_usd: float = 2.0, focus: Optional[dict] = None) -> Optional[dict]:
     """Vision-model verdict on the photo view; written to out/verdict.json. None when no call
-    could be made (paid calls off, no key, server down), with the reason printed."""
+    could be made (paid calls off, no key, server down), with the reason printed.
+    focus: an issue dict (text, kind, severity, target, photo_box) the last edit targeted; the
+    verdict then carries `focus` {resolved, evidence, regressions}, judged from crops of the region."""
     sys.path.insert(0, str(ROOT / "server"))
     from pipeline.scene_plan.client import (PlanModel, SpendLedger, NoApiError, SpendCapError,
                                             image_to_jpeg_b64, resolve_anthropic_key, estimate_usd, ModelReply)
@@ -136,19 +172,23 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
     acceptance = (plan or {}).get("acceptance") or []
     node_lines = _node_lines(graph) if graph is not None else None
     node_ids = [l.split(" ", 1)[0] for l in node_lines] if node_lines else None
-    user = _user_text(acceptance, node_lines, style)
-    schema = judge_schema(node_ids)
+    user = _user_text(acceptance, node_lines, style, focus)
+    schema = focus_schema(node_ids) if focus else judge_schema(node_ids)
     b1, _, _ = image_to_jpeg_b64(photo, 1024)
     b2, _, _ = image_to_jpeg_b64(render, 1024)
+    extra: list[str] = []
+    box = (focus or {}).get("photo_box")
+    if focus and box and len(box) == 4:
+        extra = [image_to_jpeg_b64(crop_box(photo, box), 768)[0], image_to_jpeg_b64(crop_box(render, box), 768)[0]]
     ledger = SpendLedger(ROOT / "cache" / "scene_plan", run_cap_usd=ledger_cap_usd)
     t0 = time.time()
     try:
         if pm.provider == "anthropic":
             ledger.check(0.05, "critique")
-            data, usage = _anthropic(pm, b1, b2, user, schema)
+            data, usage = _anthropic(pm, b1, b2, user, schema, extra)
             usd = estimate_usd(pm.model, usage[0], usage[1])
         else:
-            data, usage = _openai(pm, b1, b2, user, schema, raw_path=out / "judge_raw.txt")
+            data, usage = _openai(pm, b1, b2, user, schema, raw_path=out / "judge_raw.txt", extra=extra)
             usd = 0.0
     except (NoApiError, SpendCapError) as exc:
         print(f"  judge: {exc}")
@@ -172,7 +212,7 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
     return verdict
 
 
-def _anthropic(pm, b1: str, b2: str, user: str, schema: dict):
+def _anthropic(pm, b1: str, b2: str, user: str, schema: dict, extra: Optional[list[str]] = None):
     import anthropic
     from pipeline.scene_plan.client import resolve_anthropic_key
     key = resolve_anthropic_key()
@@ -184,20 +224,18 @@ def _anthropic(pm, b1: str, b2: str, user: str, schema: dict):
         tools=[{"name": "judge", "description": "Record the verdict.", "input_schema": schema}],
         tool_choice={"type": "auto"},
         messages=[{"role": "user", "content": [
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b1}},
-            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b2}},
-            {"type": "text", "text": user}]}])
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}} for b in [b1, b2] + list(extra or [])
+        ] + [{"type": "text", "text": user}]}])
     data = next((b.input for b in msg.content if getattr(b, "type", "") == "tool_use"), None)
     return data, (msg.usage.input_tokens, msg.usage.output_tokens)
 
 
-def _openai(pm, b1: str, b2: str, user: str, schema: dict, raw_path=None):
+def _openai(pm, b1: str, b2: str, user: str, schema: dict, raw_path=None, extra: Optional[list[str]] = None):
     import httpx
     base = (pm.base_url or os.environ.get("OPENAI_BASE_URL") or "http://localhost:8000/v1").rstrip("/")
     key = os.environ.get("OPENAI_API_KEY", "none")
-    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b1}"}},
-               {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b2}"}},
-               {"type": "text", "text": user + "\nReply with the JSON object only."}]
+    content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in [b1, b2] + list(extra or [])]
+    content.append({"type": "text", "text": user + "\nReply with the JSON object only."})
     body: dict[str, Any] = {"model": pm.model, "max_tokens": 3000, "temperature": 0.2,
                             "messages": [{"role": "system", "content": SYSTEM},
                                          {"role": "user", "content": content}]}
