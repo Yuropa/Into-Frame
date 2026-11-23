@@ -531,6 +531,40 @@ script now runs llama-server under `caffeinate -i`, which the Mac has to pick up
 Qwen plan is thinner than Opus's: water width, level and banks, haze and the place name
 come back null, and the species changes between reads (willow 8 m, plane 15 m).
 
+Afternoon of 2026-11-23, the turn from knobs to actions. The knob loop was a config tuner
+with the shape of an agent: every action was a stage parameter, so applying one meant
+rerunning the pipeline from that stage (10 to 70 min), nothing could place or move an
+object, and the objective was a DINO score that barely moved across edits the judge called
+major. Decided with the user: the three model calls that matter go to Claude (plan read
+Opus, fixer Opus, judge Sonnet, which scored the same Paris render 0.04 twice with an
+identical issue list where the Mac's judge gave 0.17 and 0.29); the Mac is a fallback and a
+bulk-cheap-calls box. Built: `scripts/scene-snapshot.py` (a built run frozen under
+`output/snapshots/<Scene>/<tag>/` with its scores, commit and config, restored in place, so
+animation and the agent start from it without a rebuild; `hybrid-run.sh --snapshot`);
+`server/agent/editor.py` (actions place, move, scale, rotate, remove, swap_mesh,
+set_atmosphere, set_sun on the scene.json the renderers draw; a position is world,
+bearing+distance, or a photo box cast against the terrain and water meshes, which
+reprojects to the same photo point to three decimals; applied in seconds, rendered with
+`render-scene.py --scene`, no pipeline); the `Scene Edits` stage after Exposure Fit, which
+replays `<run>/scene_edits.json` so later stages, reruns and the archive keep the agent's
+accepted actions; `scripts/scene-edit.py` (list, preview, render, accept, undo);
+`server/agent/fixer.py` + `scripts/fix-loop.py`, the issue-driven loop: the judge's issues
+(now each with a `photo_box`) are the state, the fixer sees the photograph, the render and
+both cropped to the issue's region plus the placed objects and the plan's inventory, and
+answers with one to three actions; the loop renders and asks the judge with FOCUS on that
+issue (crops of the region, `resolved / evidence / regressions`) and keeps or reverts.
+Paris rebuilt with the Opus plan and judged by Sonnet: DINO 0.84, acceptance 2/7, issues
+with boxes for the missing tour boat (severe), flat water, the left bank, the missing Pont
+d'Iéna, the quays, the tower, the sky and the light. The first live proposal (one Opus
+call, $0.05) was the right one: move `thing_19` to the boat's photo box on the water and
+scale it to 7 m; it applies on the CPU (36 m, bearing -8). The bridge was missing because
+the night's placeholder rule let the Eiffel card stand in for any structure within 20 deg;
+narrowed to the same class, the same name or a generic plan category. Still to run on the
+GPU: the live loop with renders and focused verdicts. Next: the first-pass gates (an
+inventory review after Scene Plan and segmentation, a lighting and layout review before
+generation), then content actions (place-from-photo through object completion,
+regenerate a surface's texture).
+
 How to run in the morning:
 
 ```
@@ -545,6 +579,14 @@ scripts/agent-loop.py "Mount Rainier" --label agentN --rounds 3 --max-usd 5 --ba
 scripts/hybrid-run.sh "Mount Rainier" --from "Population Fit" --label popfit1
 # the Mac: run setup-mac.sh there, then here
 scripts/local-models/check-endpoint.sh http://<mac>.local:8000/v1 server/samples/Paris.jpg
+# freeze / restore a built scene
+scripts/scene-snapshot.py save Paris --tag opus1 --check opus1; scripts/scene-snapshot.py list
+scripts/scene-snapshot.py restore Paris --tag opus1
+# the editor: what is placed, try actions, render, accept
+scripts/scene-edit.py Paris --list
+scripts/scene-edit.py Paris --actions a.json --label try1 --render [--accept]
+# the issue-driven loop (renders, no pipeline rerun)
+scripts/fix-loop.py Paris --label fix1 --rounds 12 --max-usd 10 [--baseline opus1] [--dry-run]
 ```
 
 Reports land in `scratch/agent/<label>/report.md`; every round's proposal, derived config
