@@ -491,7 +491,7 @@ def load_context(run_dir: Path, config_path: Path):
     from pipeline.pipeline import PipelineConfiguration
     from pipeline.pipeline_context import PipelineContext
     scratch = Path(tempfile.mkdtemp(prefix="scene-edit-"))
-    config = PipelineConfiguration(output=str(scratch), config_path=config_path, log_mode="plain")
+    config = PipelineConfiguration(output=str(scratch), config_path=Path(config_path), log_mode="plain")
     entries = config.stages_yaml
     names = [e["name"] for e in entries]
     enabled = [e["name"] for e in entries if e.get("enabled", True)]
