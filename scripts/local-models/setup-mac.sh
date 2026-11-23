@@ -154,12 +154,13 @@ fi
 
 # 4. wait, then one timed vision call --------------------------------------------------
 say "waiting for the server (the first load reads ${NEED_GB} GB from disk; minutes, not seconds)"
-AUTH=(); [ -n "$API_KEY" ] && AUTH=(-H "Authorization: Bearer $API_KEY")
+# bash 3.2 (macOS) treats an empty array as unbound under set -u, so a function, not an array
+hcurl() { if [ -n "$API_KEY" ]; then curl -fsS -H "Authorization: Bearer $API_KEY" "$@"; else curl -fsS "$@"; fi; }
 for _ in $(seq 1 180); do
-    if curl -fsS "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then break; fi
+    if hcurl "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then break; fi
     sleep 5
 done
-curl -fsS "${AUTH[@]}" "http://127.0.0.1:$PORT/v1/models" >/dev/null || die "server did not come up; see $CFG/llama-server.log"
+hcurl "http://127.0.0.1:$PORT/v1/models" >/dev/null || die "server did not come up; see $CFG/llama-server.log"
 
 say "one vision call, timed"
 # A 64x64 PNG with a red square on green, built with python3 (ships with macOS).
@@ -186,7 +187,7 @@ BODY=$(cat <<EOF
 EOF
 )
 T0=$(date +%s.%N)
-REPLY=$(curl -fsS "${AUTH[@]}" -H 'Content-Type: application/json' -d "$BODY" "http://127.0.0.1:$PORT/v1/chat/completions")
+REPLY=$(hcurl -H 'Content-Type: application/json' -d "$BODY" "http://127.0.0.1:$PORT/v1/chat/completions")
 T1=$(date +%s.%N)
 python3 - "$REPLY" "$T0" "$T1" <<'PY'
 import json, sys
