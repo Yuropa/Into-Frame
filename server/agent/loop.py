@@ -38,7 +38,7 @@ class LoopConfig:
     rounds: int = 3
     max_usd: float = 10.0
     model: str = "anthropic:claude-opus-5-5"
-    judge_model: Optional[str] = "anthropic:claude-haiku-5-5"
+    judge_model: Optional[str] = "anthropic:claude-sonnet-5-5"
     base_url: Optional[str] = None
     dry_run: bool = False
     allow_expensive: bool = False

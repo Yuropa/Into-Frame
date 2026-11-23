@@ -32,7 +32,7 @@ Flags:
 Scene Plan (docs/hybrid-scene-plan.md): when the run has a Scene Plan, the record
 carries its key readings and every prior decision the consumer stages published
 (plan_overrides_*.json: field, measured, plan, used, source), printed under the table.
-  --judge      a vision model (default anthropic:claude-haiku-5-5) grades the photo view
+  --judge      a vision model (default anthropic:claude-sonnet-5-5) grades the photo view
                against the photograph and the plan's acceptance list: observe, list
                issues (target, kind, severity), pass/fail each acceptance item, then a
                0-1 score computed in code from the rubric minus penalties. Written to
@@ -364,7 +364,7 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=720, help="render width per view")
     ap.add_argument("--grass", action="store_true", help="render grass blades (slow)")
     ap.add_argument("--judge", action="store_true", help="vision-model verdict on the photo view (cents per check)")
-    ap.add_argument("--judge-model", default="anthropic:claude-haiku-5-5")
+    ap.add_argument("--judge-model", default="anthropic:claude-sonnet-5-5")
     ap.add_argument("--base-url", default=None, help="OpenAI-compatible server for an openai:<model> judge")
     args = ap.parse_args()
     label = args.label or dt.datetime.now().strftime("%m%d-%H%M")

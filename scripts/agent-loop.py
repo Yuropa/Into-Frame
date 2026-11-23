@@ -2,7 +2,7 @@
 """Run the agent loop over one cached scene (docs/agentic-scene-graph-plan.md §4).
 
     scripts/agent-loop.py "Mount Rainier" --label agent1 --rounds 3 [--max-usd 10]
-        [--model anthropic:claude-opus-5-5] [--judge-model anthropic:claude-haiku-5-5]
+        [--model anthropic:claude-opus-5-5] [--judge-model anthropic:claude-sonnet-5-5]
         [--baseline band27] [--allow-expensive] [--dry-run] [--no-grass]
         [--base-url http://studio.local:8000/v1]
 
@@ -32,7 +32,7 @@ def main() -> int:
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--max-usd", type=float, default=10.0)
     ap.add_argument("--model", default="anthropic:claude-opus-5-5")
-    ap.add_argument("--judge-model", default="anthropic:claude-haiku-5-5")
+    ap.add_argument("--judge-model", default="anthropic:claude-sonnet-5-5")
     ap.add_argument("--no-judge", action="store_true", help="metrics only, no critic")
     ap.add_argument("--base-url", default=None, help="OpenAI-compatible server for openai:<model> ids")
     ap.add_argument("--baseline", default=None, help="existing scene-check label to use as round 0")

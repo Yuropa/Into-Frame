@@ -4,27 +4,32 @@
 #   scripts/hybrid-run.sh Paris "Mount Rainier"                 # rerun from Panorama Lighting, check
 #   scripts/hybrid-run.sh Paris --from "Region Map" --label h2  # rerun from a later stage
 #   scripts/hybrid-run.sh Paris --no-check                      # pipeline only
+#   scripts/hybrid-run.sh Paris --label opus1 --snapshot opus1  # freeze the result (scripts/scene-snapshot.py)
 #
-# For each scene: (1) if the cached run has no Scene Plan yet, read the photograph once
-# with scripts/replay-stage.py --save (one billed call, then cached in cache/scene_plan/);
+# For each scene: (1) if the cached run's Scene Plan is from another schema or model than
+# config.yaml names, read the photograph once with scripts/replay-stage.py --save (a cache
+# hit in cache/scene_plan/ is free, a miss is one billed call);
 # (2) `main.py run --rerun <from>` so every stage from <from> on rebuilds with the plan's
 # priors while the panorama and segmentation stay cached; (3) scripts/scene-check.py with
-# --label, --grass and --judge. Refuses to start while another pipeline holds the GPU.
+# --label, --grass and --judge; (4) with --snapshot, scripts/scene-snapshot.py save, so the
+# built scene is kept for later stages (animation) without a rebuild. Refuses to start
+# while another pipeline holds the GPU.
 # Logs: scratch/hybrid/<label>/<scene>.log, chain log scratch/hybrid/<label>/chain.log.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-scenes=(); from="Panorama Lighting"; label="hybrid-$(date +%m%d-%H%M)"; check=1; judge="--judge"
+scenes=(); from="Panorama Lighting"; label="hybrid-$(date +%m%d-%H%M)"; check=1; judge="--judge"; snap=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --from) from="$2"; shift 2 ;;
         --label) label="$2"; shift 2 ;;
         --no-check) check=0; shift ;;
         --no-judge) judge=""; shift ;;
-        -h|--help) sed -n 2,14p "$0"; exit 0 ;;
+        --snapshot) snap="$2"; shift 2 ;;
+        -h|--help) sed -n 2,17p "$0"; exit 0 ;;
         *) scenes+=("$1"); shift ;;
     esac
 done
-[ ${#scenes[@]} -gt 0 ] || { echo "usage: $0 <Scene>... [--from STAGE] [--label L] [--no-check] [--no-judge]" >&2; exit 2; }
+[ ${#scenes[@]} -gt 0 ] || { echo "usage: $0 <Scene>... [--from STAGE] [--label L] [--no-check] [--no-judge] [--snapshot TAG]" >&2; exit 2; }
 
 if pgrep -f "main\.py (run|server)" >/dev/null; then
     echo "a pipeline run or server is alive (main.py run|server); not starting" >&2; exit 3
@@ -62,9 +67,11 @@ for scene in "${scenes[@]}"; do
     [ -f "$photo" ] || { say "no photo at $photo; skipping"; continue; }
     run="$(resolve_run "$scene")"
     want=$(python -c "import sys; sys.path.insert(0,'$ROOT/server'); from pipeline.scene_plan.schema import SCHEMA_VERSION; print(SCHEMA_VERSION)")
+    want_model=$(python -c "import yaml; print(next(s for s in yaml.safe_load(open('$ROOT/server/config.yaml'))['stages'] if s['name']=='Scene Plan')['model'])")
     have=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('schema_version'))" "$run/Scene Plan/scene_plan.json" 2>/dev/null || echo none)
-    if [ -n "$run" ] && [ "$have" != "$want" ]; then
-        say "[$scene] Scene Plan in $run is schema $have, want $want; reading the photograph once"
+    have_model=$(python -c "import json,sys; print(json.load(open(sys.argv[1])).get('model'))" "$run/Scene Plan/scene_plan.json" 2>/dev/null || echo none)
+    if [ -n "$run" ] && { [ "$have" != "$want" ] || [ "$have_model" != "$want_model" ]; }; then
+        say "[$scene] Scene Plan in $run is schema $have from $have_model, want $want from $want_model; reading the photograph once"
         python "$ROOT/scripts/replay-stage.py" "$run" "Scene Plan" --save >> "$logdir/$scene.plan.log" 2>&1 \
             || say "[$scene] Scene Plan replay failed (see $scene.plan.log); the run will read it itself"
     fi
@@ -78,7 +85,14 @@ for scene in "${scenes[@]}"; do
         say "[$scene] scene-check --label $label"
         python "$ROOT/scripts/scene-check.py" "$scene" --label "$label" --grass $judge > "$logdir/$scene.check.log" 2>&1 \
             && tail -6 "$logdir/$scene.check.log" | tee -a "$chain" \
-            || say "[$scene] scene-check failed (see $scene.check.log)"
+            || { say "[$scene] scene-check failed (see $scene.check.log)"; continue; }
+    fi
+    if [ -n "$snap" ]; then
+        say "[$scene] snapshot $snap"
+        python "$ROOT/scripts/scene-snapshot.py" save "$scene" --tag "$snap" --check "$label" --force \
+            --note "hybrid-run --from '$from' --label $label" >> "$logdir/$scene.snapshot.log" 2>&1 \
+            && tail -1 "$logdir/$scene.snapshot.log" | tee -a "$chain" \
+            || say "[$scene] snapshot failed (see $scene.snapshot.log)"
     fi
 done
 say "ALL DONE $label"
