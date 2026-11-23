@@ -460,6 +460,25 @@ def plan_text(plan: dict) -> str:
     return "\n".join(parts) or "(no plan)"
 
 
+def review_text(run: Path) -> str:
+    """What the Inventory Review gate found: dropped and relabelled detections and the plan
+    items no detection covered (with their photo_box), so the fixer knows what the first
+    pass already judged absent."""
+    f = run / "Inventory Review" / "review.json"
+    if not f.is_file():
+        return "(no inventory review)"
+    try:
+        r = json.loads(f.read_text())
+    except Exception:
+        return "(unreadable inventory review)"
+    out = []
+    for m in r.get("missing") or []:
+        out.append(f"missing after the first pass: {m.get('count')} x {m.get('name')} ({m.get('category')}) at photo_box {m.get('photo_box')}: {m.get('why')}")
+    for a in r.get("applied") or []:
+        out.append(str(a))
+    return "\n".join(out) or "(the review changed nothing)"
+
+
 def history_text(loop: FixLoop, issue: dict) -> str:
     tries = loop._tries(issue)
     if not tries:
@@ -491,6 +510,7 @@ def propose_fix(model_id: str, loop: FixLoop, issue: dict, render: Image.Image, 
             + f"\n\nPLACED OBJECTS\n{objects_text(ed, loop.run, loop.photo.size)}\n\n"
             f"MESH KEYS THIS RUN CAN PLACE\n{', '.join(ed.mesh_keys())}\n\n"
             f"PLAN (what the photograph contains)\n{plan_text(loop.plan)}\n\n"
+            f"INVENTORY REVIEW (what the first pass dropped, relabelled or found missing)\n{review_text(loop.run)}\n\n"
             f"EARLIER ATTEMPTS AT THIS ISSUE\n{history_text(loop, issue)}\n\n"
             f"ACTION VOCABULARY\n{vocab}\n\nPropose the actions for this issue.")
     (out / "prompt.txt").write_text(user)
