@@ -565,6 +565,27 @@ inventory review after Scene Plan and segmentation, a lighting and layout review
 generation), then content actions (place-from-photo through object completion,
 regenerate a surface's texture).
 
+Evening of 2026-11-23, the first gate and two findings. The first-pass gate is built:
+`server/pipeline/inventory_review/`, the stage "Inventory Review" right after Object
+Labeling. Sonnet sees the photograph with every reviewable detection boxed and numbered,
+the clean photograph, each box's class and phrase and the plan's inventory, and decides
+keep / drop / relabel per box with a reason; plan items no box covers come back as
+`missing` with a photo_box, which the fixer's prompt now carries. A drop demotes the
+detection to indeterminate the way the size veto does. On Paris it reviewed 50 boxes for
+$0.06: eleven drops (the foreground tour boat was seven boxes, two full-width strips, a
+duplicate of the bridge, a hotel box over the trees), one relabel (a "tree" sitting on
+the white cruise boat), two missing (the Pullman block, the left houseboat). That is why
+the judge called the tour boat missing: the first pass built its fragments. The second
+finding is Rainier's black mid-ground, the judge's severe issue since band27: not the
+geometry (the render's depth is a smooth ground at 30-100 m) and not the paint (the
+terrain texture holds the meadow and snow there) but the light. The exposure fit, solved
+on the near field, halved sun and ambient against the bright flower cards, and delit
+albedo under a 20-degree sun with half ambient is black. A new editor action `set_light`
+(sun_scale / ambient_scale multipliers) is the move for that, in the fixer's vocabulary.
+Queued for the night, unattended: Paris rebuilt from Inventory Review (label and
+snapshot opus2), the fix loop on it (fix1, 12 rounds, $10 cap), a check and snapshot of
+the result, then the same loop on Rainier from its opus1 baseline.
+
 How to run in the morning:
 
 ```
@@ -587,6 +608,8 @@ scripts/scene-edit.py Paris --list
 scripts/scene-edit.py Paris --actions a.json --label try1 --render [--accept]
 # the issue-driven loop (renders, no pipeline rerun)
 scripts/fix-loop.py Paris --label fix1 --rounds 12 --max-usd 10 [--baseline opus1] [--dry-run]
+scripts/replay-stage.py output/<uuid> "Inventory Review"          # the gate's decisions, boxes.png, review.json (dry; --save to apply)
+scripts/hybrid-run.sh Paris --from "Inventory Review" --label opus2 --snapshot opus2
 ```
 
 Reports land in `scratch/agent/<label>/report.md`; every round's proposal, derived config
