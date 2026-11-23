@@ -158,6 +158,24 @@ stages:
     panorama_detect_scale: 0.5   # Grounding DINO on a half-size panorama outside the cone
     size_veto_ratio: 3.0         # metric-height prior veto (person 1.7 m, car 1.5 m, ...)
 
+  - name: Inventory Review
+    stage: InventoryReviewStage
+    enabled: true
+    # The first agent gate (docs/agentic-scene-graph-plan.md §13a): a vision model sees the
+    # photograph with every labelled detection boxed and numbered, the detector's class and
+    # phrase for each, and the scene plan's inventory, and decides per box keep / drop /
+    # relabel; plan items no box covers are recorded as missing with a photo_box for the
+    # fix loop. Drops demote to indeterminate (occluder only, never placed), like the size
+    # veto. Cached across runs by (photo, detections, model) in cache/inventory_review/.
+    model: anthropic:claude-sonnet-5-5
+    max_usd_per_run: 1.0
+    no_api: false
+    refresh: false
+    min_box_px: 10               # smaller boxes are not shown to the reviewer (kept as they are)
+    max_boxes: 80
+    apply: true                  # false: decide and record, change nothing
+    required: false
+
   - name: Object Classification
     stage: PanoramaObjectClassificationStage
     enabled: false               # superseded by Object Labeling

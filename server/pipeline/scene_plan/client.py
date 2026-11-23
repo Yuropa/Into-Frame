@@ -123,23 +123,26 @@ class PlanModel:
 
     # ── public ────────────────────────────────────────────────────────────────
     def read_photo(self, pil_image, system: str, user: str, tool_name: str, schema: dict,
-                   max_tokens: int = 8000) -> ModelReply:
+                   max_tokens: int = 8000, extra_images=None, purpose: str = "Record the scene plan read from the photograph.") -> ModelReply:
+        """One structured reading of an image (plus optional further images, in order) through
+        a tool/schema. `purpose` is the tool's description."""
         if self.no_api:
             raise NoApiError(f"a {self.provider}:{self.model} call is needed and paid calls are off (FRAME_NO_API)")
         b64, w, h = image_to_jpeg_b64(pil_image)
+        extra = [image_to_jpeg_b64(im)[0] for im in (extra_images or [])]
         user = user.format(width=w, height=h) if "{width}" in user else user
         started = time.time()
         if self.provider == "anthropic":
-            reply = self._anthropic(b64, system, user, tool_name, schema, max_tokens)
+            reply = self._anthropic(b64, system, user, tool_name, schema, max_tokens, extra, purpose)
         elif self.provider in ("openai", "local"):
-            reply = self._openai(b64, system, user, tool_name, schema, max_tokens)
+            reply = self._openai(b64, system, user, tool_name, schema, max_tokens, extra)
         else:
             raise ValueError(f"unknown plan model provider {self.provider!r} (anthropic | openai)")
         reply.seconds = time.time() - started
         return reply
 
     # ── anthropic ─────────────────────────────────────────────────────────────
-    def _anthropic(self, b64, system, user, tool_name, schema, max_tokens) -> ModelReply:
+    def _anthropic(self, b64, system, user, tool_name, schema, max_tokens, extra=(), purpose="") -> ModelReply:
         import anthropic
         key = resolve_anthropic_key(self.key_service, self.key_user)
         if not key:
@@ -151,14 +154,16 @@ class PlanModel:
             # (2.8) takes no temperature for this model family, so repeatability rests on
             # the reading cache: a photograph is read once and the plan kept.
             model=self.model, max_tokens=max_tokens, system=system,
-            tools=[{"name": tool_name, "description": "Record the scene plan read from the photograph.",
+            tools=[{"name": tool_name, "description": purpose or "Record the reading of the photograph.",
                     "input_schema": schema}],
             # Forced tool_choice ("tool"/"any") is rejected by this model family, so the
             # tool is offered and the prompt asks for it; a JSON text reply is the fallback.
             tool_choice={"type": "auto"},
             messages=[{"role": "user", "content": [
-                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
-                {"type": "text", "text": user + f"\n\nRecord the complete plan by calling the {tool_name} tool."},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b}}
+                for b in (b64, *extra)
+            ] + [
+                {"type": "text", "text": user + f"\n\nRecord the complete answer by calling the {tool_name} tool."},
             ]}],
         )
         data = None
@@ -185,12 +190,12 @@ class PlanModel:
                           usd=estimate_usd(self.model, usage.input_tokens, usage.output_tokens), seconds=0.0)
 
     # ── openai-compatible ─────────────────────────────────────────────────────
-    def _openai(self, b64, system, user, tool_name, schema, max_tokens) -> ModelReply:
+    def _openai(self, b64, system, user, tool_name, schema, max_tokens, extra=()) -> ModelReply:
         import httpx
         base = (self.base_url or os.environ.get("OPENAI_BASE_URL") or "http://localhost:8000/v1").rstrip("/")
         key = os.environ.get("OPENAI_API_KEY", "none")
-        content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                   {"type": "text", "text": user + "\nReply with the JSON object only."}]
+        content = [{"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b}"}} for b in (b64, *extra)]
+        content.append({"type": "text", "text": user + "\nReply with the JSON object only."})
         body: dict[str, Any] = {"model": self.model, "max_tokens": max_tokens, "temperature": 0.2,
                                 "messages": [{"role": "system", "content": system},
                                              {"role": "user", "content": content}]}
