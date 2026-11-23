@@ -14,6 +14,8 @@ render (scripts/render-scene.py --scene), never a pipeline rerun:
     swap_mesh     an object's mesh key
     set_atmosphere  haze_near_m / haze_far_m / haze_color
     set_sun       azimuth_deg / elevation_deg / intensity / color
+    set_light     sun_scale / ambient_scale: multipliers on the rendered light (1.5 = half again
+                  as bright); the fix for a scene whose exposure fit left the mid-ground black
 
 A position (the `at` field) is one of
     {"world": [x, y, z]}
@@ -50,7 +52,7 @@ from typing import Any, Optional
 
 import numpy as np
 
-ACTIONS = ("place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun")
+ACTIONS = ("place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun", "set_light")
 ENV_NAMES = {"terrain", "water", "water_apron", "treeline", "far_field", "backdrop"}
 WATER_CLASSES = {"boat", "ship", "barge", "sailboat", "kayak", "canoe", "yacht", "ferry", "buoy", "swan", "duck"}
 EDITS_FILE = "scene_edits.json"
@@ -460,6 +462,33 @@ class Editor:
             sun["color"] = str(a["color"])
         new = {k: sun.get(k) for k in ("direction", "elevation_deg", "intensity", "color")}
         return {"old": old, "sun": new, "note": f"sun az {az:.1f} el {el:.1f} intensity {sun.get('intensity')} colour {sun.get('color')}"}
+
+    def _do_set_light(self, a: dict) -> dict:
+        """Multiply the rendered sun and ambient light. The renderer draws sun.intensity as
+        written (Exposure Fit already folded its sun_scale in) and ambient as the sky mean x
+        lighting.fit.ambient_scale, so sun_scale edits sun.intensity and ambient_scale edits
+        the fit's ambient_scale; both are multipliers on what is there."""
+        L = self.scene.get("lighting")
+        if not isinstance(L, dict) or not isinstance(L.get("sun"), dict):
+            raise EditError("the scene has no lighting to edit")
+        ss, as_ = a.get("sun_scale"), a.get("ambient_scale")
+        if ss is None and as_ is None:
+            raise EditError("set_light needs sun_scale and/or ambient_scale")
+        for v, n in ((ss, "sun_scale"), (as_, "ambient_scale")):
+            if v is not None and not (0.05 <= float(v) <= 20.0):
+                raise EditError(f"{n} {v} is outside 0.05-20")
+        sun = L["sun"]
+        fit = L.setdefault("fit", {})
+        old = {"sun_intensity": sun.get("intensity"), "ambient_scale": fit.get("ambient_scale")}
+        if ss is not None:
+            sun["intensity"] = round(float(sun.get("intensity") or 1.0) * float(ss), 4)
+            fit["agent_sun_scale"] = round(float(fit.get("agent_sun_scale") or 1.0) * float(ss), 4)
+        if as_ is not None:
+            fit["ambient_scale"] = round(float(fit.get("ambient_scale") or 1.0) * float(as_), 4)
+            fit["agent_ambient_scale"] = round(float(fit.get("agent_ambient_scale") or 1.0) * float(as_), 4)
+        new = {"sun_intensity": sun.get("intensity"), "ambient_scale": fit.get("ambient_scale")}
+        return {"old": old, "light": new, "note": f"sun intensity {old['sun_intensity']} -> {new['sun_intensity']}, "
+                                                  f"ambient scale {old['ambient_scale']} -> {new['ambient_scale']}"}
 
     # ── files ────────────────────────────────────────────────────────────────
     def save(self, path: Path) -> Path:

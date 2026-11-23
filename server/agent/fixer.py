@@ -47,7 +47,7 @@ FIX_SCHEMA = {
         "actions": {"type": "array", "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False, "required": ["action", "why"],
             "properties": {
-                "action": {"type": "string", "enum": ["place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun"]},
+                "action": {"type": "string", "enum": ["place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun", "set_light"]},
                 "target": {"type": "string", "description": "object id, unique name or thing_<sourceIndex> (move/scale/rotate/remove/swap_mesh)"},
                 "mesh": {"type": "string", "description": "a mesh key from the list (place/swap_mesh)"},
                 "class": {"type": "string"}, "name": {"type": "string"},
@@ -60,6 +60,7 @@ FIX_SCHEMA = {
                 "on": {"type": "string", "enum": ["ground", "water", "none"]},
                 "haze_near_m": {"type": "number"}, "haze_far_m": {"type": "number"},
                 "azimuth_deg": {"type": "number"}, "elevation_deg": {"type": "number"}, "intensity": {"type": "number"}, "color": {"type": "string"},
+                "sun_scale": {"type": "number", "description": "set_light: multiplier on the sun"}, "ambient_scale": {"type": "number", "description": "set_light: multiplier on the ambient (fill) light"},
                 "why": {"type": "string"}}}},
         "expect": {"type": "string", "description": "what the crop of the target region should show after the actions, one sentence"},
         "give_up": {"type": "boolean", "description": "true when no action in the vocabulary can address this issue (it needs new content: a texture, a mesh the run does not have)"},
