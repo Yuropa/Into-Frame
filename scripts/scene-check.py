@@ -413,7 +413,7 @@ def main() -> int:
                       f"{', must failed: ' + ', '.join(verdict['failed_must']) if verdict['failed_must'] else ''}); "
                       f"acceptance {verdict['acceptance_pass']}; {verdict['summary']}", flush=True)
                 for i in verdict["issues"]:
-                    print(f"    {i.get('severity'):6s} {i.get('kind'):11s} {i.get('node') or '-'} {i.get('target')}: {i.get('text')}")
+                    print(f"    {str(i.get('severity') or '?'):6s} {str(i.get('kind') or '?'):11s} {i.get('node') or '-'} {i.get('target')}: {i.get('text')}")
 
         hist_path = base / "history.jsonl"
         history = [json.loads(l) for l in hist_path.read_text().splitlines() if l.strip()] if hist_path.exists() else []

@@ -98,7 +98,9 @@ say "server script -> $SERVE"
 # -c is the KV budget shared by the slots, so it is doubled to give each slot $CTX.
 {
     echo '#!/bin/bash'
-    echo "exec llama-server -m '$FIRST_SHARD' --mmproj '$MMPROJ' --alias qwen3-vl \\"
+    echo '# caffeinate -i: the Mac must not idle-sleep while it serves (the Into Frame box saw connection'
+    echo '# timeouts mid-run on 2026-11-23 while the Mac dozed between calls).'
+    echo "exec caffeinate -i llama-server -m '$FIRST_SHARD' --mmproj '$MMPROJ' --alias qwen3-vl \\"
     echo "    --host 0.0.0.0 --port $PORT -c $((CTX * 2)) -ngl 999 -np 2 --jinja --flash-attn on \\"
     [ -n "$API_KEY" ] && echo "    --api-key '$API_KEY' \\"
     echo "    --no-warmup"
