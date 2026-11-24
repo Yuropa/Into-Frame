@@ -631,6 +631,70 @@ hikers were removed, a large green block at the right, a floating grey line), an
 Exposure Fit's halving of sun and ambient on Rainier is a first-pass decision for the
 lighting review gate rather than something to undo in the loop.
 
+Night of 2026-11-24, a pass over the whole agentification and the three scenes again.
+Before it: the Paris bridge edits of fix3/fix4 were undone (the editor had been moving a
+structure placeholder by its origin while its vertices carry world coordinates; move and
+place now take the mesh's centre, 0024316), and two more loops on the old builds kept
+nothing (rainier-fix3, sharkfin-fix2), for the reason above: the open issues were content.
+The pass, in the order it was built (each its own commit):
+
+| piece | where | what it does |
+|---|---|---|
+| `edit_population` | `agent/editor.py`, fix loop (7bc15d3) | thin, or rescale the height and width of, every instance of a population or a family, optionally inside a distance ring; the fixer's first content action on scattered things |
+| Asset Director | Object Completion (5c9b040) | first-pass gate: one vision call reads the photograph with the chosen crops boxed and says which reference views to use or drop before a mesh is generated |
+| Species Director | Species Assets (5f13c2b) | first-pass gate on the flowers' build: one vision call with each plan species' crop; it does not set the counts |
+| Exposure Fit on the ground | `lighting/exposure_fit.py` (8045c4b, b4be8b6) | the photo view is rendered a second time without the placed objects and the lights are fitted on the ground blocks, with an ambient tint and a bounded object gain; the passes are decoded to light before they are combined (the fit had been summing gamma-encoded frames, so every fitted scene rendered darker than promised) |
+| Water from the photograph | `terrain/water_photo.py`, Terrain Mesh, renderer (d7ea13f, 57a4be7, eb8304d, 795500e) | the water sheet wears the photographed water; under an object and past the bank it is synthesised from the river (low frequencies carried, each row's ripple mirrored across the water's edge); open water nothing photographed takes the photograph's colour for its row and a ripple of that row's strength; drawn fully rough so the scene sun adds no second glint |
+| Far-field slivers | Far Field Backdrop (eb8304d) | connected pieces of the shell taller than 10 m on under 5 degrees of azimuth are left off (the orange pillar on Shark Fin, the tower blocks on Paris) |
+| Sky from the photograph | `skybox_inpainting/sky_photo.py` (795500e, b916723) | inside the photographed cone a generated sky is the photograph's own, faded into the outpainted continuation over 12 degrees; clear skies keep the clear-sky model. Applied to the cached Shark Fin and Paris skies through the context; not yet run inside the stage (no FLUX pass that night) |
+| Whole-scene guard | `scripts/fix-guard.py` (4a5bd3b) | after a loop, compares the scene-check before and after and restores the snapshot when the judge and DINO both fell |
+
+Results, all three refitted from Exposure Fit (label and snapshot `agent2`), then the fix
+loop on each (6 rounds, about $0.45 a scene), then the check again (`agent2-fix`):
+
+| scene | build | DINO | layout | dE | judge | note |
+|---|---|---|---|---|---|---|
+| Paris | agent1 (before the fit and sky fixes) | 0.838 | 0.666 | 6.6 | 0.18 | |
+| Paris | agent2 | 0.887 | 0.729 | 5.0 | 0.28 | sun x1.93, ambient x2.15; photographed cumulus and water |
+| Paris | agent2-fix | 0.827 | 0.692 | 5.0 | 0.13 | 4 rounds kept, 11 edits; rolled back |
+| Shark Fin | agent1 | 0.440 | 0.559 | 19.0 | 0.17 | flat fraction 0.45 |
+| Shark Fin | agent2 | 0.616 | 0.611 | 13.0 | 0.22 | sun x1.41, ambient x58.9 (x8 on screen); ground 0.08 -> 0.30 against the photograph's 0.31 |
+| Shark Fin | agent2-fix | 0.553 | 0.592 | 13.4 | 0.31 | fin rock moved onto the water and scaled x1.5; kept |
+| Mount Rainier | agent1 | 0.509 | 0.585 | 12.9 | 0.26 | |
+| Mount Rainier | agent2 | 0.524 | 0.585 | 13.7 | 0.17 | sun x0.50, ambient x7.07 |
+| Mount Rainier | agent2-fix | 0.560 | 0.593 | 12.9 | 0.22 | lousewort thinned 695 -> 135 and narrowed, paintbrush and lupine enlarged, a lone fir placed; kept |
+
+What this says. The photograph-derived layers are the gain: Shark Fin's beach and rocks
+are lit and its sky is the photographed one, Paris has its clouds and its water colour.
+The content actions work where the content exists: thinning one population turned
+Rainier's yellow carpet into a mixed meadow in one round. They fail where the loop has
+only bad material to place: on Paris the fixer scaled the 27 m grey boat mesh to 45 m,
+which put a marbled texture across the frame, and lined the far bank with copies of the one
+red barge; the judge's focus verdict called each a step ("improved", regressions "minor")
+and the whole-frame check fell from 0.28 to 0.13. The focus verdict is not enough to keep
+an edit by; the guard is the stopgap, and the real fix is in the loop (a whole-frame
+comparison against the round-0 render every few kept rounds, and no `place` of a mesh the
+judge has already called wrong). The judge's score moves 0.05 to 0.08 between calls on the
+same render (Paris agent2 scored 0.28 and then 0.20), so differences under 0.1 are not
+findings.
+
+Still open, by scene. Paris: the tour boat (the generated mesh is a small grey patrol
+boat, the crowd is lost in reconstruction), the bridge, the quays, grey and brown land
+wedges outside the photographed cone, the fragment boxes not inpainted out of the terrain
+panorama. Shark Fin: the left cliff low and lumpy, the right cliff cut flat at the cone's
+edge, outside the cone the water apron ends short of the horizon (a pale slab with a
+visible box where the far-field shell stands behind it) and its synthetic ripple is
+blurrier than the photographed sea, a pebble plate and a hole under the camera, no people.
+Rainier: the snow patches and trail (the terrain's texture there is a dark band the judge
+reads as a pond; the run has no water mesh), the lone fir is a thin grey cone, thin
+conifers, flat light. Across all: the Unity client does not yet apply
+the ambient tint or object gain, and there is no lighting review gate beyond Exposure Fit
+and `set_light`.
+
+The spins (720 frames, 30 s, a third of the earlier speed) are in
+`scratch/orbit-agent2/final/`; the stills of each beside them in
+`scratch/orbit-agent2/<Scene>[-fix]/stills.jpg`.
+
 How to run in the morning:
 
 ```
@@ -658,6 +722,10 @@ scripts/hybrid-run.sh Paris --from "Inventory Review" --label opus2 --snapshot o
 # the fix loop on a built scene (needs a scene-check label as the round-0 baseline), then freeze it
 scripts/fix-loop.py Paris --label fixN --rounds 12 --max-usd 10 --baseline opus2
 scripts/scene-check.py Paris --label fixN --grass --judge && scripts/scene-snapshot.py save Paris --tag fixN --check fixN
+# did the loop make the scene better as a whole? puts the snapshot back if not
+scripts/fix-guard.py Paris --before opus2 --after fixN --restore opus2
+# a spin capture of a built scene (720 frames at 24 fps = 30 s)
+cd server && python ../scripts/render-scene.py ../output/<uuid> --out ../scratch/orbit/<name> --orbit 720 --fps 24 --width 960
 ```
 
 Reports land in `scratch/agent/<label>/report.md`; every round's proposal, derived config
