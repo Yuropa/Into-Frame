@@ -42,6 +42,10 @@ _CHUNK_BIN = b"BIN\x00"
 
 _COMPONENT_TYPE_FLOAT = 5126
 
+# asset.extras key: the embedded base colour texture is an RGBA layer sampled through
+# TEXCOORD_1 over the material's own colour factor (inject_texcoord1's `overlay`).
+OVERLAY_MARKER = "into_frame_texcoord1_overlay"
+
 
 def _read_glb(data: bytes) -> tuple[dict, bytes]:
     magic, version, total_length = struct.unpack_from("<4sII", data, 0)
@@ -93,6 +97,7 @@ def inject_texcoord1(
     path: "str | Path",
     uv2: np.ndarray,
     preview_image: "PILImage.Image | None" = None,
+    overlay: bool = False,
 ) -> bool:
     """
     Add `uv2` ((N, 2) float array) to the GLB at `path` as glTF TEXCOORD_1,
@@ -113,6 +118,13 @@ def inject_texcoord1(
     transmitted SplatMaterialData instead), overwriting it to show the real
     panorama through the corrected UV costs nothing there and makes a
     standalone GLB preview finally show what the fix actually did.
+
+    overlay: the preview image is a layer over the material's own colour rather
+    than a replacement for it (the water sheet's photographed water, see
+    pipeline.terrain.water_photo): its alpha channel is kept (the weight of the
+    layer), the material's baseColorFactor is left as the exporter wrote it, and
+    the file is marked (asset.extras[OVERLAY_MARKER]) so Mesh.load brings the
+    image back as Mesh.preview_image.
 
     Returns True if injection succeeded, False if the file's structure didn't
     match what trimesh is expected to produce (single embedded buffer, no
@@ -138,7 +150,7 @@ def inject_texcoord1(
     preview_png: bytes | None = None
     if preview_image is not None:
         buf = io.BytesIO()
-        preview_image.convert("RGB").save(buf, format="PNG")
+        preview_image.convert("RGBA" if overlay else "RGB").save(buf, format="PNG", compress_level=3 if overlay else 6)
         preview_png = buf.getvalue()
 
     n = len(uv2)
@@ -206,10 +218,14 @@ def inject_texcoord1(
                 if mat_idx is not None and 0 <= mat_idx < len(materials):
                     pbr = materials[mat_idx].setdefault("pbrMetallicRoughness", {})
                     pbr["baseColorTexture"] = {"index": preview_texture_idx, "texCoord": 1}
-                    pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
+                    if not overlay:
+                        pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
 
     if target_accessor_idx is None:
         return False
+
+    if overlay and preview_texture_idx is not None:
+        tree.setdefault("asset", {}).setdefault("extras", {})[OVERLAY_MARKER] = True
 
     buffers[0]["byteLength"] = len(bin_data)
     _write_glb(path, tree, bin_data)

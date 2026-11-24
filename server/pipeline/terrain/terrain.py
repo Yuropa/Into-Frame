@@ -56,6 +56,9 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         min_water_area_m2: float = 12.0,
         water_level_percentile: float = 25.0,
         water_depression_ramp_m: float = 2.0,
+        water_photo_texture: bool = True,
+        water_photo_max_width: int = 4096,
+        water_photo_outside_flatten: float = 0.9,
         # A vertex keeps its depth sample's cached panorama pixel only while it
         # still stands within this of the sampled height (see
         # TerrainMeshGenerator.generate); past it the UV is re-projected.
@@ -124,6 +127,15 @@ class TerrainMeshConfiguration(PipelineStageConfiguration):
         # Metres in from the shore over which the lakebed descends to its full
         # water_depression_m (see TerrainMeshGenerator.generate).
         self.water_depression_ramp_m = float(water_depression_ramp_m)
+        # The water sheet wears the photographed water (pipeline.terrain.water_photo):
+        # panorama UVs in TEXCOORD_1 and the object-free panorama as an RGBA layer whose
+        # alpha is the water mask. false: the flat photographed colour only, as before.
+        self.water_photo_texture = bool(water_photo_texture)
+        self.water_photo_max_width = int(water_photo_max_width)
+        # How far the outpainted water's low frequencies (outside the photographed
+        # cone) are pulled to the photograph's own near-to-far colour profile. 0 keeps
+        # the outpainting as it is; 1 leaves only its ripple.
+        self.water_photo_outside_flatten = float(water_photo_outside_flatten)
         self.pano_uv_max_height_drift_m = float(pano_uv_max_height_drift_m)
         self.physics_inner_min_dist = physics_inner_min_dist
         self.physics_outer_min_dist = physics_outer_min_dist
@@ -454,6 +466,7 @@ class TerrainMeshStage(PipelineStage):
         )
         if water_mesh is not None:
             self._colour_water_from_photo(context, water_mesh)
+            water_mesh = self._photograph_water(context, water_mesh, panorama_key)
         if uv_folds_fixed:
             total_faces = len(mesh.mesh.faces) if mesh is not None else 0
             self.log_info(
@@ -609,6 +622,34 @@ class TerrainMeshStage(PipelineStage):
 
         self.finish_progress(task)
         return context
+
+    def _photograph_water(self, context: PipelineContext, water_mesh, panorama_key: str):
+        """Put the photographed water on the sheet: panorama UVs (Mesh.extra_uv,
+        TEXCOORD_1 in the GLB) and the object-free panorama as an RGBA layer whose
+        alpha is 1 on water-typed pixels (ContextKey.WATER_PHOTO_TEXTURE, also
+        embedded in the GLB as the material's base colour texture). The colour
+        factor _colour_water_from_photo set stays: it is what shows where the layer's
+        weight is zero and what a shader without the layer uses. See
+        pipeline.terrain.water_photo."""
+        cfg: TerrainMeshConfiguration = self.config
+        if not getattr(cfg, "water_photo_texture", True):
+            return water_mesh
+        from pipeline.terrain.water_photo import attach_water_photo, build_water_photo_texture
+        try:
+            texture = build_water_photo_texture(
+                context, panorama_key=panorama_key,
+                max_width=int(getattr(cfg, "water_photo_max_width", 4096)),
+                outside_flatten=float(getattr(cfg, "water_photo_outside_flatten", 0.9)),
+                log=self.log_info,
+            )
+        except Exception as e:
+            self.log_warning(f"Water photograph: failed ({type(e).__name__}: {e}); the sheet keeps its flat colour")
+            return water_mesh
+        if texture is None:
+            self.log_info("Water photograph: no water-typed panorama pixels; the sheet keeps its flat colour")
+            return water_mesh
+        context.add_image(ContextKey.WATER_PHOTO_TEXTURE, texture)
+        return attach_water_photo(water_mesh, texture)
 
     def _colour_water_from_photo(self, context: PipelineContext, water_mesh) -> None:
         """The water sheet's base colour from the photographed water: the median of

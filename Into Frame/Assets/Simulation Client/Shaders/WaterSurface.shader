@@ -16,6 +16,31 @@ Shader "IntoFrame/WaterSurface"
         _ShallowColor ("Shallow Water Color", Color) = (0.25, 0.50, 0.55, 1.0)
         _Smoothness ("Smoothness", Range(0,1)) = 0.95
 
+        // ── The photographed water ───────────────────────────────────────────
+        // The server puts the photograph on the sheet (TerrainMeshStage.
+        // _photograph_water, pipeline/terrain/water_photo.py): the object-free
+        // panorama, sampled through the mesh's second UV set (glTF TEXCOORD_1), its
+        // alpha 1 on water pixels and 0 elsewhere. It replaces the computed water
+        // body colour (absorption + scatter) by _PhotoWeight (see _PhotoFill for alpha 0);
+        // reflection, Fresnel, glint and foam go on top as before.
+        // WaterMaterialManager binds the texture the GLB carries and sets the weight
+        // per renderer; at weight 0 (the default, and any mesh without the second UV
+        // set) the shader is exactly what it was.
+        [NoScaleOffset] _PhotoTex ("Photographed Water (RGB, A = weight)", 2D) = "black" {}
+        _PhotoWeight ("Photograph Weight", Range(0,1)) = 0.0
+        // Where the photograph shows no water (alpha 0: a bank, a hull, a rock stood
+        // there) the texture's RGB is the nearby water's colour carried outward,
+        // without detail. This is how much of it shows there; 0 leaves those parts
+        // to the computed water colour.
+        _PhotoFill ("Photograph Fill Outside Its Water", Range(0,1)) = 0.85
+        // The photograph already holds the sky the water mirrored from the capture
+        // point; the probe reflection over it is scaled by this where the
+        // photograph shows, so the two do not add up to a white sheet at grazing angles.
+        _PhotoReflection ("Reflection Over Photograph", Range(0,1)) = 0.35
+        // The ripple nudges the photograph's UV by this much per unit of slope, so
+        // the picture moves with the surface instead of sliding under it.
+        _PhotoRipple ("Photograph Ripple (UV per slope)", Float) = 0.0008
+
         // ── Depth / shore ────────────────────────────────────────────────────
         // Beer-Lambert absorption: how many metres of water turn the refracted
         // bottom into the deep colour (63% at this depth).
@@ -106,6 +131,10 @@ Shader "IntoFrame/WaterSurface"
                 float4 _BaseColor;
                 float4 _ShallowColor;
                 float  _Smoothness;
+                float  _PhotoWeight;
+                float  _PhotoFill;
+                float  _PhotoReflection;
+                float  _PhotoRipple;
                 float  _AbsorptionDepth;
                 float  _ShoreFadeDepth;
                 float  _FoamDepth;
@@ -126,6 +155,9 @@ Shader "IntoFrame/WaterSurface"
                 float  _DetailFadeDistance;
             CBUFFER_END
 
+            TEXTURE2D(_PhotoTex);
+            SAMPLER(sampler_PhotoTex);
+
             // Scene-global wind (WindField.cs), pushed via Shader.SetGlobalX every
             // frame -- declared outside UnityPerMaterial (globals are not
             // per-material data; in that cbuffer the shader would not be SRP-Batcher
@@ -142,6 +174,8 @@ Shader "IntoFrame/WaterSurface"
             {
                 float4 positionOS : POSITION;
                 float3 normalOS   : NORMAL;
+                // glTF TEXCOORD_1: the panorama UV of the photographed water.
+                float2 photoUV    : TEXCOORD1;
                 UNITY_VERTEX_INPUT_INSTANCE_ID
             };
 
@@ -152,6 +186,7 @@ Shader "IntoFrame/WaterSurface"
                 float3 normalWS   : TEXCOORD1;
                 float  fogFactor  : TEXCOORD2;
                 float4 screenPos  : TEXCOORD3;
+                float2 photoUV    : TEXCOORD4;
                 UNITY_VERTEX_OUTPUT_STEREO
             };
 
@@ -257,6 +292,7 @@ Shader "IntoFrame/WaterSurface"
                 OUT.normalWS   = normalize(float3(-slope.x, 1.0, -slope.y));
                 OUT.fogFactor  = ComputeFogFactor(OUT.positionCS.z);
                 OUT.screenPos  = ComputeScreenPos(OUT.positionCS);
+                OUT.photoUV    = IN.photoUV;
                 return OUT;
             }
 
@@ -321,6 +357,15 @@ Shader "IntoFrame/WaterSurface"
                 float3 scattered = waterTint * ambient;
                 float3 underwater = lerp(bottom * lerp(1.0, _ShallowColor.rgb, saturate(absorb * 2.0)), scattered, absorb);
 
+                // ── the photographed water in place of the computed body ──────
+                float photoWeight = 0.0;
+                if (_PhotoWeight > 0.0)
+                {
+                    half4 photo = SAMPLE_TEXTURE2D(_PhotoTex, sampler_PhotoTex, IN.photoUV + detailSlope * _PhotoRipple);
+                    photoWeight = saturate(lerp(_PhotoFill, 1.0, photo.a) * _PhotoWeight);
+                    underwater = lerp(underwater, photo.rgb, photoWeight);
+                }
+
                 // ── reflection: the scene's probe (the panorama sky) ──────────
                 float3 reflectVector = reflect(-viewDirWS, normalWS);
                 // Never reflect below the horizon: the probe's lower half is the
@@ -335,7 +380,7 @@ Shader "IntoFrame/WaterSurface"
                 // Schlick against water's F0, so the ramp is the physical one.
                 float fresnel = _FresnelF0 + (1.0 - _FresnelF0) * pow(1.0 - NdotV, 5.0);
 
-                float3 color = lerp(underwater, reflection, fresnel);
+                float3 color = lerp(underwater, reflection, fresnel * lerp(1.0, _PhotoReflection, photoWeight));
 
                 // ── sun: shadowed glitter track and a soft lobe ───────────────
                 #if defined(MAIN_LIGHT_CALCULATE_SHADOWS)

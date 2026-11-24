@@ -24,6 +24,11 @@ class Mesh:
         # docstring for why the embedded material can need this even when
         # extra_uv's live consumer (Unity) never looks at it.
         self.preview_image: "PILImage.Image | None" = None
+        # True: preview_image is an RGBA layer over the material's own colour (its
+        # alpha the layer's weight, the colour factor kept), not a replacement for
+        # it, and load() brings it back -- the water sheet's photographed water
+        # (pipeline.terrain.water_photo), which Unity's water shader reads from the GLB.
+        self.preview_overlay: bool = False
         # Optional vertical bone chain (world/mesh-local Y heights, base-to-tip)
         # for a gentle procedural sway animation -- see util.gltf_skin.inject_skin's
         # own docstring for the glTF skin (joints/weights/inverseBindMatrices) this
@@ -429,7 +434,8 @@ class Mesh:
             from util.gltf_uv2 import _read_glb, _write_glb
             if self.extra_uv is not None:
                 from util.gltf_uv2 import inject_texcoord1
-                inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image)
+                inject_texcoord1(path, self.extra_uv, preview_image=self.preview_image,
+                                 overlay=self.preview_overlay and self.preview_image is not None)
             if self.skin_bone_heights is not None:
                 from util.gltf_skin import inject_skin
                 inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
@@ -472,24 +478,41 @@ class Mesh:
             tex.setdefault("sampler", clamp)
 
     @classmethod
-    def _stored_in_gltf_frame(cls, path) -> bool:
+    def _asset_extras(cls, path) -> dict:
         if not str(path).lower().endswith(".glb"):
-            return False
+            return {}
         try:
             from util.gltf_uv2 import _read_glb
             tree, _ = _read_glb(Path(path).read_bytes())
         except Exception:
-            return False
-        return (tree.get("asset", {}).get("extras", {}) or {}).get(cls._HANDEDNESS_MARKER) == "gltf"
+            return {}
+        return tree.get("asset", {}).get("extras", {}) or {}
+
+    @classmethod
+    def _stored_in_gltf_frame(cls, path) -> bool:
+        return cls._asset_extras(path).get(cls._HANDEDNESS_MARKER) == "gltf"
 
     @classmethod
     def load(cls, path) -> Self:
         loaded = trimesh.load(str(path), force="mesh")
         if not isinstance(loaded, trimesh.Trimesh):
             raise ValueError(f"Expected a single Trimesh at {path}, got {type(loaded).__name__}")
-        if cls._stored_in_gltf_frame(path):
+        extras = cls._asset_extras(path)
+        if extras.get(cls._HANDEDNESS_MARKER) == "gltf":
             loaded = cls._mirror_x(loaded)
         mesh = cls(loaded)
+
+        # An overlay texture (save() with preview_overlay) comes back as the trimesh
+        # material's base colour texture. Move it to preview_image, where save() takes
+        # it from, so a load -> save round trip writes it once and through TEXCOORD_1.
+        from util.gltf_uv2 import OVERLAY_MARKER
+        if extras.get(OVERLAY_MARKER):
+            material = getattr(loaded.visual, "material", None)
+            texture = getattr(material, "baseColorTexture", None)
+            if texture is not None:
+                mesh.preview_image = texture.convert("RGBA")
+                mesh.preview_overlay = True
+                material.baseColorTexture = None
 
         # trimesh models one UV set and no skinning, so loading through it drops both
         # the TEXCOORD_1 panorama UV and the sway skeleton that save() injected. Left

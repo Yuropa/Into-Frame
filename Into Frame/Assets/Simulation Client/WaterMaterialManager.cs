@@ -21,7 +21,12 @@ public class WaterMaterialManager : MonoBehaviour
     [Tooltip("Shader used for animated water. Falls back to Shader.Find if unassigned.")]
     public Shader waterShader;
 
+    [Tooltip("How much of the photographed water (the texture the water GLB carries) shows in place of the shader's computed water colour. 0 turns it off.")]
+    [Range(0f, 1f)] public float photoWeight = 1f;
+
     private Material _runtimeWaterMaterial;
+    // Keeps the photographed-water textures referenced once the baked materials are replaced.
+    private readonly System.Collections.Generic.List<Texture> _photoTextures = new System.Collections.Generic.List<Texture>();
 
     /// <summary>
     /// Called by SceneObjectManager after every GLB mesh is instantiated. If the name
@@ -59,8 +64,48 @@ public class WaterMaterialManager : MonoBehaviour
             break;
         }
 
+        // The photographed water (server: TerrainMeshStage._photograph_water): the GLB's
+        // material carries it as its base colour texture, sampled through the mesh's
+        // second UV set (glTF TEXCOORD_1), alpha = weight. Bound per renderer, so a
+        // water mesh without that UV set or texture keeps the shader's own look
+        // (_PhotoWeight 0) while sharing the one runtime material.
         foreach (var r in go.GetComponentsInChildren<Renderer>())
+        {
+            Texture photo = PhotographedWater(r);
             r.sharedMaterial = mat;
+            var block = new MaterialPropertyBlock();
+            r.GetPropertyBlock(block);
+            if (photo != null)
+            {
+                // The seam triangles' U runs past 1 (TerrainMeshGenerator._fix_uv_seam).
+                photo.wrapModeU = TextureWrapMode.Repeat;
+                photo.wrapModeV = TextureWrapMode.Clamp;
+                block.SetTexture("_PhotoTex", photo);
+                _photoTextures.Add(photo);
+            }
+            block.SetFloat("_PhotoWeight", photo != null ? photoWeight : 0f);
+            r.SetPropertyBlock(block);
+        }
+    }
+
+    /// <summary>
+    /// The base colour texture glTFast baked on this renderer's material, when its
+    /// mesh has the second UV set that texture is sampled through; null otherwise.
+    /// </summary>
+    private static Texture PhotographedWater(Renderer r)
+    {
+        var baked = r.sharedMaterial;
+        var filter = r.GetComponent<MeshFilter>();
+        var mesh = filter != null ? filter.sharedMesh : null;
+        if (baked == null || mesh == null) return null;
+        if (!mesh.HasVertexAttribute(UnityEngine.Rendering.VertexAttribute.TexCoord1)) return null;
+        foreach (var prop in new[] { "baseColorTexture", "_BaseMap", "_MainTex" })
+        {
+            if (!baked.HasProperty(prop)) continue;
+            var tex = baked.GetTexture(prop);
+            if (tex != null) return tex;
+        }
+        return null;
     }
 
     private Material GetWaterMaterial()

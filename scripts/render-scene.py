@@ -182,7 +182,10 @@ NO_PBR_MAPS = False  # --no-pbr-maps: base colour only, for before/after compari
 
 def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit: bool = False,
                  blend: bool = False, color=None, roughness: float = 0.9, double_sided: bool = True,
-                 normal_image: PILImage.Image | None = None, occlusion_image: PILImage.Image | None = None):
+                 normal_image: PILImage.Image | None = None, occlusion_image: PILImage.Image | None = None,
+                 gain: float = 1.0):
+    # gain: a multiplier on the albedo (Exposure Fit's object_gain: generated meshes come out
+    # of TRELLIS brighter or darker than the photographed ground the lights were fitted on).
     kwargs = dict(metallicFactor=0.0, roughnessFactor=roughness, doubleSided=double_sided,
                   alphaMode="BLEND" if blend else "OPAQUE")
     img = image
@@ -214,6 +217,8 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
             from pyrender.constants import GLTF
             sampler = pyrender.Sampler(wrapS=GLTF.CLAMP_TO_EDGE, wrapT=GLTF.CLAMP_TO_EDGE)
         kwargs["baseColorTexture"] = pyrender.Texture(source=arr, source_channels="RGBA", sampler=sampler)
+        if gain != 1.0 and not unlit:
+            kwargs["baseColorFactor"] = [float(gain), float(gain), float(gain), 1.0]
         if unlit:
             # The photograph's own light is in the pixels: show them as emission
             # (a second Texture object; one shared between slots loses the cutout).
@@ -456,6 +461,31 @@ class SceneBuilder:
                 self.log(f"  missing mesh {key}")
         return self._trimesh_cache[key]
 
+    def _water_photo(self, key: str, tm: trimesh.Trimesh, colour) -> tuple | None:
+        """The water sheet wearing the photographed water (server:
+        pipeline.terrain.water_photo): the mesh's TEXCOORD_1 samples the object-free
+        panorama. Its alpha is 1 where the photograph shows water; elsewhere its RGB is
+        the nearby water's colour carried outward, which is what this draws there (the
+        sheet's single colour factor against a photographed sea reads as a stain).
+        The photograph carries its own light (the water's colour is mostly the sky it
+        mirrors), so it is drawn as emission, like the photographed backdrops, under a
+        low-roughness surface that keeps the sun's glint. None when the mesh has no
+        second UV set or no texture: the caller draws the flat sheet as before."""
+        m = self.context.input_mesh(key)
+        uv = getattr(m, "extra_uv", None)
+        if uv is None or len(uv) != len(tm.vertices):
+            return None
+        if not hasattr(self, "_water_photo_tex"):
+            tex = getattr(m, "preview_image", None) if getattr(m, "preview_overlay", False) else None
+            if tex is None:
+                tex = self.image_for("water_photo_texture")
+            self._water_photo_tex = tex.convert("RGB") if tex is not None else None
+        if self._water_photo_tex is None:
+            return None
+        out = trimesh.Trimesh(vertices=np.asarray(tm.vertices), faces=np.asarray(tm.faces), process=False)
+        out.visual = trimesh.visual.TextureVisuals(uv=np.asarray(uv, dtype=np.float64))
+        return out, material_for(out, image=self._water_photo_tex, unlit=True, roughness=0.1)
+
     def image_for(self, key: str) -> PILImage.Image | None:
         if key not in self._image_cache:
             im = self.context.input_image(key)
@@ -524,7 +554,7 @@ class SceneBuilder:
                 if tm is None:
                     stats["skipped"] += len(poses)
                     continue
-                mat = material_for(tm, unlit=kind == "mesh_unlit")
+                mat = material_for(tm, unlit=kind == "mesh_unlit", gain=float(getattr(self.args, "object_gain", 1.0) or 1.0))
                 geom = to_gl(tm)
                 smooth = False
                 if key.endswith("_card"):
@@ -544,7 +574,7 @@ class SceneBuilder:
                     stats["skipped"] += len(poses)
                     continue
                 geom = to_gl(quad())
-                mat = material_for(geom, image=img)
+                mat = material_for(geom, image=img, gain=float(getattr(self.args, "object_gain", 1.0) or 1.0))
             gl_poses = np.stack([_MIRROR @ p @ _MIRROR for p in poses])
             pm = pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=smooth)
             if kind in ("mesh", "mesh_unlit") and casts_no_shadow(key):
@@ -599,7 +629,11 @@ class SceneBuilder:
                     f = np.asarray(factor, dtype=np.float64).ravel()
                     colour = list(f / 255.0 if f.max() > 1.0 else f)
                     colour[3] = 0.90
-                mat = material_for(tm, blend=True, color=colour, roughness=0.1)
+                photo = None if os.environ.get("RENDER_WATER_FLAT") == "1" else self._water_photo(key, tm, colour)
+                if photo is not None:
+                    tm, mat = photo
+                else:
+                    mat = material_for(tm, blend=True, color=colour, roughness=0.1)
             elif name in ("treeline", "backdrop"):
                 # Lit unless the scene object says it carries its photographed
                 # light (SceneObject.unlit); RENDER_UNLIT_ENV=1 for older scenes.
@@ -841,7 +875,8 @@ class SceneBuilder:
 
     def _ambient(self):
         sky = self._sky_mean()
-        return (sky * float(self.args.ambient)).tolist()
+        tint = np.asarray(getattr(self.args, "ambient_tint", None) or [1.0, 1.0, 1.0], dtype=np.float64)
+        return (sky * tint * float(self.args.ambient)).tolist()
 
     def _sky_mean(self) -> np.ndarray:
         sky = self.context.input_panorama(self.scene.get("skybox") or "panorama_sky")
@@ -988,6 +1023,7 @@ def main() -> int:
     ap.add_argument("--no-grass", action="store_true")
     ap.add_argument("--orbit", type=int, default=0, help="render N frames of a full turn about the capture camera and encode orbit.mp4")
     ap.add_argument("--fps", type=int, default=24, help="frame rate of orbit.mp4")
+    ap.add_argument("--resume", action="store_true", help="--orbit: keep the frames already in --out and render the rest")
     ap.add_argument("--flat-terrain", action="store_true", help="debug: terrain as flat grey facets, no texture")
     ap.add_argument("--no-pbr-maps", action="store_true", help="ignore normal/occlusion/metallic-roughness textures on assets")
     ap.add_argument("--material", type=Path, default=None, help="use this saved splat_material directory instead of the run's")
@@ -1032,7 +1068,15 @@ def main() -> int:
     # scales both here.
     fit = (scene.get("lighting") or {}).get("fit")
     fit_path = run_dir / "Exposure Fit" / "exposure_fit.json"
+    args.ambient_tint, args.object_gain = None, 1.0
     if not args.no_fit:
+        src = fit if fit else (json.loads(fit_path.read_text()) if fit_path.exists() else {})
+        tint = src.get("ambient_tint")
+        if isinstance(tint, (list, tuple)) and len(tint) == 3:
+            args.ambient_tint = [float(v) for v in tint]
+        args.object_gain = float(src.get("object_gain") or 1.0)
+        if args.ambient_tint or args.object_gain != 1.0:
+            log(f"exposure fit: ambient tint {args.ambient_tint}, object albedo x{args.object_gain:.2f}")
         if fit:
             args.ambient *= float(fit.get("ambient_scale") or 1.0)
             log(f"exposure fit (scene): ambient x{float(fit.get('ambient_scale') or 1.0):.2f}, sun already x{float(fit.get('sun_scale') or 1.0):.2f}")
@@ -1070,11 +1114,14 @@ def main() -> int:
     views = [v.strip() for v in args.views.split(",") if v.strip()]
     if args.orbit > 0:
         views = [f"orbit:{(360.0 * i / args.orbit):.4f}" for i in range(args.orbit)]
+    orbit_ps = orbit_cam = orbit_stats = None
     for vi, view in enumerate(views):
         fname = f"orbit_{vi:04d}" if view.startswith("orbit:") else view
         Rv, pos = view_pose(R, t, view)
         t1 = time.time()
         zfar = float(scene.get("farClipPlane") or 300.0) * 1.5
+        if view.startswith("orbit:") and args.resume and (out / f"{fname}.png").is_file():
+            continue
         if args.light_passes and view == "photo":
             # The frame is linear in the lights: U (nothing lit: the emissive
             # photo content), S (sun only), A (ambient only) let a fit solve
@@ -1088,9 +1135,17 @@ def main() -> int:
                 np.save(out / f"photo_pass_{tag}.npy", (c_pass[..., :3].astype(np.float32) / 255.0).astype(np.float16))
             args.sun_scale, args.ambient = base_sun, base_amb
             log(f"photo: light passes written (sun, ambient, unlit)")
-        ps, stats = builder.build(pos, vfov)
-        cam = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=zfar)
-        ps.add(cam, pose=gl_camera_pose(Rv, pos))
+        if view.startswith("orbit:") and orbit_ps is not None:
+            # The turn keeps the camera where it is: one scene, built and uploaded once, and
+            # only the camera's pose changes (a rebuild per frame cost 8-12 s of the frame).
+            ps, stats = orbit_ps, orbit_stats
+            ps.set_pose(orbit_cam, gl_camera_pose(Rv, pos))
+        else:
+            ps, stats = builder.build(pos, vfov)
+            cam = pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=zfar)
+            cam_node = ps.add(cam, pose=gl_camera_pose(Rv, pos))
+            if view.startswith("orbit:"):
+                orbit_ps, orbit_cam, orbit_stats = ps, cam_node, stats
         colour, depth = renderer.render(ps, flags=flags)
         colour = colour[..., :3].astype(np.float32)
         if args.exposure != 1.0:
@@ -1103,8 +1158,10 @@ def main() -> int:
         img.save(out / f"{fname}.png")
         if args.save_depth:
             np.save(out / f"{fname}_depth.npy", depth.astype(np.float16))
-        results[view] = img
-        log(f"{fname}: {stats} in {time.time() - t1:.1f} s -> {out / f'{fname}.png'}")
+        if not view.startswith("orbit:"):
+            results[view] = img
+        if not view.startswith("orbit:") or vi < 3 or vi % 20 == 0:
+            log(f"{fname}: {stats} in {time.time() - t1:.1f} s -> {out / f'{fname}.png'}")
     if args.orbit > 0:
         sys.path.insert(0, str(ROOT / "scripts"))
         from frames_to_mp4 import encode as encode_mp4

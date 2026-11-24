@@ -862,7 +862,15 @@ class FarFieldBackdropStage(PipelineStage):
             vertex_normals=np.tile(np.array([[0.0, 1.0, 0.0]]), (verts.shape[0], 1)),
             visual=trimesh.visual.TextureVisuals(material=material), process=False,
         )
-        context.add_mesh(ContextKey.WATER_APRON_MESH, Mesh(tm))
+        apron = Mesh(tm)
+        # The sheet wears the photographed water (TerrainMeshStage._photograph_water);
+        # the apron continues it with the same texture through its own panorama UVs,
+        # so the two do not part at the grid's edge.
+        photo = context.input_image(ContextKey.WATER_PHOTO_TEXTURE)
+        if photo is not None and getattr(water_mesh, "extra_uv", None) is not None:
+            from pipeline.terrain.water_photo import attach_water_photo
+            apron = attach_water_photo(apron, photo.image)
+        context.add_mesh(ContextKey.WATER_APRON_MESH, apron)
         sectors = int(is_water.sum())
         self.log_info(
             f"Far-field backdrop: water apron of {faces.shape[0]} faces at y {y_apron:.2f} m over "
@@ -870,7 +878,7 @@ class FarFieldBackdropStage(PipelineStage):
             + (f" ({n_open} open-water sector(s) carried to {cfg.water_apron_open_water_m:.0f} m)" if n_open else "")
         )
         if self.temp is not None:
-            Mesh(tm).save(self.temp / "water_apron.glb")
+            apron.save(self.temp / "water_apron.glb")
         return int(faces.shape[0])
 
     @staticmethod
