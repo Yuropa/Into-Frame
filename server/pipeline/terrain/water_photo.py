@@ -30,7 +30,7 @@ from typing import Optional
 import numpy as np
 import PIL.Image
 import trimesh
-from scipy.ndimage import binary_dilation, binary_erosion, find_objects, gaussian_filter, label
+from scipy.ndimage import binary_dilation, binary_erosion, gaussian_filter
 
 from pipeline.pipeline_context import ContextKey, PipelineContext
 from scene.mesh import Mesh
@@ -75,11 +75,73 @@ def _masked_low(rgb: np.ndarray, mask: np.ndarray, sigma: float, step: int) -> n
     return low[rows][:, cols]
 
 
+def _carried(rgb: np.ndarray, mask: np.ndarray, fallback: np.ndarray, step: int) -> np.ndarray:
+    """The colour of `mask`'s pixels carried over the whole image: from the nearest
+    masked pixels first and from wider neighbourhoods further out, `fallback` where
+    none is in reach."""
+    H, W = mask.shape
+    carried = np.broadcast_to(np.asarray(fallback, dtype=np.float32), rgb.shape)
+    for sigma in (W / 16.0, W / 64.0, W / 256.0):
+        st = step * (4 if sigma > W / 100.0 else 1)
+        m = mask[::st, ::st].astype(np.float32)
+        den = _blur(m, sigma / st)
+        low = _blur(rgb[::st, ::st] * m[..., None], sigma / st) / np.maximum(den[..., None], 1e-4)
+        rr = np.minimum(np.arange(H) // st, low.shape[0] - 1)
+        cc = np.minimum(np.arange(W) // st, low.shape[1] - 1)
+        c = np.clip(den[rr][:, cc] * 8.0, 0.0, 1.0)[..., None]
+        carried = low[rr][:, cc] * c + carried * (1.0 - c)
+    return carried
+
+
+def _mirror_fill(rgb: np.ndarray, source: np.ndarray, passes: int = 4,
+                 min_run: int = 24) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Water for the pixels that have none, from the same panorama row (the same
+    distance, so the same ripple scale): each is given the water mirrored across the
+    nearest edge of the row's water, so the ripple runs on from the edge with no seam;
+    a gap wider than the water beside it is finished by further passes over what the
+    earlier ones filled. Longitude wraps. Returns the filled image, which pixels
+    hold water afterwards (rows with almost no water keep their gaps), and each
+    pixel's distance along its row to the source water on its nearer and on its
+    further side."""
+    H, W = source.shape
+    out = rgb.copy()
+    have = source.copy()
+    cols = np.arange(3 * W, dtype=np.int64)[None, :]
+    nearer = further = None
+    for _ in range(passes):
+        if have.all():
+            break
+        m = np.concatenate([have, have, have], axis=1)
+        left = np.maximum.accumulate(np.where(m, cols, -10 * W), axis=1)        # last water at or left of c
+        right = np.minimum.accumulate(np.where(m, cols, 10 * W)[:, ::-1], axis=1)[:, ::-1]
+        c = cols[:, W:2 * W]
+        dl = (c - left[:, W:2 * W])
+        dr = (right[:, W:2 * W] - c)
+        if nearer is None:
+            nearer, further = np.minimum(dl, dr), np.maximum(dl, dr)
+        use_left = dl <= dr
+        d = np.where(use_left, dl, dr)
+        src = np.where(use_left, c - 2 * d + 1, c + 2 * d - 1)
+        ok = ~have & (d < W) & (have.sum(axis=1, keepdims=True) >= min_run)
+        src_mod = np.mod(src, W)
+        rr = np.broadcast_to(np.arange(H)[:, None], (H, W))
+        ok &= have[rr, src_mod]
+        if not ok.any():
+            break
+        out[ok] = out[rr[ok], src_mod[ok]]
+        have = have | ok
+    if nearer is None:
+        nearer = further = np.zeros((H, W), dtype=np.int64)
+    return out, have, nearer, further
+
+
+
 def build_water_photo_texture(
     context: PipelineContext,
     panorama_key: str = ContextKey.PANORAMA_TERRAIN,
     max_width: int = 4096,
     outside_flatten: float = 0.9,
+    mirror_fill: bool = True,
     log=None,
 ) -> Optional[PIL.Image.Image]:
     from pipeline.panorama_segmentation.panorama_region_result import RegionType
@@ -141,30 +203,52 @@ def build_water_photo_texture(
                 target[:, c] = gaussian_filter(np.interp(np.arange(H), rows, per_row[:, c]),
                                                max(2.0, H / 256.0), mode="nearest")
 
-    # Objects left in the water: water from the same panorama rows beside them (the
-    # same distance, so the same ripple scale), else the row's water colour where the
-    # photograph gives one, else the water around them.
-    if fill.any():
+    # Where the panorama has no water of its own to show: the objects left in the water,
+    # and everything that is not water at all -- under a hull, a rock or a bank the
+    # sheet still shows (the reconstructed water is wider than the panorama's, and the
+    # object that stood there is drawn somewhere else or smaller). Each such pixel gets
+    # the colour of the unobstructed water around it (its low frequencies, from the
+    # nearest water first) and the ripple of its own panorama row mirrored across the
+    # gap's edge (the same distance, so the same ripple scale). A copy of the water
+    # beside the gap carried that water's colour with it (the tower's dark reflection
+    # column beside Paris's tour boat came out as a wedge the boat's shape), and one
+    # smooth colour in a rippled river reads as the object's ghost.
+    have = water
+    if mirror_fill:
+        source = binary_erosion(clean, iterations=max(2, W // 1024))
+        if fill.any():
+            source &= ~binary_dilation(fill, iterations=max(3, W // 512))
+        if source.sum() >= 500:
+            filled, have, nearer, further = _mirror_fill(rgb, source)
+            sig = max(2.0, W / 256.0)
+            detail = filled - _masked_low(filled, have, sigma=sig, step=1 if W <= 2048 else 2)
+            detail = np.where(np.isnan(detail) | ~have[..., None], 0.0, detail)
+            # No stronger than the unobstructed water's usual ripple (three times its
+            # median amplitude): what else the mirror brings (a moored hull typed as
+            # water, a shadow line, a line of surf) is not ripple.
+            limit = 3.0 * float(np.median(np.abs(detail[source][:: max(1, int(source.sum()) // 200000)])))
+            detail = np.clip(detail, -limit, limit)
+            # A gap with water on both sides of it (a hull in a river) is finished
+            # whole. Past the water's outer edge the ripple runs a couple of degrees on
+            # and fades: the sheet under a bank is covered, a cove is not repeated
+            # around the horizon (Shark Fin's 2% of water came back as a kaleidoscope
+            # of its own surf).
+            enclosed = further <= W // 6
+            fade = np.where(enclosed, 1.0, np.clip(1.0 - nearer / (W / 48.0), 0.0, 1.0)).astype(np.float32)
+            fade = _blur(fade, max(1.0, W / 1024.0))
+            detail = detail * fade[..., None]
+            have = have & (fade > 0.02)
+            synth = _carried(rgb, source, med_all, step) + detail
+            soft = np.clip(_blur(source.astype(np.float32), max(1.5, W / 1024.0)) * 2.0 - 1.0, 0.0, 1.0)[..., None]
+            rgb = rgb * soft + synth * (1.0 - soft)
+            have = have | water
+    elif fill.any():
         if target is not None:
             around = np.broadcast_to(target[:, None, :], rgb.shape).copy()
         else:
             around = _masked_low(rgb, clean, sigma=W / 160.0, step=step)
             around = np.where(np.isnan(around), med_all, around)
         grown = binary_dilation(fill, iterations=max(3, W // 512))
-        labels, _ = label(grown)
-        cols = np.arange(W)
-        for i, box in enumerate(find_objects(labels), start=1):
-            rs, cs = box
-            width = cs.stop - cs.start
-            if width < 4 or width > W // 4:
-                continue
-            part = labels[rs] == i
-            done = np.zeros_like(part)
-            for shift in (-(width + 2), width + 2, -2 * (width + 2), 2 * (width + 2)):
-                src = (cols + shift) % W
-                ok = part & ~done & clean[rs][:, src] & ~grown[rs][:, src]
-                around[rs][ok] = rgb[rs][:, src][ok]
-                done |= ok
         soft = _blur(grown.astype(np.float32), max(1.5, W / 1024.0))[..., None]
         rgb = rgb * (1.0 - soft) + around * soft
 
@@ -172,7 +256,7 @@ def build_water_photo_texture(
     # low frequencies (its blotches), and its ripple kept no stronger than the
     # photograph's (its painted sun paths).
     if target is not None and outside_flatten > 0:
-        low = _masked_low(rgb, water, sigma=W / 256.0, step=step)
+        low = _masked_low(rgb, have, sigma=W / 256.0, step=step)
         low = np.where(np.isnan(low), target[:, None, :], low)
         high = rgb - low
         limit = float(np.percentile(np.abs(high[clean & inside]), 97.0))
@@ -184,23 +268,11 @@ def build_water_photo_texture(
     # Weight: the water mask, pulled one pixel in from its edge and feathered.
     alpha = _blur(binary_erosion(water, iterations=1).astype(np.float32), 1.2)
     alpha = np.clip((alpha - 0.15) / 0.7, 0.0, 1.0)
-    # Colour under zero weight: the water's own colour carried outward, from the
-    # nearest water first and from wider neighbourhoods further out (a bilinear or
-    # mip sample at the mask's edge never mixes the bank in, and a consumer that
-    # shows the sheet where the photograph had a bank, a hull or a rock has the local
-    # water colour to show there rather than one colour for the whole sheet).
-    carried = np.broadcast_to(med_all.astype(np.float32), rgb.shape)
-    for sigma in (W / 16.0, W / 64.0, W / 256.0):
-        st = step * (4 if sigma > W / 100.0 else 1)
-        m = water[::st, ::st].astype(np.float32)
-        den = _blur(m, sigma / st)
-        low = _blur(rgb[::st, ::st] * m[..., None], sigma / st) / np.maximum(den[..., None], 1e-4)
-        rr = np.minimum(np.arange(H) // st, low.shape[0] - 1)
-        cc = np.minimum(np.arange(W) // st, low.shape[1] - 1)
-        c = np.clip(den[rr][:, cc] * 8.0, 0.0, 1.0)[..., None]
-        carried = low[rr][:, cc] * c + carried * (1.0 - c)
-    a3 = np.clip(_blur(water.astype(np.float32), 2.0), 0.0, 1.0)[..., None]
-    rgb = rgb * a3 + carried * (1.0 - a3)
+    # Colour under zero weight where no row water reached either (above the far bank,
+    # the sky): the water's own colour carried outward, so a bilinear or mip sample at
+    # the edge never mixes the bank in.
+    a3 = np.clip(_blur(have.astype(np.float32), 2.0), 0.0, 1.0)[..., None]
+    rgb = rgb * a3 + _carried(rgb, have, med_all, step) * (1.0 - a3)
 
     out = np.dstack([np.clip(rgb, 0, 255), alpha * 255.0]).astype(np.uint8)
     if log is not None:
