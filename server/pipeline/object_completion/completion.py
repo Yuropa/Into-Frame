@@ -63,6 +63,10 @@ COMPLETION_SUMMARY_KEY = "object_completion_summary"
 # Scene Generation scales a mesh reconstructed from one of these crops to its
 # kind's real length (mesh_sources says which crop a mesh came from).
 OBJECT_KINDS_KEY = "object_kinds"
+# {str(idx): direction} from the Asset Director (asset_director.py) for the crops it described.
+ASSET_DIRECTIONS_KEY = "asset_directions"
+# Classes whose mesh Scene Generation scales to the director's real length.
+_DIRECTOR_SIZED_CLASSES = frozenset({"boat", "ship", "dock", "car", "truck", "bus"})
 
 # What CLIP chooses between for a class's reference view: (kind, CLIP text,
 # what the prompt asks for, typical length in metres or None). A class name
@@ -153,6 +157,11 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         reference_strength: float = 0.9,
         reference_candidates: int = 3,
         min_describe_px: int = 48,
+        director_model: str | None = "anthropic:claude-sonnet-5-5",
+        director_max_usd: float = 1.5,
+        director_rounds: int = 1,
+        director_no_api: bool = False,
+        director_refresh: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Which classes to complete. Default: every placeable object class; never
@@ -218,6 +227,15 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         # Crops at least this large (longest side, px) are described by Florence-2
         # for the reference-view prompt; smaller ones are too few pixels to read.
         self.min_describe_px = int(min_describe_px)
+        # The Asset Director (asset_director.py): a vision model writes each reference
+        # view's subject and real size from the photograph and picks the candidate that
+        # is the photographed object; on "none" it corrects the description for up to
+        # director_rounds more rounds. Empty model: the BLIP/CLIP heuristics alone.
+        self.director_model = str(director_model) if director_model else None
+        self.director_max_usd = float(director_max_usd)
+        self.director_rounds = max(0, int(director_rounds))
+        self.director_no_api = bool(director_no_api)
+        self.director_refresh = bool(director_refresh)
 
 
 def build_completion_canvas(
@@ -738,15 +756,129 @@ class ObjectCompletionStage(PipelineStage):
             return 0
         self.log_info(f"Reference views for {len(sources)} object(s)")
         super().clean_up()
-        descriptions = self._describe_crops(sources, metas, context)
-        kinds = self._object_kinds(sources, metas, context)
-        context.add_object(OBJECT_KINDS_KEY, {
+        director, directions = self._directions(context, sources, metas)
+        # The heuristics describe only what the director did not.
+        undirected = {i: s for i, s in sources.items() if i not in directions}
+        descriptions = self._describe_crops(undirected, metas, context) if undirected else {}
+        kinds = self._object_kinds(undirected, metas, context) if undirected else {}
+        kinds_record = {
             str(idx): {"class": normalize_category(metas[idx].get("class")), "kind": k[0], "length_m": k[2],
                        "height_m": (k[2] / _KIND_ASPECT[k[0]]) if k[2] and k[0] in _KIND_ASPECT else None}
             for idx, k in kinds.items()
-        })
+        }
+        for idx, d in directions.items():
+            cls = normalize_category(metas[idx].get("class"))
+            # Real sizes only where Scene Generation scales by length today: a
+            # bridge or a tower stands at a depth the detector got wrong, and its
+            # angular size is the better measure there.
+            if cls in _DIRECTOR_SIZED_CLASSES and d.get("length_m"):
+                kinds_record[str(idx)] = {
+                    "class": cls, "kind": str(d.get("what") or cls), "length_m": float(d["length_m"]),
+                    "height_m": float(d["height_m"]) if d.get("height_m") else None, "source": "director"}
+        context.add_object(OBJECT_KINDS_KEY, kinds_record)
+        context.add_object(ASSET_DIRECTIONS_KEY, {str(i): d for i, d in directions.items()})
+        photo_img = context.input_image(ContextKey.INPUT)
+        photo_pil = photo_img.image.convert("RGB") if photo_img is not None else None
+        factor = float(context.input_object(DETECTION_PHOTO_FACTOR_KEY) or 1.0)
+        subjects: dict[int, str] = {}       # a corrected subject per crop, from a rejected round
+        written = 0
+        for round_no in range(1 + (cfg.director_rounds if directions else 0)):
+            todo = sources if round_no == 0 else {i: sources[i] for i in subjects}
+            if not todo:
+                break
+            generated, want_aspects = self._draw_references(todo, metas, descriptions, kinds, directions, subjects)
+            kept, subjects = self._choose_references(generated, sources, metas, kinds, want_aspects, directions,
+                                                     director,
+                                                     photo_pil, factor, round_no,
+                                                     last_round=round_no >= cfg.director_rounds)
+            for idx, best in kept.items():
+                context.add_image(reference_key(idx), Image(best))
+                written += 1
+        return written
+
+    def _directions(self, context: PipelineContext, sources: dict[int, PILImage.Image], metas: dict[int, dict]):
+        """(director, {idx: direction}) from the Asset Director; (None, {}) when it is
+        off or unavailable (the heuristics then run for every crop)."""
+        cfg: ObjectCompletionConfiguration = self.config
+        if not cfg.director_model:
+            return None, {}
+        photo = context.input_image(ContextKey.INPUT)
+        if photo is None:
+            return None, {}
+        try:
+            from pipeline.object_completion.asset_director import AssetDirector
+            from pipeline.scene_plan.plan import ScenePlan
+            from pipeline.scene_plan.scene_plan import photo_sha256
+            pil = photo.image.convert("RGB")
+            director = AssetDirector(cfg.director_model, max_usd_per_run=cfg.director_max_usd,
+                                     no_api=cfg.director_no_api, refresh=cfg.director_refresh,
+                                     log=self.log_info, warn=self.log_warning, out_dir=self.output)
+            rows = [(i, metas[i]) for i in sources]
+            factor = float(context.input_object(DETECTION_PHOTO_FACTOR_KEY) or 1.0)
+            directions = director.direct(pil, photo_sha256(pil), rows, sources, ScenePlan.from_context(context), factor)
+        except Exception as exc:
+            self.log_warning(f"Asset Director unavailable ({type(exc).__name__}: {exc}); reference views use the heuristics")
+            return None, {}
+        for idx, d in directions.items():
+            self.log_info(f"  crop_{idx} ({metas[idx].get('class')}): directed as {d.get('what')!r}, {d.get('form')}, "
+                          f"{d.get('length_m')} m x {d.get('height_m')} m, follow {d.get('follow')}, people {d.get('people')}: "
+                          f"{d.get('subject')}")
+        return director, directions
+
+    @staticmethod
+    def _directed_prompt(cls: str, d: dict, src: PILImage.Image, subject: Optional[str], base_strength: float) -> tuple[str, float, Optional[float]]:
+        """(prompt, strength, wanted length/height) for a crop the director described."""
+        text = str(subject or d.get("subject") or "").strip().rstrip(".")
+        what = str(d.get("what") or cls)
+        form = str(d.get("form") or "compact")
+        L, Hm = d.get("length_m"), d.get("height_m")
+        aspect = float(L) / float(Hm) if L and Hm and float(Hm) > 0 else None
+        want_aspect = None
+        style = "realistic photograph, even soft daylight, sharp"
+        if form in ("conifer", "broadleaf", "palm"):
+            framing = ("A single whole tree, the entire tree from the base of the trunk to the top of the crown in frame "
+                       "with empty white space on every side, standing alone, seen from the side at eye level")
+        elif form == "shrub":
+            framing = ("A single whole shrub from the ground to its top in frame with empty white space on every side, "
+                       "standing alone, seen from the side at eye level")
+        elif form == "flower":
+            framing = ("A single plant, the whole plant from the base of the stem to the top in frame with empty white "
+                       "space on every side, seen from the side")
+            style = "botanical studio photograph, even soft light, sharp"
+        elif form == "long":
+            want_aspect = float(np.clip(aspect, 2.0, 8.0)) if aspect else None
+            framing = (f"The whole {what} in frame from end to end, seen broadside in profile at eye level"
+                       + (f", about {want_aspect:.0f} times as long as it is tall" if want_aspect else ""))
+        elif form == "tall":
+            framing = "The entire structure from its base to its top in frame, seen from ground level"
+        else:
+            framing = "The whole object in frame, seen from the side at eye level, three-quarter view"
+        people = str(d.get("people") or "none")
+        crew = ""
+        if people == "crowd":
+            crew = " Its deck is crowded with passengers."
+        elif people == "few":
+            crew = " A few people aboard."
+        elif cls in ("boat", "ship", "dock", "car", "truck", "bus"):
+            crew = " Empty, with nobody aboard."
+        prompt = f"{text}.{crew} {framing}, isolated on a plain white background, {style}"
+        if subject is not None or d.get("follow") != "crop":
+            strength = 1.0                      # from the words alone
+        else:
+            strength = min(base_strength, 0.75) if min(src.size) >= 160 else base_strength
+            if form == "long":
+                strength = max(strength, 0.92)  # an end-on crop's build survives below that
+            if form in ("conifer", "broadleaf", "palm", "shrub"):
+                strength = max(strength, 0.95)
+        return prompt, strength, want_aspect
+
+    def _draw_references(self, sources: dict[int, PILImage.Image], metas: dict[int, dict], descriptions: dict[int, str],
+                         kinds: dict, directions: dict[int, dict], subjects: dict[int, str]):
+        """{idx: [candidate images]} and {idx: wanted aspect} for the crops in `sources`."""
+        cfg: ObjectCompletionConfiguration = self.config
         inpainter = InPainting(self.preferred_device, self.torch_dtype, InPaintingType.FLUX_DEV)
         generated: dict[int, list[PILImage.Image]] = {}
+        want_aspects: dict[int, Optional[float]] = {}
         try:
             for idx, src in sources.items():
                 m = metas[idx]
@@ -852,6 +984,11 @@ class ObjectCompletionStage(PipelineStage):
                         f"on a plain white background, realistic photograph, even soft daylight, sharp"
                     )
                     strength = max(strength, 0.95)
+                want_aspects[idx] = _KIND_ASPECT.get(kinds[idx][0]) if idx in kinds else None
+                if idx in directions:
+                    prompt, strength, want_aspects[idx] = self._directed_prompt(
+                        cls, directions[idx], src, subjects.get(idx), cfg.reference_strength)
+                    self.log_info(f"  crop_{idx}: reference prompt (strength {strength:.2f}): {prompt}")
                 size = cfg.canvas_px
                 canvas = PILImage.new("RGB", (size, size), (255, 255, 255))
                 fit = cfg.object_fraction * size / max(src.size)
@@ -864,7 +1001,7 @@ class ObjectCompletionStage(PipelineStage):
                         outs.append(inpainter.inpaint(
                             canvas, full, self.temp, prompt=prompt,
                             num_inference_steps=cfg.num_inference_steps, guidance_scale=3.5,
-                            strength=strength, seed=self.seed + 7919 * (k + 1) + idx,
+                            strength=strength, seed=self.seed + 7919 * (k + 1) + idx + (104729 if idx in subjects else 0),
                         ).convert("RGB"))
                     except Exception as exc:
                         self.log_warning(f"  crop_{idx}: reference view failed ({exc})")
@@ -872,8 +1009,19 @@ class ObjectCompletionStage(PipelineStage):
         finally:
             inpainter.close()
             super().clean_up()
+        return generated, want_aspects
 
-        written = 0
+    def _choose_references(self, generated: dict[int, list[PILImage.Image]], sources: dict[int, PILImage.Image],
+                           metas: dict[int, dict], kinds: dict, want_aspects: dict, directions: dict[int, dict],
+                           director, photo_pil, factor: float, round_no: int, last_round: bool):
+        """({idx: reference cutout}, {idx: corrected subject for another round}).
+        The automatic gates (matte, canvas edge, bloom colour, aspect) run first; among
+        the survivors the director picks the photographed object, CLIP when there is no
+        director. A crop whose candidates the director all refuses goes to another
+        round with its corrected subject; on the last round CLIP's best stands in."""
+        from pipeline.segmentation.foreground_segmentation import ForegroundSeg
+        kept: dict[int, PILImage.Image] = {}
+        revise: dict[int, str] = {}
         seg = ForegroundSeg(self.preferred_device)
         clip = _ClipImageSimilarity(self.preferred_device)
         try:
@@ -883,8 +1031,9 @@ class ObjectCompletionStage(PipelineStage):
                 target = src_rgb.mean(0) if len(src_rgb) else None
                 src_embed = clip.embed(_on_white(sources[idx]))
                 best, best_err, best_score = None, None, None
-                want_aspect = _KIND_ASPECT.get(kinds[idx][0]) if idx in kinds else None
+                want_aspect = want_aspects.get(idx)
                 squat_best, squat_aspect = None, -1.0
+                survivors: list[PILImage.Image] = []
                 for k, out in enumerate(outs):
                     res = seg.segment(Image(out))
                     if res.is_empty():
@@ -941,8 +1090,8 @@ class ObjectCompletionStage(PipelineStage):
                     if want_aspect and want_aspect >= 2:
                         aspect = rgba.width / max(rgba.height, 1)
                         if aspect < _KIND_MIN_ASPECT_FRACTION * want_aspect:
-                            self.log_info(f"  crop_{idx}: reference candidate {k} is {aspect:.1f}:1, a "
-                                          f"{kinds[idx][0]} is about {want_aspect:.0f}:1, skipped")
+                            self.log_info(f"  crop_{idx}: reference candidate {k} is {aspect:.1f}:1, wanted "
+                                          f"about {want_aspect:.0f}:1, skipped")
                             if aspect > squat_aspect:
                                 squat_best, squat_aspect = rgba, aspect
                             continue
@@ -952,8 +1101,31 @@ class ObjectCompletionStage(PipelineStage):
                     # a tour boat because both were white.
                     sim = clip.similarity(src_embed, clip.embed(_on_white(rgba))) if src_embed is not None else 0.0
                     score = sim - 0.002 * err
+                    survivors.append(rgba)
                     if best_score is None or score > best_score:
                         best, best_err, best_score = rgba, err, score
+                picked = None
+                if director is not None and idx in directions and survivors and photo_pil is not None:
+                    box = metas[idx].get("photo_box")
+                    box_px = tuple(float(v) for v in box) if box and len(box) == 4 else None
+                    picked = director.pick(photo_pil, sources[idx], box_px, survivors, directions[idx], idx, round_no)
+                if picked is not None:
+                    if picked["choice"] >= 0:
+                        best, best_err, best_score = survivors[picked["choice"]], 0.0, 1.0
+                        self.log_info(f"  crop_{idx}: director chose candidate {picked['choice']} of {len(survivors)}: {picked['why']}")
+                    elif not last_round and picked.get("revise", "").strip():
+                        revise[idx] = picked["revise"].strip()
+                        self.log_info(f"  crop_{idx}: director refused all {len(survivors)} candidates ({picked['why']}); "
+                                      f"another round as: {revise[idx]}")
+                        continue
+                    else:
+                        self.log_info(f"  crop_{idx}: director refused all {len(survivors)} candidates ({picked['why']}); "
+                                      "no round left, the nearest by CLIP stands in")
+                elif director is not None and idx in directions and not survivors and not last_round:
+                    # Every candidate failed the automatic gates: one more round from the words alone.
+                    revise[idx] = str(directions[idx].get("subject") or "")
+                    self.log_info(f"  crop_{idx}: no candidate passed the gates; another round from the description")
+                    continue
                 if best is None and squat_best is not None:
                     # Every candidate too squat: the longest one beats none (the mesh
                     # would otherwise come from the end-on crop itself).
@@ -964,15 +1136,14 @@ class ObjectCompletionStage(PipelineStage):
                     best, cleared = drop_white_fragments(best)
                     if cleared:
                         self.log_info(f"  crop_{idx}: cleared {cleared} px of white canvas kept by the matte")
-                    context.add_image(reference_key(idx), Image(best))
-                    written += 1
+                    kept[idx] = best
                     self.log_info(f"  crop_{idx} ({metas[idx].get('name') or metas[idx].get('class')}): "
                                   f"reference view kept (score {best_score:.3f}, colour distance {best_err:.0f})")
         finally:
             seg.unload()
             clip.close()
             super().clean_up()
-        return written
+        return kept, revise
 
     def _object_kinds(self, sources: dict[int, PILImage.Image], metas: dict[int, dict],
                       context: PipelineContext) -> dict[int, tuple[str, str, float | None]]:
