@@ -381,6 +381,12 @@ class Editor:
             scale = float(_v(like[0].get("scale"), (1, 1, 1))[1]) if like else 1.0
         yaw = float(a.get("yaw_deg") or 0.0)
         y = self._place_y(mesh, scale, float(p[1])) if a.get("at", {}).get("snap", True) and on != "none" else float(p[1])
+        # The target is the mesh's centre; a mesh built away from its origin is offset so it lands there.
+        bb = self.mesh_bounds(mesh)
+        if bb is not None:
+            c = (bb[0] + bb[1]) / 2.0 * scale
+            cy_, sy_ = math.cos(math.radians(yaw)), math.sin(math.radians(yaw))
+            p = np.array([p[0] - (cy_ * c[0] + sy_ * c[2]), p[1], p[2] - (-sy_ * c[0] + cy_ * c[2])])
         o = {"id": str(uuid.uuid4()), "position": _xyz([p[0], y, p[2]]), "rotation": _xyz([0.0, yaw, 0.0]),
              "scale": _xyz([scale, scale, scale]), "type": "mesh", "texture": "", "mesh": mesh,
              "name": str(a.get("name") or f"agent_{cls}"), "agent": {"who": "agent", "class": cls}}
@@ -399,13 +405,28 @@ class Editor:
         cls = str(a.get("class") or (o.get("agent") or {}).get("class") or str(o.get("mesh") or "").replace("category_mesh_", "").split("_")[0])
         on = str(a.get("on") or ("water" if cls in WATER_CLASSES else "ground"))
         cur = _v(o.get("position"))
-        p, how = self.resolve_at(a.get("at") or {}, on, current=cur)
+        at = a.get("at") or {}
+        is_delta = at.get("delta") is not None
+        # The target is where the object's CENTRE should stand. A mesh whose vertices carry world
+        # coordinates (the structure placeholders) sits far from its position, so the position is
+        # the target less that offset; for the usual mesh around its origin the offset is ~0.
+        ext = self.object_extent(o)
+        off = (ext[2] - cur) if ext is not None else np.zeros(3)
+        p, how = self.resolve_at(at, on, current=cur + off)
         scale = float(_v(o.get("scale"), (1, 1, 1))[1])
-        snapped = (a.get("at") or {}).get("snap", (a.get("at") or {}).get("delta") is None)
-        y = self._place_y(str(o.get("mesh") or ""), scale, float(p[1])) if snapped and on != "none" else float(p[1])
+        snapped = at.get("snap", not is_delta)
+        mesh = str(o.get("mesh") or "")
+        if snapped and on != "none" and "no surface under it" not in how:
+            y = self._place_y(mesh, scale, float(p[1]))          # base on the surface
+        elif snapped and on != "none":
+            y = float(cur[1])                                     # no surface found: keep the height it had
+        else:
+            y = float(p[1]) - float(off[1])                       # explicit y is the centre's
         old = o["position"]
-        o["position"] = _xyz([p[0], y, p[2]])
-        b, dist = self.bearing_distance([p[0], y, p[2]])
+        o["position"] = _xyz([p[0] - off[0], y, p[2] - off[2]])
+        ext = self.object_extent(o)
+        c = ext[2] if ext is not None else _v(o["position"])
+        b, dist = self.bearing_distance(c)
         return {"id": o["id"], "name": o.get("name"), "old": old, "position": o["position"],
                 "note": f"{o.get('name')} to {dist:.1f} m bearing {b:.1f} deg; {how}"}
 
