@@ -2675,7 +2675,8 @@ stages:
                                 # near pixel, the earlier fit: Rainier's bright generated flowers took both lights to the floor
                                 # and the meadow behind them rendered black)
     far_m: 400.0
-    ambient_max: 10.0           # Shark Fin's dusk cove needs x7 fill; at x3 it was a silhouette
+    ambient_max: 100.0          # of light, not of pixel value (the passes are decoded before the fit): Shark Fin's dusk cove needs x62 of
+                                # its sky's ambient, x8 on screen; at x10 the beach stayed at half the photograph's luminance
     tint: true                  # the ambient's colour per channel from the same blocks
     object_gain: true           # one albedo gain for the placed objects, measured against the photograph under the fitted lights
     object_gain_range: [0.7, 1.4]   # a gain past this is wrong content, not wrong albedo: Rainier measured x0.49 off a wall of yellow

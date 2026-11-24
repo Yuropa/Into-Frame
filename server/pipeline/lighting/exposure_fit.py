@@ -10,7 +10,12 @@ fill, the paintbrush maroon, the snow flat (docs/hybrid-scene-plan.md section 7)
 The frame is linear in the lights, so three passes of the photo view -- the sun
 alone (S), the ambient alone (A), nothing lit (U: the emissive photographic
 content, cards and the backdrop) -- give the lit frame for any pair of scales,
-clip(U + s (S - U) + a (A - U)), without rendering again. s and a are searched on
+clip(U + s (S - U) + a (A - U)), without rendering again. Linear in LIGHT: the
+passes arrive as the renderer writes them, pow(colour, 1/2.2), and are decoded
+before they are combined and encoded again before they are compared (the first
+ground fit combined the encoded frames, which predicts x4 of light as x4 of
+pixel value where the renderer gives x1.9: Shark Fin's fitted ground was promised
+at 0.27 of luminance and rendered at 0.14, and every run was fitted too dark). s and a are searched on
 a log grid for the luminance percentiles of the lit pixels nearer than near_m
 (the grid and the placed objects; the far shell is the photograph itself) that
 best match the photograph's at the same pixels.
@@ -23,7 +28,8 @@ and stayed a silhouette. The ground fit (mode: ground, the default) judges the G
 instead -- the pixels where the terrain or the water is what the camera sees, found by
 a second depth render without the placed objects. Their albedo is the delit
 photograph, so lit correctly they reproduce it: block means of the lit frame against
-the photograph's in log luminance (L1), the ambient free to x ambient_max. Then the
+the photograph's in log luminance (L1), the ambient free to x ambient_max (of light: Shark Fin's
+dusk sky gives a sixtieth of the fill its beach received). Then the
 ambient's colour per channel (the sky's mean is not the fill the ground received:
 Shark Fin's orange sky lit a rose-grey beach), and one gain for the placed objects'
 albedo where they cover enough of the frame to measure (object_gain: the generated
@@ -55,6 +61,17 @@ from pipeline.pipeline_stage import PipelineStage, PipelineStageConfiguration
 MARKER = "exposure_fit"
 ROOT = Path(__file__).resolve().parents[3]
 LUMA = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+GAMMA = 2.2     # scripts/render-scene.py's fragment shader writes pow(colour, 1 / 2.2)
+
+
+def _lin(a: np.ndarray) -> np.ndarray:
+    """A rendered frame (display values) as the light the shader summed."""
+    return np.power(np.clip(np.asarray(a, dtype=np.float32), 0.0, 1.0), GAMMA)
+
+
+def _enc(a: np.ndarray) -> np.ndarray:
+    """Summed light as the renderer writes it."""
+    return np.power(np.clip(a, 0.0, 1.0), 1.0 / GAMMA)
 
 
 class ExposureFitConfiguration(PipelineStageConfiguration):
@@ -83,7 +100,7 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         plan_sun_min_elevation_deg: float = 20.0,
         mode: str = "ground",
         far_m: float = 400.0,
-        ambient_max: float = 10.0,
+        ambient_max: float = 100.0,
         block_px: int = 8,
         min_ground_blocks: int = 40,
         tint: bool = True,
@@ -135,12 +152,12 @@ def fit_light_scales(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit:
     in [0, 1]; near is the (H, W) mask of pixels the fit judges."""
     pct = np.asarray(percentiles, dtype=np.float64)
     lp = np.percentile(photo[near] @ LUMA, pct)
-    u = unlit[near].astype(np.float32)
-    ds = (sun[near] - unlit[near]).astype(np.float32)
-    da = (amb[near] - unlit[near]).astype(np.float32)
+    u = _lin(unlit[near])
+    ds = _lin(sun[near]) - u
+    da = _lin(amb[near]) - u
 
     def render_pct(s: float, a: float) -> np.ndarray:
-        c = np.clip(u + s * ds + a * da, 0.0, 1.0)
+        c = _enc(u + s * ds + a * da)
         return np.percentile(c @ LUMA, pct)
 
     def err(pr: np.ndarray) -> float:
@@ -156,7 +173,7 @@ def fit_light_scales(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit:
                 best = (e, float(s), float(a))
     e_best, s_best, a_best = best
     after = render_pct(s_best, a_best)
-    c_after = np.clip(u + s_best * ds + a_best * da, 0.0, 1.0)
+    c_after = _enc(u + s_best * ds + a_best * da)
     ratio = photo[near].mean(axis=0) / np.maximum(c_after.mean(axis=0), 1e-3)
     return {
         "sun_scale": round(s_best, 3), "ambient_scale": round(a_best, 3),
@@ -179,7 +196,7 @@ def _blocks(a: np.ndarray, b: int) -> np.ndarray:
 
 def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit: np.ndarray,
                             lit: np.ndarray, ground: np.ndarray, sun_range: tuple[float, float] = (0.5, 4.0),
-                            ambient_range: tuple[float, float] = (0.5, 10.0), steps: int = 41, block_px: int = 8,
+                            ambient_range: tuple[float, float] = (0.5, 100.0), steps: int = 41, block_px: int = 8,
                             min_ground_blocks: int = 40, tint_range: Optional[tuple[float, float]] = (0.6, 1.6),
                             object_gain_range: Optional[tuple[float, float]] = (0.7, 1.4),
                             min_object_blocks: int = 60) -> dict:
@@ -190,10 +207,12 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
     of block_px that are mostly ground are compared with the photograph's in log
     luminance (mean absolute error, with a weak pull to x1 so a direction the data
     does not constrain stays put). With too few ground blocks every lit block is
-    judged instead."""
+    judged instead. The passes are decoded to light before they are combined (see
+    the module text); the scales are scales of light."""
     b = int(block_px)
-    bp, bu = _blocks(photo, b), _blocks(unlit, b)
-    bs, ba = _blocks(sun - unlit, b), _blocks(amb - unlit, b)
+    l_unlit = _lin(unlit)
+    bp, bu = _blocks(photo, b), _blocks(l_unlit, b)
+    bs, ba = _blocks(_lin(sun) - l_unlit, b), _blocks(_lin(amb) - l_unlit, b)
     g_frac, l_frac = _blocks(ground.astype(np.float32), b), _blocks(lit.astype(np.float32), b)
     g_ok = g_frac > 0.6
     judged = "ground"
@@ -203,7 +222,7 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
     u, ds, da = bu[g_ok], bs[g_ok], ba[g_ok]
 
     def err(sc: float, ac: float) -> float:
-        c = np.clip(u + sc * ds + ac * da, 0.0, 1.0)
+        c = _enc(u + sc * ds + ac * da)
         return float(np.abs(np.log(c @ LUMA + 0.02) - lp).mean())
 
     best = None
@@ -219,21 +238,21 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
             lpc = np.log(bp[g_ok][:, ch] + 0.02)
             cand = None
             for t in np.geomspace(tint_range[0], tint_range[1], 31):
-                c = np.clip(u[:, ch] + s_best * ds[:, ch] + a_best * t * da[:, ch], 0.0, 1.0)
+                c = _enc(u[:, ch] + s_best * ds[:, ch] + a_best * t * da[:, ch])
                 e = float(np.abs(np.log(c + 0.02) - lpc).mean())
                 if cand is None or e < cand[0]:
                     cand = (e, float(t))
             tint[ch] = cand[1]
         tint /= max(float(tint @ LUMA), 1e-6)       # a colour, not a second brightness
     tint32 = tint.astype(np.float32)
-    after = np.clip(u + s_best * ds + a_best * tint32 * da, 0.0, 1.0)
+    after = _enc(u + s_best * ds + a_best * tint32 * da)
     out = {
         "mode": "ground", "judged": judged, "n_blocks": int(g_ok.sum()), "block_px": b,
         "sun_scale": round(s_best, 3), "ambient_scale": round(a_best, 3),
         "ambient_tint": [round(float(v), 3) for v in tint],
         "err_before": round(err(1.0, 1.0), 4), "err_after": round(float(np.abs(np.log(after @ LUMA + 0.02) - lp).mean()), 4),
         "photo_median": round(float(np.median(bp[g_ok] @ LUMA)), 4),
-        "render_median_before": round(float(np.median(np.clip(u + ds + da, 0, 1) @ LUMA)), 4),
+        "render_median_before": round(float(np.median(_enc(u + ds + da) @ LUMA)), 4),
         "render_median_after": round(float(np.median(after @ LUMA)), 4),
         "colour_ratio_after": [round(float(v), 3) for v in bp[g_ok].mean(axis=0) / np.maximum(after.mean(axis=0), 1e-3)],
         "at_ceiling": bool(a_best >= ambient_range[1] * 0.999 or s_best >= sun_range[1] * 0.999),
@@ -248,7 +267,7 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
             want = np.log(bp[o_ok] @ LUMA + 0.02)
             cand = None
             for g in np.geomspace(object_gain_range[0], object_gain_range[1], 41):
-                c = np.clip(bu[o_ok] + g * lit_o, 0.0, 1.0)
+                c = _enc(bu[o_ok] + g * lit_o)
                 e = float(np.abs(np.log(c @ LUMA + 0.02) - want).mean()) + 0.004 * math.log(g) ** 2
                 if cand is None or e < cand[0]:
                     cand = (e, float(g))
