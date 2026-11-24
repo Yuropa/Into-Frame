@@ -2098,6 +2098,16 @@ stages:
     context_background: true      # paint in the object-removed panorama's surroundings, not on white
     background_diff: 18.0         # a painted hole this close (mean |diff|, 0-255) to the context canvas was
                                   # filled with background, not object, and is left out of the cutout
+    # Asset Director (pipeline/object_completion/asset_director.py): a vision model reads the photograph
+    # with the chosen crops boxed and writes what each reference view is drawn as (subject, real length
+    # and height, people aboard, follow the crop or the words), then picks the candidate that is the
+    # photographed object, or refuses them all and corrects the description for director_rounds more
+    # rounds. Empty model, no key, no_api or the spend cap: the BLIP/CLIP heuristics.
+    director_model: anthropic:claude-sonnet-5-5
+    director_max_usd: 1.5
+    director_rounds: 1
+    director_no_api: false
+    director_refresh: false
 
   - name: Panorama Asset Generation
     stage: PanoramaAssetGenerationStage
@@ -2652,7 +2662,14 @@ stages:
     width: 480
     near_m: 60.0          # the lit geometry the fit sees: the grid and placed objects, not the shell
     scale_min: 0.5              # the key light stays a key light: band21 fitted sun x0.25, ambient x3.25 against a self-shadowed meadow and went flat
-    scale_max: 3.0
+    scale_max: 4.0
+    mode: ground                # fit on the terrain and water pixels, whose albedo is the delit photograph (percentiles: every
+                                # near pixel, the earlier fit: Rainier's bright generated flowers took both lights to the floor
+                                # and the meadow behind them rendered black)
+    far_m: 400.0
+    ambient_max: 10.0           # Shark Fin's dusk cove needs x7 fill; at x3 it was a silhouette
+    tint: true                  # the ambient's colour per channel from the same blocks
+    object_gain: true           # one albedo gain for the placed objects, measured against the photograph under the fitted lights
 
   - name: Scene Edits
     stage: SceneEditsStage
