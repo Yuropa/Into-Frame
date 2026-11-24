@@ -68,6 +68,35 @@ def far_field_radius(
     return r0 + (far_m - r0) * (1.0 - np.exp(-over / max(scale_m, 1e-6)))
 
 
+def _drop_upright_slivers(vertices: np.ndarray, faces: np.ndarray, min_span_deg: float,
+                          min_height_m: float) -> tuple[np.ndarray, int]:
+    """`faces` without the connected pieces that are taller than min_height_m and
+    cover less than min_span_deg of azimuth, and how many pieces that was."""
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = vertices.shape[0]
+    e = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]]], axis=0)
+    graph = coo_matrix((np.ones(len(e), dtype=np.int8), (e[:, 0], e[:, 1])), shape=(n, n))
+    _, comp = connected_components(graph, directed=False)
+    face_comp = comp[faces[:, 0]]
+    az = np.degrees(np.arctan2(vertices[:, 0], vertices[:, 2]))
+    used = np.zeros(n, dtype=bool)
+    used[faces.ravel()] = True
+    drop = []
+    for c in np.unique(face_comp):
+        sel = used & (comp == c)
+        y = vertices[sel, 1]
+        if float(y.max() - y.min()) <= min_height_m:
+            continue
+        a = np.sort(az[sel])
+        span = 360.0 - float(np.diff(np.concatenate([a, a[:1] + 360.0])).max())
+        if span < min_span_deg:
+            drop.append(c)
+    if not drop:
+        return faces, 0
+    return faces[~np.isin(face_comp, drop)], len(drop)
+
+
 class FarFieldBackdropConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -89,6 +118,8 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         feather_px: float = 3.0,
         texture_max_width: int = 8192,
         min_faces: int = 50,
+        min_upright_span_deg: float = 5.0,
+        min_upright_height_m: float = 10.0,
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
@@ -138,6 +169,13 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.feather_px = float(feather_px)
         self.texture_max_width = int(texture_max_width)
         self.min_faces = int(min_faces)
+        # A piece of the shell that stands up (taller than min_upright_height_m) on
+        # less than this much azimuth is left off: where the near-content and
+        # silhouette tests cut a far cliff or a far bank's buildings into single
+        # columns, each column is a card standing alone against the sky (Shark Fin's
+        # orange pillar, Paris's row of tower blocks). 0 keeps every piece.
+        self.min_upright_span_deg = float(min_upright_span_deg)
+        self.min_upright_height_m = float(min_upright_height_m)
         # Extend the ground from the grid's edge out to the shell (see run).
         self.skirt = bool(skirt)
         self.skirt_start_fraction = float(skirt_start_fraction)
@@ -697,6 +735,13 @@ class FarFieldBackdropStage(PipelineStage):
             faces.append(np.stack([v00[t1], v11[t1], v10[t1]], axis=-1))
             faces.append(np.stack([v00[t2], v01[t2], v11[t2]], axis=-1))
         faces = np.concatenate(faces, axis=0) if faces else np.zeros((0, 3), dtype=np.int64)
+        if cfg.min_upright_span_deg > 0 and faces.shape[0]:
+            faces, n_cards = _drop_upright_slivers(vertices, faces, cfg.min_upright_span_deg, cfg.min_upright_height_m)
+            if n_cards:
+                self.log_info(
+                    f"Far-field backdrop: {n_cards} piece(s) standing more than {cfg.min_upright_height_m:.0f} m tall on "
+                    f"less than {cfg.min_upright_span_deg:.0f} deg of azimuth left off (cards against the sky)"
+                )
         if faces.shape[0] < cfg.min_faces:
             self.log_info(f"Far-field backdrop: only {faces.shape[0]} face(s) beyond {start_m:.0f} m — no backdrop")
             context.add_object(FAR_FIELD_SUMMARY_KEY, {"faces": int(faces.shape[0]), "reason": "too few faces"})

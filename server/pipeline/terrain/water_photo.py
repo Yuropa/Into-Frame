@@ -136,12 +136,35 @@ def _mirror_fill(rgb: np.ndarray, source: np.ndarray, passes: int = 4,
 
 
 
+def _open_water_ripple(H: int, W: int, seed: int = 0) -> np.ndarray:
+    """A unit-strength ripple pattern (H, W, 1) for open water nothing photographed:
+    band-limited noise stretched along the rows, finer and more stretched toward the
+    horizon the way a rippled plane foreshortens (three scales, chosen per row by its
+    angle under the horizon). Wraps in longitude; the same seed gives the same pattern."""
+    rng = np.random.default_rng(seed)
+    k = W / 4096.0
+    layers = []
+    for sy, sx in ((0.7, 6.0), (1.2, 6.0), (2.2, 7.0)):
+        n = rng.standard_normal((H, W)).astype(np.float32)
+        n = gaussian_filter(n, sigma=(max(0.5, sy * k), max(1.0, sx * k)), mode=("nearest", "wrap"))
+        layers.append(n / max(float(n.std()), 1e-6))
+    below = np.degrees((np.arange(H) / H - 0.5) * np.pi)
+    f = np.clip(np.log2(np.maximum(below, 0.1) / 2.5), 0.0, len(layers) - 1.0)
+    out = np.zeros((H, W), dtype=np.float32)
+    for i, n in enumerate(layers):
+        out += np.clip(1.0 - np.abs(f - i), 0.0, 1.0)[:, None] * n
+    # Nothing at or above the horizon (no water plane maps there), full by 1 degree under.
+    out *= np.clip(below, 0.0, 1.0)[:, None]
+    return np.clip(out, -2.5, 2.5)[..., None]
+
+
 def build_water_photo_texture(
     context: PipelineContext,
     panorama_key: str = ContextKey.PANORAMA_TERRAIN,
     max_width: int = 4096,
     outside_flatten: float = 0.9,
     mirror_fill: bool = True,
+    seed: int = 0,
     log=None,
 ) -> Optional[PIL.Image.Image]:
     from pipeline.panorama_segmentation.panorama_region_result import RegionType
@@ -189,6 +212,7 @@ def build_water_photo_texture(
     cone = captured_cone_from_context(context, W, H)
     inside = np.zeros((H, W), dtype=bool)
     target = None
+    ripple_amp = None
     n_cone = 0
     if cone is not None:
         (u0, u1), (v0, v1) = cone.u_range, cone.v_range
@@ -202,6 +226,17 @@ def build_water_photo_texture(
             for c in range(3):
                 target[:, c] = gaussian_filter(np.interp(np.arange(H), rows, per_row[:, c]),
                                                max(2.0, H / 256.0), mode="nearest")
+            # And its ripple's strength per row (median absolute deviation from the
+            # water's own low frequencies), for the open water nothing photographed.
+            low0 = _masked_low(rgb, clean, sigma=max(2.0, W / 256.0), step=step)
+            dev = np.abs(rgb - np.where(np.isnan(low0), rgb, low0))
+            per_row = np.stack([np.median(dev[r][cone_water[r]], axis=0) for r in rows]) * 1.48
+            ripple_amp = np.empty((H, 3), dtype=np.float32)
+            # (a row of surf is not a row of ripple: no row above the usual one)
+            per_row = np.minimum(per_row, np.median(per_row, axis=0, keepdims=True))
+            for c in range(3):
+                ripple_amp[:, c] = gaussian_filter(np.interp(np.arange(H), rows, per_row[:, c]),
+                                                   max(2.0, H / 256.0), mode="nearest")
 
     # Where the panorama has no water of its own to show: the objects left in the water,
     # and everything that is not water at all -- under a hull, a rock or a bank the
@@ -268,11 +303,22 @@ def build_water_photo_texture(
     # Weight: the water mask, pulled one pixel in from its edge and feathered.
     alpha = _blur(binary_erosion(water, iterations=1).astype(np.float32), 1.2)
     alpha = np.clip((alpha - 0.15) / 0.7, 0.0, 1.0)
-    # Colour under zero weight where no row water reached either (above the far bank,
-    # the sky): the water's own colour carried outward, so a bilinear or mip sample at
-    # the edge never mixes the bank in.
+    # Colour under zero weight where no row water reached either. Beside the water:
+    # its own colour carried outward, so a bilinear or mip sample at the edge never
+    # mixes the bank in. Further off (the sheet runs on where the panorama shows a
+    # headland, and to the horizon beside a cove): the photograph's colour for that
+    # row with a ripple of that row's strength. The carried colour alone is the mean
+    # of the cove, surf included, and unlit and smooth it stood beside Shark Fin's
+    # sea as a pale concrete slab.
     a3 = np.clip(_blur(have.astype(np.float32), 2.0), 0.0, 1.0)[..., None]
-    rgb = rgb * a3 + _carried(rgb, have, med_all, step) * (1.0 - a3)
+    outer = _carried(rgb, have, med_all, step)
+    if target is not None and ripple_amp is not None:
+        beside = np.clip(_blur(have.astype(np.float32), W / 48.0) * 2.0, 0.0, 1.0)[..., None]
+        outer = outer * beside + target[:, None, :] * (1.0 - beside)
+        # At half the photographed strength: the pattern is smoother than a real
+        # ripple, and at the same strength it shows more.
+        outer = outer + _open_water_ripple(H, W, seed) * (0.5 * ripple_amp[:, None, :])
+    rgb = rgb * a3 + outer * (1.0 - a3)
 
     out = np.dstack([np.clip(rgb, 0, 255), alpha * 255.0]).astype(np.uint8)
     if log is not None:
