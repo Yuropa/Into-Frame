@@ -183,10 +183,11 @@ class Builder:
         v0 = self.card_part(base, d, horiz, length, name, width=width)
         self.soft.update(range(v0, v0 + 4))
 
-    def head_part(self, base, up, length, name, planes=3, roll=0.0, min_aspect=0.5):
-        """A flower head as a fan of cards no narrower than min_aspect of its length."""
+    def head_part(self, base, up, length, name, planes=3, roll=0.0, min_aspect=0.5, aspect=None):
+        """A flower head as a fan of cards no narrower than min_aspect of its length;
+        `aspect` (the Species Director's measurement) sets the width outright."""
         info = self.parts[name]
-        width = length * max(float(info.get("aspect") or 0.5), min_aspect)
+        width = length * (float(aspect) if aspect else max(float(info.get("aspect") or 0.5), min_aspect))
         self.crossed_part(base, up, length, name, width=width, planes=planes, roll=roll)
 
     def crossed_part(self, base, up, length, name, width=None, planes=2, roll=0.0):
@@ -308,21 +309,27 @@ def form_spike(b, spec, rng, h, w):
     b.polyline_tube(stem, r * 1.3, r * 0.6, "stem")
     # Leaves on the lower two thirds.
     for i in range(rng.randint(16, 24) if b.has_part("leaf") else rng.randint(6, 11)):
-        f = rng.uniform(0.08, 0.62)
+        f = rng.uniform(0.08, min(0.62, 0.97 - float(spec.get("head_fraction") or 0.35)))
         base = _along(stem, f)
         a = rng.uniform(0, 2 * math.pi)
         up = rng.uniform(0.35, 0.8)
         d = (math.cos(a), math.sin(a), up)
         if b.has_part("leaf"):
-            b.leaf_part(base, d, rng.uniform(0.3, 0.5) * h, "leaf")
+            length = rng.uniform(0.3, 0.5) * h
+            if spec.get("head_aspect"):
+                # A measured plant: its leaves stay near the width it was seen at (the
+                # 0.7 m lousewort's 0.3 m leaves made a 0.5 m bush of a 0.14 m plant).
+                length = min(length, 1.2 * w)
+            b.leaf_part(base, d, length, "leaf")
         else:
             b.leaf(base, d, rng.uniform(0.25, 0.4) * h, rng.uniform(0.03, 0.06) * w / 0.2, "foliage", droop=0.3)
     if b.has_part("head"):
         # The photographed head as a fan of three cards on the top third of the
         # stem, as wide as the head was painted and never a sliver.
-        base = _along(stem, 0.62)
+        base = _along(stem, 1.0 - float(spec.get("head_fraction") or 0.38))
         up = v_sub(stem[-1], base)
-        b.head_part(base, up, v_len(up) * rng.uniform(1.05, 1.2), "head", roll=rng.uniform(0, math.pi), min_aspect=0.5)
+        b.head_part(base, up, v_len(up) * rng.uniform(1.05, 1.2), "head", roll=rng.uniform(0, math.pi), min_aspect=0.5,
+                    aspect=spec.get("head_aspect"))
         return
     # Bloom: a cylindrical head of small bracts on the top third.
     count = _density_count(spec, 150, 110, 75)
@@ -370,9 +377,10 @@ def form_raceme(b, spec, rng, h, w):
             d = (math.cos(a), math.sin(a), rng.uniform(0.0, 0.3))
             b.leaf(tip, d, rng.uniform(0.3, 0.45) * w, rng.uniform(0.04, 0.07) * w / 0.3, "foliage", droop=0.15)
     if b.has_part("head"):
-        base = _along(stem, 0.48)
+        base = _along(stem, 1.0 - float(spec.get("head_fraction") or 0.52))
         up = v_sub(stem[-1], base)
-        b.head_part(base, up, v_len(up) * rng.uniform(1.02, 1.1), "head", roll=rng.uniform(0, math.pi), min_aspect=0.4)
+        b.head_part(base, up, v_len(up) * rng.uniform(1.02, 1.1), "head", roll=rng.uniform(0, math.pi), min_aspect=0.4,
+                    aspect=spec.get("head_aspect"))
         return
     # Pea flowers: a tapered spiral column on the top half.
     count = _density_count(spec, 70, 55, 40)

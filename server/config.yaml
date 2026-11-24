@@ -2305,6 +2305,14 @@ stages:
     tree_variants: 2
     timeout_s: 600
     min_evidence: visible
+    # The Species Director (pipeline/species/species_director.py): one vision call reads each plan species'
+    # proportions off the photograph (head width over length, the head's share of the height, the plant's
+    # width over height) and the builder draws those instead of the form's fixed ratios (Rainier: the 4 cm
+    # lousewort spike stood as a 15 cm cone). Empty model, no key or the spend cap: the built-in ratios.
+    director_model: anthropic:claude-sonnet-5-5
+    director_max_usd: 0.5
+    director_no_api: false
+    director_refresh: false
 
   - name: Tree Mesh Refinement
     stage: TreeMeshGenerationStage
@@ -2670,6 +2678,8 @@ stages:
     ambient_max: 10.0           # Shark Fin's dusk cove needs x7 fill; at x3 it was a silhouette
     tint: true                  # the ambient's colour per channel from the same blocks
     object_gain: true           # one albedo gain for the placed objects, measured against the photograph under the fitted lights
+    object_gain_range: [0.7, 1.4]   # a gain past this is wrong content, not wrong albedo: Rainier measured x0.49 off a wall of yellow
+                                    # lousewort where the photograph has dark meadow, and it greyed the trees and the paintbrush
 
   - name: Scene Edits
     stage: SceneEditsStage

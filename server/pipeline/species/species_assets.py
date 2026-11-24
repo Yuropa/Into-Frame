@@ -93,6 +93,10 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         atlas_steps: int = 28,
         atlas_guidance: float = 3.5,
         plan_only_species: bool = True,
+        director_model: str | None = "anthropic:claude-sonnet-5-5",
+        director_max_usd: float = 0.5,
+        director_no_api: bool = False,
+        director_refresh: bool = False,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.blender_path = Path(os.path.expanduser(blender_path))
@@ -112,6 +116,14 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         self.atlas_steps = int(atlas_steps)
         self.atlas_guidance = float(atlas_guidance)
         self.plan_only_species = bool(plan_only_species)
+        # The Species Director (species_director.py): a vision model reads each plan
+        # species' proportions off the photograph (head width over length, the head's
+        # share of the height, the plant's width over height) and the builder draws
+        # those. Empty model, no key or the spend cap: the forms' built-in proportions.
+        self.director_model = str(director_model) if director_model else None
+        self.director_max_usd = float(director_max_usd)
+        self.director_no_api = bool(director_no_api)
+        self.director_refresh = bool(director_refresh)
 
 
 class SpeciesAssetsStage(PipelineStage):
@@ -261,9 +273,34 @@ class SpeciesAssetsStage(PipelineStage):
             return None, None, "no plan species of this class"
         return best[0], (best[1] if best[1] < 999.0 else None), "class match" + (f", foliage dE {best[1]:.0f}" if best[1] < 999.0 else "")
 
+    # ── the director ────────────────────────────────────────────────────────
+    def _measure(self, photo, species: list[dict]) -> dict[str, dict]:
+        """{species name: proportions read off the photograph}; {} when the director is
+        off, has no key, or the photograph is missing."""
+        cfg = self.config
+        flowers = [sp for sp in species if str(sp.get("class", "")).lower() in ("flower", "shrub")]
+        if not cfg.director_model or photo is None or not flowers:
+            return {}
+        try:
+            from pipeline.scene_plan.scene_plan import photo_sha256
+            from pipeline.species.species_director import SpeciesDirector
+            director = SpeciesDirector(model=cfg.director_model, max_usd_per_run=cfg.director_max_usd,
+                                       no_api=cfg.director_no_api, refresh=cfg.director_refresh,
+                                       log=self.log_info, warn=self.log_warning, out_dir=self.temp or self.output)
+            measured = director.measure(photo, photo_sha256(photo), flowers)
+        except Exception as exc:
+            self.log_warning(f"Species Director unavailable ({type(exc).__name__}: {exc}); built-in proportions")
+            return {}
+        for name, m in measured.items():
+            self.log_info(f"  Species Director: '{name}': head {m.get('head_aspect')} wide per length, "
+                          f"{m.get('head_fraction')} of the height; plant {m.get('plant_aspect')} wide per height, "
+                          f"{m.get('height_m')} m ({m.get('seen')}) -- {m.get('why')}")
+        return measured
+
     # ── building ────────────────────────────────────────────────────────────
     @staticmethod
-    def _spec_entry(key: str, species: dict, bucket_pal: dict, seed: int, variants: int) -> dict:
+    def _spec_entry(key: str, species: dict, bucket_pal: dict, seed: int, variants: int,
+                    measured: Optional[dict] = None) -> dict:
         form = species_form(species)
         size = species.get("size_m")
         height = float(size) if isinstance(size, (int, float)) and size > 0 else (12.0 if form == "conifer" else 0.4)
@@ -276,11 +313,20 @@ class SpeciesAssetsStage(PipelineStage):
         # A conifer or a tuft has no bloom: its "bloom" pixels are the snow and sky
         # inside the mask, so the foliage palette stands in for every part.
         bloom = (bucket_pal["bloom"] or foliage) if form in ("spike", "raceme", "seedhead", "shrub") else foliage
-        return {
+        entry = {
             "id": key, "form": form, "height_m": round(height, 3), "width_m": round(width, 3),
             "bloom_rgb": bloom, "foliage_rgb": foliage, "stem_rgb": stem,
             "density": str(species.get("density") or "patchy"), "variants": int(variants), "seed": int(seed),
         }
+        # The Species Director's reading of the photographed plant replaces the form's
+        # ratios (keys present only then, so an undirected entry keeps its cache hash).
+        if measured and form in ("spike", "raceme", "seedhead"):
+            if measured.get("plant_aspect"):
+                entry["width_m"] = round(height * min(max(float(measured["plant_aspect"]), 0.08), 0.8), 3)
+            if measured.get("head_aspect") and measured.get("head_fraction"):
+                entry["head_aspect"] = float(measured["head_aspect"])
+                entry["head_fraction"] = float(measured["head_fraction"])
+        return entry
 
     @staticmethod
     def _apply_head_width(entry: dict) -> None:
@@ -288,6 +334,12 @@ class SpeciesAssetsStage(PipelineStage):
         the paintbrush's bracted head is a quarter of its height across, not the
         spike ratio's seventh (band23: 4.5 cm heads read as magenta slivers)."""
         head = (entry.get("parts") or {}).get("head")
+        if head and entry.get("head_aspect"):
+            # Measured on the photograph: the head is as wide as it was seen, and the
+            # plant no narrower than its head.
+            head_w = float(entry["head_aspect"]) * float(entry["head_fraction"]) * entry["height_m"]
+            entry["width_m"] = round(max(entry["width_m"], head_w), 3)
+            return
         frac = {"spike": 0.38 * 1.12, "raceme": 0.52 * 1.06, "seedhead": 0.3}.get(entry.get("form"))
         if head and frac:
             head_w = frac * float(head.get("aspect") or 0.5) * entry["height_m"]
@@ -398,6 +450,7 @@ class SpeciesAssetsStage(PipelineStage):
             self.log_info(f"  plan species '{sp.get('name')}' ({species_form(sp)}, {sp.get('size_m')} m): palette from {src}"
                           + (f", bloom {pal['bloom'][:2]}" if pal and pal.get("bloom") else ""))
 
+        measured = self._measure(photo, species)
         groups = self._bucket_members(context)
         if not groups:
             self.log_info("No bucketed flower/tree detections; species layer skipped")
@@ -421,7 +474,8 @@ class SpeciesAssetsStage(PipelineStage):
             self.log_info(f"  {key} ({len(members)} members): '{sp.get('name')}' by {how}; "
                           f"bloom {pal['bloom'][:2]} foliage {pal['foliage'][:1]} ({pal['pixels']} px)")
             entry = self._spec_entry(key, sp, pal, seed=self.seed + bucket * 17 + (0 if cls == "flower" else 101),
-                                     variants=self.config.variants if cls == "flower" else self.config.tree_variants)
+                                     variants=self.config.variants if cls == "flower" else self.config.tree_variants,
+                                     measured=measured.get(str(sp.get("name"))))
             entries.append(entry)
             matches[key] = (sp, pal, how, de, members)
             self.advance_progress(task)
@@ -440,7 +494,8 @@ class SpeciesAssetsStage(PipelineStage):
                 key = f"category_mesh_flower_{next_bucket}"
                 pal = {**spal, "bloom": spal["bloom"], "foliage": spal.get("foliage") or [[72, 96, 46]],
                        "stem": spal.get("stem") or [], "pixels": int(spal.get("pixels") or 0), "bloom_fraction": 1.0}
-                entry = self._spec_entry(key, sp, pal, seed=self.seed + next_bucket * 17, variants=self.config.variants)
+                entry = self._spec_entry(key, sp, pal, seed=self.seed + next_bucket * 17, variants=self.config.variants,
+                                         measured=measured.get(str(sp.get("name"))))
                 entries.append(entry)
                 matches[key] = (sp, pal, f"the plan alone ({src})", None, [])
                 self.log_info(f"  {key}: '{sp.get('name')}' from the plan alone, no bucket of its own; "
@@ -496,6 +551,8 @@ class SpeciesAssetsStage(PipelineStage):
                 "palette": {"bloom": pal["bloom"], "foliage": pal["foliage"], "stem": pal["stem"]},
                 "files": [str(p) for p in paths], "faces": mesh.face_count, "variants": len(meshes),
             }
+            if measured.get(str(sp.get("name"))):
+                published[key]["measured"] = measured[str(sp.get("name"))]
             # Variants k >= 1 under their own keys; Scene Generation spreads a bucket's
             # instances across them (one plant per mesh, so one shape per meadow is
             # what the judge called "uniform sprite-like blobs").

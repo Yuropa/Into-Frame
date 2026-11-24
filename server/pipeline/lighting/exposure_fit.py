@@ -123,7 +123,7 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         self.tint = bool(tint)
         self.tint_range = [float(v) for v in (tint_range or [0.6, 1.6])]
         self.object_gain = bool(object_gain)
-        self.object_gain_range = [float(v) for v in (object_gain_range or [0.4, 1.6])]
+        self.object_gain_range = [float(v) for v in (object_gain_range or [0.7, 1.4])]
         self.min_object_blocks = int(min_object_blocks)
 
 
@@ -181,7 +181,7 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
                             lit: np.ndarray, ground: np.ndarray, sun_range: tuple[float, float] = (0.5, 4.0),
                             ambient_range: tuple[float, float] = (0.5, 10.0), steps: int = 41, block_px: int = 8,
                             min_ground_blocks: int = 40, tint_range: Optional[tuple[float, float]] = (0.6, 1.6),
-                            object_gain_range: Optional[tuple[float, float]] = (0.4, 1.6),
+                            object_gain_range: Optional[tuple[float, float]] = (0.7, 1.4),
                             min_object_blocks: int = 60) -> dict:
     """Sun and ambient scales, the ambient's tint and the placed objects' albedo gain.
 
