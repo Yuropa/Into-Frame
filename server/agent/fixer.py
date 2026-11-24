@@ -47,7 +47,7 @@ FIX_SCHEMA = {
         "actions": {"type": "array", "maxItems": 3, "items": {
             "type": "object", "additionalProperties": False, "required": ["action", "why"],
             "properties": {
-                "action": {"type": "string", "enum": ["place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun", "set_light"]},
+                "action": {"type": "string", "enum": ["place", "move", "scale", "rotate", "remove", "swap_mesh", "edit_population", "set_atmosphere", "set_sun", "set_light"]},
                 "target": {"type": "string", "description": "object id, unique name or thing_<sourceIndex> (move/scale/rotate/remove/swap_mesh)"},
                 "mesh": {"type": "string", "description": "a mesh key from the list (place/swap_mesh); a swap keeps the object's length in metres when it is longer than tall, else its height"},
                 "class": {"type": "string"}, "name": {"type": "string"},
@@ -59,6 +59,11 @@ FIX_SCHEMA = {
                 "height_m": {"type": "number", "description": "place/scale: the object's vertical height in metres"},
                 "length_m": {"type": "number", "description": "place/scale: the object's longest horizontal extent in metres; use this for boats, bridges, buildings and anything wider than it is tall"},
                 "yaw_deg": {"type": "number"}, "delta_deg": {"type": "number"}, "factor": {"type": "number"},
+                "population": {"type": "string", "description": "edit_population: a population from the listing (flower_1) or a whole family (flower)"},
+                "keep_fraction": {"type": "number", "description": "edit_population: the share of the instances that stays (0.3 removes 70%)"},
+                "height_factor": {"type": "number", "description": "edit_population: multiplies every instance's height"},
+                "width_factor": {"type": "number", "description": "edit_population: multiplies every instance's width (a spike drawn too fat: 0.5)"},
+                "min_distance_m": {"type": "number"}, "max_distance_m": {"type": "number", "description": "edit_population: only instances this far from the camera"},
                 "on": {"type": "string", "enum": ["ground", "water", "none"]},
                 "haze_near_m": {"type": "number"}, "haze_far_m": {"type": "number"},
                 "azimuth_deg": {"type": "number"}, "elevation_deg": {"type": "number"}, "intensity": {"type": "number"}, "color": {"type": "string"},
@@ -84,7 +89,10 @@ bridges and buildings (each object's listing gives its current length and height
 the list; a missing object with no suitable mesh is a give_up. Do not touch the terrain, water, treeline or \
 backdrop meshes. A region that renders black or far darker than the photograph while its surface is present \
 is usually the exposure fit, not missing content: try set_light (sun_scale, ambient_scale above 1) before \
-giving up on it. Do not repeat an attempt the history says failed. When the issue cannot be answered with \
+giving up on it. A population (the listing's `population` lines: hundreds of flowers or trees from one mesh) \
+is edited as a whole with edit_population: thin it when the photograph shows fewer of that species, change \
+its height or width when every instance is too tall or too fat, and limit the edit to a distance ring when \
+only the nearest ones are wrong; never edit population members one by one. Do not repeat an attempt the history says failed. When the issue cannot be answered with \
 these actions, set give_up and say what would be needed."""
 
 
@@ -185,10 +193,11 @@ class FixLoop:
         self.say(f"  rendered in {time.time() - t0:.0f} s")
         return Image.open(out / "photo.png").convert("RGB")
 
-    def judge(self, render: Image.Image, out: Path, focus: Optional[dict] = None) -> Optional[dict]:
+    def judge(self, render: Image.Image, out: Path, focus: Optional[dict] = None,
+              previous: Optional[Image.Image] = None) -> Optional[dict]:
         from agent.critique import judge
         v = judge(self.photo, render, self.plan, self.cfg.judge_model, out, graph=self.graph,
-                  base_url=self.cfg.base_url, focus=focus)
+                  base_url=self.cfg.base_url, focus=focus, previous=previous)
         if v:
             self.usd += float(v.get("usd") or 0.0)
             v["black"] = black_fraction(render)
@@ -299,6 +308,15 @@ class FixLoop:
                 continue
             trial = rd / "scene.json"
             trial.write_text(json.dumps(new, indent=1))
+            bad = self.sanity(new, applied)
+            if bad:
+                self.attempts.append(Attempt(r, issue, proposal["actions"], applied, None, False, "sanity check: " + "; ".join(bad)))
+                self.say("  not rendered, sanity check: " + "; ".join(bad))
+                fails += 1
+                if fails >= cfg.patience:
+                    self.say(f"{fails} rounds failed in a row; stopping")
+                    break
+                continue
             render = self.render(trial, rd)
             if render is None:
                 self.attempts.append(Attempt(r, issue, proposal["actions"], applied, None, False, "render failed"))
@@ -306,7 +324,7 @@ class FixLoop:
                 if fails >= cfg.patience:
                     break
                 continue
-            verdict = self.judge(render, rd, focus=issue)
+            verdict = self.judge(render, rd, focus=issue, previous=base_render)
             if verdict is None:
                 self.attempts.append(Attempt(r, issue, proposal["actions"], applied, None, False, "no verdict"))
                 fails += 1
@@ -331,6 +349,30 @@ class FixLoop:
                     break
         return self.report("done")
 
+    def sanity(self, scene: dict, applied: list[dict]) -> list[str]:
+        """What an edit left physically wrong, before a render is paid for: an object the action
+        placed, moved or scaled whose base is not on the ground or the water under it (Paris
+        fix3's kept edit put a bridge 12 m up in the sky and the judge called it a step)."""
+        from agent.editor import Editor
+        ed = Editor(scene, context=self._context(), run_dir=self.run, log=lambda s: None)
+        bad = []
+        for a in applied:
+            if a.get("action") not in ("place", "move", "scale", "swap_mesh") or not a.get("id"):
+                continue
+            if str((a.get("input") or {}).get("on") or "") == "none":
+                continue
+            o = next((o for o in ed.objects if o.get("id") == a["id"]), None)
+            g = ed.grounding(o) if o is not None else None
+            if g is None:
+                continue
+            tol_up = max(1.0, 0.25 * g["height_m"])
+            tol_down = max(1.0, 0.6 * g["height_m"])
+            if g["gap_m"] > tol_up:
+                bad.append(f"{o.get('name')} would float {g['gap_m']:.1f} m above the surface under it")
+            elif g["gap_m"] < -tol_down:
+                bad.append(f"{o.get('name')} would be buried {-g['gap_m']:.1f} m below the surface")
+        return bad
+
     def _last_kept_round(self) -> int:
         kept = [a.round for a in self.attempts if a.kept]
         return kept[-1] if kept else 0
@@ -339,6 +381,24 @@ class FixLoop:
         f = after.get("focus") or {}
         if after.get("black", 0.0) > before.get("black", 0.0) + 0.05:
             return False, f"black area grew to {after.get('black'):.2f}"
+        reg_sev = str(f.get("regression_severity") or "")
+        if reg_sev:
+            # The judge compared the two renders side by side: its own word on what the edit made
+            # worse is the test. (Counting severe issues or reading the whole-frame score across two
+            # separate judge calls is noise: the same render is labelled 2 severe one call and 4 the
+            # next.) The score only vetoes a fall far outside that noise.
+            if reg_sev in ("major", "severe"):
+                return False, f"{reg_sev} regression: {str(f.get('regressions') or '')[:200]}"
+            if str(f.get("overall")) == "worse":
+                return False, f"the render as a whole got worse: {str(f.get('regressions') or f.get('evidence') or '')[:200]}"
+            if float(after.get("score") or 0) < float(before.get("score") or 0) - 3 * self.cfg.score_drop:
+                return False, f"score fell {before.get('score')} -> {after.get('score')}"
+            notes = f"; judge notes ({reg_sev}): {str(f.get('regressions') or '')[:160]}" if reg_sev == "minor" else ""
+            if f.get("resolved"):
+                return True, "issue resolved" + notes
+            if f.get("improved") and str(f.get("overall")) in ("better", "same"):
+                return True, "improved, not resolved; kept as a step" + notes
+            return False, f"focus not resolved: {f.get('evidence', '')}"
         sev_before = sum(1 for i in before.get("issues", []) if i.get("severity") == "severe")
         sev_after = sum(1 for i in after.get("issues", []) if i.get("severity") == "severe")
         if sev_after > sev_before:
@@ -431,11 +491,26 @@ def objects_text(editor, run: Path, photo_size) -> str:
         fam.setdefault(m.group(1) if m else "", []).append(o)
     lines = []
     singles = []
+    species: dict[str, dict] = {}
+    try:
+        species = json.loads((run / "Species Assets" / "species_meshes.json").read_text())
+    except Exception:
+        pass
     for k, v in sorted(fam.items()):
         if k and len(v) >= 20:
-            d = sorted(editor.bearing_distance([o["position"]["x"], o["position"]["y"], o["position"]["z"]])[1] for o in v)
-            lines.append(f"population pop_{k}: {len(v)} instances at {d[0]:.0f}-{d[-1]:.0f} m (members by id or thing_<src>; a few examples follow)")
-            singles.extend(sorted(v, key=lambda o: editor.bearing_distance([o["position"]["x"], o["position"]["y"], o["position"]["z"]])[1])[:3])
+            buckets: dict[str, list[dict]] = {}
+            for o in v:
+                buckets.setdefault(re.sub(r"(_v\d+|_card)$", "", str(o.get("mesh")))[len("category_mesh_"):], []).append(o)
+            lines.append(f"population family {k}: {len(v)} instances in {len(buckets)} population(s); edit one with "
+                         f"edit_population (population: its name) or all with population: {k}")
+            for bk, members in sorted(buckets.items(), key=lambda kv: -len(kv[1])):
+                d = sorted(editor.bearing_distance([o["position"]["x"], o["position"]["y"], o["position"]["z"]])[1] for o in members)
+                hs = sorted(e[1] for e in (editor.object_extent(o) for o in members[:200]) if e is not None)
+                ws = sorted(e[0] for e in (editor.object_extent(o) for o in members[:200]) if e is not None)
+                sp = species.get(f"category_mesh_{bk}") or {}
+                what = f" = {sp.get('species')} (plan height {sp.get('height_m')} m)" if sp.get("species") else ""
+                size = f", {hs[len(hs) // 2]:.2f} m tall x {ws[len(ws) // 2]:.2f} m wide (median)" if hs else ""
+                lines.append(f"  population {bk}{what}: {len(members)} instances at {d[0]:.1f}-{d[-1]:.0f} m{size}")
         else:
             singles.extend(v)
     for o in singles:

@@ -61,11 +61,16 @@ def focus_schema(node_ids: Optional[list[str]] = None) -> dict:
     """judge_schema plus a verdict on one targeted issue (the fix loop's question)."""
     s = judge_schema(node_ids)
     s["required"] = list(s["required"]) + ["focus"]
-    s["properties"]["focus"] = {"type": "object", "additionalProperties": False, "required": ["resolved", "improved", "evidence", "regressions"],
+    s["properties"]["focus"] = {"type": "object", "additionalProperties": False,
+                                "required": ["resolved", "improved", "evidence", "regressions", "regression_severity", "overall"],
                                 "properties": {"resolved": {"type": "boolean", "description": "the targeted issue is fixed in this render (gone, or reduced to minor)"},
                                                "improved": {"type": "boolean", "description": "the target region is clearly closer to the photograph than in the previous render, even if the issue stands (a step worth keeping)"},
                                                "evidence": {"type": "string", "description": "what you see at the target region now, one sentence"},
-                                               "regressions": {"type": "string", "description": "anything the change made worse elsewhere, or ''"}}}
+                                               "regressions": {"type": "string", "description": "anything the change made worse elsewhere, or ''"},
+                                               "regression_severity": {"type": "string", "enum": ["none", "minor", "major", "severe"],
+                                                                       "description": "how bad the worst thing the edit made worse is, comparing the previous render with this one; none when nothing got worse"},
+                                               "overall": {"type": "string", "enum": ["better", "same", "worse"],
+                                                           "description": "this render against the previous render as a whole, as a reconstruction of the photograph"}}}
     return s
 
 
@@ -80,7 +85,7 @@ Give each issue its place in the photograph as `photo_box` fractions, so the fix
 
 
 def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: Optional[str],
-               focus: Optional[dict] = None) -> str:
+               focus: Optional[dict] = None, has_previous: bool = False) -> str:
     acc = "\n".join(f"- {a.get('id')} [{a.get('priority')}]: {a.get('text')}" for a in acceptance) or "- (none)"
     parts = ["The first image is the photograph, the second the render from its camera.",
              f"Acceptance items read from the photograph:\n{acc}"]
@@ -94,8 +99,13 @@ def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: O
                      f"[{focus.get('severity')}/{focus.get('kind')}] {focus.get('target')}: {focus.get('text')}"
                      + (f" (photo region x {box[0]:.2f} y {box[1]:.2f} w {box[2]:.2f} h {box[3]:.2f})." if box and len(box) == 4 else ".")
                      + " The third and fourth images are the photograph and the render cropped to that region. "
-                     "Say in `focus` whether it is resolved, whether the region is at least clearly closer to the photograph "
-                     "than before (improved), what the region shows now, and what the edit made worse elsewhere.")
+                     + ("The last images are the PREVIOUS render (before the edit), whole and cropped to the same region: "
+                        "compare the two renders directly; a difference you cannot see between them is not a change. "
+                        if has_previous else "")
+                     + "Say in `focus` whether it is resolved, whether the region is at least clearly closer to the photograph "
+                     "than before (improved), what the region shows now, what the edit made worse elsewhere and how bad "
+                     "that is (regression_severity), and whether the render as a whole is better, the same or worse than "
+                     "the previous one (overall).")
     parts.append("Record your verdict with the judge tool / as the JSON object.")
     return "\n\n".join(parts)
 
@@ -159,11 +169,14 @@ def crop_box(im: Image.Image, box: list, margin: float = 0.25, min_side: int = 3
 
 def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_id: str, out: Path,
           graph=None, style: Optional[str] = None, base_url: Optional[str] = None,
-          ledger_cap_usd: float = 2.0, focus: Optional[dict] = None) -> Optional[dict]:
+          ledger_cap_usd: float = 2.0, focus: Optional[dict] = None,
+          previous: Optional[Image.Image] = None) -> Optional[dict]:
     """Vision-model verdict on the photo view; written to out/verdict.json. None when no call
     could be made (paid calls off, no key, server down), with the reason printed.
     focus: an issue dict (text, kind, severity, target, photo_box) the last edit targeted; the
-    verdict then carries `focus` {resolved, evidence, regressions}, judged from crops of the region."""
+    verdict then carries `focus` {resolved, improved, evidence, regressions, regression_severity,
+    overall}, judged from crops of the region. previous: the render before that edit; with it the
+    judge compares the two renders instead of recalling one it never saw."""
     sys.path.insert(0, str(ROOT / "server"))
     from pipeline.scene_plan.client import (PlanModel, SpendLedger, NoApiError, SpendCapError,
                                             image_to_jpeg_b64, resolve_anthropic_key, estimate_usd, ModelReply)
@@ -174,7 +187,7 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
     acceptance = (plan or {}).get("acceptance") or []
     node_lines = _node_lines(graph) if graph is not None else None
     node_ids = [l.split(" ", 1)[0] for l in node_lines] if node_lines else None
-    user = _user_text(acceptance, node_lines, style, focus)
+    user = _user_text(acceptance, node_lines, style, focus, has_previous=bool(focus) and previous is not None)
     schema = focus_schema(node_ids) if focus else judge_schema(node_ids)
     b1, _, _ = image_to_jpeg_b64(photo, 1024)
     b2, _, _ = image_to_jpeg_b64(render, 1024)
@@ -182,6 +195,10 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
     box = (focus or {}).get("photo_box")
     if focus and box and len(box) == 4:
         extra = [image_to_jpeg_b64(crop_box(photo, box), 768)[0], image_to_jpeg_b64(crop_box(render, box), 768)[0]]
+    if focus and previous is not None:
+        extra.append(image_to_jpeg_b64(previous, 1024)[0])
+        if box and len(box) == 4:
+            extra.append(image_to_jpeg_b64(crop_box(previous, box), 768)[0])
     ledger = SpendLedger(ROOT / "cache" / "scene_plan", run_cap_usd=ledger_cap_usd)
     t0 = time.time()
     try:

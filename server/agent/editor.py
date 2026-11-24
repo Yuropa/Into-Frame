@@ -13,6 +13,12 @@ render (scripts/render-scene.py --scene), never a pipeline rerun:
     rotate        an object to a yaw, or by a delta
     remove        an object
     swap_mesh     an object's mesh key
+    edit_population  every instance of a population at once (the 600 lousewort spikes, the tree
+                  band): `population` names a mesh bucket (flower_1 covers category_mesh_flower_1 and its
+                  _v1/_v2/_card variants) or a whole family (flower); keep_fraction thins it
+                  (which instances stay is fixed by their positions, so a replay keeps the same ones),
+                  height_factor and width_factor rescale each instance about its base, and
+                  min_distance_m / max_distance_m limit the edit to a ring about the camera
     set_atmosphere  haze_near_m / haze_far_m / haze_color
     set_sun       azimuth_deg / elevation_deg / intensity / color
     set_light     sun_scale / ambient_scale: multipliers on the rendered light (1.5 = half again
@@ -53,7 +59,8 @@ from typing import Any, Optional
 
 import numpy as np
 
-ACTIONS = ("place", "move", "scale", "rotate", "remove", "swap_mesh", "set_atmosphere", "set_sun", "set_light")
+ACTIONS = ("place", "move", "scale", "rotate", "remove", "swap_mesh", "edit_population", "set_atmosphere", "set_sun",
+           "set_light")
 ENV_NAMES = {"terrain", "water", "water_apron", "treeline", "far_field", "backdrop"}
 WATER_CLASSES = {"boat", "ship", "barge", "sailboat", "kayak", "canoe", "yacht", "ferry", "buoy", "swan", "duck"}
 EDITS_FILE = "scene_edits.json"
@@ -496,6 +503,79 @@ class Editor:
         if o.get("lods"):
             o["lods"] = []
         return {"id": o["id"], "name": o.get("name"), "old_mesh": old, "mesh": mesh, "note": f"{o.get('name')} mesh {old} -> {mesh}"}
+
+    def population(self, name: str) -> list[dict]:
+        """The placed instances of a population: a mesh bucket (flower_1, with its variants)
+        or a family (flower, tree)."""
+        import re
+        n = str(name or "").strip()
+        n = n[4:] if n.startswith("pop_") else n
+        n = n[len("category_mesh_"):] if n.startswith("category_mesh_") else n
+        if not n:
+            return []
+        pat = (re.compile(rf"^category_mesh_{re.escape(n)}(_v\d+|_card)?$") if re.search(r"_\d+$", n)
+               else re.compile(rf"^category_mesh_{re.escape(n)}_\d+(_v\d+|_card)?$"))
+        return [o for o in self.objects if pat.match(str(o.get("mesh") or "")) and not self.is_env(o)]
+
+    def _do_edit_population(self, a: dict) -> dict:
+        members = self.population(a.get("population") or a.get("target"))
+        if not members:
+            raise EditError(f"no population matches '{a.get('population') or a.get('target')}'")
+        keep = a.get("keep_fraction")
+        hf, wf = a.get("height_factor"), a.get("width_factor")
+        if keep is None and hf is None and wf is None:
+            raise EditError("edit_population needs keep_fraction, height_factor and/or width_factor")
+        if keep is not None and not (0.0 <= float(keep) <= 1.0):
+            raise EditError(f"keep_fraction {keep} is outside 0-1")
+        for v, n in ((hf, "height_factor"), (wf, "width_factor")):
+            if v is not None and not (0.1 <= float(v) <= 10.0):
+                raise EditError(f"{n} {v} is outside 0.1-10")
+        lo = float(a["min_distance_m"]) if a.get("min_distance_m") is not None else 0.0
+        hi = float(a["max_distance_m"]) if a.get("max_distance_m") is not None else float("inf")
+        ring = [o for o in members if lo <= self.bearing_distance(_v(o.get("position")))[1] <= hi]
+        removed = 0
+        if keep is not None:
+            for o in ring:
+                # Fixed by the mesh and the position (ids are new on every Scene Generation), so the
+                # same instances go on every replay.
+                q = _v(o.get("position"))
+                tag = f"{o.get('mesh')}:{q[0]:.2f}:{q[2]:.2f}"
+                h = int(hashlib.sha256(tag.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+                if h >= float(keep):
+                    self.objects.remove(o)
+                    removed += 1
+            ring = [o for o in ring if o in self.objects]
+        if hf is not None or wf is not None:
+            fy, fxz = float(hf or 1.0), float(wf or 1.0)
+            for o in ring:
+                sc = _v(o.get("scale"), (1, 1, 1))
+                b = self.mesh_bounds(str(o.get("mesh") or ""))
+                pos = _v(o.get("position"))
+                base = float(b[0][1]) if b is not None else 0.0
+                # The base stays on its surface.
+                o["position"] = _xyz([pos[0], pos[1] + base * sc[1] - base * sc[1] * fy, pos[2]])
+                o["scale"] = _xyz([sc[0] * fxz, sc[1] * fy, sc[2] * fxz])
+        where = "" if (lo == 0.0 and hi == float("inf")) else f" between {lo:g} and {hi:g} m"
+        return {"population": str(a.get("population") or a.get("target")), "members": len(members), "edited": len(ring),
+                "removed": removed,
+                "note": f"population {a.get('population') or a.get('target')}{where}: {len(members)} instances, "
+                        f"{removed} removed, {len(ring)} left in range"
+                        + (f", height x{float(hf):g}" if hf is not None else "") + (f", width x{float(wf):g}" if wf is not None else "")}
+
+    def grounding(self, o: dict) -> Optional[dict]:
+        """How an object sits on its surface: its base's height above the ground (or the
+        water) under its centre. None when either is unknown."""
+        ext = self.object_extent(o)
+        b = self.mesh_bounds(str(o.get("mesh") or ""))
+        if ext is None or b is None:
+            return None
+        sc = _v(o.get("scale"), (1, 1, 1))
+        base_y = float(_v(o.get("position"))[1]) + float(b[0][1]) * float(sc[1])
+        ys = [y for y in (self.surface_y(ext[2], "water"), self.surface_y(ext[2], "ground")) if y is not None]
+        if not ys:
+            return None
+        gap = min((base_y - y for y in ys), key=abs)
+        return {"base_y": round(base_y, 2), "gap_m": round(float(gap), 2), "height_m": round(ext[1], 2), "length_m": round(ext[0], 2)}
 
     def _do_set_atmosphere(self, a: dict) -> dict:
         atm = dict(self.scene.get("atmosphere") or {})
