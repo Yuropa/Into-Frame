@@ -511,6 +511,13 @@ stages:
                                 # sky) survives Pass 2 vs. being replaced by FLUX's own
                                 # generation. 1.0 = fully overwritten, ignores the input almost
                                 # entirely; lower keeps more of the original sky's colour/texture.
+    photographed_sky: true      # inside the photographed cone the finished sky is the photograph's own
+                                # (sky_photo.py): Shark Fin's generated sky had radial streaks and a sun
+                                # disc where the photograph has soft bands, Paris's clear-sky model no
+                                # cumulus. Generated skies only (a clear sky's model is its own profile).
+                                # false keeps the rebuilt sky everywhere.
+    photographed_sky_outside_deg: 12.0   # the photographed sky runs on into the outpainted sky around
+                                         # the cone and fades into the generated sky over this many degrees
     close_sky_wrap_seam: true
     # Pass 4: after the generative seam repair, force column 0 and column W-1 to match
     # EXACTLY by spreading their per-row difference back over wrap_seam_band_px columns

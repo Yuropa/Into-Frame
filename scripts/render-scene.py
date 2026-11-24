@@ -468,9 +468,11 @@ class SceneBuilder:
         the nearby water's colour carried outward, which is what this draws there (the
         sheet's single colour factor against a photographed sea reads as a stain).
         The photograph carries its own light (the water's colour is mostly the sky it
-        mirrors), so it is drawn as emission, like the photographed backdrops, under a
-        low-roughness surface that keeps the sun's glint. None when the mesh has no
-        second UV set or no texture: the caller draws the flat sheet as before."""
+        mirrors), so it is drawn as emission, like the photographed backdrops, on a
+        fully rough surface: the photograph has the sun's glint where the sun put it,
+        and a second one from the scene's light was the glitter column down Shark
+        Fin's cove. None when the mesh has no second UV set or no texture: the caller
+        draws the flat sheet as before."""
         m = self.context.input_mesh(key)
         uv = getattr(m, "extra_uv", None)
         if uv is None or len(uv) != len(tm.vertices):
@@ -484,7 +486,7 @@ class SceneBuilder:
             return None
         out = trimesh.Trimesh(vertices=np.asarray(tm.vertices), faces=np.asarray(tm.faces), process=False)
         out.visual = trimesh.visual.TextureVisuals(uv=np.asarray(uv, dtype=np.float64))
-        return out, material_for(out, image=self._water_photo_tex, unlit=True, roughness=0.1)
+        return out, material_for(out, image=self._water_photo_tex, unlit=True, roughness=1.0)
 
     def image_for(self, key: str) -> PILImage.Image | None:
         if key not in self._image_cache:

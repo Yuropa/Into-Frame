@@ -483,6 +483,11 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         # from the photo's own colours (_clear_sky) instead of generated.
         clear_sky_max_cloud: float = 0.05,
         clear_sky_max_structure: float = 0.08,
+        # Inside the photographed cone the finished sky is the photograph's
+        # (sky_photo.restore_photographed_sky), fading into the generated sky over
+        # photographed_sky_outside_deg of the outpainted sky around the cone.
+        photographed_sky: bool = True,
+        photographed_sky_outside_deg: float = 12.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.clear_sky_max_cloud = float(clear_sky_max_cloud)
@@ -504,6 +509,8 @@ class SkyboxInpaintingConfiguration(PipelineStageConfiguration):
         # three and the interior statistics are indistinguishable, so this is
         # chosen for headroom rather than because the outcome is sensitive to it.
         self.wrap_seam_band_px = int(wrap_seam_band_px)
+        self.photographed_sky = bool(photographed_sky)
+        self.photographed_sky_outside_deg = float(photographed_sky_outside_deg)
 
 
 class SkyboxInpaintingStage(PipelineStage):
@@ -686,7 +693,8 @@ class SkyboxInpaintingStage(PipelineStage):
 
         structure = _sky_structure(source_arr, sky_mask, cone_cols)
         self.log_info(f"Photographed sky structure: {structure:.1%} of it off its row's colour")
-        if cloudiness < self.config.clear_sky_max_cloud and structure < self.config.clear_sky_max_structure:
+        clear = cloudiness < self.config.clear_sky_max_cloud and structure < self.config.clear_sky_max_structure
+        if clear:
             # A clear photographed sky: nothing for a generator to add, and what it
             # adds is cloud banks along the buried skyline (see _clear_sky).
             # The model alone, not composited over the terrain panorama's sky: that
@@ -706,6 +714,24 @@ class SkyboxInpaintingStage(PipelineStage):
                     f"range {gains[: h // 2].min():.2f}-{gains[: h // 2].max():.2f}"
                 )
                 result_pil = PILImage.fromarray(matched)
+
+        # --- The photographed sky back over the result, where the photograph shows it ---
+        # The generator rebuilds the sky inside the cone too, with another cloud
+        # structure: radial streaks and a sun disc for Shark Fin's soft bands, a
+        # cloudless gradient for Paris's cumulus. See sky_photo. Not for a clear sky:
+        # the model above is that sky's own profile already, and what the terrain
+        # panorama holds around Rainier's sliver of it is the outpainter's grey smears.
+        if self.config.photographed_sky and not clear:
+            from pipeline.skybox_inpainting.sky_photo import restore_photographed_sky
+            original = context.input_panorama(ContextKey.PANORAMA)
+            original_arr = None
+            if original is not None:
+                original_arr = np.asarray(original.image.convert("RGB").resize((w, h), PILImage.LANCZOS))
+            restored, sky_info = restore_photographed_sky(
+                np.asarray(result_pil.convert("RGB")), source_arr, sky_mask, cone if cone_cols is not None else None,
+                original_arr, outside_deg=self.config.photographed_sky_outside_deg, log=self.log_info)
+            if sky_info.get("applied"):
+                result_pil = PILImage.fromarray(restored)
 
         # --- Pass 4: close whatever step Pass 3 left, in closed form ---
         # Pass 3 is a generative fill and has no continuity constraint, so it
