@@ -97,13 +97,20 @@ def restore_photographed_sky(result: np.ndarray, source: np.ndarray, sky_mask: n
             step = _blur(step[iy, ix], 2.0 * ppd)
             info["edge_step_levels"] = round(float(np.abs(step[band]).mean()), 1)
             src = np.where(continued[..., None], src + step, src)
-    # The photographed colours carried past the pixels that have them.
+    # The photographed colours carried past the pixels that have them: the nearest
+    # photographed pixel's within a degree (the strip along the frame's border, a
+    # speck's hole: the low frequencies alone drew the border as a faint darker line),
+    # the low frequencies further off.
     carried = _carried(src, valid, fallback, 2)
+    away, (iy, ix) = distance_transform_edt(~valid, return_indices=True)
+    away = away.astype(np.float32)
+    t = np.clip(away / ppd, 0.0, 1.0)[..., None]
+    photo = np.where(valid[..., None], src, src[iy, ix] * (1.0 - t) + carried * t)
     a = np.clip(_blur(valid.astype(np.float32), 1.5), 0.0, 1.0)[..., None]
-    photo = src * a + carried * (1.0 - a)
+    join = 4.0 * a * (1.0 - a)
+    photo = photo * (1.0 - join) + _blur(photo, 1.5) * join
     # 1 on the photographed sky, falling to 0 a feather away from it (below the skyline)
     # and over the outpainted continuation past the cone's edges.
-    away = distance_transform_edt(~valid).astype(np.float32)
     w = np.clip(1.0 - away / feather, 0.0, 1.0) * np.clip(1.0 + edge / outside, 0.0, 1.0)
     w = w * w * (3.0 - 2.0 * w)
     out = result.astype(np.float32) * (1.0 - w[..., None]) + photo * w[..., None]
