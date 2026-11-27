@@ -1,0 +1,1012 @@
+<title>__TITLE__</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* layout: one screen, three panes side by side: index | view (graph, map, photograph, tables, data) | detail.
+   Each pane scrolls inside itself; under 900px one pane shows at a time. */
+:root{
+  --bg:#e9eeeb; --panel:#f4f7f5; --raise:#ffffff; --ink:#14201b; --ink2:#46564f; --ink3:#74837c;
+  --line:#ccd6d0; --line2:#dfe6e2; --accent:#0b6b7a; --on-accent:#ffffff; --sel:#e8a800; --sel-soft:#fdf0c4;
+  --ev-measured:#1c7c54; --ev-plan-visible:#2563a8; --ev-fitted:#7a4bb5; --ev-plan-inferred:#a86f0c; --ev-generated:#c0457a; --ev-default:#74837c;
+  --f-env:#56698c; --f-ground:#8a6a45; --f-living:#3f8a4f; --f-asset:#0b6b7a; --f-backdrop:#7d8791; --f-det:#9aa7a0;
+  --warn:#b3261e; --shade:rgba(20,32,27,.06);
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --bg:#0e1412; --panel:#141b18; --raise:#1a2320; --ink:#e2eae5; --ink2:#a8b7af; --ink3:#7d8c85;
+  --line:#2b3732; --line2:#202a26; --accent:#56c4d2; --on-accent:#06262b; --sel:#ffcc33; --sel-soft:#3d3210;
+  --ev-measured:#4fc28f; --ev-plan-visible:#6ea8ea; --ev-fitted:#b592ea; --ev-plan-inferred:#e0aa3e; --ev-generated:#ee7fae; --ev-default:#8a9992;
+  --f-env:#8fa3c8; --f-ground:#c69d70; --f-living:#6fc07f; --f-asset:#56c4d2; --f-backdrop:#a3adb7; --f-det:#6f7d76;
+  --warn:#ff8a80; --shade:rgba(255,255,255,.05); color-scheme:dark } }
+:root[data-theme="dark"]{
+  --bg:#0e1412; --panel:#141b18; --raise:#1a2320; --ink:#e2eae5; --ink2:#a8b7af; --ink3:#7d8c85;
+  --line:#2b3732; --line2:#202a26; --accent:#56c4d2; --on-accent:#06262b; --sel:#ffcc33; --sel-soft:#3d3210;
+  --ev-measured:#4fc28f; --ev-plan-visible:#6ea8ea; --ev-fitted:#b592ea; --ev-plan-inferred:#e0aa3e; --ev-generated:#ee7fae; --ev-default:#8a9992;
+  --f-env:#8fa3c8; --f-ground:#c69d70; --f-living:#6fc07f; --f-asset:#56c4d2; --f-backdrop:#a3adb7; --f-det:#6f7d76;
+  --warn:#ff8a80; --shade:rgba(255,255,255,.05); color-scheme:dark }
+
+html,body{height:100%}
+[hidden]{display:none!important}
+body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans);-webkit-text-size-adjust:100%}
+*{box-sizing:border-box}
+button,input,select{font:inherit;color:inherit}
+button{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+#app{height:100%;display:flex;flex-direction:column;gap:8px;padding-block:10px;
+  padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px))}
+.mono{font-family:var(--mono);font-size:12.5px}
+.num{font-variant-numeric:tabular-nums}
+.muted{color:var(--ink3)}
+
+.bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px 18px}
+.bar h1{font-size:19px;font-weight:600;margin:0;letter-spacing:-.01em;text-wrap:balance}
+.bar .run{font-family:var(--mono);font-size:11.5px;color:var(--ink3)}
+.bar .id{display:flex;flex-direction:column;min-width:0}
+.counts{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:12.5px;color:var(--ink2);flex:1 1 320px;min-width:0}
+.counts b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+#q{flex:0 1 280px;min-width:160px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--raise)}
+
+.tabs{display:flex;gap:2px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.tabs button{border:0;background:none;padding:6px 12px;border-bottom:2px solid transparent;color:var(--ink2);white-space:nowrap;font-weight:500}
+.tabs button[aria-selected="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.tabs .phone{display:none}
+
+.panes{flex:1;min-height:0;display:grid;grid-template-columns:240px minmax(0,1fr) 350px;gap:10px}
+.pane{min-height:0;min-width:0;overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.pane,.table-wrap,.photo-scroll,.data-wrap{scrollbar-width:thin;scrollbar-color:var(--line) transparent}
+.table-wrap,.photo-scroll,.data-wrap{background:var(--panel)}
+.stage{position:relative;overflow:hidden;display:flex;flex-direction:column}
+.stage > section{flex:1;min-height:0;position:relative;display:flex;flex-direction:column}
+@media (max-width: 900px){
+  .tabs .phone{display:block}
+  .panes{grid-template-columns:minmax(0,1fr)}
+  #app[data-pane="index"] .stage, #app[data-pane="index"] .detail,
+  #app[data-pane="stage"] .index, #app[data-pane="stage"] .detail,
+  #app[data-pane="detail"] .index, #app[data-pane="detail"] .stage{display:none}
+}
+
+/* index */
+.index details{border-bottom:1px solid var(--line2)}
+.index summary{padding:6px 10px;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);cursor:pointer;display:flex;gap:6px;align-items:center}
+.index summary .n{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--ink3);letter-spacing:0}
+.index h2{margin:0;padding:10px 10px 4px;font-size:12px;font-weight:600;color:var(--ink)}
+.row{display:flex;align-items:center;gap:8px;width:100%;text-align:left;border:0;background:none;padding:4px 10px 4px 14px;min-width:0}
+.row:hover{background:var(--shade)}
+.row[aria-current="true"]{background:var(--sel-soft);box-shadow:inset 3px 0 0 var(--sel)}
+.row .t{min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row .s{color:var(--ink3);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.row img,.row canvas{width:26px;height:26px;object-fit:contain;flex:none;border-radius:3px;background:var(--shade)}
+.glyph{flex:none;width:12px;height:12px}
+.struck .t{text-decoration:line-through;color:var(--ink3)}
+
+/* view toolbars */
+.tools{display:flex;flex-wrap:wrap;gap:6px 12px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--line2);font-size:12.5px;color:var(--ink2)}
+.tools label{display:inline-flex;gap:5px;align-items:center}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{border:0;background:var(--raise);padding:3px 10px;color:var(--ink2)}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--on-accent)}
+.btn{border:1px solid var(--line);background:var(--raise);border-radius:6px;padding:3px 9px}
+.fill{flex:1;min-height:0;position:relative}
+.fill > svg,.fill > canvas{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none}
+.status{padding:4px 10px;border-top:1px solid var(--line2);font-size:12px;color:var(--ink2);min-height:26px;font-family:var(--mono)}
+.legend{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center}
+.chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:999px;padding:1px 8px 1px 6px;background:var(--raise);font-size:12px}
+.chip[aria-pressed="false"]{opacity:.45}
+.dot{width:9px;height:9px;border-radius:50%;flex:none;background:currentColor}
+
+/* graph */
+#g-svg text{font-family:var(--sans);fill:var(--ink)}
+#g-svg .sub{fill:var(--ink3);font-size:10.5px}
+#g-svg .colhead{fill:var(--ink3);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+#g-svg .edge{fill:none;stroke:var(--ink3);stroke-width:1.1;opacity:.55}
+#g-svg .edge.hot{stroke:var(--accent);opacity:1;stroke-width:1.8}
+#g-svg .edge.belongs{stroke-dasharray:2 4;opacity:.35}
+#g-svg .elabel{font-size:10px;fill:var(--ink2);paint-order:stroke;stroke:var(--panel);stroke-width:3px}
+#g-svg .elabel.hot{fill:var(--accent);font-weight:600}
+#g-svg .node{cursor:pointer}
+#g-svg .node .shape{stroke:var(--panel);stroke-width:1.5}
+#g-svg .node.sel .shape{stroke:var(--sel);stroke-width:3.5}
+#g-svg.has-sel .node:not(.near){opacity:.5}
+#g-svg.has-sel .edge:not(.hot){opacity:.15}
+#g-svg .arrow{fill:var(--ink3)}
+
+/* photograph */
+.photo-scroll{flex:1;min-height:0;overflow:auto;padding:10px}
+.photo-box{position:relative;display:block;margin:0 auto;max-width:none}
+.photo-box img{display:block;width:100%;height:auto;max-width:none;border-radius:4px}
+.photo-box svg{position:absolute;inset:0;width:100%;height:100%}
+.photo-box rect{fill:transparent;stroke-width:1.6;vector-effect:non-scaling-stroke;cursor:pointer}
+.photo-box rect:hover{fill:rgba(255,255,255,.14)}
+.photo-box rect.off{stroke-dasharray:3 3;opacity:.75}
+.photo-box rect.sel{stroke:var(--sel)!important;stroke-width:3.5;stroke-dasharray:none;opacity:1}
+
+/* tables */
+.table-wrap{flex:1;min-height:0;overflow:auto}
+table{border-collapse:collapse;width:100%;font-size:12.5px}
+th,td{padding:4px 8px;text-align:left;border-bottom:1px solid var(--line2);vertical-align:top;white-space:nowrap}
+td.wrap{white-space:normal;min-width:220px;max-width:420px}
+th{position:sticky;top:0;background:var(--panel);font-weight:600;color:var(--ink2);cursor:pointer;white-space:nowrap;z-index:1;border-bottom:1px solid var(--line)}
+td.r,th.r{text-align:right;font-variant-numeric:tabular-nums}
+tbody tr{cursor:pointer}
+tbody tr:hover{background:var(--shade)}
+tbody tr.sel{background:var(--sel-soft)}
+td img{width:28px;height:28px;object-fit:contain;display:block}
+
+/* detail */
+.detail{padding:0}
+.d-head{padding:12px 14px 10px;border-bottom:1px solid var(--line2);display:flex;flex-direction:column;gap:4px}
+.d-head h2{margin:0;font-size:17px;font-weight:600;overflow-wrap:anywhere;text-wrap:balance}
+.d-kind{font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);display:flex;gap:6px;align-items:center}
+.d-sec{padding:10px 14px;border-bottom:1px solid var(--line2);display:flex;flex-direction:column;gap:6px}
+.d-sec h3{margin:0;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2);font-weight:600}
+.kv{display:grid;grid-template-columns:minmax(90px,42%) minmax(0,1fr);gap:3px 10px;font-size:12.5px}
+.kv dt{color:var(--ink2);overflow-wrap:anywhere}
+.kv dd{margin:0;overflow-wrap:anywhere}
+.attr{display:grid;grid-template-columns:minmax(0,1fr);gap:1px;padding:5px 0;border-bottom:1px dashed var(--line2)}
+.attr:last-child{border-bottom:0}
+.attr .a-top{display:flex;gap:8px;align-items:baseline;justify-content:space-between}
+.attr .a-name{font-family:var(--mono);font-size:12px;color:var(--ink2);overflow-wrap:anywhere}
+.attr .a-val{overflow-wrap:anywhere}
+.attr .a-src{font-size:11.5px;color:var(--ink3)}
+.ev{display:inline-flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;border-radius:999px;padding:0 7px 0 5px;border:1px solid currentColor}
+.ev::before{content:"";width:7px;height:7px;border-radius:50%;background:currentColor}
+.ev.measured{color:var(--ev-measured)} .ev.plan-visible{color:var(--ev-plan-visible)} .ev.fitted{color:var(--ev-fitted)}
+.ev.plan-inferred{color:var(--ev-plan-inferred)} .ev.generated{color:var(--ev-generated)} .ev.default{color:var(--ev-default)}
+button.ev{background:var(--raise)} button.ev[aria-pressed="false"]{opacity:.4}
+.link{border:0;background:none;padding:0;color:var(--accent);text-decoration:underline;text-underline-offset:2px;text-align:left;overflow-wrap:anywhere}
+.tags{display:flex;flex-wrap:wrap;gap:4px}
+.tag{font-size:11.5px;border:1px solid var(--line);border-radius:4px;padding:0 6px;background:var(--raise);color:var(--ink2)}
+.thumbs{display:flex;flex-wrap:wrap;gap:6px}
+.thumbs button{border:1px solid var(--line);background:var(--raise);border-radius:5px;padding:2px;width:52px;height:52px}
+.thumbs img{width:100%;height:100%;object-fit:contain}
+.figs{display:flex;flex-wrap:wrap;gap:8px}
+.figs figure{margin:0;display:flex;flex-direction:column;gap:2px;font-size:11.5px;color:var(--ink3)}
+.figs img{max-width:150px;max-height:150px;border:1px solid var(--line);border-radius:5px;background:var(--raise)}
+.spin{width:100%;max-width:300px;aspect-ratio:1;border:1px solid var(--line);border-radius:6px;background:var(--raise);touch-action:none;cursor:grab;align-self:center}
+.note{font-size:12px;color:var(--ink2)}
+.warnline{color:var(--warn);font-size:12.5px}
+.rel{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;font-size:12.5px}
+.rel .p{font-family:var(--mono);font-size:11.5px;color:var(--ink2)}
+.empty{padding:24px 16px;color:var(--ink2)}
+.logrow{font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line2)}
+.logrow:last-child{border-bottom:0}
+
+/* data trees */
+.data-wrap{flex:1;min-height:0;overflow:auto;padding:8px 12px;display:flex;flex-direction:column;gap:10px}
+.data-wrap h3{margin:6px 0 2px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--ink2)}
+.jt{font-family:var(--mono);font-size:12px;line-height:1.5}
+.jt details{padding-left:14px}
+.jt summary{cursor:pointer;margin-left:-14px}
+.jt .leaf{padding-left:14px;overflow-wrap:anywhere}
+.jt .k{color:var(--ink2)} .jt .v-s{color:var(--ev-measured)} .jt .v-n{color:var(--ev-plan-visible)} .jt .v-b{color:var(--ev-fitted)} .jt .v-0{color:var(--ink3)}
+@media (prefers-reduced-motion: reduce){ *{scroll-behavior:auto!important;transition:none!important} }
+</style>
+
+<div id="app" data-pane="stage">
+  <header class="bar">
+    <div class="id"><h1 id="t-title"></h1><span class="run" id="t-run"></span></div>
+    <div class="counts" id="counts"></div>
+    <input id="q" type="search" placeholder="Find a node, model, class, attribute" aria-label="Find in the scene graph">
+  </header>
+  <nav class="tabs" id="tabs" role="tablist" aria-label="Views">
+    <button class="phone" data-tab="index" role="tab">Index</button>
+    <button data-tab="graph" role="tab">Graph</button>
+    <button data-tab="map" role="tab">Map</button>
+    <button data-tab="photo" role="tab">Photograph</button>
+    <button data-tab="tables" role="tab">Tables</button>
+    <button data-tab="data" role="tab">Data</button>
+    <button class="phone" data-tab="detail" role="tab">Detail</button>
+  </nav>
+  <div class="panes">
+    <aside class="pane index" id="index" aria-label="Index"></aside>
+    <main class="pane stage" id="stage">
+      <section id="v-graph">
+        <div class="tools">
+          <span class="legend" id="g-legend"></span>
+          <label><input type="checkbox" id="g-labels"> Relation names</label>
+          <label><input type="checkbox" id="g-dets"> Detections</label>
+          <button class="btn" id="g-fit" type="button">Fit</button>
+        </div>
+        <div class="fill"><svg id="g-svg" role="img" aria-label="Scene graph: nodes and relations"></svg></div>
+        <div class="status" id="g-status"></div>
+      </section>
+      <section id="v-map" hidden>
+        <div class="tools">
+          <span class="legend" id="m-legend"></span>
+          <label><input type="checkbox" id="m-ground" checked> Ground map</label>
+          <button class="btn" id="m-fit" type="button">Fit</button>
+        </div>
+        <div class="fill"><canvas id="m-canvas" aria-label="Top-down map of every placed object"></canvas></div>
+        <div class="status" id="m-status"></div>
+      </section>
+      <section id="v-photo" hidden>
+        <div class="tools">
+          <span class="seg" id="p-mode"><button type="button" data-mode="photo" aria-pressed="true">Photograph</button><button type="button" data-mode="panorama" aria-pressed="false">Panorama</button></span>
+          <label><input type="checkbox" id="p-regions"> Region labels (sky, sand, water)</label>
+          <label>Zoom <input type="range" id="p-zoom" min="1" max="4" step="0.25" value="1"></label>
+          <span id="p-count" class="muted"></span>
+        </div>
+        <div class="photo-scroll"><div class="photo-box" id="p-box"></div></div>
+        <div class="status" id="p-status"></div>
+      </section>
+      <section id="v-tables" hidden>
+        <div class="tools"><span class="seg" id="t-which"></span><span id="t-count" class="muted"></span></div>
+        <div class="table-wrap" id="t-wrap"></div>
+      </section>
+      <section id="v-data" hidden><div class="data-wrap" id="data-wrap"></div></section>
+    </main>
+    <aside class="pane detail" id="detail" aria-label="Detail"></aside>
+  </div>
+</div>
+<script id="view-data" type="application/json">__DATA__</script>
+<script>
+'use strict';
+(() => {
+const V = JSON.parse(document.getElementById('view-data').textContent);
+const G = V.graph, NODES = G.nodes, RELS = G.relations, MODELS = V.models, DETS = V.detections, ROWS = V.placements.rows;
+const $ = (id) => document.getElementById(id);
+const SVGNS = 'http://www.w3.org/2000/svg';
+const EVIDENCE = ['measured', 'plan-visible', 'fitted', 'plan-inferred', 'generated', 'default'];
+const EV_NOTE = {measured: 'read from the photograph or the built scene', 'plan-visible': 'the Scene Plan saw it in the photograph',
+  fitted: 'fitted against the photograph', 'plan-inferred': 'the Scene Plan inferred it', generated: 'made by a generator', 'default': 'a default or a class prior'};
+const TYPE_ORDER = ['World', 'Style', 'Camera', 'Light', 'Medium', 'Surface', 'Mass', 'Linear', 'Backdrop', 'Population', 'Thing', 'Asset'];
+const FAMILY = {World: 'env', Style: 'env', Camera: 'env', Light: 'env', Medium: 'env', Surface: 'ground', Mass: 'ground', Linear: 'ground',
+  Backdrop: 'backdrop', Thing: 'thing', Population: 'population', Asset: 'asset'};
+const FAMILY_VAR = {env: '--f-env', ground: '--f-ground', backdrop: '--f-backdrop', thing: '--f-living', population: '--f-living', asset: '--f-asset', det: '--f-det'};
+const FAMILY_NAME = {env: 'world, camera, light, air', ground: 'surface', backdrop: 'backdrop', thing: 'thing', population: 'population', asset: 'model'};
+const SURFACE_KINDS = new Set(['terrain', 'water', 'backdrop', 'formation']);
+const CLASS_COLOUR = {tree: '#2e8b57', flower: '#d6457f', rock: '#8c6d4f', bush: '#7a9a2e', shrub: '#7a9a2e', grass_tuft: '#9bbf3b', plant: '#4aa08a',
+  reed: '#b59b3a', boat: '#2f6fd0', ship: '#2f6fd0', building: '#a05a4a', bridge: '#7b5ea7', tower: '#7b5ea7', person: '#e07b00', animal: '#c2501f', car: '#d03a3a'};
+const SPARE = ['#0b84a5', '#f6c85f', '#6f4e7c', '#ca472f', '#ffa056', '#8dddd0', '#9dd866'];
+
+// ── small helpers ────────────────────────────────────────────────────────────────
+function put(e, attrs, kids) {
+  for (const k in attrs || {}) {
+    const v = attrs[k];
+    if (v === null || v === undefined || v === false) continue;
+    if (k === 'text') e.textContent = v;
+    else if (k.startsWith('on') && typeof v === 'function') e.addEventListener(k.slice(2), v);
+    else e.setAttribute(k, v === true ? '' : v);
+  }
+  for (const kid of kids) if (kid !== null && kid !== undefined && kid !== false) e.append(kid);
+  return e;
+}
+const h = (tag, attrs, ...kids) => put(document.createElement(tag), attrs, kids.flat());
+const s = (tag, attrs, ...kids) => put(document.createElementNS(SVGNS, tag), attrs, kids.flat());
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+function num(v, sig = 4) {
+  if (typeof v !== 'number' || !isFinite(v)) return String(v);
+  if (Number.isInteger(v)) return v.toLocaleString('en-US');
+  if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString('en-US');
+  return String(parseFloat(v.toPrecision(sig)));
+}
+function plain(v) {   // a one-line rendering, or null when the value needs a tree
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return num(v);
+  if (typeof v === 'boolean') return v ? 'yes' : 'no';
+  if (typeof v === 'string') return v;
+  if (Array.isArray(v) && v.length <= 8 && v.every((x) => typeof x === 'number')) return v.map((x) => num(x)).join(', ');
+  if (Array.isArray(v) && v.length <= 10 && v.every((x) => typeof x === 'string')) return v.join(', ');
+  if (!Array.isArray(v) && typeof v === 'object') {
+    const ks = Object.keys(v);
+    if (ks.length <= 4 && ks.every((k) => v[k] === null || typeof v[k] !== 'object')) return ks.map((k) => k + ' ' + plain(v[k])).join(', ');
+  }
+  return null;
+}
+function brief(v, n = 90) { const p = plain(v); const t = p === null ? JSON.stringify(v) : p; return t.length > n ? t.slice(0, n - 1) + '…' : t; }
+function mass(kg) {
+  if (kg === null || kg === undefined) return '—';
+  if (kg >= 1000) return num(kg / 1000, 3) + ' t';
+  if (kg < 1) return num(kg * 1000, 3) + ' g';
+  return num(kg, 3) + ' kg';
+}
+function bytes(n) { return n >= 1048576 ? num(n / 1048576, 3) + ' MB' : num(n / 1024, 3) + ' kB'; }
+function metres(v) { return v === null || v === undefined ? '—' : num(v, 3) + ' m'; }
+function jnode(v, key, open) {
+  const k = key === undefined ? null : h('span', {class: 'k', text: key + ': '});
+  if (v === null || typeof v !== 'object') {
+    const cls = v === null ? 'v-0' : typeof v === 'string' ? 'v-s' : typeof v === 'number' ? 'v-n' : 'v-b';
+    let t = v === null ? 'null' : typeof v === 'string' ? JSON.stringify(v) : String(v);
+    if (t.length > 600) t = t.slice(0, 600) + '… (' + t.length + ' characters)';
+    return h('div', {class: 'leaf'}, k, h('span', {class: cls, text: t}));
+  }
+  const arr = Array.isArray(v), keys = arr ? null : Object.keys(v), n = arr ? v.length : keys.length;
+  if (arr && n <= 8 && v.every((x) => x === null || typeof x !== 'object'))
+    return h('div', {class: 'leaf'}, k, h('span', {class: 'v-n', text: brief(JSON.stringify(v).replace(/,/g, ', '), 300)}));
+  if (n === 0) return h('div', {class: 'leaf'}, k, h('span', {class: 'v-0', text: arr ? '[]' : '{}'}));
+  const d = h('details', null, h('summary', null, k, h('span', {class: 'v-0', text: arr ? '[' + n + ']' : '{' + n + '}'})));
+  let built = false;
+  const build = () => {
+    if (built) return; built = true;
+    const lim = 200;
+    if (arr) v.slice(0, lim).forEach((x, i) => d.append(jnode(x, String(i), false)));
+    else keys.slice(0, lim).forEach((x) => d.append(jnode(v[x], x, false)));
+    if (n > lim) d.append(h('div', {class: 'leaf v-0', text: '… ' + (n - lim) + ' more'}));
+  };
+  d.addEventListener('toggle', () => { if (d.open) build(); });
+  if (open) { d.open = true; build(); }
+  return d;
+}
+const tree = (v, key, open) => h('div', {class: 'jt'}, jnode(v, key, open));
+function glyph(fam, r, extra) {
+  const a = Object.assign({class: 'shape', style: 'fill:var(' + FAMILY_VAR[fam] + ')'}, extra || {});
+  if (fam === 'ground') return s('rect', Object.assign(a, {x: -r, y: -r, width: 2 * r, height: 2 * r, rx: 2}));
+  if (fam === 'backdrop') return s('rect', Object.assign(a, {x: -r * 1.25, y: -r * 0.62, width: 2.5 * r, height: 1.24 * r, rx: 1.5}));
+  if (fam === 'thing') return s('polygon', Object.assign(a, {points: `0,${-r * 1.2} ${r * 1.2},0 0,${r * 1.2} ${-r * 1.2},0`}));
+  if (fam === 'population') { const k = r * 1.1, q = k * 0.5, t = k * 0.866; return s('polygon', Object.assign(a, {points: `${-k},0 ${-q},${-t} ${q},${-t} ${k},0 ${q},${t} ${-q},${t}`})); }
+  if (fam === 'asset') return s('polygon', Object.assign(a, {points: `0,${-r * 1.15} ${r * 1.15},${r * 0.9} ${-r * 1.15},${r * 0.9}`}));
+  return s('circle', Object.assign(a, {r: fam === 'det' ? r * 0.7 : r}));
+}
+const smallGlyph = (fam) => s('svg', {class: 'glyph', viewBox: '-8 -8 16 16', 'aria-hidden': 'true'}, glyph(fam, 5.5));
+const evPill = (ev) => h('span', {class: 'ev ' + ev, title: EV_NOTE[ev] || '', text: ev});
+const nodeLabel = (n) => n.name && n.name !== n.id ? n.name : n.id;
+function classColour(cls) {
+  if (!(cls in CLASS_COLOUR)) CLASS_COLOUR[cls] = SPARE[Object.keys(CLASS_COLOUR).length % SPARE.length];
+  return CLASS_COLOUR[cls];
+}
+function detStatus(d) {
+  if (d.erase) return 'erased';
+  if (d.vetoed) return 'vetoed';
+  if (d.part_of !== undefined && d.part_of !== null) return 'part of #' + d.part_of;
+  if (d.placed) return 'placed';
+  if (d.region) return 'region';
+  return d.node ? 'kept' : 'unused';
+}
+const detOff = (d) => !!(d.erase || d.vetoed);
+const detName = (d) => (d.name && d.name !== d.cls ? d.name : d.cls) + ' #' + d.i;
+const dist = (p) => (p ? Math.hypot(p[0], p[2]) : null);
+
+// ── indexes ──────────────────────────────────────────────────────────────────────
+const nodeById = new Map(NODES.map((n) => [n.id, n]));
+const detByI = new Map(DETS.map((d) => [d.i, d]));
+const modelByKey = new Map(MODELS.map((m) => [m.key, m]));
+const relsByNode = new Map(), modelsByNode = new Map(), detsByNode = new Map(), rowsByModel = MODELS.map(() => []);
+const push = (map, k, v) => { if (!map.has(k)) map.set(k, []); map.get(k).push(v); };
+RELS.forEach((r) => { push(relsByNode, r.s, r); if (r.o !== r.s) push(relsByNode, r.o, r); });
+MODELS.forEach((m) => { if (m.node) push(modelsByNode, m.node, m); if (m.owner && m.owner !== m.node) push(modelsByNode, m.owner, m); });
+DETS.forEach((d) => { if (d.node) push(detsByNode, d.node, d); });
+ROWS.forEach((r, i) => rowsByModel[r[5]].push(i));
+const evCount = {};
+NODES.forEach((n) => Object.values(n.attrs || {}).forEach((a) => { evCount[a.evidence] = (evCount[a.evidence] || 0) + 1; }));
+const logByNode = new Map();
+(V.log || []).forEach((e) => push(logByNode, e.node, e));
+
+const state = {sel: null, tab: 'graph', q: '', evOff: new Set(), table: 'models', sort: {}, photoMode: V.images.photo ? 'photo' : 'panorama', regions: false, mapOff: new Set(), mapGround: true};
+const selKey = (x) => (x ? x.kind + '.' + x.id : '');
+const phone = () => matchMedia('(max-width: 900px)').matches;
+
+function select(sel, opts) {
+  state.sel = sel;
+  try { const k = selKey(sel); if (/^[\w.~-]+$/.test(k)) history.replaceState(null, '', '#' + state.tab + '~' + k); } catch (e) { /* a frame that does not allow it */ }
+  renderDetail(); markIndex(opts && opts.fromIndex); drawGraph(); drawMap(); markPhoto(opts && opts.fromPhoto); markTable();
+  if (opts && opts.reveal && phone()) setPane('detail');
+}
+const link = (text, sel) => h('button', {class: 'link', type: 'button', text, onclick: () => select(sel)});
+function nodeLink(id) { const n = nodeById.get(id); return n ? link(nodeLabel(n), {kind: 'node', id}) : h('span', {text: id}); }
+/* the graph node a selection stands on */
+function selNodeId() {
+  const x = state.sel; if (!x) return '';
+  if (x.kind === 'node') return x.id;
+  if (x.kind === 'model') { const m = modelByKey.get(x.id); return m ? m.node : ''; }
+  if (x.kind === 'det') { const d = detByI.get(x.id); return d ? d.node : ''; }
+  if (x.kind === 'place') { const r = ROWS[x.id]; return r ? MODELS[r[5]].node : ''; }
+  return '';
+}
+
+// ── header ───────────────────────────────────────────────────────────────────────
+function renderHeader() {
+  $('t-title').textContent = V.title;
+  $('t-run').textContent = 'run ' + V.run_id + ' · built ' + V.generated;
+  const off = DETS.filter(detOff).length, erased = DETS.filter((d) => d.erase).length;
+  let mesh = 0, card = 0;
+  ROWS.forEach((r) => { if (!SURFACE_KINDS.has(MODELS[r[5]].kind)) { if (r[6] & 8) card++; else mesh++; } });
+  const c = $('counts'); c.replaceChildren();
+  const item = (n, label) => h('span', null, h('b', {text: num(n)}), ' ' + label);
+  c.append(item(NODES.length, 'nodes'), item(RELS.length, 'relations'),
+    item(DETS.length, 'detections' + (off ? ' (' + off + ' vetoed' + (erased ? ', ' + erased + ' erased' : '') + ')' : '')),
+    item(MODELS.length, 'models'), item(mesh, 'placed as meshes'), item(card, 'as cards'));
+  const evs = h('span', {class: 'legend', title: 'Where each attribute value comes from. Press one to hide it.'});
+  EVIDENCE.forEach((ev) => { if (evCount[ev]) evs.append(h('button', {class: 'ev ' + ev, type: 'button', 'aria-pressed': 'true', title: EV_NOTE[ev],
+    text: ev + ' ' + evCount[ev], onclick: (e) => { const b = e.currentTarget; if (state.evOff.has(ev)) state.evOff.delete(ev); else state.evOff.add(ev);
+      b.setAttribute('aria-pressed', String(!state.evOff.has(ev))); renderDetail(); renderTable(); }})); });
+  c.append(evs);
+}
+
+// ── index ────────────────────────────────────────────────────────────────────────
+function matches(text) { return !state.q || text.toLowerCase().includes(state.q); }
+const nodeText = (n) => [n.id, n.name, n.type, n.kind].concat(Object.keys(n.attrs || {}), Object.values(n.attrs || {}).map((a) => (typeof a.value === 'string' ? a.value : ''))).join(' ');
+const modelText = (m) => [m.key, m.cls, m.kind, m.phys.material, m.phys.body, m.owner].join(' ');
+const detText = (d) => [d.cls, d.name, '#' + d.i, detStatus(d), d.veto, d.src, d.node].join(' ');
+function row(sel, lead, title, sub, cls) {
+  return h('button', {class: 'row' + (cls ? ' ' + cls : ''), type: 'button', 'data-sel': selKey(sel), onclick: () => select(sel, {reveal: true, fromIndex: true})},
+    lead, h('span', {class: 't', text: title, title}), sub ? h('span', {class: 's', text: sub}) : null);
+}
+function renderIndex() {
+  const root = $('index'); root.replaceChildren();
+  root.append(h('h2', {text: 'Graph nodes'}));
+  TYPE_ORDER.forEach((type) => {
+    const list = NODES.filter((n) => n.type === type && matches(nodeText(n)));
+    if (!list.length) return;
+    const d = h('details', {open: true}, h('summary', null, smallGlyph(FAMILY[type]), type, h('span', {class: 'n', text: list.length})));
+    list.forEach((n) => d.append(row({kind: 'node', id: n.id}, null, nodeLabel(n), n.kind || '')));
+    root.append(d);
+  });
+  const models = MODELS.filter((m) => matches(modelText(m)));
+  if (models.length) {
+    const d = h('details', {open: true}, h('summary', null, smallGlyph('asset'), 'Model files', h('span', {class: 'n', text: models.length})));
+    models.forEach((m) => d.append(row({kind: 'model', id: m.key}, m.images.length ? h('img', {src: m.images[0].src, alt: ''}) : null, m.key, '×' + num(m.n))));
+    root.append(d);
+  }
+  root.append(h('h2', {text: 'Detections in the photograph'}));
+  const byClass = new Map();
+  DETS.forEach((d) => { if (matches(detText(d))) push(byClass, d.cls, d); });
+  [...byClass.entries()].sort((a, b) => b[1].length - a[1].length).forEach(([cls, list]) => {
+    const d = h('details', {open: !!state.q && list.length <= 30}, h('summary', null, h('span', {class: 'dot', style: 'color:' + classColour(cls)}), cls, h('span', {class: 'n', text: list.length})));
+    list.forEach((x) => d.append(row({kind: 'det', id: x.i}, x.thumb ? h('img', {src: x.thumb, alt: '', loading: 'lazy'}) : null, detName(x), detStatus(x), detOff(x) ? 'struck' : '')));
+    root.append(d);
+  });
+  markIndex(true);
+}
+function markIndex(quiet) {
+  const k = selKey(state.sel);
+  $('index').querySelectorAll('.row').forEach((r) => {
+    const on = r.dataset.sel === k;
+    if (on) { r.setAttribute('aria-current', 'true'); const d = r.closest('details'); if (d) d.open = true; if (!quiet) r.scrollIntoView({block: 'nearest'}); }
+    else r.removeAttribute('aria-current');
+  });
+}
+
+// ── gestures shared by the graph and the map ─────────────────────────────────────
+function gestures(el, on) {
+  const pts = new Map(); let moved = false, start = null, pinch = 0, grabbed = null, target = null;
+  const gap = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
+  el.addEventListener('pointerdown', (e) => {
+    if (e.button > 0) return;
+    pts.set(e.pointerId, {x: e.clientX, y: e.clientY});
+    if (pts.size === 1) { moved = false; start = {x: e.clientX, y: e.clientY}; target = e.target; grabbed = on.grab ? on.grab(e) : null; }
+    else if (pts.size === 2) { pinch = gap(); moved = true; grabbed = null; }
+    try { el.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer */ }
+  });
+  el.addEventListener('pointermove', (e) => {
+    const p = pts.get(e.pointerId);
+    if (!p) { if (on.hover) on.hover(e); return; }
+    if (pts.size === 2) {
+      p.x = e.clientX; p.y = e.clientY;
+      const g = gap(), [a, b] = [...pts.values()];
+      on.zoom(g / pinch, (a.x + b.x) / 2, (a.y + b.y) / 2); pinch = g; return;
+    }
+    if (!moved && Math.hypot(e.clientX - start.x, e.clientY - start.y) < 4) return;
+    moved = true;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+    if (grabbed !== null && on.drag) on.drag(grabbed, dx, dy); else on.pan(dx, dy);
+  });
+  const end = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    const one = pts.size === 1; pts.delete(e.pointerId);
+    if (one && !moved && e.type === 'pointerup' && on.tap) on.tap(e, grabbed, target);
+    if (!pts.size) grabbed = null;
+  };
+  el.addEventListener('pointerup', end); el.addEventListener('pointercancel', end);
+  el.addEventListener('wheel', (e) => { e.preventDefault(); on.zoom(Math.exp(-e.deltaY * (e.deltaMode ? 0.05 : 0.0015)), e.clientX, e.clientY); }, {passive: false});
+}
+
+// ── graph ────────────────────────────────────────────────────────────────────────
+const COLS = [{title: 'World, camera, light, air', types: ['World', 'Camera', 'Light', 'Medium', 'Style']},
+  {title: 'Ground, water, backdrops', types: ['Surface', 'Mass', 'Linear', 'Backdrop']},
+  {title: 'Populations and things', types: ['Population', 'Thing']},
+  {title: 'Model files', types: ['Asset']}];
+const gs = {pos: new Map(), heads: [], groups: [], cx: 0, cy: 0, k: 1, dets: false, labels: false, fitted: false, raf: 0, box: null};
+function layoutGraph() {
+  const ROWH = 42, SUBW = 178, MAXR = 16, TOP = 44;
+  gs.pos.clear(); gs.heads = []; gs.groups = [];
+  let x = 20;
+  if (gs.dets) {
+    const byClass = new Map(); DETS.forEach((d) => push(byClass, d.cls, d));
+    const PER = 12, PITCH = 13, W = PER * PITCH; let y = TOP - 8;
+    gs.heads.push({x: x - 8, text: 'Detections, by class'});
+    [...byClass.entries()].sort((a, b) => b[1].length - a[1].length).forEach(([cls, list]) => {
+      const rows = Math.ceil(list.length / PER), need = 20 + rows * PITCH + 12;
+      if (y + need > TOP + MAXR * ROWH && y > TOP) { y = TOP - 8; x += W + 40; }
+      gs.groups.push({cls, list, x, y, w: W, rows, ax: x + W + 4, ay: y + 12 + rows * PITCH / 2});
+      y += need;
+    });
+    x += W + 90;
+  }
+  const cols = COLS.map((c) => ({title: c.title, nodes: NODES.filter((n) => c.types.includes(n.type))
+    .sort((a, b) => c.types.indexOf(a.type) - c.types.indexOf(b.type) || a.id.localeCompare(b.id))})).filter((c) => c.nodes.length);
+  const where = new Map();
+  const place = () => cols.forEach((c) => c.nodes.forEach((n, i) => where.set(n.id, (i + 0.5) / c.nodes.length)));
+  place();
+  for (let sweep = 0; sweep < 3; sweep++) {
+    cols.forEach((c) => {
+      const mine = new Set(c.nodes.map((n) => n.id)), key = new Map();
+      c.nodes.forEach((n) => {
+        const others = (relsByNode.get(n.id) || []).map((r) => (r.s === n.id ? r.o : r.s)).filter((id) => !mine.has(id) && where.has(id));
+        key.set(n.id, others.length ? others.reduce((a, id) => a + where.get(id), 0) / others.length : where.get(n.id));
+      });
+      c.nodes.sort((a, b) => key.get(a.id) - key.get(b.id));
+    });
+    place();
+  }
+  cols.forEach((c) => {
+    const sub = Math.ceil(c.nodes.length / MAXR), per = Math.ceil(c.nodes.length / sub);
+    gs.heads.push({x: x - 8, text: c.title});
+    c.nodes.forEach((n, i) => gs.pos.set(n.id, {x: x + Math.floor(i / per) * SUBW, y: TOP + (i % per) * ROWH}));
+    x += sub * SUBW + 40;
+  });
+  let maxY = TOP; gs.pos.forEach((p) => { maxY = Math.max(maxY, p.y); }); gs.groups.forEach((g) => { maxY = Math.max(maxY, g.y + 20 + g.rows * 13); });
+  gs.box = {x: 0, y: 0, w: x - 30, h: maxY + 34};
+}
+function fitGraph() {
+  const el = $('g-svg'), w = el.clientWidth, hh = el.clientHeight; if (!w || !hh || !gs.box) return;
+  gs.k = Math.min(1.4, Math.max(0.5, Math.min(w / (gs.box.w + 24), hh / (gs.box.h + 24))));
+  // what does not fit starts at its top left corner; what fits is centred
+  gs.cx = gs.box.w * gs.k <= w ? gs.box.x + gs.box.w / 2 : gs.box.x + w / gs.k / 2 - 12;
+  gs.cy = gs.box.h * gs.k <= hh ? gs.box.y + gs.box.h / 2 : gs.box.y + hh / gs.k / 2 - 12;
+  gs.fitted = true; viewGraph();
+}
+function viewGraph() {
+  const el = $('g-svg'), w = el.clientWidth || 800, hh = el.clientHeight || 500;
+  el.setAttribute('viewBox', [gs.cx - w / gs.k / 2, gs.cy - hh / gs.k / 2, w / gs.k, hh / gs.k].map((v) => v.toFixed(2)).join(' '));
+}
+/* The curve from a to b, and where its name goes: at t along it (0 at a, 1 at b), so the
+   names of a selected node's relations sit by the far ends instead of in one pile. */
+function edgePath(a, b, t) {
+  if (t === undefined) t = 0.5;
+  const at = (p0, p1, p2, p3) => { const u = 1 - t; return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3; };
+  if (Math.abs(a.x - b.x) < 1) {
+    const bulge = 34 + Math.min(70, Math.abs(a.y - b.y) * 0.12), x1 = a.x - 9, x2 = b.x - 11;
+    return {d: `M${x1} ${a.y}C${a.x - bulge} ${a.y} ${b.x - bulge} ${b.y} ${x2} ${b.y}`, lx: at(x1, a.x - bulge, b.x - bulge, x2) - 4, ly: at(a.y, a.y, b.y, b.y) - 3, anchor: 'end'};
+  }
+  const dir = Math.sign(b.x - a.x), x1 = a.x + dir * 9, x2 = b.x - dir * 12, cx = (x1 + x2) / 2;
+  return {d: `M${x1} ${a.y}C${cx} ${a.y} ${cx} ${b.y} ${x2} ${b.y}`, lx: at(x1, cx, cx, x2), ly: at(a.y, a.y, b.y, b.y) - 4, anchor: 'middle'};
+}
+function drawGraph() {
+  const svg = $('g-svg'); if (!gs.box) return;
+  const here = selNodeId(), near = new Set(here ? [here] : []);
+  if (here) (relsByNode.get(here) || []).forEach((r) => { near.add(r.s); near.add(r.o); });
+  const selDet = state.sel && state.sel.kind === 'det' ? state.sel.id : -1;
+  svg.replaceChildren();
+  svg.classList.toggle('has-sel', !!here && gs.pos.has(here));
+  const mk = (id, cls) => s('marker', {id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse'}, s('path', {d: 'M0 1L10 5L0 9z', class: cls}));
+  svg.append(s('defs', null, mk('arr', 'arrow'), mk('arr-hot', 'arrow hot')));
+  gs.heads.forEach((hd) => svg.append(s('text', {class: 'colhead', x: hd.x, y: 16, text: hd.text})));
+  const edges = s('g'), labels = s('g'), nodes = s('g');
+  gs.groups.forEach((g) => {
+    const targets = new Set(g.list.map((d) => d.node).filter((id) => gs.pos.has(id)));
+    targets.forEach((id) => { const hot = id === here && g.list.some((d) => d.i === selDet || state.sel.kind !== 'det');
+      edges.append(s('path', {class: 'edge belongs' + (hot ? ' hot' : ''), d: edgePath({x: g.ax - 9, y: g.ay}, gs.pos.get(id)).d})); });
+    nodes.append(s('text', {x: g.x - 4, y: g.y + 6, 'font-size': 11.5, text: g.cls}, s('tspan', {class: 'sub', dx: 6, text: g.list.length})));
+    g.list.forEach((d, i) => {
+      const cx = g.x + (i % 12) * 13 + 2, cy = g.y + 18 + Math.floor(i / 12) * 13;
+      const c = s('circle', {cx, cy, r: 4.6, 'data-det': d.i, class: 'node' + (d.i === selDet ? ' sel near' : '') + (d.node && d.node === here ? ' near' : ''), style: detOff(d) ? 'fill:none;stroke:var(--warn);stroke-width:1.3' : 'fill:' + classColour(d.cls)},
+        s('title', {text: detName(d) + ' · ' + detStatus(d)}));
+      if (d.i === selDet) c.setAttribute('style', c.getAttribute('style') + ';stroke:var(--sel);stroke-width:3');
+      nodes.append(c);
+    });
+  });
+  RELS.forEach((r) => {
+    const a = gs.pos.get(r.s), b = gs.pos.get(r.o); if (!a || !b) return;
+    const hot = !!here && (r.s === here || r.o === here), e = edgePath(a, b, !hot ? 0.5 : r.s === here ? 0.86 : 0.14);
+    edges.append(s('path', {class: 'edge' + (hot ? ' hot' : ''), d: e.d, 'marker-end': hot ? 'url(#arr-hot)' : 'url(#arr)', 'data-rel': r.s + ' ' + r.p + ' ' + r.o + '  ·  ' + r.evidence + (r.source ? ', ' + r.source : '')}));
+    if (hot || gs.labels) labels.append(s('text', {class: 'elabel' + (hot ? ' hot' : ''), x: e.lx, y: e.ly, 'text-anchor': e.anchor, text: r.p.replace(/_/g, ' ')}));
+  });
+  NODES.forEach((n) => {
+    const p = gs.pos.get(n.id); if (!p) return;
+    const fam = FAMILY[n.type] || 'env', label = nodeLabel(n);
+    const g = s('g', {class: 'node' + (n.id === here ? ' sel' : '') + (near.has(n.id) ? ' near' : ''), 'data-id': n.id, transform: `translate(${p.x} ${p.y})`},
+      s('title', {text: n.id + ' (' + n.type + (n.kind ? ', ' + n.kind : '') + ')'}), glyph(fam, 7),
+      s('text', {x: 14, y: 1, 'font-size': 12.5, 'font-weight': 500, style: 'paint-order:stroke;stroke:var(--panel);stroke-width:3px', text: label.length > 23 ? label.slice(0, 22) + '…' : label}),
+      s('text', {class: 'sub', x: 14, y: 13.5, text: n.type + (n.kind ? ' · ' + (n.kind.length > 16 ? n.kind.slice(0, 15) + '…' : n.kind) : '')}));
+    const attrs = Object.values(n.attrs || {});
+    if (attrs.length) { let x = 14; const W = Math.min(64, 6 + attrs.length * 3);
+      EVIDENCE.forEach((ev) => { const c = attrs.filter((a) => a.evidence === ev).length; if (!c) return; const w = W * c / attrs.length;
+        g.append(s('rect', {x, y: 18, width: Math.max(0.8, w - 0.6), height: 2.6, style: 'fill:var(--ev-' + ev + ')'})); x += w; }); }
+    nodes.append(g);
+  });
+  svg.append(edges, labels, nodes);
+  viewGraph();
+}
+function graphStatus(text) {
+  $('g-status').textContent = text || `${NODES.length} nodes, ${RELS.length} relations. Drag to move around, scroll or pinch to zoom, drag a node to place it. The bar under a node shows where its attributes come from.`;
+}
+function initGraph() {
+  const fams = h('span', {class: 'legend'});
+  ['env', 'ground', 'backdrop', 'population', 'thing', 'asset'].forEach((f) => fams.append(h('span', {class: 'chip'}, smallGlyph(f), FAMILY_NAME[f])));
+  $('g-legend').replaceWith(put(fams, {id: 'g-legend'}, []));
+  $('g-labels').addEventListener('change', (e) => { gs.labels = e.target.checked; drawGraph(); });
+  $('g-dets').addEventListener('change', (e) => { gs.dets = e.target.checked; layoutGraph(); drawGraph(); fitGraph(); });
+  $('g-fit').addEventListener('click', () => { layoutGraph(); drawGraph(); fitGraph(); });
+  const svg = $('g-svg');
+  gestures(svg, {
+    grab: (e) => { const g = e.target.closest && e.target.closest('g.node'); return g ? g.dataset.id : null; },
+    drag: (id, dx, dy) => { const p = gs.pos.get(id); if (!p) return; p.x += dx / gs.k; p.y += dy / gs.k; if (!gs.raf) gs.raf = requestAnimationFrame(() => { gs.raf = 0; drawGraph(); }); },
+    pan: (dx, dy) => { gs.cx -= dx / gs.k; gs.cy -= dy / gs.k; viewGraph(); },
+    zoom: (f, px, py) => { const r = svg.getBoundingClientRect(), k = Math.min(6, Math.max(0.15, gs.k * f));
+      const ux = gs.cx + (px - r.left - r.width / 2) / gs.k, uy = gs.cy + (py - r.top - r.height / 2) / gs.k;
+      gs.cx = ux - (px - r.left - r.width / 2) / k; gs.cy = uy - (py - r.top - r.height / 2) / k; gs.k = k; viewGraph(); },
+    tap: (e, id, target) => { if (id) return select({kind: 'node', id});
+      const d = target && target.closest && target.closest('[data-det]'); if (d) select({kind: 'det', id: Number(d.dataset.det)}); },
+    hover: (e) => { const t = e.target; if (!t || !t.closest) return;
+      const g = t.closest('g.node'), ed = t.closest('.edge'), dd = t.closest('[data-det]');
+      if (g) { const n = nodeById.get(g.dataset.id); graphStatus(n.id + '  ·  ' + n.type + (n.kind ? ', ' + n.kind : '') + '  ·  ' + Object.keys(n.attrs || {}).length + ' attributes, ' + (relsByNode.get(n.id) || []).length + ' relations'); }
+      else if (ed && ed.dataset.rel) graphStatus(ed.dataset.rel);
+      else if (dd) { const d = detByI.get(Number(dd.dataset.det)); graphStatus('detection ' + detName(d) + '  ·  ' + detStatus(d)); }
+      else graphStatus(''); },
+  });
+  layoutGraph(); graphStatus('');
+}
+
+// ── map ──────────────────────────────────────────────────────────────────────────
+const ms = {cx: 0, cz: 0, ppm: 1, fitted: false, img: null, hover: -1};
+/* Where a placement stands on the map and what it covers: its position plus the centre of
+   its model's bounds (structures are modelled in scene coordinates and placed at the origin),
+   and its half extents, turned by its yaw (left-handed, clockwise seen from above). */
+const spots = ROWS.map((r) => {
+  const m = MODELS[r[5]], b = m.geom.bounds, a = r[3] * Math.PI / 180, c = Math.cos(a), sn = Math.sin(a);
+  const lx = b ? (b[0][0] + b[1][0]) / 2 * r[4] : 0, lz = b ? (b[0][2] + b[1][2]) / 2 * r[4] : 0;
+  const hx = b ? (b[1][0] - b[0][0]) / 2 * r[4] : 0.3, hz = b ? (b[1][2] - b[0][2]) / 2 * r[4] : 0.3;
+  return {x: r[0] + lx * c + lz * sn, z: r[1] - lx * sn + lz * c, hx, hz, c, sn, rad: Math.max(hx, hz), long: Math.max(hx, hz) > 1.5 * Math.min(hx, hz) || m.kind === 'structure' || m.kind === 'formation'};
+});
+const footprint = spots.map((sp) => sp.rad * 2);
+function mapClasses() { const c = new Map(); ROWS.forEach((r) => { const m = MODELS[r[5]]; if (!SURFACE_KINDS.has(m.kind)) c.set(m.cls, (c.get(m.cls) || 0) + 1); }); return [...c.entries()].sort((a, b) => b[1] - a[1]); }
+function fitMap() {
+  const c = $('m-canvas'), w = c.clientWidth, hh = c.clientHeight; if (!w || !hh) return;
+  const far = spots.filter((sp, i) => !SURFACE_KINDS.has(MODELS[ROWS[i][5]].kind)).map((sp) => Math.max(Math.abs(sp.x), Math.abs(sp.z))).sort((a, b) => a - b);
+  let half = (V.images.map.size_m || 400) / 2;
+  const near = far.filter((d) => d <= half * 2.5);   // a landmark card far off is reached by dragging, it does not shrink the rest
+  if (near.length) half = Math.max(half, near[near.length - 1] * 1.08);
+  ms.ppm = Math.min(w, hh) / (2 * half) * 0.96; ms.cx = 0; ms.cz = 0; ms.fitted = true; drawMap();
+}
+const toScreen = (x, z, w, hh) => [w / 2 + (x - ms.cx) * ms.ppm, hh / 2 - (z - ms.cz) * ms.ppm];
+function selectedRows() {
+  const x = state.sel, out = new Set(); if (!x) return out;
+  if (x.kind === 'place') out.add(x.id);
+  else if (x.kind === 'model') { const i = MODELS.findIndex((m) => m.key === x.id); if (i >= 0) rowsByModel[i].forEach((r) => out.add(r)); }
+  else if (x.kind === 'det') ROWS.forEach((r, i) => { if (r[7] === x.id) out.add(i); });
+  else if (x.kind === 'node') (modelsByNode.get(x.id) || []).forEach((m) => rowsByModel[MODELS.indexOf(m)].forEach((r) => out.add(r)));
+  return out;
+}
+function drawMap() {
+  const c = $('m-canvas'); if (!c.clientWidth || $('v-map').hidden) return;
+  const dpr = window.devicePixelRatio || 1, w = c.clientWidth, hh = c.clientHeight;
+  if (c.width !== Math.round(w * dpr) || c.height !== Math.round(hh * dpr)) { c.width = Math.round(w * dpr); c.height = Math.round(hh * dpr); }
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const ink = css('--ink'), ink3 = css('--ink3'), selc = css('--sel');
+  g.fillStyle = css('--panel'); g.fillRect(0, 0, w, hh);
+  const size = V.images.map.size_m || 0;
+  if (state.mapGround && ms.img && size) { const [x0, y0] = toScreen(-size / 2, size / 2, w, hh); g.globalAlpha = 0.9; g.imageSmoothingEnabled = true; g.drawImage(ms.img, x0, y0, size * ms.ppm, size * ms.ppm); g.globalAlpha = 1; }
+  const [ox, oy] = toScreen(0, 0, w, hh);
+  g.lineWidth = 1; g.font = '11px ' + css('--mono'); g.textAlign = 'left';
+  [10, 25, 50, 100, 200, 400, 800].forEach((r) => { const pr = r * ms.ppm; if (pr < 26 || pr > Math.hypot(w, hh)) return;
+    g.strokeStyle = ink3; g.globalAlpha = 0.55; g.setLineDash([3, 4]); g.beginPath(); g.arc(ox, oy, pr, 0, Math.PI * 2); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    const t = r + ' m', tw = g.measureText(t).width; g.fillStyle = css('--panel'); g.globalAlpha = 0.8; g.fillRect(ox - tw / 2 - 2, oy + pr - 7, tw + 4, 13); g.globalAlpha = 1; g.fillStyle = ink; g.fillText(t, ox - tw / 2, oy + pr + 3); });
+  const fov = (V.camera.fov_deg || 60) * Math.PI / 360, reach = Math.max(w, hh) * 2;
+  g.fillStyle = selc; g.globalAlpha = 0.10; g.beginPath(); g.moveTo(ox, oy); g.lineTo(ox - Math.sin(fov) * reach, oy - Math.cos(fov) * reach); g.lineTo(ox + Math.sin(fov) * reach, oy - Math.cos(fov) * reach); g.closePath(); g.fill();
+  g.globalAlpha = 0.9; g.strokeStyle = ink; g.lineWidth = 1.2; g.beginPath(); g.moveTo(ox - Math.sin(fov) * reach, oy - Math.cos(fov) * reach); g.lineTo(ox, oy); g.lineTo(ox + Math.sin(fov) * reach, oy - Math.cos(fov) * reach); g.stroke(); g.globalAlpha = 1;
+  const picked = selectedRows();
+  const pass = (onlyPicked) => ROWS.forEach((r, i) => {
+    const m = MODELS[r[5]]; if (SURFACE_KINDS.has(m.kind) || state.mapOff.has(m.cls) || picked.has(i) !== onlyPicked) return;
+    const sp = spots[i], [x, y] = toScreen(sp.x, sp.z, w, hh), reach = sp.rad * ms.ppm + 40; if (x < -reach || y < -reach || x > w + reach || y > hh + reach) return;
+    const rad = Math.max(2.2, sp.rad * ms.ppm), box = sp.long && rad > 3.5;
+    const outline = (grow) => { g.beginPath();
+      if (!box) { g.arc(x, y, rad + grow, 0, Math.PI * 2); return; }
+      const ax = Math.max(1, sp.hx * ms.ppm) + grow, az = Math.max(1, sp.hz * ms.ppm) + grow;
+      [[-1, -1], [1, -1], [1, 1], [-1, 1]].forEach(([u, v], n) => { const px = x + u * ax * sp.c + v * az * sp.sn, py = y - (-u * ax * sp.sn + v * az * sp.c); if (n) g.lineTo(px, py); else g.moveTo(px, py); });
+      g.closePath(); };
+    outline(0);
+    if (r[6] & 8) { g.strokeStyle = classColour(m.cls); g.lineWidth = 1.8; g.stroke(); }
+    else { g.fillStyle = classColour(m.cls); g.globalAlpha = rad > 12 ? 0.72 : 1; g.fill(); g.globalAlpha = 1; g.strokeStyle = 'rgba(0,0,0,.55)'; g.lineWidth = 0.7; g.stroke(); }
+    if (onlyPicked) { g.strokeStyle = selc; g.lineWidth = 2.4; outline(2.5); g.stroke(); }
+  });
+  pass(false); pass(true);
+  if (state.sel && state.sel.kind === 'det') { const d = detByI.get(state.sel.id); if (d && d.pos) { const [x, y] = toScreen(d.pos[0], d.pos[2], w, hh);
+    g.strokeStyle = selc; g.lineWidth = 2.4; g.beginPath(); g.moveTo(x - 8, y); g.lineTo(x + 8, y); g.moveTo(x, y - 8); g.lineTo(x, y + 8); g.stroke(); } }
+  g.fillStyle = ink; g.beginPath(); g.arc(ox, oy, 4, 0, Math.PI * 2); g.fill();
+  const bar = [1, 2, 5, 10, 20, 50, 100, 200, 500].find((b) => b * ms.ppm >= 60) || 500;
+  g.fillStyle = css('--panel'); g.globalAlpha = 0.85; g.fillRect(8, hh - 30, bar * ms.ppm + 16, 24); g.globalAlpha = 1;
+  g.strokeStyle = ink; g.lineWidth = 1.5; g.beginPath(); g.moveTo(16, hh - 12); g.lineTo(16 + bar * ms.ppm, hh - 12); g.moveTo(16, hh - 16); g.lineTo(16, hh - 8); g.moveTo(16 + bar * ms.ppm, hh - 16); g.lineTo(16 + bar * ms.ppm, hh - 8); g.stroke();
+  g.fillStyle = ink; g.fillText(bar + ' m', 20, hh - 17);
+}
+function mapHit(e) {
+  const c = $('m-canvas'), r = c.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top; let best = -1, bd = 1e9;
+  ROWS.forEach((row, i) => { const m = MODELS[row[5]]; if (SURFACE_KINDS.has(m.kind) || state.mapOff.has(m.cls)) return;
+    const [x, y] = toScreen(spots[i].x, spots[i].z, r.width, r.height), d = Math.hypot(x - px, y - py), rad = Math.max(7, (spots[i].long ? Math.min(spots[i].hx, spots[i].hz) : spots[i].rad) * ms.ppm + 3);
+    if (d <= rad && d < bd) { bd = d; best = i; } });
+  return {i: best, x: ms.cx + (px - r.width / 2) / ms.ppm, z: ms.cz - (py - r.height / 2) / ms.ppm};
+}
+function initMap() {
+  const leg = $('m-legend');
+  mapClasses().forEach(([cls, n]) => leg.append(h('button', {class: 'chip', type: 'button', 'aria-pressed': 'true', onclick: (e) => {
+    if (state.mapOff.has(cls)) state.mapOff.delete(cls); else state.mapOff.add(cls); e.currentTarget.setAttribute('aria-pressed', String(!state.mapOff.has(cls))); drawMap(); }},
+    h('span', {class: 'dot', style: 'color:' + classColour(cls)}), cls + ' ' + num(n))));
+  leg.append(h('span', {class: 'muted', text: 'filled: mesh up close · ring: card'}));
+  $('m-ground').addEventListener('change', (e) => { state.mapGround = e.target.checked; drawMap(); });
+  $('m-fit').addEventListener('click', fitMap);
+  if (V.images.map.src) { const im = new Image(); im.onload = () => { ms.img = im; drawMap(); }; im.src = V.images.map.src; }
+  const c = $('m-canvas');
+  const rest = () => { $('m-status').textContent = `${num(ROWS.length)} placements. Camera at the centre, looking up the page; the wedge is the photograph's field of view (${num(V.camera.fov_deg || 0, 3)}°).`; };
+  gestures(c, {
+    pan: (dx, dy) => { ms.cx -= dx / ms.ppm; ms.cz += dy / ms.ppm; drawMap(); },
+    zoom: (f, px, py) => { const r = c.getBoundingClientRect(), k = Math.min(400, Math.max(0.2, ms.ppm * f));
+      const wx = ms.cx + (px - r.left - r.width / 2) / ms.ppm, wz = ms.cz - (py - r.top - r.height / 2) / ms.ppm;
+      ms.cx = wx - (px - r.left - r.width / 2) / k; ms.cz = wz + (py - r.top - r.height / 2) / k; ms.ppm = k; drawMap(); },
+    tap: (e) => { const hit = mapHit(e); if (hit.i >= 0) select({kind: 'place', id: hit.i}); },
+    hover: (e) => { const hit = mapHit(e), where = `x ${hit.x.toFixed(1)}  z ${hit.z.toFixed(1)}  ·  ${Math.hypot(hit.x, hit.z).toFixed(1)} m from the camera`;
+      if (hit.i < 0) { $('m-status').textContent = where; return; }
+      const r = ROWS[hit.i], m = MODELS[r[5]]; $('m-status').textContent = `${m.key}  ·  ${m.cls}  ·  ${Math.hypot(spots[hit.i].x, spots[hit.i].z).toFixed(1)} m  ·  ${num(spots[hit.i].hx * 2, 3)} × ${num(spots[hit.i].hz * 2, 3)} m  ·  ${r[6] & 8 ? 'card' : 'mesh'}`; },
+  });
+  c.addEventListener('pointerleave', rest); rest();
+}
+
+// ── photograph ───────────────────────────────────────────────────────────────────
+function renderPhoto() {
+  const box = $('p-box'); box.replaceChildren();
+  const pan = state.photoMode === 'panorama', img = pan ? V.images.panorama : V.images.photo;
+  $('p-mode').querySelectorAll('button').forEach((b) => { b.setAttribute('aria-pressed', String(b.dataset.mode === state.photoMode)); b.disabled = !V.images[b.dataset.mode]; });
+  if (!img) { box.append(h('p', {class: 'empty', text: 'This run has no ' + state.photoMode + ' image.'})); return; }
+  const zoom = Number($('p-zoom').value) || 1;
+  box.style.width = (zoom * 100) + '%'; box.style.maxWidth = pan || zoom > 1 ? 'none' : Math.round(img.w * 1.4) + 'px';
+  const svg = s('svg', {viewBox: '0 0 1 1', preserveAspectRatio: 'none'});
+  const list = DETS.filter((d) => (pan ? d.box : d.pbox) && (state.regions || !d.region || (state.sel && state.sel.kind === 'det' && state.sel.id === d.i)))
+    .sort((a, b) => { const A = pan ? a.box : a.pbox, B = pan ? b.box : b.pbox; return B[2] * B[3] - A[2] * A[3]; });
+  list.forEach((d) => { const b = pan ? d.box : d.pbox;
+    svg.append(s('rect', {x: b[0], y: b[1], width: Math.min(b[2], 1 - b[0]), height: b[3], 'data-det': d.i, class: detOff(d) ? 'off' : '',
+      style: 'stroke:' + (detOff(d) ? 'var(--warn)' : classColour(d.cls)), onclick: () => select({kind: 'det', id: d.i}, {fromPhoto: true}),
+      onpointerenter: () => { $('p-status').textContent = detName(d) + '  ·  ' + detStatus(d) + (d.conf !== undefined ? '  ·  confidence ' + num(d.conf, 2) : '') + (d.pos ? '  ·  ' + dist(d.pos).toFixed(1) + ' m' : ''); }},
+      s('title', {text: detName(d)}))); });
+  box.append(h('img', {src: img.src, alt: pan ? 'The panorama built around the photograph' : 'The input photograph'}), svg);
+  const hidden = DETS.filter((d) => (pan ? d.box : d.pbox) && d.region).length;
+  $('p-count').textContent = list.length + (list.length === 1 ? ' box' : ' boxes') + (!state.regions && hidden ? ' · ' + hidden + ' region labels hidden' : '');
+  markPhoto(true);
+}
+function markPhoto(quiet) {
+  const id = state.sel && state.sel.kind === 'det' ? String(state.sel.id) : '', d = id ? detByI.get(Number(id)) : null;
+  const drawable = d && (state.photoMode === 'panorama' ? d.box : d.pbox);
+  if (drawable && !$('p-box').querySelector('rect[data-det="' + id + '"]') && !$('v-photo').hidden) { renderPhoto(); return; }
+  $('p-box').querySelectorAll('rect').forEach((r) => { const on = r.dataset.det === id; r.classList.toggle('sel', on); if (on && !quiet && !$('v-photo').hidden) r.scrollIntoView({block: 'nearest', inline: 'nearest'}); });
+}
+function initPhoto() {
+  $('p-mode').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b && !b.disabled) { state.photoMode = b.dataset.mode; renderPhoto(); } });
+  $('p-regions').addEventListener('change', (e) => { state.regions = e.target.checked; renderPhoto(); });
+  $('p-zoom').addEventListener('input', renderPhoto);
+  $('p-status').textContent = 'Each box is something the pipeline found. Solid: kept. Dashed: vetoed or erased. Press one to see what became of it.';
+}
+
+// ── tables ───────────────────────────────────────────────────────────────────────
+const attrRows = []; NODES.forEach((n) => Object.entries(n.attrs || {}).forEach(([k, a]) => attrRows.push({n, k, a})));
+const TABLES = {
+  models: {label: 'Models', rows: () => MODELS, sel: (m) => ({kind: 'model', id: m.key}), text: modelText, cols: [
+    {label: 'Model file', get: (m) => m.key}, {label: 'Class', get: (m) => m.cls}, {label: 'Kind', get: (m) => m.kind},
+    {label: 'Placed', r: 1, get: (m) => m.n}, {label: 'Mesh', r: 1, get: (m) => m.first.mesh}, {label: 'Card', r: 1, get: (m) => m.first.card},
+    {label: 'Triangles', r: 1, get: (m) => m.geom.triangles}, {label: 'Size, m', get: (m) => (m.phys.size_m ? m.phys.size_m.map((v) => num(v, 3)).join(' × ') : '')},
+    {label: 'Material', get: (m) => m.phys.material}, {label: 'Body', get: (m) => m.phys.body}, {label: 'Mass', r: 1, get: (m) => m.phys.mass_kg, show: (m) => (m.phys.mass_kg === undefined || m.phys.mass_kg === null ? '' : mass(m.phys.mass_kg))},
+    {label: 'Collider', get: (m) => m.phys.collider}, {label: 'Nearest, m', r: 1, get: (m) => (m.dist ? m.dist[0] : null)}, {label: 'Farthest, m', r: 1, get: (m) => (m.dist ? m.dist[2] : null)}]},
+  detections: {label: 'Detections', rows: () => DETS, sel: (d) => ({kind: 'det', id: d.i}), text: detText, cols: [
+    {label: '', get: (d) => d.i, show: (d) => (d.thumb ? h('img', {src: d.thumb, alt: '', loading: 'lazy'}) : '')}, {label: '#', r: 1, get: (d) => d.i},
+    {label: 'Class', get: (d) => d.cls}, {label: 'Name', get: (d) => d.name}, {label: 'Outcome', get: detStatus}, {label: 'Why', wrap: 1, get: (d) => d.veto || ''},
+    {label: 'Confidence', r: 1, get: (d) => d.conf}, {label: 'Found by', get: (d) => d.src || ''}, {label: 'In photo', get: (d) => (d.in_photo === undefined ? '' : d.in_photo ? 'yes' : 'no')},
+    {label: 'Distance, m', r: 1, get: (d) => dist(d.pos)}, {label: 'Height, m', r: 1, get: (d) => d.h}, {label: 'Node', get: (d) => d.node},
+    {label: 'Placed as', get: (d) => (d.placed ? Object.entries(d.placed).map(([k, n]) => k + ' ×' + n).join(', ') : '')}]},
+  attributes: {label: 'Attributes', rows: () => attrRows.filter((x) => !state.evOff.has(x.a.evidence)), sel: (x) => ({kind: 'node', id: x.n.id}),
+    text: (x) => [x.n.id, x.n.type, x.k, x.a.evidence, x.a.source, typeof x.a.value === 'string' ? x.a.value : ''].join(' '), cols: [
+    {label: 'Node', get: (x) => x.n.id}, {label: 'Type', get: (x) => x.n.type}, {label: 'Attribute', get: (x) => x.k},
+    {label: 'Value', wrap: 1, get: (x) => (typeof x.a.value === 'number' ? x.a.value : brief(x.a.value)), show: (x) => brief(x.a.value, 120)}, {label: 'Unit', get: (x) => x.a.unit || ''},
+    {label: 'Evidence', get: (x) => EVIDENCE.indexOf(x.a.evidence), show: (x) => evPill(x.a.evidence)}, {label: 'Confidence', r: 1, get: (x) => (x.a.confidence === undefined ? 1 : x.a.confidence)},
+    {label: 'Source', get: (x) => x.a.source || ''}]},
+  relations: {label: 'Relations', rows: () => RELS, sel: (r) => ({kind: 'node', id: r.s}), text: (r) => [r.s, r.p, r.o, r.evidence, r.source].join(' '), cols: [
+    {label: 'Subject', get: (r) => r.s}, {label: 'Relation', get: (r) => r.p.replace(/_/g, ' ')}, {label: 'Object', get: (r) => r.o},
+    {label: 'Evidence', get: (r) => EVIDENCE.indexOf(r.evidence), show: (r) => evPill(r.evidence)}, {label: 'Source', get: (r) => r.source || ''}]},
+  edits: {label: 'Edits', rows: () => V.log || [], sel: (e) => (nodeById.has(e.node) ? {kind: 'node', id: e.node} : null), text: (e) => JSON.stringify(e), cols: [
+    {label: 'Time', get: (e) => e.time || ''}, {label: 'Node', get: (e) => e.node || ''}, {label: 'Attribute', get: (e) => e.attr || ''},
+    {label: 'Was', get: (e) => (e.old === undefined ? '' : brief(e.old, 60))}, {label: 'Now', get: (e) => (e.new === undefined ? '' : brief(e.new, 60))},
+    {label: 'Who', get: (e) => e.who || ''}, {label: 'Why', wrap: 1, get: (e) => e.why || e.note || ''}]},
+};
+function renderTable() {
+  const t = TABLES[state.table], wrap = $('t-wrap'), sort = state.sort[state.table];
+  $('t-which').querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.t === state.table)));
+  let rows = t.rows().filter((r) => matches(t.text(r)));
+  if (sort) { const c = t.cols[sort.i]; rows = rows.slice().sort((a, b) => { const x = c.get(a), y = c.get(b);
+    const xe = x === null || x === undefined || x === '', ye = y === null || y === undefined || y === ''; if (xe || ye) return xe - ye;
+    return (typeof x === 'number' && typeof y === 'number' ? x - y : String(x).localeCompare(String(y))) * sort.dir; }); }
+  const head = h('tr'); t.cols.forEach((c, i) => head.append(h('th', {class: c.r ? 'r' : '', scope: 'col', 'aria-sort': sort && sort.i === i ? (sort.dir > 0 ? 'ascending' : 'descending') : null,
+    text: c.label + (sort && sort.i === i ? (sort.dir > 0 ? ' ↑' : ' ↓') : ''), onclick: () => { state.sort[state.table] = {i, dir: sort && sort.i === i ? -sort.dir : (c.r ? -1 : 1)}; renderTable(); }})));
+  const body = h('tbody'), lim = 1500;
+  rows.slice(0, lim).forEach((r) => { const sel = t.sel(r), tr = h('tr', {'data-sel': selKey(sel), onclick: () => sel && select(sel, {reveal: true})});
+    t.cols.forEach((c) => { const v = c.show ? c.show(r) : c.get(r); tr.append(h('td', {class: c.r ? 'r' : c.wrap ? 'wrap' : ''}, v instanceof Node ? v : (v === null || v === undefined ? '' : typeof v === 'number' ? num(v) : String(v)))); });
+    body.append(tr); });
+  wrap.replaceChildren(h('table', null, h('thead', null, head), body));
+  $('t-count').textContent = num(rows.length) + ' rows' + (rows.length > lim ? ', first ' + lim + ' shown' : '') + (state.q ? ' matching “' + state.q + '”' : '');
+  markTable();
+}
+function markTable() { const k = selKey(state.sel); $('t-wrap').querySelectorAll('tbody tr').forEach((r) => r.classList.toggle('sel', !!k && r.dataset.sel === k)); }
+function initTables() {
+  const seg = $('t-which');
+  Object.entries(TABLES).forEach(([k, t]) => seg.append(h('button', {type: 'button', 'data-t': k, 'aria-pressed': 'false', text: t.label + ' ' + num(t.rows().length), onclick: () => { state.table = k; renderTable(); }})));
+}
+
+// ── data ─────────────────────────────────────────────────────────────────────────
+function renderData() {
+  const w = $('data-wrap'); if (w.childElementCount) return;
+  const sec = (title, note, v, open) => { if (v === null || v === undefined || (typeof v === 'object' && !Object.keys(v).length)) return; w.append(h('div', null, h('h3', {text: title}), note ? h('p', {class: 'note', text: note}) : null, tree(v, undefined, open))); };
+  if ((V.warnings || []).length) w.append(h('div', null, h('h3', {text: 'What the export could not find'}), ...V.warnings.map((t) => h('p', {class: 'warnline', text: t}))));
+  sec('Scene Plan', 'What the planner read from the photograph before anything was built.', V.plan, true);
+  sec('Graph record', 'How the graph was exported from the run.', G.meta, false);
+  sec('Scene file, without its objects', 'What the client receives besides the placed objects: sky, light, fog, grass field, camera.', V.scene, false);
+  sec('Inventory Review', 'The reviewer’s decisions on the detections.', V.review, false);
+  sec('Accepted scene edits', 'Edits the fix loop kept, replayed on every rebuild.', V.edits, false);
+  sec('Stages run', '', V.stages, false);
+  sec('The whole graph', 'Nodes and relations as saved.', {nodes: NODES, relations: RELS}, false);
+}
+
+// ── detail ───────────────────────────────────────────────────────────────────────
+const sec = (title, ...kids) => h('div', {class: 'd-sec'}, title ? h('h3', {text: title}) : null, kids.flat());
+function kv(pairs) { const dl = h('dl', {class: 'kv'}); pairs.forEach(([k, v]) => { if (v === null || v === undefined || v === '') return; dl.append(h('dt', {text: k}), h('dd', null, v instanceof Node ? v : String(v))); }); return dl; }
+function attrBlock(name, a) {
+  const p = plain(a.value);
+  return h('div', {class: 'attr'}, h('div', {class: 'a-top'}, h('span', {class: 'a-name', text: name}), evPill(a.evidence)),
+    p === null ? tree(a.value, undefined, false) : h('div', {class: 'a-val', text: p + (a.unit ? ' ' + a.unit : '')}),
+    (a.source || (a.confidence !== undefined && a.confidence !== 1)) ? h('div', {class: 'a-src', text: [a.source, a.confidence !== undefined && a.confidence !== 1 ? 'confidence ' + num(a.confidence, 2) : ''].filter(Boolean).join(' · ')}) : null);
+}
+function modelRow(m) { return h('div', {class: 'rel'}, link(m.key, {kind: 'model', id: m.key}), h('span', {class: 'muted', text: '×' + num(m.n) + (m.phys.mass_kg !== undefined && m.phys.mass_kg !== null ? ' · ' + mass(m.phys.mass_kg) : '')})); }
+function detThumbs(list) {
+  const box = h('div', {class: 'thumbs'});
+  list.slice(0, 48).forEach((d) => box.append(h('button', {type: 'button', title: detName(d) + ' · ' + detStatus(d), onclick: () => select({kind: 'det', id: d.i})}, d.thumb ? h('img', {src: d.thumb, alt: detName(d), loading: 'lazy'}) : h('span', {class: 'muted', text: '#' + d.i}))));
+  return [box, list.length > 48 ? h('p', {class: 'note', text: (list.length - 48) + ' more in the index.'}) : null];
+}
+const goto = (tab, text) => h('button', {class: 'btn', type: 'button', text, onclick: () => setTab(tab)});
+let spinRaf = 0;
+function spinner(m) {
+  const N = 340, c = h('canvas', {class: 'spin', width: N, height: N, 'aria-label': 'Points sampled on the surface of ' + m.key + '. Drag to turn.'});
+  const raw = atob(m.points), n = Math.floor(raw.length / 6), P = new Float32Array(n * 3), C = new Uint8Array(n * 3);
+  const lo = [1e9, 1e9, 1e9], hi = [-1e9, -1e9, -1e9];
+  for (let i = 0; i < n; i++) for (let k = 0; k < 3; k++) { const v = raw.charCodeAt(i * 6 + k) / 255; P[i * 3 + k] = v; lo[k] = Math.min(lo[k], v); hi[k] = Math.max(hi[k], v); C[i * 3 + k] = raw.charCodeAt(i * 6 + 3 + k); }
+  const mid = lo.map((v, k) => (v + hi[k]) / 2), diag = Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) || 1;
+  let yaw = 0.7, pitch = 0.32, auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const g = c.getContext('2d'), img = g.createImageData(N, N), zb = new Float32Array(N * N), R = 3, k = N * 0.92 / diag;
+  function draw() {
+    img.data.fill(0); zb.fill(1e9);
+    const cy = Math.cos(yaw), sy = Math.sin(yaw), cp = Math.cos(pitch), sp = Math.sin(pitch);
+    for (let i = 0; i < n; i++) {
+      const x = P[i * 3] - mid[0], y = P[i * 3 + 1] - mid[1], z = P[i * 3 + 2] - mid[2];
+      const x1 = x * cy + z * sy, z1 = -x * sy + z * cy, y2 = y * cp + z1 * sp, z2 = -y * sp + z1 * cp;
+      const px = Math.round(N / 2 + x1 * k), py = Math.round(N / 2 - y2 * k);
+      for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+        if (dx * dx + dy * dy > R * R + 1) continue;
+        const u = px + dx, v = py + dy; if (u < 0 || v < 0 || u >= N || v >= N) continue;
+        const o = v * N + u; if (z2 >= zb[o]) continue;   // the eye looks along +z: the nearer point wins
+        zb[o] = z2; img.data[o * 4] = C[i * 3]; img.data[o * 4 + 1] = C[i * 3 + 1]; img.data[o * 4 + 2] = C[i * 3 + 2]; img.data[o * 4 + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+  }
+  function loop() { if (!c.isConnected) { spinRaf = 0; return; } if (auto) { yaw += 0.006; draw(); } spinRaf = requestAnimationFrame(loop); }
+  let last = null;
+  c.addEventListener('pointerdown', (e) => { auto = false; last = {x: e.clientX, y: e.clientY}; try { c.setPointerCapture(e.pointerId); } catch (err) { /* synthetic */ } });
+  c.addEventListener('pointermove', (e) => { if (!last) return; yaw += (e.clientX - last.x) * 0.012; pitch = Math.max(-1.5, Math.min(1.5, pitch + (e.clientY - last.y) * 0.012)); last = {x: e.clientX, y: e.clientY}; draw(); });
+  const up = () => { last = null; }; c.addEventListener('pointerup', up); c.addEventListener('pointercancel', up);
+  draw(); cancelAnimationFrame(spinRaf); spinRaf = requestAnimationFrame(() => requestAnimationFrame(loop));
+  return c;
+}
+function detailNode(n) {
+  const root = [], fam = FAMILY[n.type] || 'env';
+  root.push(h('div', {class: 'd-head'}, h('div', {class: 'd-kind'}, smallGlyph(fam), n.type + (n.kind ? ' · ' + n.kind : '')), h('h2', {text: nodeLabel(n)}), h('span', {class: 'mono muted', text: n.id})));
+  const attrs = Object.entries(n.attrs || {}), shown = attrs.filter(([, a]) => !state.evOff.has(a.evidence));
+  if (attrs.length) root.push(sec('Attributes · ' + shown.length + (shown.length < attrs.length ? ' of ' + attrs.length : ''), shown.map(([k, a]) => attrBlock(k, a))));
+  if ((n.affordances || []).length) root.push(sec('What an agent may do to it', h('div', {class: 'tags'}, n.affordances.map((a) => h('span', {class: 'tag', text: typeof a === 'string' ? a : brief(a, 60)})))));
+  const rels = relsByNode.get(n.id) || [];
+  if (rels.length) root.push(sec('Relations · ' + rels.length, rels.map((r) => h('div', {class: 'rel'}, r.s === n.id ? [h('span', {class: 'p', text: r.p.replace(/_/g, ' ') + ' →'}), nodeLink(r.o)] : [nodeLink(r.s), h('span', {class: 'p', text: r.p.replace(/_/g, ' ') + ' → this'})], evPill(r.evidence)))));
+  if (n.geometry && Object.keys(n.geometry).length) root.push(sec('Geometry', tree(n.geometry, undefined, true)));
+  const models = modelsByNode.get(n.id) || [];
+  if (models.length) root.push(sec('Model files · ' + models.length, models.map(modelRow)));
+  const dets = detsByNode.get(n.id) || [];
+  if (dets.length) root.push(sec('Detections behind it · ' + dets.length, detThumbs(dets)));
+  const log = logByNode.get(n.id) || [];
+  if (log.length) root.push(sec('Edits · ' + log.length, log.map((e) => h('div', {class: 'logrow'}, h('div', {class: 'mono muted', text: [e.time, e.who].filter(Boolean).join(' · ')}),
+    h('div', {text: e.attr ? e.attr + ': ' + brief(e.old, 50) + ' → ' + brief(e.new, 50) : (e.note || '')}), e.why ? h('div', {class: 'note', text: e.why}) : null))));
+  root.push(sec('As saved', tree(n, undefined, false)));
+  return root;
+}
+function detailModel(m) {
+  const root = [], g = m.geom, p = m.phys, def = (v) => (v === null || v === undefined ? null : h('span', null, String(v) + ' ', evPill('default')));
+  root.push(h('div', {class: 'd-head'}, h('div', {class: 'd-kind'}, smallGlyph('asset'), 'model file · ' + m.cls + (m.kind !== 'model' ? ' · ' + m.kind : '')), h('h2', {text: m.key}),
+    h('div', {class: 'tags'}, h('span', {class: 'tag', text: num(m.n) + (m.n === 1 ? ' placement' : ' placements')}), m.first.mesh ? h('span', {class: 'tag', text: num(m.first.mesh) + ' as mesh'}) : null, m.first.card ? h('span', {class: 'tag', text: num(m.first.card) + ' as card'}) : null,
+      g.skinned ? h('span', {class: 'tag', text: 'rigged'}) : null, goto('map', 'Show on the map'))));
+  if (m.points) root.push(sec('Shape · ' + num(Math.floor(m.points.length * 3 / 4 / 6)) + ' points sampled on the surface', spinner(m)));
+  else if (g.error || g.note) root.push(sec('Shape', h('p', {class: 'note', text: g.error || g.note})));
+  if (m.images.length) root.push(sec('Where it came from', h('div', {class: 'figs'}, m.images.map((im) => h('figure', null, h('img', {src: im.src, alt: im.label}), h('figcaption', {text: im.label}))))));
+  if (Object.keys(g).length) root.push(sec('Geometry, measured from the file', kv([['file', g.file], ['written by', g.stage], ['size on disk', g.bytes ? bytes(g.bytes) : null], ['triangles', g.triangles !== undefined ? num(g.triangles) : null],
+    ['vertices', g.vertices !== undefined ? num(g.vertices) : null], ['parts', g.parts], ['textures', g.textures], ['extents (file units)', g.extents ? g.extents.map((v) => num(v, 3)).join(' × ') : null],
+    ['size in the scene', p.size_m ? p.size_m.map((v) => num(v, 3)).join(' × ') + ' m' : null], ['surface area', g.area !== undefined ? num(g.area, 3) : null], ['closed surface', g.watertight === undefined ? null : g.watertight ? 'yes' : 'no'],
+    ['volume', g.volume !== undefined ? num(g.volume, 3) : null], ['convex hull volume', g.hull_volume !== undefined ? num(g.hull_volume, 3) : null], ['rigged', g.skinned ? 'yes' : null]])));
+  if (Object.keys(p).length) root.push(sec('Physical estimate',
+    h('p', {class: 'note', text: 'Size and volume are measured. Material, density, friction and bounce are priors for the class “' + (p.prior || m.cls) + '”: nothing has looked at this object to decide them.'}),
+    kv([['material', def(p.material)], ['body', def(p.body)], ['collider', p.collider_in_scene ? h('span', null, String(p.collider) + ' ', evPill('measured')) : def(p.collider)], ['volume', p.volume_m3 !== undefined && p.volume_m3 !== null ? num(p.volume_m3, 3) + ' m³' : null], ['volume from', p.volume_from],
+      ['density', p.density_kg_m3 !== undefined && p.density_kg_m3 !== null ? def(num(p.density_kg_m3) + ' kg/m³') : null], ['solid fraction', p.solid_fraction !== undefined && p.solid_fraction !== 1 ? def(num(p.solid_fraction, 2)) : null],
+      ['mass', p.mass_kg !== undefined && p.mass_kg !== null ? mass(p.mass_kg) : null], ['mass, smallest to largest', p.mass_range_kg ? mass(p.mass_range_kg[0]) + ' to ' + mass(p.mass_range_kg[1]) : null],
+      ['friction, static / moving', p.friction_static !== undefined ? def(num(p.friction_static, 2) + ' / ' + num(p.friction_dynamic, 2)) : null], ['bounce', p.restitution !== undefined ? def(num(p.restitution, 2)) : null], ['note', p.note]])));
+  root.push(sec('In the scene', kv([['placements', num(m.n)], ['distance, m', m.dist ? m.dist.map((v) => num(v, 3)).join(' / ') + '  (nearest / median / farthest)' : null],
+    ['scale', m.scale ? (m.scale[0] === m.scale[2] ? num(m.scale[0], 3) : m.scale.map((v) => num(v, 3)).join(' / ') + '  (min / median / max)') : null],
+    ['levels of detail', h('span', null, m.lods.map(([c, n]) => h('div', {class: 'mono', text: c + (m.lods.length > 1 ? '  ×' + n : '')})))],
+    ['carried per object', Object.keys(m.annotations).length ? Object.entries(m.annotations).map(([k, n]) => k + ' ×' + num(n)).join(', ') : null],
+    ['graph node', m.node ? nodeLink(m.node) : null], ['belongs to', m.owner ? nodeLink(m.owner) : null]])));
+  const dets = m.sources.map((i) => detByI.get(i)).filter(Boolean);
+  if (dets.length) root.push(sec('Built from detection' + (m.source_count > 1 ? 's · ' + m.source_count : ''), detThumbs(dets)));
+  return root;
+}
+function detailDet(d) {
+  const root = [], st = detStatus(d);
+  root.push(h('div', {class: 'd-head'}, h('div', {class: 'd-kind'}, h('span', {class: 'dot', style: 'color:' + classColour(d.cls)}), 'detection · ' + d.cls), h('h2', {text: detName(d)}),
+    h('div', {class: 'tags'}, h('span', {class: 'tag', text: st}), d.pbox || d.box ? h('button', {class: 'btn', type: 'button', text: d.pbox ? 'Show in the photograph' : 'Show in the panorama', onclick: () => { state.photoMode = d.pbox && V.images.photo ? 'photo' : 'panorama'; setTab('photo'); }}) : null, d.pos ? goto('map', 'Show on the map') : null)));
+  if (d.thumb) root.push(sec('Cut-out', h('div', {class: 'figs'}, h('figure', null, h('img', {src: d.thumb, alt: 'Cut-out of ' + detName(d), style: 'min-width:96px;image-rendering:auto'})))));
+  if (d.vetoed || d.veto || d.erase) root.push(sec('Why it is not in the scene', h('p', {class: 'warnline', text: [d.erase ? 'Erased from the photograph and the scene.' : '', d.vetoed ? 'Was labelled “' + d.vetoed + '”.' : '', d.veto || ''].filter(Boolean).join(' ')})));
+  root.push(sec('What was found', kv([['class', d.cls], ['name', d.name], ['label confidence', d.conf !== undefined ? num(d.conf, 3) : null], ['mask score', d.score !== undefined ? num(d.score, 3) : null], ['found by', d.src], ['labelled from', d.label_src],
+    ['inside the photograph', d.in_photo === undefined ? null : d.in_photo ? 'yes' : 'no, in the outpainted panorama'], ['part of', d.part_of !== undefined && d.part_of !== null ? link('detection #' + d.part_of, {kind: 'det', id: d.part_of}) : null],
+    ['made by the pipeline', d.synthetic ? 'yes' : null]])));
+  root.push(sec('Where it stands', kv([['position x, y, z', d.pos ? d.pos.map((v) => num(v, 3)).join(', ') + ' m' : null], ['distance', d.pos ? metres(dist(d.pos)) : null], ['width', d.w !== undefined ? metres(d.w) : null], ['height', d.h !== undefined ? metres(d.h) : null],
+    ['size bucket', d.bucket], ['stationary', d.stationary === undefined ? null : d.stationary ? 'yes' : 'no'], ['graph node', d.node ? nodeLink(d.node) : null],
+    ['placed as', d.placed ? h('span', null, Object.entries(d.placed).map(([k, n]) => h('div', null, link(k, {kind: 'model', id: k}), ' ×' + n))) : 'nothing']])));
+  ['review', 'motion', 'sway'].forEach((k) => { if (d[k] !== undefined && d[k] !== null && typeof d[k] === 'object') root.push(sec(k === 'review' ? 'Reviewer' : k === 'motion' ? 'Motion estimate' : 'Sway', tree(d[k], undefined, true))); });
+  return root;
+}
+function detailPlace(i) {
+  const r = ROWS[i], m = MODELS[r[5]], root = [], e = m.geom.extents;
+  const med = m.scale ? m.scale[1] : 1, kg = m.phys.mass_kg !== undefined && m.phys.mass_kg !== null ? m.phys.mass_kg * Math.pow(r[4] / (med || 1), 3) : null;
+  root.push(h('div', {class: 'd-head'}, h('div', {class: 'd-kind'}, h('span', {class: 'dot', style: 'color:' + classColour(m.cls)}), 'placement · ' + m.cls), h('h2', {text: m.key + ' at ' + Math.hypot(spots[i].x, spots[i].z).toFixed(1) + ' m'}),
+    h('div', {class: 'tags'}, h('span', {class: 'tag', text: r[6] & 8 ? 'card' : 'mesh up close'}), r[6] & 1 ? h('span', {class: 'tag', text: 'sways'}) : null, r[6] & 2 ? h('span', {class: 'tag', text: 'moves'}) : null, r[6] & 4 ? h('span', {class: 'tag', text: 'video texture'}) : null)));
+  root.push(sec('Placement', kv([['model file', link(m.key, {kind: 'model', id: m.key})], ['position x, y, z', [r[0], r[2], r[1]].map((v) => num(v, 4)).join(', ') + ' m'], ['stands at x, z', num(spots[i].x, 4) + ', ' + num(spots[i].z, 4) + ' m'], ['distance', Math.hypot(spots[i].x, spots[i].z).toFixed(1) + ' m'],
+    ['bearing', num(Math.atan2(spots[i].x, spots[i].z) * 180 / Math.PI, 3) + '° right of the camera axis'], ['turned', num(r[3]) + '°'], ['scale', num(r[4])],
+    ['size', e ? e.map((v) => num(v * r[4], 3)).join(' × ') + ' m' : null], ['mass at this size', kg !== null ? h('span', null, mass(kg) + ' ', evPill('default')) : null],
+    ['from detection', r[7] >= 0 && detByI.has(r[7]) ? link(detName(detByI.get(r[7])), {kind: 'det', id: r[7]}) : null], ['graph node', m.owner ? nodeLink(m.owner) : null]])));
+  return root;
+}
+function renderDetail() {
+  const root = $('detail'), x = state.sel; let kids = null;
+  if (x && x.kind === 'node' && nodeById.has(x.id)) kids = detailNode(nodeById.get(x.id));
+  else if (x && x.kind === 'model' && modelByKey.has(x.id)) kids = detailModel(modelByKey.get(x.id));
+  else if (x && x.kind === 'det' && detByI.has(x.id)) kids = detailDet(detByI.get(x.id));
+  else if (x && x.kind === 'place' && ROWS[x.id]) kids = detailPlace(x.id);
+  if (!kids) kids = [h('div', {class: 'empty'}, h('p', {text: 'Pick anything: a node in the graph, a dot on the map, a box in the photograph, a row in a table.'}),
+    h('p', {class: 'note', text: 'Every value carries where it came from: measured from the photograph or the built scene, read or inferred by the Scene Plan, fitted, generated, or a default.'}))];
+  root.replaceChildren(...kids); root.scrollTop = 0;
+}
+
+// ── tabs ─────────────────────────────────────────────────────────────────────────
+function setPane(p) { $('app').dataset.pane = p; markTabs(); }
+function markTabs() {
+  const pane = $('app').dataset.pane, narrow = phone();
+  $('tabs').querySelectorAll('button').forEach((b) => { const t = b.dataset.tab;
+    b.setAttribute('aria-selected', String(narrow ? (pane === 'stage' ? t === state.tab : t === pane) : t === state.tab)); });
+}
+function setTab(tab) {
+  if (tab === 'index' || tab === 'detail') { setPane(tab); return; }
+  state.tab = tab; $('app').dataset.pane = 'stage';
+  ['graph', 'map', 'photo', 'tables', 'data'].forEach((t) => { $('v-' + t).hidden = t !== tab; });
+  markTabs();
+  try { localStorage.setItem('scene-graph-tab', tab); } catch (e) { /* storage refused */ }
+  if (tab === 'graph') { drawGraph(); if (!gs.fitted) fitGraph(); }
+  if (tab === 'map') { if (!ms.fitted) fitMap(); else drawMap(); }
+  if (tab === 'photo') renderPhoto();
+  if (tab === 'tables') renderTable();
+  if (tab === 'data') renderData();
+}
+
+// ── start ────────────────────────────────────────────────────────────────────────
+renderHeader(); initGraph(); initMap(); initPhoto(); initTables(); renderIndex(); renderDetail();
+$('tabs').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setTab(b.dataset.tab); });
+$('q').addEventListener('input', (e) => { state.q = e.target.value.trim().toLowerCase(); renderIndex(); if (state.tab === 'tables') renderTable(); });
+let tab = 'graph';
+try { tab = localStorage.getItem('scene-graph-tab') || tab; } catch (e) { /* storage refused */ }
+const m = /^#(?:(graph|map|photo|tables|data)(?:~|$))?(?:(node|model|det|place)\.(.+))?$/.exec(location.hash || '');
+if (m && m[1]) tab = m[1];
+if (!['graph', 'map', 'photo', 'tables', 'data'].includes(tab)) tab = 'graph';
+if (m && m[2]) state.sel = {kind: m[2], id: m[2] === 'det' || m[2] === 'place' ? Number(m[3]) : m[3]};
+setTab(tab);
+if (state.sel) select(state.sel);
+const redraw = () => { if (state.tab === 'graph') { if (!gs.fitted) fitGraph(); else viewGraph(); } if (state.tab === 'map') { if (!ms.fitted) fitMap(); else drawMap(); } markTabs(); };
+if (window.ResizeObserver) new ResizeObserver(redraw).observe($('stage')); else window.addEventListener('resize', redraw);
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', drawMap);
+new MutationObserver(drawMap).observe(document.documentElement, {attributes: true, attributeFilter: ['data-theme']});
+})();
+</script>

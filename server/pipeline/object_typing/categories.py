@@ -30,9 +30,12 @@ VEGETATION_CATEGORIES: Final[frozenset[str]] = frozenset({
 # A billboard is a picture that turns to face the viewer; that reads as a plant at
 # a distance but as a cardboard cutout for a boat or a bridge, which the viewer
 # knows has a side. Vegetation keeps its card and billboard LODs.
+# A rock and an animal are solid in the same way: a boulder that turns to follow
+# the head is the plainest billboard there is in a headset.
 ALWAYS_MESH_CATEGORIES: Final[frozenset[str]] = frozenset({
     "boat", "ship", "dock", "bridge", "building", "tower", "person",
     "car", "truck", "bus", "motorcycle", "bicycle", "bench", "statue",
+    "rock", "animal",
 })
 
 # Classes whose detections in the OUTPAINTED part of the panorama are kept (see

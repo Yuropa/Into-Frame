@@ -35,7 +35,10 @@ A position (the `at` field) is one of
 y snaps to the surface the object stands on (`on`: ground | water | none; water classes
 default to water) unless the position gives it explicitly with `"snap": false`. The
 uniform scale is height_m over the mesh's own height, and the mesh's base is set on
-the surface whatever its origin.
+the surface whatever its origin. With `"fit_photo_box": true` a place or a scale takes
+the height from the photo_box instead: the height the box's top edge stands above the
+object's base at the distance the object is at (the agent read a fir as "0.45 of the
+frame at 15 m, so 6 m" and it rendered 1.6 times the photographed tree's height).
 
 A target is an object id, a unique object name, thing_<sourceIndex> (the graph's node
 id), or sourceIndex:<n>. Environment meshes (terrain, water, treeline, far_field,
@@ -313,6 +316,31 @@ class Editor:
                 how += f"; on the {on} at y {y:.2f}"
         return p, how
 
+    def box_height(self, box, base: np.ndarray) -> Optional[float]:
+        """The height in metres of something standing at `base` (world, its foot) whose top
+        is at the top edge of photo box [x, y, w, h]: where the ray through the box's top
+        centre passes over the foot. None when the ray never comes over it."""
+        if self.context is None:
+            return None
+        from pipeline.pipeline_context import ContextKey
+        intr = self.context.input_intrinsics(ContextKey.INTRINSICS)
+        if intr is None:
+            return None
+        x, y, w, h = [float(v) for v in box]
+        if max(x, y, w, h) > 1.5:
+            raise EditError("photo_box is in fractions of the photograph (0-1), not pixels")
+        d = np.array(intr.unproject((x + w / 2.0) * intr.width, y * intr.height, 1.0), dtype=float)
+        d = self.R @ (d / np.linalg.norm(d))
+        flat = d[0] ** 2 + d[2] ** 2
+        if flat < 1e-9:
+            return None
+        base = np.asarray(base, dtype=float)
+        along = ((base[0] - self.t[0]) * d[0] + (base[2] - self.t[2]) * d[2]) / flat
+        if along <= 0.0:
+            return None
+        height = float(self.t[1] + along * d[1] - base[1])
+        return height if height > 0.05 else None
+
     def _place_y(self, mesh: str, scale: float, surface_y: float) -> float:
         b = self.mesh_bounds(mesh)
         return surface_y - (float(b[0][1]) * scale if b is not None else 0.0)
@@ -383,6 +411,13 @@ class Editor:
         p, how = self.resolve_at(a.get("at") or {}, on)
         height = a.get("height_m") if a.get("height_m") is not None else a.get("length_m")
         scale = self._scale_for(mesh, a, 1.0)
+        fitted = ""
+        if a.get("fit_photo_box") and (a.get("at") or {}).get("photo_box") is not None:
+            measured = self.box_height(a["at"]["photo_box"], p)
+            if measured is not None:
+                scale = self._scale_for_height(mesh, measured, scale if scale is not None else 1.0)
+                fitted = f", {measured:.1f} m tall by its photo box" + (f" (asked {height} m)" if height is not None else "")
+                height = round(measured, 2)
         if scale is None:
             like = [o for o in self.objects if o.get("mesh") == mesh]
             scale = float(_v(like[0].get("scale"), (1, 1, 1))[1]) if like else 1.0
@@ -403,7 +438,8 @@ class Editor:
         warn = f"; beyond the far clip ({far:.0f} m), it will not draw" if far and dist > far else ""
         return {"id": o["id"], "name": o["name"], "mesh": mesh, "position": o["position"], "scale": round(scale, 4),
                 "note": f"{o['name']} ({mesh}) at {dist:.1f} m bearing {b:.1f} deg, "
-                        + (f"{'length' if a.get('height_m') is None and a.get('length_m') is not None else 'height'} {height} m" if height is not None else "size as others")
+                        + (fitted.lstrip(", ") if fitted else
+                           f"{'length' if a.get('height_m') is None and a.get('length_m') is not None else 'height'} {height} m" if height is not None else "size as others")
                         + f"; {how}{warn}"}
 
     def _do_move(self, a: dict) -> dict:
@@ -442,9 +478,19 @@ class Editor:
         self._guard(o, a)
         old = _v(o.get("scale"), (1, 1, 1))
         s = self._scale_for(str(o.get("mesh") or ""), a, float(old[1]))
+        box = (a.get("at") or {}).get("photo_box") if a.get("fit_photo_box") else None
+        if box is not None:
+            # The height the box's top stands above the object's own foot, where it is.
+            ext = self.object_extent(o)
+            bb = self.mesh_bounds(str(o.get("mesh") or ""))
+            if ext is not None and bb is not None:
+                foot = np.array([ext[2][0], float(_v(o.get("position"))[1]) + float(bb[0][1]) * float(old[1]), ext[2][2]])
+                measured = self.box_height(box, foot)
+                if measured is not None:
+                    s = self._scale_for_height(str(o.get("mesh") or ""), measured, float(old[1]))
         if s is None:
             if a.get("factor") is None:
-                raise EditError("scale needs height_m, length_m or factor")
+                raise EditError("scale needs height_m, length_m, factor, or a photo_box with fit_photo_box")
             s = float(old[1]) * float(a["factor"])
         # Keep the footprint centre and the base where they were (a mesh whose vertices sit away
         # from its origin would otherwise slide as it scales).

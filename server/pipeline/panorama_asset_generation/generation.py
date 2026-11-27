@@ -12,7 +12,7 @@ from pipeline.object_typing.categories import (
     ENVIRONMENT_CATEGORIES as _ENV_CATEGORIES, CategoryFilter, normalize_category,
     VEGETATION_CATEGORIES, GRASS_TUFT_CATEGORY, ALWAYS_MESH_CATEGORIES, OUTPAINTED_PLACEABLE_CATEGORIES,
 )
-from pipeline.grass_cover.cards import crossed_card_mesh, defringe_rgba, reference_cut_side
+from pipeline.grass_cover.cards import crossed_card_mesh, defringe_rgba, recolour_canvas_cast, reference_cut_side
 from util.lod_metrics import angular_height_px_from_box
 from pipeline.panorama_segmentation.panorama_region_result import RegionType
 from PIL import Image as PILImage
@@ -196,6 +196,9 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         seed: int = 0,
         billboard_distance_m: float = 10.0,
         min_mesh_angular_px: float = 90.0,
+        far_mesh_angular_px: float = 270.0,
+        level_tilted_meshes_deg: float = 35.0,
+        min_view_depth_ratio: dict | None = None,
         viewer_px_per_degree: float = 34.0,
         generator_type: str = "SAM3D",
         category_generators: dict[str, str] | None = None,
@@ -438,6 +441,24 @@ class PanoramaAssetGenerationConfiguration(PipelineStageConfiguration):
         # 60 px here against 250 px there leaves room for a correction as low as
         # ~0.25x before the ordering inverts.
         self.min_mesh_angular_px = float(min_mesh_angular_px)
+        # A subject beyond billboard_distance_m is still reconstructed when its box
+        # stands this many display pixels tall: Shark Fin's sea stack, the subject of
+        # the photograph, is 17 degrees of the view at 60.1 m and stood as a billboard
+        # because the distance gate is 60.0. Plants are left out (Species Assets builds
+        # those). 0 keeps the distance gate alone.
+        self.far_mesh_angular_px = float(far_mesh_angular_px)
+        # The reconstructor returns its own guess at where the camera stood. When that
+        # is further than this from level, the mesh is turned until it is level: the
+        # photographs are taken standing, and a rock face "seen from 73 degrees below"
+        # is a rock face lying on the ground (Shark Fin's rock_0: a slab 0.18 thick,
+        # the crop's outline when seen from above). 0 leaves the pose as returned.
+        self.level_tilted_meshes_deg = float(level_tilted_meshes_deg)
+        # Class -> the least depth along the view, as a fraction of the smaller of the
+        # mesh's width and height. One photograph says nothing about how deep a rock
+        # is, and the reconstructor's answer is often a shell; a boulder or a stack is
+        # about as deep as it is wide.
+        self.min_view_depth_ratio = {str(k).lower(): float(v) for k, v in
+                                     (min_view_depth_ratio if min_view_depth_ratio is not None else {"rock": 0.6}).items()}
         # Display angular resolution the threshold above is quoted against; must
         # match Scene Generation's for the two to be comparable at all.
         self.viewer_px_per_degree = float(viewer_px_per_degree)
@@ -641,6 +662,44 @@ class PanoramaAssetGenerationStage(PipelineStage):
             str(obj_class).lower(), self.config.generator_type
         )
 
+    def _settle_pose(self, mesh_key: str, mesh, obj_class: str) -> bool:
+        """Level a reconstruction whose own camera pose is far from level, and give a
+        class with a least depth (rocks) that depth along the view. Returns whether
+        the mesh changed; the stored front is the levelled one."""
+        front = self._mesh_fronts.get(mesh_key)
+        if front is None:
+            return False
+        changed = False
+        f = np.asarray(front, dtype=np.float64)
+        f /= max(float(np.linalg.norm(f)), 1e-9)
+        flat = np.array([f[0], 0.0, f[2]])
+        tilt = float(np.degrees(np.arcsin(np.clip(abs(f[1]), 0.0, 1.0))))
+        limit = self.config.level_tilted_meshes_deg
+        if limit > 0 and tilt > limit and float(np.linalg.norm(flat)) > 1e-3:
+            flat /= np.linalg.norm(flat)
+            mesh.mesh.apply_transform(_rotation_between(f, flat))
+            self.log_info(f"  {mesh_key}: the reconstructor placed the camera {tilt:.0f} deg "
+                          f"{'below' if f[1] < 0 else 'above'} level; mesh turned to stand level")
+            f = flat
+            self._mesh_fronts[mesh_key] = [float(v) for v in f]
+            changed = True
+        ratio = self.config.min_view_depth_ratio.get(str(obj_class).lower(), 0.0)
+        if ratio > 0 and abs(f[1]) < 0.5:
+            view = np.array([f[0], 0.0, f[2]])
+            view /= max(float(np.linalg.norm(view)), 1e-9)
+            across = np.array([view[2], 0.0, -view[0]])
+            verts = np.asarray(mesh.mesh.vertices, dtype=np.float64)
+            depth, width, height = (float(np.ptp(verts @ view)), float(np.ptp(verts @ across)), float(np.ptp(verts[:, 1])))
+            want = ratio * min(width, height)
+            if 1e-6 < depth < want:
+                stretch = np.eye(4)
+                stretch[:3, :3] += (want / depth - 1.0) * np.outer(view, view)
+                mesh.mesh.apply_transform(stretch)
+                self.log_info(f"  {mesh_key}: {depth / max(min(width, height), 1e-6):.2f} as deep as it is wide or tall; "
+                              f"deepened along the view to {ratio:.2f}")
+                changed = True
+        return changed
+
     def _meshify_groups(self, context: PipelineContext, gen: ModelGenerator, batch: list, asset_task) -> None:
         for (obj_class, bucket), (idx, depth, score) in batch:
             mesh_key = f"category_mesh_{obj_class}_{bucket}"
@@ -653,6 +712,11 @@ class PanoramaAssetGenerationStage(PipelineStage):
                     front = read_toward_camera(self.temp / mesh_key)
                     if front is not None:
                         self._mesh_fronts[mesh_key] = [float(v) for v in front]
+                # A mesh cached before the pose was levelled is levelled now (a level
+                # one is left alone, so this happens once).
+                if self._settle_pose(mesh_key, cached, obj_class):
+                    cached.fit_to_box(1.0, 1.0)
+                    context.add_mesh(mesh_key, cached)
                 self.advance_progress(asset_task)
                 continue
 
@@ -709,11 +773,14 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 if self.config.repair_meshes or not mesh.has_texture:
                     mesh = mesh.repair()
                 raw_faces = mesh.face_count
-                mesh = mesh.decimate(self.config.max_mesh_faces)
+                # rebake: the texture is drawn again for the decimated triangles (see
+                # Mesh.decimate; without it the boats and the rock came out marbled).
+                mesh = mesh.decimate(self.config.max_mesh_faces, rebake=True)
                 if not mesh.has_texture:
                     # Colour-only reconstruction (SAM3D's out-of-memory fallback):
                     # the client ignores COLOR_0, so bake it into a texture.
                     mesh = mesh.bake_vertex_colours()
+                self._settle_pose(mesh_key, mesh, obj_class)
                 mesh.fit_to_box(1.0, 1.0)
                 # Plants have no flat faces. When the reconstructor gives up on one
                 # it returns boxes (Rainier's flower_0, 99% of its area on axis-aligned
@@ -887,6 +954,12 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 texture, trimmed = _trim_ground_patch(texture)
                 if trimmed:
                     self.log_info(f"  {key}: trimmed {trimmed} px of ground from under the trunk")
+            if from_reference and obj_class in _COLOUR_FROM_PHOTO_CLASSES:
+                # Before the colours are scaled: the pale strands are told from the
+                # leaves by how grey they are.
+                texture, recoloured = recolour_canvas_cast(texture)
+                if recoloured:
+                    self.log_info(f"  {key}: {recoloured} px of pale strands (half canvas) took the foliage's colour")
             if from_reference and self.config.match_texture_colour and obj_class in _COLOUR_FROM_PHOTO_CLASSES:
                 # A generated reference is a catalogue tree in noon light (Rainier's
                 # cards were lime green against the photo's dark firs): bring it to
@@ -1425,7 +1498,17 @@ class PanoramaAssetGenerationStage(PipelineStage):
                 card_sources[pool_key] = card_source["idx"]
 
             always_mesh = obj_class in self.config.always_mesh_classes
-            within_threshold = scored if always_mesh else [s for s in scored if s["depth"] < threshold]
+            far_px = self.config.far_mesh_angular_px if obj_class not in VEGETATION_CATEGORIES else 0.0
+
+            def _prominent_far(s) -> bool:
+                b = s.get("box")
+                return bool(far_px > 0 and pano_h and b is not None and angular_height_px_from_box(
+                    b[3], pano_h, self.config.viewer_px_per_degree) >= far_px)
+
+            within_threshold = scored if always_mesh else [s for s in scored if s["depth"] < threshold or _prominent_far(s)]
+            if not always_mesh and within_threshold and all(s["depth"] >= threshold for s in within_threshold):
+                self.log_info(f"  {obj_class}::{bucket}: nothing within {threshold:.0f} m, but "
+                              f"{len(within_threshold)} instance(s) stand tall enough in the view to reconstruct")
             if not within_threshold:
                 continue  # nothing close enough to mesh -- billboard-only group
 
@@ -1755,6 +1838,18 @@ def _check_class_likeness(mesh, cls: str, threshold: float, log, label: str) -> 
     log(f"  {label}: looks like a {cls} with p={score:.2f}")
     if score < threshold:
         raise ValueError(f"rendered, it does not look like a {cls} (p={score:.2f} < {threshold:.2f})")
+
+
+def _rotation_between(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """The 4x4 rotation that takes unit vector a onto unit vector b by the shortest way."""
+    v = np.cross(a, b)
+    c = float(np.dot(a, b))
+    out = np.eye(4)
+    if c < -1.0 + 1e-9:
+        return out
+    vx = np.array([[0.0, -v[2], v[1]], [v[2], 0.0, -v[0]], [-v[1], v[0], 0.0]])
+    out[:3, :3] = np.eye(3) + vx + vx @ vx / (1.0 + c)
+    return out
 
 
 def _axis_aligned_fraction(mesh) -> float:

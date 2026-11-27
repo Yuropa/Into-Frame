@@ -247,11 +247,13 @@ def apply_detail(texture_rgb, ratio, row0: int, scale: float):
     return (up * rr).clip(0, 255).astype(np.uint8)
 
 
-def sharpen_strip(context, panorama, rgb_strip, alpha_strip, row0: int, max_width: int = 8192):
+def sharpen_strip(context, panorama, rgb_strip, alpha_strip, row0: int, max_width: int = 8192, plain=None):
     """An environment strip texture (rows row0.. of `panorama`, full width, at its
     resolution) rebuilt at the photograph's resolution with photo_detail_ratio.
     Returns an RGBA PIL image, or None when there is no photo or cone, or nothing
-    to gain. Pixels the foreground removal repainted get no detail."""
+    to gain. Pixels the foreground removal repainted get no detail, nor do the
+    strip's pixels under `plain` (a mask the strip's size: what the caller painted
+    there is not what was photographed there)."""
     import numpy as np
     from PIL import Image as PILImage
     from pipeline.pipeline_context import ContextKey
@@ -266,6 +268,12 @@ def sharpen_strip(context, panorama, rgb_strip, alpha_strip, row0: int, max_widt
         keep = np.asarray(removal.image.convert("L").resize((w, h), PILImage.NEAREST)) <= 127
     ratio, scale = photo_detail_ratio(panorama.image.convert("RGB"), photo.image, cone, keep=keep, max_width=max_width)
     rgb = apply_detail(np.ascontiguousarray(rgb_strip), ratio, row0, scale)
+    if plain is not None and np.asarray(plain).any():
+        size = (rgb.shape[1], rgb.shape[0])
+        up = np.asarray(PILImage.fromarray(np.ascontiguousarray(rgb_strip)).resize(size, PILImage.BICUBIC), dtype=np.float32)
+        m = np.asarray(PILImage.fromarray(np.asarray(plain, dtype=np.uint8) * 255).resize(size, PILImage.BILINEAR),
+                       dtype=np.float32)[..., None] / 255.0
+        rgb = (rgb * (1.0 - m) + up * m).clip(0, 255).astype(np.uint8)
     a = PILImage.fromarray((np.clip(alpha_strip, 0, 1) * 255).astype(np.uint8)).resize(
         (rgb.shape[1], rgb.shape[0]), PILImage.BILINEAR)
     return PILImage.fromarray(np.dstack([rgb, np.asarray(a)]), "RGBA")

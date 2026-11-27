@@ -616,6 +616,8 @@ class RegionMapStage(PipelineStage):
                         smooth_min_distance_m=cfg.plan_smooth_min_distance_m,
                         prior_width_m=prior_width,
                         prior_width_tol=cfg.plan_width_tolerance,
+                        standing_radius_m=float(((context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {})
+                                                 .get("standing_pedestal") or {}).get("radius_m") or 0.0),
                     ),
                     self.log_info,
                 )
@@ -639,10 +641,17 @@ class RegionMapStage(PipelineStage):
                 cell_m = grid_m / res
                 W = type_idx_map.shape[1]
                 lon_c = np.radians(((np.arange(W) + 0.5) / W - 0.5) * 360.0)
-                edge_r = grid_m / 2.0 - 2.0 * cell_m
-                ex = np.clip(((edge_r * np.sin(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
-                ez = np.clip(((edge_r * np.cos(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
-                ocean_cols = region_map[ez, ex] == int(RegionType.WATER)
+                # Read over the grid's last metres, not on its outermost cells: the
+                # plan's shoreline smoothing rounds the water off against the array's
+                # border, and at two cells in (0.2 m) Shark Fin's sea was "land" over
+                # 20 degrees of its carried coast, so the far field's apron stopped
+                # short there and the sea ended in a ledge under the sky.
+                ocean_cols = np.zeros(W, dtype=bool)
+                for back_m in (2.0 * cell_m, 2.0, 4.0, 6.0, 8.0):
+                    edge_r = grid_m / 2.0 - back_m
+                    ex = np.clip(((edge_r * np.sin(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
+                    ez = np.clip(((edge_r * np.cos(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
+                    ocean_cols |= region_map[ez, ex] == int(RegionType.WATER)
                 if plan.channel is not None and ocean_cols.any():
                     # A river leaves the grid through its channel, which is not
                     # the sea reaching the horizon: carried out to 5 km by the

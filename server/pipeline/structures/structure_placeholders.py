@@ -8,8 +8,11 @@ harness got these because its planner wrote them as boxes. This stage does the b
 version of that: for every visible plan landmark of a placeholder category that Scene
 Generation did not place as a mesh near that bearing, it builds simple massing
 
-  bridge    a deck spanning the river channel from the terrain plan, on piers, with
-            parapets, perpendicular to the channel axis at the plan distance
+  bridge    the bridge's own reconstruction when asset generation made one (its
+            detection is kept in the far plate, so Scene Generation never places it),
+            stretched across the river channel from the terrain plan; without one, a
+            deck on piers with parapets. Perpendicular to the channel axis at the plan
+            distance either way
   building  a block of the plan height facing the camera
 
 at min(plan distance, far_clip_fraction x far clip), scaled so its angular size is kept,
@@ -139,11 +142,12 @@ class StructurePlaceholdersStage(PipelineStage):
     def _dbearing(a: float, b: float) -> float:
         return abs((a - b + 180.0) % 360.0 - 180.0)
 
-    def _detection_colour(self, context: PipelineContext, photo: Optional[PILImage.Image], category: str,
-                          phrase: str, bearing: float, hfov: float) -> tuple[Optional[tuple[int, int, int]], str]:
-        """Median colour of the photograph inside the best matching detection box."""
+    def _detection_box(self, context: PipelineContext, photo: Optional[PILImage.Image], category: str,
+                       phrase: str, bearing: float, hfov: float) -> Optional[tuple[int, tuple[float, float, float, float]]]:
+        """The detection of this category (or carrying this name) nearest the bearing,
+        within 30 degrees: its index and its box in the photograph (x, y, w, h)."""
         if photo is None:
-            return None, "no photograph"
+            return None
         count = int(context.input_object(ContextKey.OBJECT_COUNT) or 0)
         W, H = photo.size
         words = {w for w in re.split(r"\W+", phrase.lower()) if len(w) > 2}
@@ -163,9 +167,18 @@ class StructurePlaceholdersStage(PipelineStage):
             d = self._dbearing(az, bearing)
             if d <= 30.0 and (best is None or d < best[0]):
                 best = (d, idx, (x, y, w, h))
+        return None if best is None else (best[1], best[2])
+
+    def _detection_colour(self, context: PipelineContext, photo: Optional[PILImage.Image], category: str,
+                          phrase: str, bearing: float, hfov: float) -> tuple[Optional[tuple[int, int, int]], str]:
+        """Median colour of the photograph inside the best matching detection box."""
+        if photo is None:
+            return None, "no photograph"
+        W, H = photo.size
+        best = self._detection_box(context, photo, category, phrase, bearing, hfov)
         if best is None:
             return self._horizon_colour(photo, bearing, hfov)
-        _, idx, (x, y, w, h) = best
+        idx, (x, y, w, h) = best
         box = (max(0, int(x)), max(0, int(y)), min(W, int(math.ceil(x + w))), min(H, int(math.ceil(y + h))))
         if box[2] - box[0] < 2 or box[3] - box[1] < 2:
             return None, f"detection {idx} box too small"
@@ -176,6 +189,64 @@ class StructurePlaceholdersStage(PipelineStage):
         keep = arr[~skyish] if (~skyish).sum() >= max(8, 0.2 * len(arr)) else arr
         med = np.median(keep, axis=0)
         return tuple(int(round(float(c))) for c in med), f"median of detection {idx}'s box ({box[2]-box[0]}x{box[3]-box[1]} px)"
+
+    def _reconstructed_bridge(self, context: PipelineContext, photo: Optional[PILImage.Image], phrase: str, bearing: float,
+                              hfov: float, centre: np.ndarray, u: np.ndarray, half_span: float, water_y: float,
+                              deck_top: float, deck_width: float) -> Optional[tuple[trimesh.Trimesh, str, str]]:
+        """The bridge's reconstruction laid across the channel, in terrain-local
+        coordinates: its long axis along `u` over the span, its foot just under the
+        water, the face it was photographed from towards the camera. Its height is the
+        span times the proportions of its detection box in the photograph (Paris's
+        Pont d'Iena: 307 x 25 px, 9 m on a 114 m span), no lower than the placeholder
+        deck and no taller than the mesh's own proportions. None when asset generation
+        made no bridge mesh."""
+        source, src = None, None
+        for i in range(8):
+            cand = context.input_mesh(f"category_mesh_bridge_{i}")
+            if cand is not None and cand.mesh is not None and len(cand.mesh.vertices):
+                source, src = f"category_mesh_bridge_{i}", cand
+                break
+        if src is None:
+            return None
+        tm = src.mesh.copy()
+        lo, hi = np.asarray(tm.bounds[0], dtype=float), np.asarray(tm.bounds[1], dtype=float)
+        ext = hi - lo
+        long_axis = 0 if ext[0] >= ext[2] else 2
+        across = 2 - long_axis
+        if ext[long_axis] < 1e-6 or ext[1] < 1e-6 or ext[across] < 1e-6:
+            return None
+        span = 2.0 * half_span
+        own_h = span * ext[1] / ext[long_axis]
+        target_h, why = deck_top - water_y, "the plan height"
+        best = self._detection_box(context, photo, "bridge", phrase, bearing, hfov)
+        if best is not None and best[1][2] > 4 and best[1][3] > 2:
+            target_h = span * best[1][3] / best[1][2]
+            why = f"the proportions of detection {best[0]}'s box ({best[1][2]:.0f}x{best[1][3]:.0f} px)"
+        height = float(min(max(target_h, deck_top - water_y), own_h))
+        sink = 0.05 * height
+        # Local axes of the mesh onto the scene: long axis -> u, up -> up, the third
+        # onto the channel axis with the sign that keeps it a rotation (no mirror).
+        n = np.array([-u[2], 0.0, u[0]])
+        e_long, e_across = (u, n) if long_axis == 0 else (n, u)
+        basis = np.zeros((3, 3))
+        basis[:, long_axis], basis[:, 1], basis[:, across] = e_long, (0.0, 1.0, 0.0), e_across
+        if np.linalg.det(basis) < 0:
+            basis[:, across] = -basis[:, across]
+        # The reconstruction's +Z is the side it was photographed from; turn it half
+        # round when that side would face away from the camera.
+        if float(np.dot(basis[:, 2], -centre)) < 0:
+            basis[:, 0], basis[:, 2] = -basis[:, 0], -basis[:, 2]
+        scale = np.ones(3)
+        scale[long_axis], scale[1], scale[across] = span / ext[long_axis], (height + sink) / ext[1], deck_width / ext[across]
+        mid = (lo + hi) / 2.0
+        m = np.eye(4)
+        m[:3, :3] = basis @ np.diag(scale)
+        m[:3, 3] = (np.array([centre[0], water_y - sink, centre[2]])
+                    - m[:3, :3] @ np.array([mid[0], lo[1], mid[2]]))
+        tm.apply_transform(m)
+        note = (f"{source} laid {span:.0f} m across the channel, {height:.1f} m above water from {why} "
+                f"(its own proportions would stand {own_h:.1f} m), {deck_width:.0f} m deep")
+        return tm, source, note
 
     @staticmethod
     def _horizon_colour(photo: PILImage.Image, bearing: float, hfov: float) -> tuple[Optional[tuple[int, int, int]], str]:
@@ -369,12 +440,44 @@ class StructurePlaceholdersStage(PipelineStage):
                 water_y = float(channel.get("water_y", 0.0))
                 bank_y = float(channel.get("bank_y", water_y))
                 xc = offset + slope * lz
+                if grid_m > 0 and max(abs(xc), abs(lz)) > grid_m / 2.0:
+                    # Beyond the terrain there is no river to cross: the bridge stood
+                    # over nothing, behind the backdrop that carries its picture, and
+                    # showed over the backdrop's canopy as a grey sliver in the sky
+                    # (Paris's Pont d'Iena, laid 368 m out past a +-200 m grid).
+                    self.log_info(f"  '{name}' (bridge, {lm.get('evidence')}): bearing {bearing:.0f}, {d:.0f} m is beyond the "
+                                  f"terrain (+-{grid_m / 2.0:.0f} m), no water under it; left to the backdrop's picture of it")
+                    records.append({"name": name, "category": category, "status": "beyond the terrain",
+                                    "bearing_deg": bearing, "distance_m": d, "plan_distance_m": distance})
+                    self.advance_progress(task)
+                    continue
                 axis = np.array([slope, 0.0, 1.0]); axis /= np.linalg.norm(axis)
                 u = np.array([axis[2], 0.0, -axis[0]])  # across the river
                 centre = np.array([xc, 0.0, lz])
                 deck_top = max(water_y + h, bank_y + 1.0)
                 deck_bot = deck_top - cfg.deck_thickness_m
                 half_span = width / 2.0 + 12.0
+                built = self._reconstructed_bridge(context, photo, str(lm.get("phrase") or name), bearing, hfov,
+                                                   centre, u, half_span, water_y, deck_top, cfg.deck_width_m)
+                if built is not None:
+                    tm, source, note = built
+                    key = f"structure_{_slug(name)}"
+                    context.add_mesh(key, Mesh(tm))
+                    obj = Object3D.mesh(key, 0.0, 0.0, 0.0)
+                    obj.name = name
+                    obj.rotation = vec3(0.0, yaw, 0.0)
+                    scene.add_object(obj)
+                    self.log_info(f"  '{name}' (bridge, {lm.get('evidence')}): {note}; bearing {bearing:.0f}, {d:.0f} m"
+                                  + (f" (plan {distance:.0f} m, scaled x{f:.2f})" if f < 0.999 else ""))
+                    records.append({"name": name, "category": category, "status": "placed", "mesh": key, "source_mesh": source,
+                                    "bearing_deg": bearing, "distance_m": d, "plan_distance_m": distance, "height_m": h,
+                                    "note": note})
+                    plan.overrides.append({"field": f"structure: {name}", "plan": [bearing, distance, height],
+                                           "evidence": lm.get("evidence"), "because": lm.get("because", ""), "measured": None,
+                                           "measured_source": "none (absorbed into the backdrop)", "used": [bearing, d, h],
+                                           "source": "plan", "note": note})
+                    self.advance_progress(task)
+                    continue
                 parts.append(_oriented_box(centre + np.array([0.0, (deck_top + deck_bot) / 2.0, 0.0]), u, half_span,
                                            cfg.deck_thickness_m / 2.0, cfg.deck_width_m / 2.0))
                 for sw in (-1, 1):

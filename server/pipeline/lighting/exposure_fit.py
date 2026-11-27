@@ -44,6 +44,7 @@ Output  exposure_fit.json in this stage's folder (render-scene applies it),
 from __future__ import annotations
 
 import json
+import re
 import math
 import os
 import subprocess
@@ -108,6 +109,12 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         object_gain: bool = True,
         object_gain_range: Optional[list[float]] = None,
         min_object_blocks: int = 60,
+        object_colour_gains: bool = True,
+        object_colour_gain_range: Optional[list[float]] = None,
+        min_object_px: int = 250,
+        class_colour_gains: Optional[list[str]] = None,
+        class_colour_gain_range: Optional[list[float]] = None,
+        min_class_px: int = 2000,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         self.width = int(width)
@@ -133,6 +140,18 @@ class ExposureFitConfiguration(PipelineStageConfiguration):
         # ground: fit on the terrain and water pixels (see the module text);
         # percentiles: the earlier fit on every near pixel's luminance percentiles.
         self.mode = str(mode)
+        # A colour gain of its own for each model that stands once in the scene and
+        # is seen in the photo view (see fit_object_colour_gains).
+        self.object_colour_gains = bool(object_colour_gains)
+        self.object_colour_gain_range = [float(v) for v in (object_colour_gain_range or [0.45, 2.5])]
+        self.min_object_px = int(min_object_px)
+        # One colour gain for all the instanced models of a class, measured on their
+        # pixels together (see fit_class_colour_gains). Trees: a stand is where the
+        # photograph has trees. Not flowers: a meadow's copies stand in front of
+        # whatever the photograph has there (see object_gain_range in config.yaml).
+        self.class_colour_gains = [str(c).lower() for c in (class_colour_gains if class_colour_gains is not None else ["tree"])]
+        self.class_colour_gain_range = [float(v) for v in (class_colour_gain_range or [0.3, 2.5])]
+        self.min_class_px = int(min_class_px)
         self.far_m = float(far_m)
         self.ambient_max = float(ambient_max)
         self.block_px = max(2, int(block_px))
@@ -272,6 +291,118 @@ def fit_light_scales_ground(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray,
                 if cand is None or e < cand[0]:
                     cand = (e, float(g))
             out["object_gain"] = round(cand[1], 3)
+    return out
+
+
+def fit_object_colour_gains(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit: np.ndarray, lit: np.ndarray,
+                            ids: np.ndarray, keys: list, eligible: set, sun_scale: float, ambient_scale: float,
+                            tint, gain_range: tuple[float, float] = (0.45, 2.5), min_px: int = 250) -> dict:
+    """An albedo gain per colour channel for each eligible model, under the fitted lights.
+
+    One gain for every placed object is a brightness; a reconstructed model whose
+    texture was matched to the photographed crop is that crop's colour under the
+    photograph's light, not an albedo, and under the fitted lights it comes out
+    another colour (Shark Fin's fin rock, orange in the photograph at
+    0.33/0.19/0.17, rendered grey at 0.27/0.22/0.20: the dusk sky's ambient is
+    x40 and green-blue). `ids` is the renderer's object-id pass of the photo view
+    (0: no model; i: keys[i - 1], a [kind, key] pair); `eligible` the mesh keys
+    that stand once in the scene, so that the pixels are the photographed object
+    itself. Per channel the gain that brings the model's pixels to the
+    photograph's, L1 in log (the median pixel decides, not a misplaced rim)."""
+    from scipy.ndimage import binary_erosion
+    l_unlit = _lin(unlit)
+    t = np.asarray(tint if tint is not None else (1.0, 1.0, 1.0), dtype=np.float32)
+    lit_part = sun_scale * (_lin(sun) - l_unlit) + ambient_scale * t * (_lin(amb) - l_unlit)
+    out: dict = {}
+    for i, pair in enumerate(keys, start=1):
+        kind, key = (pair[0], pair[1]) if isinstance(pair, (list, tuple)) and len(pair) == 2 else (None, None)
+        if kind != "mesh" or key not in eligible:
+            continue
+        m = binary_erosion(ids == i, iterations=1) & lit
+        if int(m.sum()) < min_px:
+            continue
+        g = _colour_gain(photo, l_unlit, lit_part, m, gain_range)
+        # The same end of the range on all three channels is not a colour, it is
+        # other pixels: Shark Fin's offshore reef stood a little off where it was
+        # photographed, its 346 px lay on the sunlit water beside it (0.73/0.56/0.51
+        # against a rock at 0.33/0.30/0.29) and x2.5 x2.5 x2.5 made a dark ledge a
+        # pale glassy slab. Such a model keeps its own colour.
+        for end in gain_range:
+            if all(abs(v - end) < 1e-3 for v in g["gain"]):
+                g["rejected"] = g["gain"]
+                g["gain"] = [1.0, 1.0, 1.0]
+                g["render_after"] = g["render_before"]
+        out[key] = g
+    return out
+
+
+def _colour_gain(photo: np.ndarray, l_unlit: np.ndarray, lit_part: np.ndarray, m: np.ndarray,
+                 gain_range: tuple[float, float]) -> dict:
+    """The gain per channel that brings the pixels of `m` to the photograph's (L1 in log)."""
+    u, lp, want = l_unlit[m], lit_part[m], np.log(photo[m] + 0.02)
+    gain = []
+    for ch in range(3):
+        cand = None
+        for g in np.geomspace(gain_range[0], gain_range[1], 61):
+            e = float(np.abs(np.log(_enc(u[:, ch] + g * lp[:, ch]) + 0.02) - want[:, ch]).mean()) + 0.004 * math.log(g) ** 2
+            if cand is None or e < cand[0]:
+                cand = (e, float(g))
+        gain.append(round(cand[1], 3))
+    gain = _limit_hue(gain, gain_range)
+    return {"gain": gain, "n_px": int(m.sum()),
+            "photo": [round(float(v), 3) for v in photo[m].mean(axis=0)],
+            "render_before": [round(float(v), 3) for v in _enc(u + lp).mean(axis=0)],
+            "render_after": [round(float(v), 3) for v in _enc(u + np.asarray(gain, dtype=np.float32) * lp).mean(axis=0)]}
+
+
+def _limit_hue(gain: list, gain_range: tuple[float, float], hue: float = 1.5) -> list:
+    """`gain` with each channel within x`hue` of the three's geometric mean.
+
+    The channels are fitted one by one, and pixels that are not the model's send
+    them to opposite ends of the range: Paris's moored houseboat, placed a little
+    off its photographed spot, was measured on the plane trees behind it and
+    took x2.5 x2.5 x0.45, a white hull turned yellow. Two channels at opposite
+    ends is no colour at all (identity); otherwise the tint a model may take is
+    bounded, its brightness is not."""
+    lo, hi = gain_range
+    at_lo = [abs(v - lo) < 1e-3 for v in gain]
+    at_hi = [abs(v - hi) < 1e-3 for v in gain]
+    if any(at_lo) and any(at_hi):
+        return [1.0, 1.0, 1.0]
+    mean = float(np.exp(np.mean(np.log(np.asarray(gain, dtype=np.float64)))))
+    return [round(float(np.clip(v, mean / hue, mean * hue)), 3) for v in gain]
+
+
+def fit_class_colour_gains(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, unlit: np.ndarray, lit: np.ndarray,
+                           ids: np.ndarray, keys: list, classes: dict, sun_scale: float, ambient_scale: float,
+                           tint, gain_range: tuple[float, float] = (0.3, 2.5), min_px: int = 2000) -> dict:
+    """One albedo gain per colour channel for all the models of a class, under the fitted lights.
+
+    A model that is instanced has no pixels of its own to be measured on (see
+    fit_object_colour_gains), and the one gain for every placed object stops at
+    its range: Rainier's generated firs, at [0.18, 0.22, 0.14] of albedo, stood
+    olive-brown under a meadow's lights (ambient x5.4, tinted yellow for the
+    ground) in front of a forest the photograph has near black, with the scene's
+    gain at its floor of x0.7. A stand of one class is where the photograph has
+    that class: the pixels of all its models together are fitted as one, and the
+    median decides, so a copy standing in front of something else does not.
+    `classes` maps a class to the mesh keys of its models; the result maps the
+    class to the gain and its measurements."""
+    from scipy.ndimage import binary_erosion
+    l_unlit = _lin(unlit)
+    t = np.asarray(tint if tint is not None else (1.0, 1.0, 1.0), dtype=np.float32)
+    lit_part = sun_scale * (_lin(sun) - l_unlit) + ambient_scale * t * (_lin(amb) - l_unlit)
+    index = {pair[1]: i for i, pair in enumerate(keys, start=1)
+             if isinstance(pair, (list, tuple)) and len(pair) == 2 and pair[0] == "mesh"}
+    out: dict = {}
+    for cls, members in classes.items():
+        wanted = [index[k] for k in members if k in index]
+        if not wanted:
+            continue
+        m = binary_erosion(np.isin(ids, wanted), iterations=1) & lit
+        if int(m.sum()) < min_px:
+            continue
+        out[cls] = {**_colour_gain(photo, l_unlit, lit_part, m, gain_range), "models": sorted(k for k in members if k in index)}
     return out
 
 
@@ -456,6 +587,62 @@ class ExposureFitStage(PipelineStage):
                 f"{fit['render_median_before']} -> {fit['render_median_after']}; err {fit['err_before']:.3f} -> "
                 f"{fit['err_after']:.3f}; colour ratio after {fit['colour_ratio_after']}"
                 + ("; AT THE CEILING: the ground is darker than the lights can lift" if fit["at_ceiling"] else ""))
+            ids_path = out / "photo_object_ids.npy"
+            if cfg.object_colour_gains and ids_path.exists() and (out / "photo_object_ids.json").exists():
+                try:
+                    ids = np.load(ids_path)
+                    keys = json.loads((out / "photo_object_ids.json").read_text())
+                    # A model that stands once is the photographed object where it was
+                    # photographed; a model that is instanced is painted where the
+                    # photograph may show something else.
+                    count: dict = {}
+                    for o in json.loads(fit_scene.read_text()).get("objects") or []:
+                        for key in {o.get("mesh")} | {lv.get("mesh") for lv in (o.get("lods") or [])}:
+                            if key:
+                                count[key] = count.get(key, 0) + 1
+                    eligible = {k for k, n in count.items() if n == 1 and not str(k).endswith("_card")}
+                    gains = fit_object_colour_gains(
+                        photo, passes["sun"], passes["amb"], passes["unlit"], lit, ids, keys, eligible,
+                        float(fit["sun_scale"]), float(fit["ambient_scale"]), fit.get("ambient_tint"),
+                        tuple(cfg.object_colour_gain_range), cfg.min_object_px) if ids.shape == depth.shape else {}
+                    if gains:
+                        fit["object_gains"] = {k: v["gain"] for k, v in gains.items()}
+                        fit["object_gains_detail"] = gains
+                        for k, v in gains.items():
+                            if v.get("rejected"):
+                                self.log_info(f"  no colour gain for {k}: x{v['rejected']} on {v['n_px']} px is the end of the "
+                                              f"range on every channel (photograph {v['photo']}, render {v['render_before']}): "
+                                              f"those pixels are not the model's")
+                                continue
+                            self.log_info(f"  colour gain for {k}: x{v['gain']} on {v['n_px']} px (photograph {v['photo']}, "
+                                          f"render {v['render_before']} -> {v['render_after']})")
+                    if cfg.class_colour_gains and ids.shape == depth.shape:
+                        # The models by class: the one in the model's name, else the
+                        # class an agent placed the object as.
+                        classes: dict = {}
+                        for o in json.loads(fit_scene.read_text()).get("objects") or []:
+                            for key in {o.get("mesh")} | {lv.get("mesh") for lv in (o.get("lods") or [])}:
+                                if not key:
+                                    continue
+                                named = re.match(r"category_mesh_([a-z_]+?)_\d+", str(key))
+                                c = named.group(1) if named else str((o.get("agent") or {}).get("class") or "").lower()
+                                if c in cfg.class_colour_gains:
+                                    classes.setdefault(c, set()).add(key)
+                        class_gains = fit_class_colour_gains(
+                            photo, passes["sun"], passes["amb"], passes["unlit"], lit, ids, keys, classes,
+                            float(fit["sun_scale"]), float(fit["ambient_scale"]), fit.get("ambient_tint"),
+                            tuple(cfg.class_colour_gain_range), cfg.min_class_px)
+                        for c, v in class_gains.items():
+                            # Every model of the class takes it, seen in the photo view or not
+                            # (a variant, a far level of detail): they are one population.
+                            for key in classes[c]:
+                                fit.setdefault("object_gains", {}).setdefault(key, v["gain"])
+                            self.log_info(f"  colour gain for the {len(classes[c])} {c} model(s): x{v['gain']} on {v['n_px']} px of "
+                                          f"{len(v['models'])} of them (photograph {v['photo']}, render {v['render_before']} -> {v['render_after']})")
+                        if class_gains:
+                            fit["class_gains_detail"] = class_gains
+                except Exception as exc:
+                    self.log_warning(f"Exposure fit: no per-model colour gains ({type(exc).__name__}: {exc})")
         else:
             fit = fit_light_scales(photo, passes["sun"], passes["amb"], passes["unlit"], near, cfg.percentiles,
                                    cfg.scale_min, cfg.scale_max, cfg.grid_steps)
@@ -471,7 +658,7 @@ class ExposureFitStage(PipelineStage):
             scene.lighting.fit_sun_scale = float(fit["sun_scale"])
             scene.lighting.ambient_scale = float(fit["ambient_scale"])
             scene.lighting.fit = {k: fit[k] for k in ("sun_scale", "ambient_scale", "near_m", "n_near", "err_before", "err_after",
-                                                       "ambient_tint", "object_gain", "mode") if k in fit}
+                                                       "ambient_tint", "object_gain", "object_gains", "mode") if k in fit}
             sun = scene.lighting.sun() or {}
             self.log_info(f"Sun intensity {sun.get('intensity_base')} -> {sun.get('intensity')} for the client")
         else:

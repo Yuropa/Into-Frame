@@ -537,7 +537,7 @@ class TreelineBackdropStage(PipelineStage):
         """Squat or boxy scraps of canopy (a strip of shadowed ground, a trunk cut
         off by the run test) stood as dark slabs on the horizon (Rainier). A
         component under min_share of the canopy goes when it is wider than tall
-        or fills over 75% of its box, and any component filling over 80%; a conifer is tall and pointed (fill ~0.5),
+        or fills over 75% of its box, and any component filling over 80% that is not a long band; a conifer is tall and pointed (fill ~0.5),
         and a broadleaf treeline is one large band. A component darker than
         min_luma_ratio of the panorama's canopy goes too: Rainier's shadowed
         forest came through the delit panorama as a streaked near-black block
@@ -559,8 +559,11 @@ class TreelineBackdropStage(PipelineStage):
                 drop[k] = True
             # A filled box is never a canopy silhouette, whatever its share: once
             # near trees stopped being restored, Rainier's shadow block (fill 0.90)
-            # was 11% of what was left.
-            if fill > 0.8:
+            # was 11% of what was left. A long level band is one, though: Paris's
+            # right bank is a row of planes 34 degrees wide and 7 tall, the largest
+            # piece of the canopy (19%), fill 0.81, and without it the bank ended
+            # in a bare slab under open sky.
+            if fill > 0.8 and not (w >= 4 * h and sizes[k] >= min_share * total):
                 drop[k] = True
             mask = labels[sl] == k
             mean = rgb[sl][mask].astype(np.float64).mean(axis=0)

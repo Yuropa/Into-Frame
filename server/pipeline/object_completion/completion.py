@@ -155,6 +155,9 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         background_diff: float = 18.0,
         reference_view_classes: list[str] | None = None,
         reference_strength: float = 0.9,
+        people_aboard: bool = False,
+        clear_view_px: int = 256,
+        keep_view_strength: float = 0.7,
         reference_candidates: int = 3,
         min_describe_px: int = 48,
         director_model: str | None = "anthropic:claude-sonnet-5-5",
@@ -220,9 +223,34 @@ class ObjectCompletionConfiguration(PipelineStageConfiguration):
         self.reference_view_classes = frozenset(
             str(c).lower() for c in (reference_view_classes if reference_view_classes is not None
                                      else ["boat", "ship", "dock", "bridge", "tower", "building",
-                                           "statue", "monument", "car", "truck", "bus", "flower", "tree"])
+                                           "statue", "monument", "car", "truck", "bus", "flower", "tree",
+                                           # A rock is photographed lit from one side, cut by the
+                                           # water or the frame; reconstructed from that crop Shark
+                                           # Fin's came back a flat slab.
+                                           "rock",
+                                           # A person is a few dozen pixels of the photograph
+                                           # (Shark Fin's are 16 x 33): the redrawn figure is what
+                                           # there is to reconstruct.
+                                           "person", "animal"])
         )
         self.reference_strength = float(reference_strength)
+        # People are not in the scene for now (Inventory Review erases them: nothing
+        # animates a person yet), so a boat's reference is drawn with empty decks
+        # whatever the photograph shows aboard. True draws the director's crowd.
+        self.people_aboard = bool(people_aboard)
+        # A compact object whose cut-out the director calls a clear view (`follow:
+        # crop`, nobody on it) and that is at least this many pixels on its short
+        # side is modelled from the cut-out itself, with no reference view drawn.
+        # Shark Fin's sea stack, 500 px of unobstructed three-quarter view, was
+        # redrawn at strength 0.75 into a rock with combed vertical flutes, a round
+        # cave mouth and a dark plinth, and that is the model the scene carried;
+        # the builds that reconstructed the cut-out had the photograph's stack.
+        # 0 draws a reference view for every directed crop.
+        self.clear_view_px = max(0, int(clear_view_px))
+        # img2img strength of a reference view that keeps a clear crop's viewpoint
+        # (see _reference_views). Paris's tour boat: 0.7 kept the boat and emptied
+        # its decks; at 0.8 and over it was another boat.
+        self.keep_view_strength = float(keep_view_strength)
         self.reference_candidates = max(1, int(reference_candidates))
         # Crops at least this large (longest side, px) are described by Florence-2
         # for the reference-view prompt; smaller ones are too few pixels to read.
@@ -777,6 +805,34 @@ class ObjectCompletionStage(PipelineStage):
                     "height_m": float(d["height_m"]) if d.get("height_m") else None, "source": "director"}
         context.add_object(OBJECT_KINDS_KEY, kinds_record)
         context.add_object(ASSET_DIRECTIONS_KEY, {str(i): d for i, d in directions.items()})
+        if cfg.clear_view_px:
+            for idx in [i for i in sources if i in directions]:
+                d = directions[idx]
+                box = sources[idx].getchannel("A").getbbox()
+                short = min(box[2] - box[0], box[3] - box[1]) if box else 0
+                if (d.get("follow") == "crop" and str(d.get("form") or "compact") == "compact"
+                        and str(d.get("people") or "none") == "none" and short >= cfg.clear_view_px):
+                    self.log_info(f"  crop_{idx}: the cut-out is a clear view {short} px on its short side; "
+                                  f"modelled from it, no reference view drawn")
+                    del sources[idx]
+            if not sources:
+                return 0
+            # A clear view that is not modelled as it stands (a crowd aboard, a long
+            # hull) is still the view to draw: Paris's tour boat, 616x460 px from
+            # behind and above, was redrawn broadside from the words at strength
+            # 0.92 and came back a generic lake ferry three rounds running. Redrawn
+            # at keep_view_strength the hull, the railings, the wheelhouse and the
+            # viewpoint are the crop's, the decks are empty, and the model's front
+            # is the side the photograph shows.
+            for idx in [i for i in sources if i in directions]:
+                d = directions[idx]
+                box = sources[idx].getchannel("A").getbbox()
+                short = min(box[2] - box[0], box[3] - box[1]) if box else 0
+                if (d.get("follow") == "crop" and str(d.get("form") or "compact") in ("compact", "long")
+                        and short >= cfg.clear_view_px):
+                    d["keep_view"] = True
+                    self.log_info(f"  crop_{idx}: the cut-out is a clear view {short} px on its short side; "
+                                  f"its reference view keeps that viewpoint")
         photo_img = context.input_image(ContextKey.INPUT)
         photo_pil = photo_img.image.convert("RGB") if photo_img is not None else None
         factor = float(context.input_object(DETECTION_PHOTO_FACTOR_KEY) or 1.0)
@@ -826,7 +882,8 @@ class ObjectCompletionStage(PipelineStage):
         return director, directions
 
     @staticmethod
-    def _directed_prompt(cls: str, d: dict, src: PILImage.Image, subject: Optional[str], base_strength: float) -> tuple[str, float, Optional[float]]:
+    def _directed_prompt(cls: str, d: dict, src: PILImage.Image, subject: Optional[str], base_strength: float,
+                         people_aboard: bool = False, keep_view_strength: float = 0.7) -> tuple[str, float, Optional[float]]:
         """(prompt, strength, wanted length/height) for a crop the director described."""
         text = str(subject or d.get("subject") or "").strip().rstrip(".")
         what = str(d.get("what") or cls)
@@ -845,6 +902,9 @@ class ObjectCompletionStage(PipelineStage):
             framing = ("A single plant, the whole plant from the base of the stem to the top in frame with empty white "
                        "space on every side, seen from the side")
             style = "botanical studio photograph, even soft light, sharp"
+        elif d.get("keep_view"):
+            # The viewpoint is the crop's (see _reference_views); no side-on aspect to hold a candidate to.
+            framing = f"The whole {what} in frame, in three-quarter view"
         elif form == "long":
             want_aspect = float(np.clip(aspect, 2.0, 8.0)) if aspect else None
             framing = (f"The whole {what} in frame from end to end, seen broadside in profile at eye level"
@@ -855,14 +915,21 @@ class ObjectCompletionStage(PipelineStage):
             framing = "The whole object in frame, seen from the side at eye level, three-quarter view"
         people = str(d.get("people") or "none")
         crew = ""
-        if people == "crowd":
+        if people != "none" and not people_aboard:
+            crew = " Its decks are empty, with nobody aboard."
+            if d.get("keep_view"):
+                # The crowd is in the picture being redrawn; what stands in its place is named.
+                crew = " Its decks are empty, with nobody aboard: bare decks and rows of empty seats."
+        elif people == "crowd":
             crew = " Its deck is crowded with passengers."
         elif people == "few":
             crew = " A few people aboard."
         elif cls in ("boat", "ship", "dock", "car", "truck", "bus"):
             crew = " Empty, with nobody aboard."
         prompt = f"{text}.{crew} {framing}, isolated on a plain white background, {style}"
-        if subject is not None or d.get("follow") != "crop":
+        if d.get("keep_view"):
+            strength = keep_view_strength
+        elif subject is not None or d.get("follow") != "crop":
             strength = 1.0                      # from the words alone
         else:
             strength = min(base_strength, 0.75) if min(src.size) >= 160 else base_strength
@@ -987,7 +1054,8 @@ class ObjectCompletionStage(PipelineStage):
                 want_aspects[idx] = _KIND_ASPECT.get(kinds[idx][0]) if idx in kinds else None
                 if idx in directions:
                     prompt, strength, want_aspects[idx] = self._directed_prompt(
-                        cls, directions[idx], src, subjects.get(idx), cfg.reference_strength)
+                        cls, directions[idx], src, subjects.get(idx), cfg.reference_strength, cfg.people_aboard,
+                        cfg.keep_view_strength)
                     self.log_info(f"  crop_{idx}: reference prompt (strength {strength:.2f}): {prompt}")
                 size = cfg.canvas_px
                 canvas = PILImage.new("RGB", (size, size), (255, 255, 255))
@@ -1108,7 +1176,10 @@ class ObjectCompletionStage(PipelineStage):
                 if director is not None and idx in directions and survivors and photo_pil is not None:
                     box = metas[idx].get("photo_box")
                     box_px = tuple(float(v) for v in box) if box and len(box) == 4 else None
-                    picked = director.pick(photo_pil, sources[idx], box_px, survivors, directions[idx], idx, round_no)
+                    direction = dict(directions[idx])
+                    if not self.config.people_aboard and str(direction.get("people") or "none") != "none":
+                        direction["nobody_aboard"] = True
+                    picked = director.pick(photo_pil, sources[idx], box_px, survivors, direction, idx, round_no)
                 if picked is not None:
                     if picked["choice"] >= 0:
                         best, best_err, best_score = survivors[picked["choice"]], 0.0, 1.0

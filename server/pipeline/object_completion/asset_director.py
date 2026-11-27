@@ -319,6 +319,8 @@ class AssetDirector:
         for c in candidates:
             h.update(_image_sha(c).encode())
         h.update(json.dumps((direction or {}).get("subject", "")).encode())
+        if (direction or {}).get("nobody_aboard"):
+            h.update(b"nobody-aboard")
         key = "pick-" + h.hexdigest()[:40]
         record = self._cached(key)
         if record is None:
@@ -330,6 +332,12 @@ class AssetDirector:
                     f"{d.get('subject') or '(no description)'}\n"
                     f"Real size: length {d.get('length_m')} m, height {d.get('height_m')} m. "
                     f"There are {len(candidates)} candidates, numbered 0 to {len(candidates) - 1}.")
+            if d.get("nobody_aboard"):
+                # The people in the photograph are not built into the model (Paris: of three
+                # redrawn tour boats the one still carrying its passengers was chosen as
+                # "matching the photo", and the crowd was baked into the deck).
+                user += ("\nThe scene is built without people: the drawing was asked for with nobody aboard. "
+                         "A candidate that shows people is not to be chosen while another shows none.")
             reply = self._call(f"pick crop_{idx}", sheet, PICK_SYSTEM, user, "pick_reference", PICK_SCHEMA, expected_usd=0.05)
             if reply is None:
                 return None

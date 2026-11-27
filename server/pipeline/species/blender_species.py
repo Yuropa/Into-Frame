@@ -141,16 +141,20 @@ class Builder:
         self.faces = []
         self.face_swatch = []
         self.face_rect = []       # None, or the atlas rect the face's corners map to
+        self.face_uv = []         # None, or the face's own corner UVs (pixel rows top-down, 0-1)
+        self.face_smooth = []     # the face is part of a rounded surface
         self.parts = {}           # atlas parts: name -> {"uv": [...], "aspect": w/h}
         self.soft = set()         # vertices (leaf tips) free to overshoot the drawn width
 
     def pick(self, part):
         return self.rng.choice(self.swatches[part])
 
-    def add_face(self, idx, part=None, swatch=None, rect=None):
+    def add_face(self, idx, part=None, swatch=None, rect=None, uv=None, smooth=False):
         self.faces.append(tuple(idx))
-        self.face_swatch.append(swatch if swatch is not None else (0 if rect is not None else self.pick(part)))
+        self.face_swatch.append(swatch if swatch is not None else (0 if (rect is not None or uv is not None) else self.pick(part)))
         self.face_rect.append(rect)
+        self.face_uv.append(uv)
+        self.face_smooth.append(bool(smooth))
 
     def has_part(self, name):
         return bool(ATLAS["active"] and name in self.parts)
@@ -185,10 +189,53 @@ class Builder:
 
     def head_part(self, base, up, length, name, planes=3, roll=0.0, min_aspect=0.5, aspect=None):
         """A flower head as a fan of cards no narrower than min_aspect of its length;
-        `aspect` (the Species Director's measurement) sets the width outright."""
+        `aspect` (the Species Director's measurement) sets the width outright. When the
+        atlas measured the painted head's outline (info["profile"]), a body of that
+        outline stands inside the fan."""
         info = self.parts[name]
         width = length * (float(aspect) if aspect else max(float(info.get("aspect") or 0.5), min_aspect))
+        if info.get("profile"):
+            self.head_core(base, up, length, name, width, roll=roll)
         self.crossed_part(base, up, length, name, width=width, planes=planes, roll=roll)
+
+    def head_core(self, base, up, length, name, width, roll=0.0, segs=6, fill=0.66):
+        """The head's body: the painted outline turned about the stem at `fill` of its
+        half-width, wearing the picture's middle wrapped round it (mirrored front to
+        back, so it has no seam). Three crossed cards alone are paper from above and
+        show the next plant through the gaps between them; with the body inside,
+        the cards are the ragged tips of something solid."""
+        info = self.parts[name]
+        profile = [max(0.0, min(1.0, float(v))) for v in info["profile"]]
+        u0, v0, u1, v1 = info["uv"]
+        uc, du = 0.5 * (u0 + u1), 0.5 * (u1 - u0)
+        u = v_norm(up)
+        s0, t0 = frame(u)
+        n = len(profile)
+        rings = []
+        for i in range(n + 1):
+            f = i / n
+            # The outline at the ring: the bands either side of it, a closed tip and base.
+            a, c = profile[max(i - 1, 0)], profile[min(i, n - 1)]
+            p = 0.5 * (a + c) if 0 < i < n else 0.35 * (a if i else c)
+            r = fill * 0.5 * width * p
+            centre = v_add(base, v_mul(u, length * f))
+            ring, uvs = [], []
+            for j in range(segs):
+                ang = roll + 2.0 * math.pi * j / segs
+                side = v_add(v_mul(s0, math.cos(ang)), v_mul(t0, math.sin(ang)))
+                ring.append(v_add(centre, v_mul(side, r)))
+                # A triangle wave round the stem: the picture's middle runs left to
+                # right over the front half and back again over the rear.
+                k = 2.0 * j / segs
+                tri = (2.0 * k - 1.0) if k <= 1.0 else (3.0 - 2.0 * k)
+                uvs.append((uc + du * 0.8 * p * tri, v1 - f * (v1 - v0)))
+            rings.append((self.add_verts(ring), uvs))
+        for i in range(n):
+            (a, uva), (c, uvc) = rings[i], rings[i + 1]
+            for j in range(segs):
+                jj = (j + 1) % segs
+                # The wave's far end closes on its start: the last quad runs to u(0).
+                self.add_face((a + j, a + jj, c + jj, c + j), uv=[uva[j], uva[jj], uvc[jj], uvc[j]], smooth=True)
 
     def crossed_part(self, base, up, length, name, width=None, planes=2, roll=0.0):
         """`planes` cards of the part fanned about `up` (2: a cross)."""
@@ -456,8 +503,16 @@ def form_conifer(b, spec, rng, h, w):
         for i in range(n_br):
             a = a0 + 2 * math.pi * i / n_br + rng.uniform(-0.2, 0.2)
             droop = rng.uniform(-0.12, 0.08) - 0.1 * (1 - f)
+            zb = z
+            if b.has_part("spray"):
+                # Each branch leaves the trunk at its own height within the whorl's
+                # share of it and hangs at its own angle, steeper low on the tree:
+                # every branch of a whorl at one height and one angle stacked the
+                # crown as a pile of plates with air between them.
+                zb = min(h * 0.985, z + rng.uniform(-0.5, 0.5) * spacing)
+                droop = -rng.uniform(0.18, 0.5) * (1.0 - 0.6 * f)
             d = v_norm((math.cos(a), math.sin(a), droop))
-            root = (0.0, 0.0, z)
+            root = (0.0, 0.0, zb)
             tip = v_add(root, v_mul(d, reach))
             tip = (tip[0], tip[1], tip[2] - 0.15 * reach * (1 - f))
             mid = v_mul(v_add(root, tip), 0.5)
@@ -467,7 +522,13 @@ def form_conifer(b, spec, rng, h, w):
                 # The photographed spray twice: lying flat along the branch (a fir's
                 # sprays are flat) and standing on edge, so it reads from every side.
                 flat_side = v_norm(v_cross(d, (0.0, 0.0, 1.0)))
-                length = reach * rng.uniform(0.95, 1.1)
+                # No shorter than a whorl and a half of trunk at the base, two thirds of
+                # a whorl at the tip: near the top the reach is a hand's width, and the
+                # leader stood bare between its whorls. The one floor all the way up made
+                # the upper half of a narrow fir as wide as its middle: a column with a
+                # flat top where the photograph has a spire (Rainier, m3d3).
+                floor = spacing * (0.65 + 0.85 * (1.0 - f))
+                length = max(reach * rng.uniform(0.95, 1.1), floor * rng.uniform(0.9, 1.1))
                 # No narrower than half its length: a painted twig is slimmer than
                 # the spray it stands for, and the tree read as a bottle brush.
                 width = max(length * float(b.parts["spray"].get("aspect") or 0.5), 0.5 * length)
@@ -544,8 +605,163 @@ def form_shrub(b, spec, rng, h, w):
         b.card(c, s, t, 0.05 * h / 0.5, 0.035 * h / 0.5, part)
 
 
+def _crown_point(rng, cz, rx, rz, lo=-0.5, hi=1.0, r_lo=0.6, r_hi=1.0, bearing=None):
+    """A point in the shell of the crown (an ellipsoid about (0, 0, cz)) and the way
+    out of the crown there. lo..hi is the cosine of the angle from the crown's top."""
+    u = rng.uniform(0, 2 * math.pi) if bearing is None else bearing
+    cv = rng.uniform(lo, hi)
+    sv = math.sqrt(max(0.0, 1.0 - cv * cv))
+    rr = rng.uniform(r_lo, r_hi)
+    p = (rx * rr * sv * math.cos(u), rx * rr * sv * math.sin(u), cz + rz * rr * cv)
+    n = v_norm((sv * math.cos(u) / rx, sv * math.sin(u) / rx, cv / rz))
+    return p, n
+
+
+def _tree_frame(b, rng, h, bole, cz, rx, rz, arch):
+    """The wood of a broadleaf tree: a trunk that runs on into the crown and scaffold
+    limbs from it to the crown's shell, each with two side branches. `arch` lifts a
+    limb's middle (a weeping tree's limbs rise before its branchlets hang)."""
+    trunk_r = max(0.05, h * 0.024)
+    top_z = bole + (h - bole) * 0.5
+    lean = (rng.uniform(-0.02, 0.02) * h, rng.uniform(-0.02, 0.02) * h)
+    pts = []
+    for i in range(6):
+        f = i / 5
+        wob = 0.012 * h * math.sin(f * math.pi)
+        pts.append((lean[0] * f + rng.uniform(-wob, wob), lean[1] * f + rng.uniform(-wob, wob), top_z * f))
+    b.polyline_tube(pts, trunk_r, trunk_r * 0.3, "stem", segs=8)
+    n = rng.randint(5, 7)
+    a0 = rng.uniform(0, 2 * math.pi)
+    for i in range(n):
+        a = a0 + 2 * math.pi * i / n + rng.uniform(-0.3, 0.3)
+        f = i / (n - 1)
+        # The low limbs leave low and reach out; the high ones leave high and go up.
+        root = _along(pts, (bole * 0.9 + (top_z - bole * 0.9) * (0.1 + 0.9 * f)) / top_z)
+        cv = max(-0.2, min(0.95, 0.05 + 0.8 * f + rng.uniform(-0.1, 0.1)))
+        tip, _ = _crown_point(rng, cz, rx, rz, lo=cv, hi=cv, r_lo=0.8, r_hi=0.8, bearing=a)
+        reach = v_len(v_sub(tip, root))
+        mid = _lerp(root, tip, 0.5)
+        mid = (mid[0], mid[1], mid[2] + arch * reach)
+        r0 = trunk_r * rng.uniform(0.3, 0.42)
+        b.polyline_tube([root, mid, tip], r0, r0 * 0.3, "stem", segs=5)
+        for k in range(2):
+            sp = _along([root, mid, tip], rng.uniform(0.35, 0.75))
+            cv2 = max(-0.3, min(0.95, cv + rng.uniform(-0.35, 0.35)))
+            st, _ = _crown_point(rng, cz, rx, rz, lo=cv2, hi=cv2, r_lo=0.85, r_hi=0.85,
+                                 bearing=a + rng.choice((-1.0, 1.0)) * rng.uniform(0.4, 0.9))
+            b.tube(sp, st, r0 * 0.45, r0 * 0.12, "stem", segs=4)
+
+
+def _spray_pair(b, rng, base, d, length, name, min_aspect, max_aspect=2.0):
+    """The painted spray twice about its own axis, so it has a face from every side."""
+    width = min(max(length * float(b.parts[name].get("aspect") or 0.5), min_aspect * length), max_aspect * length)
+    side = v_norm(v_cross(d, (0.0, 0.0, 1.0))) if abs(d[2]) < 0.95 else (1.0, 0.0, 0.0)
+    b.card_part(base, d, side, length, name, width=width, mirror=rng.random() < 0.5)
+    b.card_part(base, d, v_norm(v_cross(d, side)), length, name, width=width)
+
+
+def form_broadleaf(b, spec, rng, h, w):
+    """A broadleaf tree with a rounded crown (a plane, an oak, a lime): a clear bole,
+    scaffold limbs, and the crown's shell filled with leaf sprays that point out of
+    it. The sprays are cards of the painted branch tip; without an atlas, facets."""
+    # The crown is the upper two thirds: on a bole of a third and a shell that began at
+    # its own waist, the leaves started at half height and the tree read as a lollipop.
+    bole = h * rng.uniform(0.2, 0.3)
+    spray_len = 0.2 * h
+    # The sprays stand half their length out of the shell: the shell is drawn inside
+    # the plant's width by that much, so the built tree is not squeezed to fit.
+    rx = max(0.3 * w, 0.5 * w - 0.45 * spray_len)
+    rz = max(0.2 * h, 0.5 * (h - bole) - 0.3 * spray_len)
+    cz = bole + 0.5 * (h - bole)
+    _tree_frame(b, rng, h, bole, cz, rx, rz, arch=0.1)
+    if b.has_part("spray"):
+        for i in range(200):
+            p, n = _crown_point(rng, cz, rx, rz, lo=-0.9, hi=1.0, r_lo=0.5, r_hi=0.95)
+            d = v_norm(v_add(n, (rng.gauss(0, 0.35), rng.gauss(0, 0.35), 0.25 + rng.gauss(0, 0.25))))
+            length = spray_len * rng.uniform(0.8, 1.2)
+            _spray_pair(b, rng, v_add(p, v_mul(d, -0.55 * length)), d, length, "spray", 0.75)
+        return
+    for i in range(70):
+        p, _ = _crown_point(rng, cz, rx, rz, lo=-0.9, hi=1.0, r_lo=0.45, r_hi=1.0)
+        r = spray_len * rng.uniform(0.55, 0.9)
+        b.blob(p, (r, r, 0.75 * r), "foliage", segs=5, rings=3)
+
+
+def form_weeping(b, spec, rng, h, w):
+    """A weeping tree (a weeping willow): a short bole, limbs that arch up into a low
+    dome, a cap of sprays over the dome and curtains of branchlets hanging from it
+    most of the way to the ground."""
+    bole = h * rng.uniform(0.2, 0.28)
+    rx = 0.4 * w
+    rz = 0.3 * h
+    cz = 0.64 * h
+    _tree_frame(b, rng, h, bole, cz, rx, rz, arch=0.22)
+    cap = "spray" if b.has_part("spray") else None
+    strand = "strand" if b.has_part("strand") else cap
+    for i in range(55):
+        p, n = _crown_point(rng, cz, rx, rz, lo=0.1, hi=1.0, r_lo=0.7, r_hi=1.0)
+        d = v_norm(v_add(n, (rng.gauss(0, 0.3), rng.gauss(0, 0.3), 0.1)))
+        length = h * rng.uniform(0.12, 0.18)
+        if cap:
+            _spray_pair(b, rng, v_add(p, v_mul(d, -0.5 * length)), d, length, cap, 0.75)
+        else:
+            b.blob(p, (0.6 * length, 0.6 * length, 0.4 * length), "foliage", segs=5, rings=3)
+    for i in range(85):
+        p, n = _crown_point(rng, cz, rx, rz, lo=-0.15, hi=0.8, r_lo=0.8, r_hi=1.05)
+        out = v_norm((n[0], n[1], 0.0)) if abs(n[2]) < 0.99 else (1.0, 0.0, 0.0)
+        d = v_norm((out[0] * 0.16 + rng.gauss(0, 0.05), out[1] * 0.16 + rng.gauss(0, 0.05), -1.0))
+        # Each curtain stops its own way short of the ground.
+        length = max(0.15 * h, min(h * rng.uniform(0.32, 0.55), p[2] - h * rng.uniform(0.04, 0.16)))
+        if strand:
+            _spray_pair(b, rng, p, d, length, strand, 0.2, 0.55)
+            continue
+        mid = v_add(p, v_mul(d, 0.5 * length))
+        tip = v_add(p, v_mul(d, length))
+        half = 0.035 * length
+        for side in frame(d):
+            b.strip([p, mid, tip], [half, half * 0.8, half * 0.2], side, "foliage")
+
+
 FORMS = {"spike": form_spike, "raceme": form_raceme, "seedhead": form_seedhead,
-         "conifer": form_conifer, "tuft": form_tuft, "shrub": form_shrub}
+         "conifer": form_conifer, "tuft": form_tuft, "shrub": form_shrub,
+         "broadleaf": form_broadleaf, "weeping": form_weeping}
+CLUMPING = (form_spike, form_raceme, form_seedhead)
+
+
+def _rotate(v, axis, angle):
+    """v turned about the unit axis by angle (Rodrigues)."""
+    c, s = math.cos(angle), math.sin(angle)
+    d = axis[0] * v[0] + axis[1] * v[1] + axis[2] * v[2]
+    cr = v_cross(axis, v)
+    return (v[0] * c + cr[0] * s + axis[0] * d * (1 - c),
+            v[1] * c + cr[1] * s + axis[1] * d * (1 - c),
+            v[2] * c + cr[2] * s + axis[2] * d * (1 - c))
+
+
+def build_plant(form, b, spec, rng, h, w):
+    """One plant: the form once, or `stems` of it leaning apart from one root (the
+    Species Director's count: a paintbrush is a bunch of stems, each with its head,
+    and stood in the meadow as single stems). The first stem is the tallest and
+    the straightest; the others are shorter and lean outward, far enough that the
+    heads stand beside each other. Returns the width the whole plant may take."""
+    stems = max(1, min(8, int(spec.get("stems") or 1)))
+    if stems == 1 or form not in CLUMPING:
+        form(b, spec, rng, h, w)
+        return w
+    phi0 = rng.uniform(0, 2 * math.pi)
+    for k in range(stems):
+        v0 = len(b.verts)
+        hk = h * (1.0 if k == 0 else rng.uniform(0.6, 0.93))
+        form(b, spec, rng, hk, w)
+        phi = phi0 + 2 * math.pi * k / stems + rng.uniform(-0.35, 0.35)
+        out = (math.cos(phi), math.sin(phi), 0.0)
+        axis = (-math.sin(phi), math.cos(phi), 0.0)
+        # The lean that puts this head half a plant's width from the middle.
+        lean = math.atan2(0.5 * w * rng.uniform(0.8, 1.3), hk) * (0.6 if k == 0 else 1.0) + rng.uniform(0.0, 0.08)
+        root = v_mul(out, 0.08 * w)
+        for i in range(v0, len(b.verts)):
+            b.verts[i] = v_add(_rotate(b.verts[i], axis, lean), root)
+    return w * (1.0 + 0.55 * (stems - 1) ** 0.7)
 
 
 def _lerp(a, b, f):
@@ -579,9 +795,13 @@ def make_object(name, b, png_path):
     mesh.update()
     uv_layer = mesh.uv_layers.new(name="UVMap")
     uv = uv_layer.data
-    for poly, k, rect in zip(mesh.polygons, b.face_swatch, b.face_rect):
+    for poly, k, rect, own, smooth in zip(mesh.polygons, b.face_swatch, b.face_rect, b.face_uv, b.face_smooth):
+        poly.use_smooth = smooth
         for corner, li in enumerate(poly.loop_indices):
-            uv[li].uv = rect_uv(rect, corner) if rect is not None else swatch_uv(k, corner)
+            if own is not None:
+                uv[li].uv = (own[corner][0], 1.0 - own[corner][1])
+            else:
+                uv[li].uv = rect_uv(rect, corner) if rect is not None else swatch_uv(k, corner)
     img = bpy.data.images.load(png_path)
     mat = bpy.data.materials.new(name + "_mat")
     mat.use_nodes = True
@@ -689,39 +909,46 @@ def main():
     spec = json.load(open(spec_path))
     manifest = []
     for sp in spec["species"]:
-        form = FORMS.get(str(sp.get("form", "tuft")).lower(), form_tuft)
-        n_var = int(sp.get("variants", 1))
-        for k in range(n_var):
-            rng = random.Random(int(sp.get("seed", 0)) * 1000 + k)
-            clear_scene()
-            pixels, swatches = build_palette(sp, rng)
-            png_path = os.path.join(out_dir, f"{sp['id']}_v{k}_palette.png")
-            write_png(png_path, pixels, TEX)
-            ATLAS["active"] = False
-            atlas_path = sp.get("atlas")
-            if atlas_path and os.path.exists(atlas_path) and sp.get("parts"):
-                # Variant 0 is the painting as made; the others a touch lighter or
-                # darker and warmer or cooler.
-                lit = rng.uniform(0.88, 1.12) if k else 1.0
-                warm = rng.uniform(-0.05, 0.05) if k else 0.0
-                tint = (lit * (1.0 + warm), lit, lit * (1.0 - warm))
-                png_path = atlas_with_palette(atlas_path, pixels, sp, os.path.join(out_dir, f"{sp['id']}_v{k}_atlas.png"), tint=tint)
-                ATLAS["active"] = png_path is not None
-            b = Builder(rng, swatches)
-            if ATLAS["active"]:
-                b.parts = dict(sp["parts"])
-            h = float(sp["height_m"]) * rng.uniform(0.88, 1.12)
-            w = float(sp["width_m"]) * rng.uniform(0.88, 1.12)
-            form(b, sp, rng, h, w)
-            normalise_size(b, h, w)
-            ob = make_object(f"{sp['id']}_v{k}", b, png_path)
-            path = os.path.join(out_dir, f"{sp['id']}_v{k}.glb")
-            export(ob, path)
-            entry = {"id": sp["id"], "variant": k, "file": os.path.basename(path), "form": sp.get("form"),
-                     "triangles": b.triangles, "vertices": len(b.verts), "bounds": bounds_yup(b.verts),
-                     "height_m": round(h, 4), "width_m": round(w, 4), "palette": os.path.basename(png_path)}
-            manifest.append(entry)
-            print(f"BUILT {entry['file']}: {entry['triangles']} tris, {h:.2f} m tall, {w:.2f} m wide")
+        try:
+            form = FORMS.get(str(sp.get("form", "tuft")).lower(), form_tuft)
+            n_var = int(sp.get("variants", 1))
+            for k in range(n_var):
+                rng = random.Random(int(sp.get("seed", 0)) * 1000 + k)
+                clear_scene()
+                pixels, swatches = build_palette(sp, rng)
+                png_path = os.path.join(out_dir, f"{sp['id']}_v{k}_palette.png")
+                write_png(png_path, pixels, TEX)
+                ATLAS["active"] = False
+                atlas_path = sp.get("atlas")
+                if atlas_path and os.path.exists(atlas_path) and sp.get("parts"):
+                    # Variant 0 is the painting as made; the others a touch lighter or
+                    # darker and warmer or cooler.
+                    lit = rng.uniform(0.88, 1.12) if k else 1.0
+                    warm = rng.uniform(-0.05, 0.05) if k else 0.0
+                    tint = (lit * (1.0 + warm), lit, lit * (1.0 - warm))
+                    png_path = atlas_with_palette(atlas_path, pixels, sp, os.path.join(out_dir, f"{sp['id']}_v{k}_atlas.png"), tint=tint)
+                    ATLAS["active"] = png_path is not None
+                b = Builder(rng, swatches)
+                if ATLAS["active"]:
+                    b.parts = dict(sp["parts"])
+                h = float(sp["height_m"]) * rng.uniform(0.88, 1.12)
+                w = float(sp["width_m"]) * rng.uniform(0.88, 1.12)
+                w = build_plant(form, b, sp, rng, h, w)
+                normalise_size(b, h, w)
+                ob = make_object(f"{sp['id']}_v{k}", b, png_path)
+                path = os.path.join(out_dir, f"{sp['id']}_v{k}.glb")
+                export(ob, path)
+                entry = {"id": sp["id"], "variant": k, "file": os.path.basename(path), "form": sp.get("form"),
+                         "triangles": b.triangles, "vertices": len(b.verts), "bounds": bounds_yup(b.verts),
+                         "height_m": round(h, 4), "width_m": round(w, 4), "palette": os.path.basename(png_path)}
+                manifest.append(entry)
+                print(f"BUILT {entry['file']}: {entry['triangles']} tris, {h:.2f} m tall, {w:.2f} m wide")
+        except Exception as exc:
+            # One species that cannot be built (no colours, a bad atlas) is left
+            # out; the others are still built.
+            import traceback
+            traceback.print_exc()
+            print(f"FAILED {sp.get('id')}: {exc}")
     with open(os.path.join(out_dir, "manifest.json"), "w") as f:
         json.dump(manifest, f, indent=1)
 

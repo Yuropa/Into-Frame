@@ -43,13 +43,13 @@ from pipeline.species.palette import (anchors_from_words, measure_palette, palet
 from pipeline.species.card import species_card
 from scene.mesh import Mesh
 
+_TREE_FORMS = ("conifer", "broadleaf", "weeping")
 ROOT = Path(__file__).resolve().parents[3]
 BUILDER = Path(__file__).resolve().parent / "blender_species.py"
 MARKER = "species_assets_complete"
 
 _FORM_WORDS = [
     ("conifer", r"\b(fir|spruce|pine|conifer|spire|hemlock|cedar|larch|evergreen)\b"),
-    # No procedural form yet: a tree that is not a conifer keeps its cards.
     ("broadleaf", r"\b(plane|platanus|oak|maple|beech|birch|poplar|aspen|elm|chestnut|linden|lime|deciduous|broad-?leaf|broad-?leaved)\b"),
     ("raceme", r"\b(lupin|lupine|raceme|foxglove|delphinium|larkspur|pea.flower)\b"),
     ("seedhead", r"\b(seed.?head|anemone|pasque|fuzzy|dandelion|clock)\b"),
@@ -59,14 +59,25 @@ _FORM_WORDS = [
 ]
 
 
+def _has_hint(species: dict) -> bool:
+    hint = species.get("crop_hint")
+    return isinstance(hint, (list, tuple)) and len(hint) == 4
+
+
 def species_form(species: dict) -> str:
     text = " ".join(str(species.get(k, "")) for k in ("name", "phrase", "form", "class")).lower()
+    if str(species.get("class", "")).lower() == "tree":
+        # A tree is one of three builds, whatever other words its entry holds ("willow"
+        # is a shrub word; Paris's weeping willow is a 12 m tree).
+        if re.search(_FORM_WORDS[0][1], text):
+            return "conifer"
+        return "weeping" if re.search(r"\b(weeping|drooping|pendulous|babylonica)\b", text) else "broadleaf"
     for form, pattern in _FORM_WORDS:
         if re.search(pattern, text):
             return form
     cls = str(species.get("class", "")).lower()
-    # A tree without conifer words is broadleaf, which has no procedural form (the
-    # London plane read as a conifer here and would have stood as a fir).
+    # A tree without conifer words is broadleaf (the London plane read as a conifer
+    # here and would have stood as a fir).
     return {"tree": "broadleaf", "grass": "tuft", "shrub": "shrub", "reed": "tuft", "moss": "tuft"}.get(cls, "spike")
 
 
@@ -92,6 +103,7 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         atlas_image_px: int = 768,
         atlas_steps: int = 28,
         atlas_guidance: float = 3.5,
+        atlas_reference_scale: float = 0.6,
         plan_only_species: bool = True,
         director_model: str | None = "anthropic:claude-sonnet-5-5",
         director_max_usd: float = 0.5,
@@ -115,6 +127,9 @@ class SpeciesAssetsConfiguration(PipelineStageConfiguration):
         self.atlas_image_px = int(atlas_image_px)
         self.atlas_steps = int(atlas_steps)
         self.atlas_guidance = float(atlas_guidance)
+        # How strongly the head the Species Director boxed in the photograph steers
+        # the painting of that species' head (atlas.py; 0 paints from words alone).
+        self.atlas_reference_scale = float(atlas_reference_scale)
         self.plan_only_species = bool(plan_only_species)
         # The Species Director (species_director.py): a vision model reads each plan
         # species' proportions off the photograph (head width over length, the head's
@@ -135,11 +150,18 @@ class SpeciesAssetsStage(PipelineStage):
     def _bucket_members(self, context: PipelineContext) -> dict[tuple[str, int], list[int]]:
         count = int(context.input_object(ContextKey.OBJECT_COUNT) or 0)
         groups: dict[tuple[str, int], list[int]] = {}
+        outside: dict[tuple[str, int], list[int]] = {}
         for idx in range(count):
             m = context.input_object(f"metadata_{idx}") or {}
             cls, bucket = str(m.get("class", "")).lower(), m.get("bucket")
-            if cls in self.config.classes and bucket is not None and m.get("in_captured_fov", True):
-                groups.setdefault((cls, int(bucket)), []).append(idx)
+            if cls in self.config.classes and bucket is not None:
+                (groups if m.get("in_captured_fov", True) else outside).setdefault((cls, int(bucket)), []).append(idx)
+        # A tree bucket with no member inside the photograph (the outpainted
+        # continuation's trees) is built from the members it has: left out, each of
+        # its trees stood as a crop card beside the species meshes.
+        for key, members in outside.items():
+            if key[0] == "tree" and key not in groups:
+                groups[key] = members
         return groups
 
     def _bucket_palette(self, context: PipelineContext, members: list[int], cls: str = "flower",
@@ -273,6 +295,70 @@ class SpeciesAssetsStage(PipelineStage):
             return None, None, "no plan species of this class"
         return best[0], (best[1] if best[1] < 999.0 else None), "class match" + (f", foliage dE {best[1]:.0f}" if best[1] < 999.0 else "")
 
+    def _default_tree_species(self, context: PipelineContext, members: list[int]) -> dict:
+        """The species of a scene whose plan names no tree: what the labeller called
+        the detections, so a fir is still a conifer."""
+        names: dict[str, int] = {}
+        for idx in members:
+            name = str((context.input_object(f"metadata_{idx}") or {}).get("name") or "").strip().lower()
+            if name:
+                names[name] = names.get(name, 0) + 1
+        name = max(names, key=names.get) if names else "tree"
+        sp = {"name": name, "class": "tree", "phrase": name, "colours": ["green"], "density": "patchy",
+              "evidence": "inferred"}
+        self.log_info(f"  the plan names no tree species; the detections' own name '{name}' ({species_form(sp)}) stands in")
+        return sp
+
+    def _split_located_trees(self, context: PipelineContext, groups: dict[tuple[str, int], list[int]],
+                             candidates: list[tuple[dict, dict, str]], photo) -> dict[tuple[str, int], list[int]]:
+        """Buckets with the trees the plan placed (a species with a crop hint) moved to
+        buckets of their own. A bucket is one mesh, and the buckets are cut by how a
+        crop looks at 60 px: Paris's one weeping willow shared a bucket with twenty
+        quay planes, and a bucket-wide match makes all of them one or the other."""
+        self._located: dict[tuple[str, int], dict] = {}
+        placed = [sp for sp, _pal, _src in candidates if _has_hint(sp)]
+        if photo is None or not placed or len(candidates) < 2:
+            return groups
+        W, H = photo.size
+        out = dict(groups)
+        count = int(context.input_object(ContextKey.OBJECT_COUNT) or 0)
+        used = set()
+        for i in range(count):
+            m = context.input_object(f"metadata_{i}") or {}
+            if str(m.get("class", "")).lower() == "tree" and m.get("bucket") is not None:
+                used.add(int(m["bucket"]))
+        next_bucket = (max(used) + 1) if used else 0
+        for sp in placed:
+            x, y, w, h = (float(v) for v in sp["crop_hint"])
+            hx0, hy0, hx1, hy1 = (x - 0.1 * w) * W, (y - 0.1 * h) * H, (x + 1.1 * w) * W, (y + 1.1 * h) * H
+            for (cls, bucket), members in sorted(groups.items()):
+                if cls != "tree":
+                    continue
+                inside = []
+                for idx in out.get((cls, bucket), []):
+                    box = (context.input_object(f"metadata_{idx}") or {}).get("photo_box")
+                    if not (isinstance(box, (list, tuple)) and len(box) == 4):
+                        continue
+                    bx, by, bw, bh = (float(v) for v in box)
+                    overlap = max(0.0, min(bx + bw, hx1) - max(bx, hx0)) * max(0.0, min(by + bh, hy1) - max(by, hy0))
+                    if bw * bh > 0 and overlap >= 0.5 * bw * bh:
+                        inside.append(idx)
+                if not inside:
+                    continue
+                if len(inside) == len(out[(cls, bucket)]):
+                    self._located[(cls, bucket)] = sp
+                    continue
+                for idx in inside:
+                    m = context.input_object(f"metadata_{idx}") or {}
+                    context.add_object(f"metadata_{idx}", {**m, "bucket": next_bucket, "species_split_from": bucket})
+                out[(cls, bucket)] = [i for i in out[(cls, bucket)] if i not in inside]
+                out[(cls, next_bucket)] = inside
+                self._located[(cls, next_bucket)] = sp
+                self.log_info(f"  tree bucket {bucket}: {len(inside)} of its trees stand where the plan saw "
+                              f"'{sp.get('name')}'; moved to bucket {next_bucket}")
+                next_bucket += 1
+        return out
+
     # ── the director ────────────────────────────────────────────────────────
     def _measure(self, photo, species: list[dict]) -> dict[str, dict]:
         """{species name: proportions read off the photograph}; {} when the director is
@@ -295,6 +381,9 @@ class SpeciesAssetsStage(PipelineStage):
             self.log_info(f"  Species Director: '{name}': head {m.get('head_aspect')} wide per length, "
                           f"{m.get('head_fraction')} of the height; plant {m.get('plant_aspect')} wide per height, "
                           f"{m.get('height_m')} m ({m.get('seen')}) -- {m.get('why')}")
+            if m.get("look"):
+                self.log_info(f"    {m.get('stems') or 1} stem(s) a plant; a head boxed at {m.get('head_box')}; "
+                              f"looks: {m.get('look')}")
         return measured
 
     # ── building ────────────────────────────────────────────────────────────
@@ -303,13 +392,20 @@ class SpeciesAssetsStage(PipelineStage):
                     measured: Optional[dict] = None) -> dict:
         form = species_form(species)
         size = species.get("size_m")
-        height = float(size) if isinstance(size, (int, float)) and size > 0 else (12.0 if form == "conifer" else 0.4)
+        height = float(size) if isinstance(size, (int, float)) and size > 0 else (12.0 if form in _TREE_FORMS else 0.4)
         # A spike's head is a few centimetres across, not half its height: the
         # lousewort (0.7 m) stood 0.31 m wide and the judge called the yellow
         # spikes oversized.
-        width = height * {"conifer": 0.22, "shrub": 0.6, "raceme": 0.3, "seedhead": 0.2, "spike": 0.15}.get(form, 0.45)
+        width = height * {"conifer": 0.22, "broadleaf": 0.7, "weeping": 0.85, "shrub": 0.6, "raceme": 0.3, "seedhead": 0.2,
+                          "spike": 0.15}.get(form, 0.45)
         foliage = bucket_pal["foliage"] or bucket_pal["stem"] or bucket_pal["bloom"][:1]
         stem = bucket_pal["stem"] or foliage
+        if form in ("broadleaf", "weeping") and foliage:
+            # A broadleaf tree shows its trunk, and the crop's "stem" pixels are the
+            # crown's own shade (a near-black green): bark, as dark as the foliage is.
+            lum = float(np.mean([0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2] for c in foliage]))
+            k = min(max(lum, 45.0), 110.0) / 80.0
+            stem = [[int(round(v * k)) for v in (88, 78, 66)]]
         # A conifer or a tuft has no bloom: its "bloom" pixels are the snow and sky
         # inside the mask, so the foliage palette stands in for every part.
         bloom = (bucket_pal["bloom"] or foliage) if form in ("spike", "raceme", "seedhead", "shrub") else foliage
@@ -326,6 +422,9 @@ class SpeciesAssetsStage(PipelineStage):
             if measured.get("head_aspect") and measured.get("head_fraction"):
                 entry["head_aspect"] = float(measured["head_aspect"])
                 entry["head_fraction"] = float(measured["head_fraction"])
+            if int(measured.get("stems") or 1) > 1:
+                # A plant that grows as a bunch of stems is built as one.
+                entry["stems"] = int(measured["stems"])
         return entry
 
     @staticmethod
@@ -432,6 +531,16 @@ class SpeciesAssetsStage(PipelineStage):
         photo = photo_img.image if photo_img is not None else None
         species = [s for s in plan.items("species", self.config.min_evidence)
                    if str(s.get("class", "")).lower() in ("flower", "tree", "shrub")]
+        groups = self._bucket_members(context)
+        if any(cls == "tree" for cls, _ in groups):
+            # The trees were detected; the plan's guess at what they are is enough to
+            # build them (Paris's quay planes are "inferred": only the willow is named
+            # from what shows, and every tree would have been a willow or a card).
+            named = {str(s.get("name")) for s in species}
+            species += [s for s in plan.items("species", "inferred")
+                        if str(s.get("class", "")).lower() == "tree" and str(s.get("name")) not in named]
+            if not any(str(s.get("class", "")).lower() == "tree" for s in species):
+                species.append(self._default_tree_species(context, [i for (c, _), ms in groups.items() if c == "tree" for i in ms]))
         if not species:
             self.log_info("The plan names no visible flower, tree or shrub species; species layer skipped")
             context.add_object(ContextKey.SPECIES_MESHES, published)
@@ -439,11 +548,6 @@ class SpeciesAssetsStage(PipelineStage):
             return context
         candidates: dict[str, list[tuple[dict, dict, str]]] = {}
         for sp in species:
-            if str(sp.get("class", "")).lower() == "tree" and species_form(sp) != "conifer":
-                # No procedural form for a broadleaf tree yet (Paris's plane trees and
-                # willows); its buckets keep their cards.
-                self.log_info(f"  plan species '{sp.get('name')}': broadleaf tree, no procedural form yet; skipped")
-                continue
             pal, src = self._species_palette(photo, sp)
             cls = {"shrub": "bush"}.get(str(sp.get("class")).lower(), str(sp.get("class")).lower())
             candidates.setdefault(cls, []).append((sp, pal, src))
@@ -451,7 +555,7 @@ class SpeciesAssetsStage(PipelineStage):
                           + (f", bloom {pal['bloom'][:2]}" if pal and pal.get("bloom") else ""))
 
         measured = self._measure(photo, species)
-        groups = self._bucket_members(context)
+        groups = self._split_located_trees(context, groups, candidates.get("tree", []), photo)
         if not groups:
             self.log_info("No bucketed flower/tree detections; species layer skipped")
             context.add_object(ContextKey.SPECIES_MESHES, published)
@@ -465,12 +569,36 @@ class SpeciesAssetsStage(PipelineStage):
             pal = self._bucket_palette(context, members, cls)
             if cls == "flower":
                 sp, de, how, pal = self._match_flower(context, members, pal, candidates.get(cls, []))
+            elif (cls, bucket) in self._located:
+                sp, de, how = self._located[(cls, bucket)], None, "standing where the plan saw it"
             else:
-                sp, de, how = self._match(cls, pal, candidates.get(cls, []))
+                # A species the plan placed (its crop hint) stands there and nowhere
+                # else while the class has another species to be.
+                pool = candidates.get(cls, [])
+                unplaced = [c for c in pool if not _has_hint(c[0])]
+                sp, de, how = self._match(cls, pal, unplaced if (cls == "tree" and unplaced and len(pool) > 1) else pool)
             if sp is None:
                 self.log_info(f"  {key} ({len(members)} members): keeps its card -- {how}")
                 self.advance_progress(task)
                 continue
+            if cls != "flower" and not (pal.get("foliage") or pal.get("stem") or pal.get("bloom")):
+                # A bucket with no photographed crop to measure (its trees are all in
+                # the outpainted continuation) wears the colours of the class's
+                # best-measured bucket, or the plan's words for the species.
+                donors = [self._bucket_palette(context, ms, c) for (c, b), ms in sorted(groups.items())
+                          if c == cls and b != bucket]
+                donors = [d for d in donors if d.get("foliage")]
+                spal = next((p for s_, p, _src in candidates.get(cls, []) if s_ is sp and p), None) or {}
+                if donors:
+                    pal = max(donors, key=lambda d: int(d.get("pixels") or 0))
+                elif spal.get("foliage") or spal.get("bloom"):
+                    pal = {**pal, "foliage": spal.get("foliage") or spal["bloom"][:1], "stem": spal.get("stem") or []}
+                else:
+                    self.log_info(f"  {key} ({len(members)} members): keeps its card -- no colour measured for it")
+                    self.advance_progress(task)
+                    continue
+                self.log_info(f"  {key}: no crop of its own to measure; colours from "
+                              f"{'the best-measured ' + cls + ' bucket' if donors else 'the plan'}")
             self.log_info(f"  {key} ({len(members)} members): '{sp.get('name')}' by {how}; "
                           f"bloom {pal['bloom'][:2]} foliage {pal['foliage'][:1]} ({pal['pixels']} px)")
             entry = self._spec_entry(key, sp, pal, seed=self.seed + bucket * 17 + (0 if cls == "flower" else 101),
@@ -508,15 +636,25 @@ class SpeciesAssetsStage(PipelineStage):
             device, dtype = preferred_device(DeviceStrategy.MEMORY)
             gen = SpeciesAtlas(device, dtype, self.config.cache_dir, self.config.log,
                                image_px=self.config.atlas_image_px, steps=self.config.atlas_steps,
-                               guidance=self.config.atlas_guidance, seed=self.seed)
+                               guidance=self.config.atlas_guidance, seed=self.seed,
+                               reference_scale=self.config.atlas_reference_scale)
             work = (self.temp or self.output) / "atlas"
             try:
                 for entry in entries:
                     sp, pal, _how, _de, _members = matches[entry["id"]]
-                    info = gen.build(entry, sp, pal, work)
+                    # The Species Director's words for the head and the head it boxed
+                    # go to the painter with the plan's species.
+                    seen = measured.get(str(sp.get("name"))) or {}
+                    sp_seen = {**sp, **{k: seen[k] for k in ("look", "head_box") if seen.get(k)}}
+                    info = gen.build(entry, sp_seen, pal, work, photo=photo)
                     if info and info.get("parts"):
                         entry.update({"atlas": info["atlas"], "parts": info["parts"],
                                       "palette_origin": info.get("palette_origin"), "palette_px": info.get("palette_px")})
+                        if "spray" in info["parts"]:
+                            # The builder's conifer changed (branches off the whorl's plane,
+                            # sprays no shorter than a whorl and a half; 3: the floor on a
+                            # spray's length tapers to the tip): not the cached mesh.
+                            entry["build"] = 3
                         self._apply_head_width(entry)
                         self.log_info(f"  {entry['id']}: atlas parts {', '.join(info['parts'])} "
                                       f"({Path(info['atlas']).parent.name})")
@@ -571,7 +709,6 @@ class SpeciesAssetsStage(PipelineStage):
                 self.log_info(f"  {key}_card: {picture.width}x{picture.height} card from the species mesh")
             except Exception as exc:
                 self.log_warning(f"  {key}: no species card ({exc}); the crop card stands in")
-                published[vkey] = {"variant_of": key, "variant": k, "faces": meshes[k].face_count}
             self.log_info(f"  {key}: {entry['form']} {ext[0]:.2f}x{ext[1]:.2f}x{ext[2]:.2f} m, {mesh.face_count} faces, "
                           f"{len(meshes)} variant(s)")
         self.finish_progress(task)

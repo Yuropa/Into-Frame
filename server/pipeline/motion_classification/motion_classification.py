@@ -216,6 +216,18 @@ class ObjectMotionClassificationStage(PipelineStage):
             return None
 
         positions_arr = np.asarray(positions, dtype=float)
+        # Every frame's position is put at the track's median range from the camera.
+        # The depth read under each frame's centroid is the still panorama's: as the
+        # centroid crosses a depth edge (a boat's mask breathing onto the far bank
+        # behind it) the position jumps by the gap between the two surfaces, and the
+        # fit read those jumps as travel (Paris: a tour boat at 120 m/s). Over a clip
+        # of a few seconds the object's own range changes little next to that, so
+        # the motion kept is the motion across the view at the object's distance.
+        centre = np.asarray(extrinsics.transform((0.0, 0.0, 0.0)), dtype=float) if extrinsics is not None else np.zeros(3)
+        rays = positions_arr - centre
+        ranges = np.linalg.norm(rays, axis=1)
+        if np.all(ranges > 1e-6):
+            positions_arr = centre + rays * (float(np.median(ranges)) / ranges)[:, None]
         t = np.arange(len(positions_arr)) / fps if fps else np.arange(len(positions_arr), dtype=float)
 
         # Fit each axis with a degree-2 polynomial (position = p0 + v*t + 0.5*a*t^2):

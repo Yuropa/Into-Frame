@@ -75,11 +75,15 @@ class InPaintingFlux:
         guidance_scale=30.0,
         strength=1.0,
         seed: int = 0,
+        prompt_embeds=None,
+        pooled_prompt_embeds=None,
     ) -> PILImage:
         """
         For FLUX.1-Fill:
         - If prompt is "", it performs logic-based background reconstruction.
         - Guidance scale for FLUX Fill typically defaults higher (around 30.0) compared to SD.
+        - prompt_embeds / pooled_prompt_embeds, given together, replace the prompt (a caller
+          that has added image tokens to the encoded text: species/atlas.py).
         """
 
         def normalize_dimension(dim):
@@ -97,8 +101,10 @@ class InPaintingFlux:
         # the device, and the device is picked by free memory at run time.
         gen_device = "cpu" if self.model_id == DEV_MODEL_ID else self.device
         generator = torch.Generator(device=gen_device).manual_seed(seed)
+        text = ({"prompt": prompt} if prompt_embeds is None
+                else {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled_prompt_embeds})
         output = self.pipeline(
-            prompt=prompt,
+            **text,
             image=init_img,
             mask_image=mask_img,
             height=height,

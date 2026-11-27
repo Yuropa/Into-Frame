@@ -23,7 +23,11 @@ from pipeline.scene_generation.projection import (
     class_typical_height,
 )
 from pipeline.scene_generation.object_scale import collect_anchor, fit_object_scale, is_metric_authored
-from pipeline.segmentation.hires_crops import is_photographed, CAPTURED_FOV_RESTRICTED_KEY
+from pipeline.scene_generation.photo_box_fit import (
+    appearance_match, box_angles, fit_to_box, silhouette_iou, surface_samples,
+)
+from pipeline.segmentation.hires_crops import is_photographed, hires_key, CAPTURED_FOV_RESTRICTED_KEY
+from util.captured_cone import captured_cone_from_context
 from util.lod_metrics import angular_height_px
 from scene.scene import Scene
 from scene.object import Object3D
@@ -66,6 +70,7 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         water_allowed_classes: list[str] | None = None,
         water_only_classes: list[str] | None = None,
         water_draft_fraction: float = 0.15,
+        landform_draft_fraction: float = 0.03,
         always_mesh_classes: list[str] | None = None,
         outpainted_classes: list[str] | None = None,
         skip_far_objects: bool = True,
@@ -91,6 +96,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         plan_population_fill: bool = True,
         plan_population_density_m2: dict[str, float] | None = None,
         plan_population_margin_deg: float = 20.0,
+        plan_population_drift: float = 1.0,
+        plan_population_jitter_m: float = 0.12,
         species_min_mesh_angular_px: float = 40.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
@@ -118,6 +125,11 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
         self.plan_population_fill = bool(plan_population_fill)
         self.plan_population_density_m2 = {str(k).lower(): float(v) for k, v in (plan_population_density_m2 or {}).items()}
         self.plan_population_margin_deg = float(plan_population_margin_deg)
+        # A species is dealt in drifts a few metres across rather than plant by plant
+        # (plan_population.SpeciesDrifts; 0 deals every plant on its own).
+        self.plan_population_drift = float(plan_population_drift)
+        # ...and moved up to this far off the painter's grid (relabel_population).
+        self.plan_population_jitter_m = float(plan_population_jitter_m)
         # A species mesh (one plant, a few hundred faces, its own card beyond the
         # runtime LOD) is worth keeping as geometry far smaller on screen than a
         # reconstruction: a 0.4 m flower at 15 m is 1.5 deg, 52 px at 34 px/deg.
@@ -215,6 +227,9 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
             water_only_classes if water_only_classes is not None else ["boat", "ship"]
         )
         self.water_draft_fraction = water_draft_fraction
+        # A modelled landform standing in water (a sea stack) is sunk by this part of
+        # its height, so the underside's rim is below the surface all the way round.
+        self.landform_draft_fraction = float(landform_draft_fraction)
         # Sent to the client as the target world-space depth of the terrain
         # center below the viewer; the client pushes the whole scene down to match.
         self.eye_height_meters = eye_height_meters
@@ -350,6 +365,8 @@ class SceneGenerationConfiguration(PipelineStageConfiguration):
 # any class in OBJECT_HEIGHT_PRIORS by a wide margin. Raise it for a capture whose
 # subject genuinely is a single large structure filling the frame.
 _MAX_OBJECT_SIZE_M = 25.0
+# The same backstop for a detection a model was built from (see `modelled` in the stage).
+_MODELLED_OBJECT_SIZE_FACTOR = 4.0
 
 # A category mesh is scaled to match its instance's detected HEIGHT (see the mesh
 # branch in run()), which needs its own vertical extent as the divisor. Below this
@@ -1067,6 +1084,17 @@ class SceneGenerationStage(PipelineStage):
                 if kind and kind.get("class") and kind.get("length_m"):
                     cls_name = str(kind["class"])
                     class_kind_length_m[cls_name] = max(class_kind_length_m.get(cls_name, 0.0), float(kind["length_m"]))
+            # Detections a model was built from. The stages before this one took such
+            # an object off the ground's picture and reconstructed it; culled here it
+            # is in neither (Shark Fin's sea stack, measured 25.3 m against the 25 m
+            # backstop once a recovered rock was merged into its box, left open sea
+            # where the photograph's subject stands).
+            modelled: set[int] = set()
+            for src in (context.input_object("mesh_sources") or {}).values():
+                try:
+                    modelled.add(int(src.get("idx")))
+                except (TypeError, ValueError):
+                    pass
             # Cone policy from the detection stages (see hires_crops.is_photographed).
             fov_restricted = bool(context.input_object(CAPTURED_FOV_RESTRICTED_KEY) or False)
             unphotographed_skipped = 0
@@ -1165,6 +1193,9 @@ class SceneGenerationStage(PipelineStage):
                 if vec.shape == (3,) and np.hypot(vec[0], vec[2]) > 1e-3:
                     mesh_fronts[key] = vec
             faced_photographer = 0
+            photo_cone = (
+                captured_cone_from_context(context, panorama.width, panorama.height) if panorama is not None else None
+            )
 
             rng = np.random.default_rng(self.seed)
 
@@ -1384,7 +1415,8 @@ class SceneGenerationStage(PipelineStage):
                     })
 
             if self.config.plan_population and plan is not None and species_info:
-                from pipeline.scene_generation.plan_population import relabel_population
+                from pipeline.scene_generation.plan_population import SpeciesDrifts, relabel_population
+                drifts = SpeciesDrifts(self.seed, strength=self.config.plan_population_drift)
                 yaw_rad = math.radians(float(scene.skybox_rotation or 0.0))
                 half_fov = self._captured_half_fov_deg(context)
 
@@ -1418,6 +1450,7 @@ class SceneGenerationStage(PipelineStage):
                     relabelled, psum = relabel_population(
                         painted, plan_species, buckets, bearing_frac_of,
                         near_m=self.config.plan_population_near_m, rng=np.random.default_rng((self.seed, 23)),
+                        drifts=drifts, jitter_m=self.config.plan_population_jitter_m,
                     )
                     for idx, meta in relabelled.items():
                         extra_metadata[idx] = meta
@@ -1441,7 +1474,8 @@ class SceneGenerationStage(PipelineStage):
                             return int(round(float(rm[rr, cc]))) == int(RegionType.VEGETATION)
 
                         existing_xz = np.array([[float(m["world_position"][0]), float(m["world_position"][2])]
-                                                for _, m in painted if m.get("world_position")], dtype=float)
+                                                for m in (relabelled.get(i, m0) for i, m0 in painted)
+                                                if m.get("world_position")], dtype=float)
                         bf_max = 1.0 + self.config.plan_population_margin_deg / max(half_fov, 1.0)
                         cone_fraction = min(1.0, 2.0 * (half_fov + self.config.plan_population_margin_deg) / 360.0)
                         filled, fsum = fill_population(
@@ -1449,6 +1483,7 @@ class SceneGenerationStage(PipelineStage):
                             (float(camera_xz[0]), float(camera_xz[1])), self.config.plan_population_near_m,
                             bf_max, cone_fraction, pcls, np.random.default_rng((self.seed, 29)),
                             ok_ground=ok_ground, density_table=self.config.plan_population_density_m2,
+                            drifts=drifts,
                         )
                         for meta in filled:
                             context.add_object(f"metadata_{object_count}", meta)
@@ -1710,6 +1745,13 @@ class SceneGenerationStage(PipelineStage):
 
                 max_dim = max(width, height)
                 size_cull_m = max(_MAX_OBJECT_SIZE_M, 1.3 * class_kind_length_m.get(cls, 0.0))
+                if idx in modelled:
+                    # Its own model stands for it: the backstop is the misdetection
+                    # the size of a hillside, not the sea stack a metre over the line.
+                    if max_dim > size_cull_m:
+                        self.log_info(f"Object {idx} ({cls}): estimated size {max_dim:.1f}m is over the {size_cull_m:.0f}m "
+                                      f"backstop; kept, a model was built from it")
+                    size_cull_m = max(size_cull_m, _MODELLED_OBJECT_SIZE_FACTOR * _MAX_OBJECT_SIZE_M)
                 if max_dim > size_cull_m and cls not in self.config.far_landmark_classes:
                     self.log_info(f"Skipping object {idx} ({cls}): estimated size {max_dim:.1f}m exceeds limit {size_cull_m:.0f}m")
                     self.advance_progress(generation_task)
@@ -1959,6 +2001,9 @@ class SceneGenerationStage(PipelineStage):
                 # overwrite category_mesh/mesh_key -- the runtime LOD set needs
                 # every representation the instance has, not just the one chosen
                 # for the start position.
+                # The bucket's own key: its far card is published under it, whichever
+                # variant of the mesh this instance wears.
+                bucket_key = mesh_key
                 if is_species_key(mesh_key):
                     # A species bucket with variants: this instance wears one of them,
                     # deterministically per index.
@@ -1983,7 +2028,11 @@ class SceneGenerationStage(PipelineStage):
                 # that publishes a _card mesh gets the same treatment, and any
                 # group that doesn't falls through to the billboard pool exactly
                 # as before.
-                card_mesh_key = f"{mesh_key}_card"
+                # A variant's card is its bucket's (Rainier: every `_v1`/`_v2` lupine,
+                # bistort and seed head past the mesh distance looked for a card under
+                # its own key, found none and borrowed bucket 0's, the magenta
+                # paintbrush -- two thirds of every other species turned pink at 60 m).
+                card_mesh_key = f"{bucket_key}_card"
                 card_mesh = context.input_mesh(card_mesh_key)
                 if card_mesh is None and cls in self.config.card_preferred_classes and not landmark_card:
                     # This bucket has no card: another bucket of the class lends
@@ -2276,12 +2325,206 @@ class SceneGenerationStage(PipelineStage):
                                 yaw += 90.0
                         mesh_obj.set_rotation(0.0, float(yaw) % 360.0, 0.0)
                         faced_photographer += 1
+                        if (
+                            idx in modelled and mesh_key in kind_length_m and not using_card
+                            and on_water and cls in self.config.water_only_classes
+                            and panorama is not None and metadata.get("box")
+                        ):
+                            # The detection this model was built from, afloat: the four
+                            # edges of its box in the photograph settle where it stands,
+                            # how big it is and how wide for its length (see
+                            # photo_box_fit). One depth and "the longer side is the
+                            # length" say little about a boat seen stern-on from above:
+                            # Paris's tour boat stood 28 x 5.5 x 5.7 m, 52 m out, half
+                            # the photographed width on screen; fitted, 20.5 x 7.3 x
+                            # 4.2 m at 48 m. Its kind's length still bounds it, wider
+                            # below than for a sibling detection: the box is this
+                            # boat's own.
+                            prior = kind_length_m[mesh_key]
+
+                            def fitted_at(yaw_deg: float, max_error: float = 0.1):
+                                f = fit_to_box(
+                                    category_mesh.mesh.bounds, float(yaw_deg), (position[0], position[2]),
+                                    float(terrain_y), self.config.water_draft_fraction, camera_position,
+                                    box_angles(metadata["box"], panorama.width, panorama.height), float(scale_y),
+                                )
+                                f_y = ground_y_at(f.x, f.z, scene.skybox_rotation) if f is not None else None
+                                good = (
+                                    f is not None and f.error < max_error and 0.4 * prior <= f.length_m <= 1.4 * prior
+                                    and f_y is not None and last_hit["water"] and abs(f_y - terrain_y) < 0.05
+                                )
+                                return f, good
+
+                            fit, fits = fitted_at(yaw)
+                            if not fits:
+                                # The box has no boat of this kind in it on the side the
+                                # pose faces the camera with: Paris's tour boat, its box
+                                # grown over the whole boat (1.3:1, seen stern-on from the
+                                # bridge), fitted broadside as a 14.5 m boat with the
+                                # edges 25% out, under the quarter-turn test's 2x margin
+                                # (2.6x off against 1.35x). End-on the same box holds a
+                                # 26 m boat with the edges 13% out (the model is taller
+                                # for its length than the boat, so no pose closes it).
+                                # When the box end-on does hold a boat of its kind's
+                                # length, and closer than broadside, the boat is end-on.
+                                for turn in (90.0, -90.0):
+                                    turned, turned_fits = fitted_at(yaw + turn, 0.2)
+                                    if turned_fits and (fit is None or turned.error < fit.error):
+                                        self.log_info(
+                                            f"  object {idx} ({cls}): broadside its box holds no {prior:g} m boat "
+                                            f"({fit.describe() if fit is not None else 'no fit'}); end-on it does -- turned {turn:+.0f} deg"
+                                        )
+                                        yaw += turn
+                                        mesh_obj.set_rotation(0.0, float(yaw) % 360.0, 0.0)
+                                        fit, fits = turned, True
+                                        break
+                            cut = context.input_image(hires_key(idx)) if fits else None
+                            if cut is not None and photo_cone is not None and metadata.get("photo_box"):
+                                # The box holds the boat at any heading near the pose's, the
+                                # beam taking up the difference: Paris's tour boat, rebuilt
+                                # as the wide open-deck boat it is, stood 21 degrees off the
+                                # camera's line where the photograph has it nearly stern-on,
+                                # and was fitted at half its beam (6.7 m for 12.7). Its
+                                # outline in the photograph says which heading: the fitted
+                                # model's silhouette is laid on the cut-out's at each small
+                                # turn, and a turn that fills it better is kept.
+                                pb = [float(v) for v in metadata["photo_box"]]
+                                u0, v0 = photo_cone.photo_to_pano(pb[0], pb[1])
+                                u1, v1 = photo_cone.photo_to_pano(pb[0] + pb[2], pb[1] + pb[3])
+                                own_angles = box_angles([u0, v0, u1 - u0, v1 - v0], panorama.width, panorama.height)
+                                outline = np.asarray(cut.image.convert("RGBA").getchannel("A")) > 127
+
+                                def filled_by(f, yaw_deg: float) -> float:
+                                    return silhouette_iou(
+                                        category_mesh.mesh.vertices, category_mesh.mesh.faces, category_mesh.mesh.bounds, f,
+                                        float(yaw_deg), float(terrain_y), self.config.water_draft_fraction, camera_position,
+                                        own_angles, outline,
+                                    )
+
+                                straight = filled_by(fit, yaw)
+                                best_turn, best_fit, best_filled = 0.0, fit, straight
+                                for turn in (-5.0, 5.0, -10.0, 10.0, -15.0, 15.0, -20.0, 20.0, -25.0, 25.0, -30.0, 30.0):
+                                    turned, turned_fits = fitted_at(yaw + turn)
+                                    if not turned_fits:
+                                        continue
+                                    filled = filled_by(turned, yaw + turn)
+                                    if filled > best_filled:
+                                        best_turn, best_fit, best_filled = turn, turned, filled
+                                if best_turn and best_filled >= straight + 0.03:
+                                    self.log_info(
+                                        f"  object {idx} ({cls}): turned {best_turn:+.0f} deg to its outline in the photograph "
+                                        f"(filled {best_filled:.2f}, {straight:.2f} unturned)"
+                                    )
+                                    yaw += best_turn
+                                    mesh_obj.set_rotation(0.0, float(yaw) % 360.0, 0.0)
+                                    fit = best_fit
+                            if fits:
+                                ext = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
+                                self.log_info(
+                                    f"  object {idx} ({cls}): fitted to its box in the photograph, {fit.describe()}; "
+                                    f"it stood {scale_z * float(ext[2]):.1f} x {scale_x * float(ext[0]):.1f} x "
+                                    f"{scale_y * float(ext[1]):.1f} m (z x x x y) at x={position[0]:.1f} z={position[2]:.1f}"
+                                )
+                                position = (fit.x, float(position[1]), fit.z)
+                                scale_x, scale_y, scale_z = fit.scale
+                                mesh_place_y = (
+                                    terrain_y - float(category_mesh.mesh.bounds[0][1]) * scale_y
+                                    - self.config.water_draft_fraction * float(ext[1]) * scale_y
+                                )
+                                mesh_obj.set_position(position[0], mesh_place_y, position[2])
+                            elif fit is not None:
+                                self.log_info(
+                                    f"  object {idx} ({cls}): not fitted to its box in the photograph ({fit.describe()}; "
+                                    f"its kind is {prior:g} m long)"
+                                )
+                        elif (
+                            idx in modelled and not using_card and on_water
+                            and cls not in self.config.water_only_classes
+                            and photo_cone is not None and metadata.get("photo_box")
+                        ):
+                            # A photographed landform standing in water, wearing its own
+                            # reconstruction: Shark Fin's sea stack. Its panorama box had
+                            # grown over a rock recovered beside it (268 px where the stack
+                            # is 207), so sized by that box it stood 29.7 m wide where the
+                            # photograph has it about 21, and the pose's front was some
+                            # 20 degrees round from the photographed side: a dome where the
+                            # photograph has a sheer face and a ramp. The box of the cut-out
+                            # the model was built from settles the size and the place (the
+                            # model's hull against the four edges, see photo_box_fit), and
+                            # of the yaws near the pose's the one at which
+                            # the model shows the photographed side best is kept: the one
+                            # whose surface colours, seen from the camera, follow the
+                            # cut-out's (the reconstruction wears the photograph on the side
+                            # it was made from). The outline alone does not say: the rebuilt
+                            # stack filled its outline 0.78 to 0.84 at every yaw of the full
+                            # turn, and the 0.84 was a broad face 50 degrees round. A model
+                            # with no texture to read is turned by its outline.
+                            pb = [float(v) for v in metadata["photo_box"]]
+                            u0, v0 = photo_cone.photo_to_pano(pb[0], pb[1])
+                            u1, v1 = photo_cone.photo_to_pano(pb[0] + pb[2], pb[1] + pb[3])
+                            own_angles = box_angles([u0, v0, u1 - u0, v1 - v0], panorama.width, panorama.height)
+                            cut = context.input_image(hires_key(idx))
+                            outline = np.asarray(cut.image.convert("RGBA").getchannel("A")) > 127 if cut is not None else None
+                            # Only a model of the cut-out itself shows the photographed outline.
+                            own_view = outline is not None and context.input_image(f"crop_reference_{idx}") is None
+                            bounds = category_mesh.mesh.bounds
+                            hull = np.asarray(category_mesh.mesh.convex_hull.vertices, dtype=float)
+                            draft = self.config.landform_draft_fraction
+                            samples = surface_samples(category_mesh.mesh) if own_view else None
+                            tried = []
+                            for turn in ((0.0, -10.0, 10.0, -20.0, 20.0, -30.0, 30.0, -40.0, 40.0, -50.0, 50.0) if own_view else (0.0,)):
+                                f = fit_to_box(
+                                    bounds, float(yaw + turn), (position[0], position[2]), float(terrain_y), draft,
+                                    camera_position, own_angles, float(scale_y), beam_limits=(0.8, 1.25), points=hull,
+                                )
+                                if f is None or f.error > 0.15:
+                                    continue
+                                f_y = ground_y_at(f.x, f.z, scene.skybox_rotation)
+                                if f_y is None or not last_hit["water"] or abs(f_y - terrain_y) > 0.05:
+                                    continue
+                                if not own_view:
+                                    filled = 0.0
+                                elif samples is not None:
+                                    filled = appearance_match(
+                                        samples[0], samples[1], bounds, f, float(yaw + turn), float(terrain_y), draft,
+                                        camera_position, own_angles, cut.image,
+                                    )
+                                else:
+                                    filled = silhouette_iou(
+                                        category_mesh.mesh.vertices, category_mesh.mesh.faces, bounds, f, float(yaw + turn),
+                                        float(terrain_y), draft, camera_position, own_angles, outline,
+                                    )
+                                tried.append((turn, f, filled))
+                            if tried:
+                                straight = next((t for t in tried if t[0] == 0.0), None)
+                                turn, fit, filled = max(tried, key=lambda t: t[2])
+                                if straight is not None and filled < straight[2] + 0.03:
+                                    turn, fit, filled = straight
+                                ext = bounds[1] - bounds[0]
+                                self.log_info(
+                                    f"  object {idx} ({cls}): fitted to its cut-out in the photograph, {fit.describe()}"
+                                    + (f", turned {turn:+.0f} deg from the pose's front "
+                                       f"({'likeness to the cut-out' if samples is not None else 'outline filled'} {filled:.2f}"
+                                       + (f", {straight[2]:.2f} unturned)" if straight is not None else ")") if own_view else "")
+                                    + f"; it stood {scale_x * float(ext[0]):.1f} x {scale_z * float(ext[2]):.1f} x "
+                                    f"{scale_y * float(ext[1]):.1f} m at x={position[0]:.1f} z={position[2]:.1f}"
+                                )
+                                yaw += turn
+                                mesh_obj.set_rotation(0.0, float(yaw) % 360.0, 0.0)
+                                position = (fit.x, float(position[1]), fit.z)
+                                scale_x, scale_y, scale_z = fit.scale
+                                mesh_place_y = (
+                                    terrain_y - float(bounds[0][1]) * scale_y - draft * float(ext[1]) * scale_y
+                                )
+                                mesh_obj.set_position(position[0], mesh_place_y, position[2])
+                            else:
+                                self.log_info(f"  object {idx} ({cls}): not fitted to its cut-out in the photograph")
                     else:
                         mesh_obj.set_rotation(0.0, float(rng.uniform(0.0, 360.0)), 0.0)
                     mesh_obj.set_scale(scale_x, scale_y, scale_z)
                     if always_mesh and not using_card:
                         ext = category_mesh.mesh.bounds[1] - category_mesh.mesh.bounds[0]
-                        reach = 0.5 * max(float(ext[0]), float(ext[2])) * float(scale_x)
+                        reach = 0.5 * max(float(ext[0]) * float(scale_x), float(ext[2]) * float(scale_z))
                         # Painted instances yield to anything placed; a detection
                         # yields to a stronger one of its own class -- the detector
                         # boxed Paris's tour boat three times (hull, deck, crowd),

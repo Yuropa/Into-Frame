@@ -57,6 +57,7 @@ FIX_SCHEMA = {
                                       "world": {"type": "array", "items": {"type": "number"}},
                                       "delta": {"type": "array", "items": {"type": "number"}, "description": "[dx, dy, dz] metres, move only; x right, y up, z forward"}}},
                 "height_m": {"type": "number", "description": "place/scale: the object's vertical height in metres"},
+                "fit_photo_box": {"type": "boolean", "description": "place/scale with at.photo_box: the editor measures the object's height from the box (its top edge over the object's foot, at the distance the object stands) instead of taking height_m"},
                 "length_m": {"type": "number", "description": "place/scale: the object's longest horizontal extent in metres; use this for boats, bridges, buildings and anything wider than it is tall"},
                 "yaw_deg": {"type": "number"}, "delta_deg": {"type": "number"}, "factor": {"type": "number"},
                 "population": {"type": "string", "description": "edit_population: a population from the listing (flower_1) or a whole family (flower)"},
@@ -85,7 +86,10 @@ Rules. Address only the stated issue, with one to three actions. Positions come 
 object's photo_box (fractions of the photograph's width and height) where it should stand and let the editor \
 find the ground; give bearing and distance only when the thing has no footprint in the photograph. Sizes in \
 metres, from the plan or from what the class can be: height_m for things taller than wide, length_m for boats, \
-bridges and buildings (each object's listing gives its current length and height). Place only mesh keys from \
+bridges and buildings (each object's listing gives its current length and height). For a thing that stands \
+in the photograph and is taller than wide (a tree, a mast, a tower, a figure), do not work metres out from \
+the frame: give at.photo_box drawn tightly round it with fit_photo_box true, on a place or on a scale of an \
+object already there, and the editor measures the height the box spans where the object stands. Place only mesh keys from \
 the list; a missing object with no suitable mesh is a give_up. Do not touch the terrain, water, treeline or \
 backdrop meshes. A region that renders black or far darker than the photograph while its surface is present \
 is usually the exposure fit, not missing content: try set_light (sun_scale, ambient_scale above 1) before \

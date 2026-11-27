@@ -84,11 +84,39 @@ Content marked generated (behind the camera, outpainted) is a hypothesis: do not
 Give each issue its place in the photograph as `photo_box` fractions, so the fix can be measured there."""
 
 
+_OMITTED_WORDS = {"person": "people"}
+
+
+def omitted_classes() -> list[str]:
+    """Classes the pipeline takes out of the scene by design (Inventory Review's
+    erase_classes: people, until they can be animated). The judge is told, so that their
+    absence is not an issue every verdict carries and the fix loop then tries to mend."""
+    try:
+        import yaml
+        cfg = yaml.safe_load((ROOT / "server" / "config.yaml").read_text())
+        for st in cfg.get("stages") or []:
+            if st.get("name") == "Inventory Review":
+                if st.get("enabled") is False:
+                    return []
+                classes = st.get("erase_classes")
+                return [str(c).lower() for c in (classes if classes is not None else ["person"])]
+    except Exception:
+        pass
+    return []
+
+
 def _user_text(acceptance: list[dict], node_lines: Optional[list[str]], style: Optional[str],
-               focus: Optional[dict] = None, has_previous: bool = False) -> str:
+               focus: Optional[dict] = None, has_previous: bool = False,
+               omitted: Optional[list[str]] = None) -> str:
     acc = "\n".join(f"- {a.get('id')} [{a.get('priority')}]: {a.get('text')}" for a in acceptance) or "- (none)"
     parts = ["The first image is the photograph, the second the render from its camera.",
              f"Acceptance items read from the photograph:\n{acc}"]
+    if omitted:
+        words = ", ".join(_OMITTED_WORDS.get(c, c) for c in omitted)
+        parts.append(f"Left out by design: {words}. The scene does not reproduce them and the ground where they stood "
+                     "is filled in. Their absence is not an issue: do not list it, and judge an acceptance item that is "
+                     "about them alone as passed with the evidence 'left out by design'. Anything they left behind "
+                     "(a smear, a hole, a shadow with no owner) is an issue as usual.")
     if node_lines:
         parts.append("Scene-graph nodes (id <type/kind> name):\n" + "\n".join(node_lines))
     if style:
@@ -187,7 +215,9 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
     acceptance = (plan or {}).get("acceptance") or []
     node_lines = _node_lines(graph) if graph is not None else None
     node_ids = [l.split(" ", 1)[0] for l in node_lines] if node_lines else None
-    user = _user_text(acceptance, node_lines, style, focus, has_previous=bool(focus) and previous is not None)
+    omitted = omitted_classes()
+    user = _user_text(acceptance, node_lines, style, focus, has_previous=bool(focus) and previous is not None,
+                      omitted=omitted)
     schema = focus_schema(node_ids) if focus else judge_schema(node_ids)
     b1, _, _ = image_to_jpeg_b64(photo, 1024)
     b2, _, _ = image_to_jpeg_b64(render, 1024)
@@ -220,11 +250,14 @@ def judge(photo: Image.Image, render: Image.Image, plan: Optional[dict], model_i
         return None
     ledger.record("critique", ModelReply(data, pm.model, pm.provider, usage[0], usage[1], usd, time.time() - t0),
                   out.name, "judge")
+    # An issue that came back as a bare string (Opus on Paris, 2026-11-24) is not one.
+    data["issues"] = _dicts(data.get("issues"))
     if node_ids:   # a node the model invented is dropped to '' rather than trusted
-        for i in data.get("issues", []):
+        for i in data["issues"]:
             if i.get("node") not in node_ids:
                 i["node"] = ""
     verdict = score_verdict(data, acceptance, f"{pm.provider}:{pm.model}", usd)
+    verdict["omitted"] = omitted
     verdict["seconds"] = round(time.time() - t0, 1)
     out.mkdir(parents=True, exist_ok=True)
     (out / "verdict.json").write_text(json.dumps(verdict, indent=2))

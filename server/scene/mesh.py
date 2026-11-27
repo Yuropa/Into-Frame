@@ -147,7 +147,7 @@ class Mesh:
             vertex_colors=vertex_colors,
         ))
 
-    def decimate(self, max_faces: int) -> "Mesh":
+    def decimate(self, max_faces: int, rebake: bool = False) -> "Mesh":
         """Decimate straight to a face budget, keeping per-vertex colour -- or the
         UV-mapped texture, when there is one.
 
@@ -169,6 +169,14 @@ class Mesh:
         vertices at or very near a vertex of the input). Baking a texture down to
         per-vertex colour instead would throw away every detail finer than the
         decimated vertex spacing, which on a 4000-vertex riverboat is all of them.
+
+        That transfer is sound for a vertex and wrong for a triangle whose three
+        vertices land in three charts of the atlas: it then samples the texture
+        straight across whatever lies between them. On a reconstruction taken from
+        66,000 faces to 8,000 (Shark Fin's rock, Paris's boats and bridge) that is a
+        large share of the triangles, drawn as black and pale zigzag tears over the
+        surface. rebake=True draws the texture again for the decimated triangles
+        instead (rebake_texture_from): for reconstructed solids, not for cutout cards.
 
         Returns a copy unchanged when already within budget, or when max_faces <= 0.
         """
@@ -200,6 +208,8 @@ class Mesh:
 
         vertices = np.asarray(dec.vertices)
         visual = None
+        if textured and rebake:
+            return Mesh(trimesh.Trimesh(vertices=vertices, faces=faces)).rebake_texture_from(self)
         if textured:
             from scipy.spatial import cKDTree
 
@@ -223,6 +233,118 @@ class Mesh:
                 if visual is None and dec.has_vertex_colors() else None
             ),
         ))
+
+    def rebake_texture_from(self, source: "Mesh", size: int = 0, pad_px: float = 1.5) -> "Mesh":
+        """This geometry with `source`'s texture drawn again in an atlas of its own.
+
+        Every triangle gets half a square cell of a size x size texture (triangles
+        ordered along a space-filling curve, so neighbours in the atlas are neighbours
+        on the surface and the mips stay coherent). Each texel of a cell is carried to
+        its point on the triangle's plane -- the pad_px border around the triangle
+        included, which extends the surface a little past its edges rather than
+        repeating a colour -- and takes the colour of the nearest point of the source
+        surface, read from the source's texture through the source's own UVs.
+
+        The vertices are split per triangle (no two triangles share a UV), so the
+        result is flagged to have its normals averaged over coincident vertices on
+        export (see _mirror_x); without that it would shade faceted."""
+        import open3d as o3d
+        from PIL import Image as _PIL
+
+        src = source.mesh
+        tex_img = src.visual.material.baseColorTexture
+        mode = "RGBA" if tex_img.mode in ("RGBA", "LA", "P") else "RGB"
+        tex = np.asarray(tex_img.convert(mode), dtype=np.float32)
+        th, tw = tex.shape[:2]
+        src_uv = np.asarray(src.visual.uv, dtype=np.float64)
+        src_faces = np.asarray(src.faces)
+
+        verts = np.asarray(self.mesh.vertices, dtype=np.float64)
+        faces = np.asarray(self.mesh.faces)
+        n = len(faces)
+        # Morton order of the triangle centroids.
+        cen = verts[faces].mean(axis=1)
+        q = ((cen - cen.min(axis=0)) / max(float(np.ptp(cen)), 1e-9) * 1023).astype(np.uint64)
+        code = np.zeros(n, dtype=np.uint64)
+        for bit in range(10):
+            for axis in range(3):
+                code |= ((q[:, axis] >> np.uint64(bit)) & np.uint64(1)) << np.uint64(3 * bit + axis)
+        faces = faces[np.argsort(code, kind="stable")]
+
+        k = int(np.ceil(np.sqrt(n / 2.0)))
+        if size <= 0:
+            size = 1024 if 1024 // k >= 24 else 2048
+        c = size // k
+        if c < 6:
+            raise ValueError(f"{n} triangles do not fit a {size} px atlas")
+        p = min(float(pad_px), c / 8.0)
+        leg = c - (2.0 + np.sqrt(2.0)) * p          # the triangle's two short sides, in texels
+
+        span = k * c
+        py, px = np.mgrid[0:span, 0:span]
+        x, y = (px % c) + 0.5, (py % c) + 0.5
+        upper = (x + y) > c
+        slot = 2 * ((py // c) * k + (px // c)) + upper
+        used = slot < n
+        b1 = np.where(upper, c - p - x, x - p)[used] / leg
+        b2 = np.where(upper, c - p - y, y - p)[used] / leg
+        tri = verts[faces[slot[used]]]
+        points = (tri[:, 0] * (1.0 - b1 - b2)[:, None] + tri[:, 1] * b1[:, None] + tri[:, 2] * b2[:, None])
+
+        scene = o3d.t.geometry.RaycastingScene()
+        scene.add_triangles(o3d.core.Tensor(np.asarray(src.vertices, dtype=np.float32)),
+                            o3d.core.Tensor(src_faces.astype(np.uint32)))
+        colours = np.empty((len(points), tex.shape[2]), dtype=np.float32)
+        for start in range(0, len(points), 1 << 20):
+            hit = scene.compute_closest_points(o3d.core.Tensor(points[start:start + (1 << 20)].astype(np.float32)))
+            fid = hit["primitive_ids"].numpy().astype(np.int64)
+            bary = hit["primitive_uvs"].numpy().astype(np.float64)
+            corner = src_uv[src_faces[fid]]
+            uv = (corner[:, 0] * (1.0 - bary[:, 0] - bary[:, 1])[:, None] + corner[:, 1] * bary[:, :1]
+                  + corner[:, 2] * bary[:, 1:2])
+            # Bilinear, v up.
+            fx = np.clip(uv[:, 0], 0.0, 1.0) * (tw - 1)
+            fy = (1.0 - np.clip(uv[:, 1], 0.0, 1.0)) * (th - 1)
+            x0, y0 = np.floor(fx).astype(np.int64), np.floor(fy).astype(np.int64)
+            x1, y1 = np.minimum(x0 + 1, tw - 1), np.minimum(y0 + 1, th - 1)
+            wx, wy = (fx - x0)[:, None].astype(np.float32), (fy - y0)[:, None].astype(np.float32)
+            colours[start:start + len(fid)] = ((tex[y0, x0] * (1 - wx) + tex[y0, x1] * wx) * (1 - wy)
+                                               + (tex[y1, x0] * (1 - wx) + tex[y1, x1] * wx) * wy)
+
+        # Cells past the last triangle and the strip the cells do not reach take the
+        # mean colour, so the smallest mips are not pulled toward black.
+        atlas = np.empty((size, size, tex.shape[2]), dtype=np.float32)
+        atlas[:] = colours.mean(axis=0)
+        block = atlas[:span, :span]
+        block[used] = colours
+        image = _PIL.fromarray(np.clip(np.rint(atlas), 0, 255).astype(np.uint8), mode)
+
+        # The corners of each triangle in the atlas, in the order of its vertices.
+        slots = np.arange(n)
+        ox, oy = ((slots // 2) % k) * c, ((slots // 2) // k) * c
+        up = (slots % 2).astype(bool)
+        local = np.where(up[:, None, None],
+                         np.array([[c - p, c - p], [c - p - leg, c - p], [c - p, c - p - leg]]),
+                         np.array([[p, p], [p + leg, p], [p, p + leg]]))
+        uv_px = local + np.stack([ox, oy], axis=1)[:, None, :]
+        new_uv = np.stack([uv_px[..., 0] / size, 1.0 - uv_px[..., 1] / size], axis=-1).reshape(-1, 2)
+
+        old = src.visual.material
+        material = trimesh.visual.material.PBRMaterial(
+            baseColorTexture=image,
+            baseColorFactor=getattr(old, "baseColorFactor", None),
+            metallicFactor=getattr(old, "metallicFactor", None),
+            roughnessFactor=getattr(old, "roughnessFactor", None),
+            alphaMode=getattr(old, "alphaMode", None),
+            alphaCutoff=getattr(old, "alphaCutoff", None),
+            doubleSided=getattr(old, "doubleSided", None),
+        )
+        out = trimesh.Trimesh(
+            vertices=verts[faces].reshape(-1, 3), faces=np.arange(3 * n).reshape(n, 3),
+            visual=trimesh.visual.TextureVisuals(uv=new_uv, material=material), process=False,
+        )
+        out.metadata[self._WELD_NORMALS] = True
+        return Mesh(out)
 
     def simplify(self, max_error_fraction: float = 0.03, min_faces: int = 50) -> "Mesh":
         """Decimate as aggressively as possible while keeping geometric error within budget.
@@ -414,6 +536,26 @@ class Mesh:
     # faces still point outward. load() undoes it for files that carry the marker
     # below; a GLB without the marker predates this and is read as before.
     _HANDEDNESS_MARKER = "intoframe_handedness"
+    # A mesh whose vertices are split per triangle (rebake_texture_from) shades
+    # smooth only when its normals are averaged over coincident vertices; the flag
+    # travels in the trimesh metadata and in the GLB's asset extras.
+    _WELD_NORMALS = "intoframe_weld_normals"
+
+    @staticmethod
+    def _welded_normals(tm: trimesh.Trimesh) -> np.ndarray:
+        """Vertex normals averaged (by face area) over all vertices at one position."""
+        vertices = np.asarray(tm.vertices, dtype=np.float64)
+        faces = np.asarray(tm.faces)
+        scale = max(float(np.ptp(vertices, axis=0).max()), 1e-9)
+        _, inverse = np.unique(np.round(vertices / scale * 1e6).astype(np.int64), axis=0, return_inverse=True)
+        inverse = np.asarray(inverse).reshape(-1)
+        tri = vertices[faces]
+        weighted = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])     # normal x 2 area
+        acc = np.zeros((int(inverse.max()) + 1, 3), dtype=np.float64)
+        np.add.at(acc, inverse[faces].reshape(-1), np.repeat(weighted, 3, axis=0))
+        normals = acc[inverse]
+        length = np.linalg.norm(normals, axis=1, keepdims=True)
+        return np.where(length > 1e-12, normals / np.maximum(length, 1e-12), [0.0, 1.0, 0.0])
 
     @staticmethod
     def _mirror_x(tm: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -426,6 +568,8 @@ class Mesh:
         # winding instead of being the stale mirror-image ones.
         out.vertices = vertices
         out.faces = faces
+        if tm.metadata.get(Mesh._WELD_NORMALS):
+            out.vertex_normals = Mesh._welded_normals(out)
         return out
 
     def save(self, path):
@@ -441,6 +585,8 @@ class Mesh:
                 inject_skin(path, self.skin_bone_heights, self.skin_bone_names)
             tree, bin_data = _read_glb(Path(path).read_bytes())
             tree.setdefault("asset", {}).setdefault("extras", {})[self._HANDEDNESS_MARKER] = "gltf"
+            if self.mesh.metadata.get(self._WELD_NORMALS):
+                tree["asset"]["extras"][self._WELD_NORMALS] = True
             self._clamp_samplers(tree)
             _write_glb(Path(path), tree, bin_data)
 
@@ -498,6 +644,8 @@ class Mesh:
         if not isinstance(loaded, trimesh.Trimesh):
             raise ValueError(f"Expected a single Trimesh at {path}, got {type(loaded).__name__}")
         extras = cls._asset_extras(path)
+        if extras.get(cls._WELD_NORMALS):
+            loaded.metadata[cls._WELD_NORMALS] = True
         if extras.get(cls._HANDEDNESS_MARKER) == "gltf":
             loaded = cls._mirror_x(loaded)
         mesh = cls(loaded)

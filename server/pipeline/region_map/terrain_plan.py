@@ -22,7 +22,10 @@ land cover with rules a cartographer would apply:
     whatever the outpainter put beyond that edge. An edge that ends on land (a
     headland filling the frame's side) is not extended: the land goes on.
   * A RIVER is a channel of constant width along its fitted axis through the
-    whole grid, with continuous banks; water anywhere outside the channel is bank.
+    whole grid, with continuous banks. Outside the photograph the outpainted water
+    that joins it stays water: the ground there wears the panorama, and a bank that
+    wears painted water reads as water the scene failed to find. Inside the
+    photograph water outside the channel is what the photograph shows.
   * Water that the photograph did not show exists only as a continuation of water
     it did: any outpainted water body not connected to photographed water is
     land. Small land islets inside a water body are water.
@@ -80,15 +83,18 @@ class PlanConfig:
     bank_tolerance_m: float = 1.5          # photographed land this far above the water plane stays land
     edge_deg: float = 10.0                 # the coast's direction at a cone edge is fitted over this much of it
     extend_deg: float = 60.0               # and carried this far round past the edge
+    edge_end_deg: float = 3.0              # what the frame's last columns hold is what it cuts through
     river_margin_m: float = 5.0            # bank strip either side of the channel
     hole_m2: float = 200.0                 # land islets inside water smaller than this are water
     land_smooth_m: float = 4.0             # land-cover regions are at least this wide (0 disables)
     smooth_min_distance_m: float = 20.0    # the near field keeps its photographed detail
     prior_width_m: Optional[float] = None  # Scene Plan: the photographed river's width when both banks are visible
     prior_width_tol: float = 0.2           # the fitted width is moved inside this fraction of it
+    river_keeps_outpainted: bool = True    # outpainted water joined to the channel stays water
+    standing_radius_m: float = 0.0         # Height Map's pedestal under the viewer reaches this far (0: none)
 
 
-def _column_shore_stats(type_idx_map, depth, cone_hfov_deg, half_m, bin_m=2.0, min_px=3):
+def _column_shore_stats(type_idx_map, depth, cone_hfov_deg, half_m, bin_m=2.0, min_px=3, face_gap_m=6.0):
     """Per panorama column: azimuth, whether it is inside the cone, whether it meets
     the sky as water, the nearest water range and the farthest land range."""
     H, W = type_idx_map.shape
@@ -112,16 +118,37 @@ def _column_shore_stats(type_idx_map, depth, cone_hfov_deg, half_m, bin_m=2.0, m
     # sea scene is sea.
     nb = int(np.ceil(half_m / bin_m)) + 1
     occ = np.zeros((W, nb), dtype=bool)
+    # Land above the horizon is the face of something that stands higher than the
+    # viewer, and it stands at its range like the ground at its foot. Shark Fin's
+    # left headland is a 22 m cliff 145 m out with its upper half above the eye:
+    # counted from the pixels below the horizon alone, the ranges its upper face
+    # was measured at held no land, the sea was planned through them and the
+    # cliff kept its foot, 8 m high with its top under the horizon.
+    standing_px = np.isin(type_idx_map, _GROUND_TYPES) & finite & (depth < 0.97 * d_max)
+    above = ~below
     for c in np.flatnonzero(in_cone):
         if water_px[:, c].any():
             r_shore[c] = float(np.nanmin(r_h[water_px[:, c], c]))
         if land_px[:, c].any():
-            rl = r_h[land_px[:, c], c]
-            r_land[c] = float(np.nanmax(rl))
+            r_land[c] = float(np.nanmax(r_h[land_px[:, c], c]))
+        sp = standing_px[:, c]
+        if sp.any():
+            rc = r_h[:, c]
+            rl = rc[sp]
             rl = rl[rl < half_m]
             if rl.size:
                 counts = np.bincount((rl / bin_m).astype(np.int64), minlength=nb)
                 occ[c] = counts >= min_px
+            # The depth leans such a face back: one pixel to the next up it, the
+            # range grows by a metre or two and no bin collects three (the same
+            # headland 15 degrees along: 137 m at the horizon to 166 m two degrees
+            # above it). Two neighbouring pixels of the face are one surface, and
+            # every range between them is the body it stands on.
+            pair = sp[:-1] & sp[1:] & above[:-1]
+            for i in np.flatnonzero(pair):
+                r0, r1 = sorted((float(rc[i]), float(rc[i + 1])))
+                if r1 < half_m and r1 - r0 <= face_gap_m:
+                    occ[c, int(r0 / bin_m):int(r1 / bin_m) + 1] = True
     occ |= np.roll(occ, 1, axis=1) | np.roll(occ, -1, axis=1)
     # Sea column: the first ground-typed pixel from the top is water.
     non_sky = type_idx_map != sky_idx
@@ -327,6 +354,27 @@ def build_plan(
             band = (rel > 0.0) & (rel <= float(cfg.extend_deg))
             r_coast = max(5.0, r_edge) * (1.0 + rel / float(cfg.extend_deg))
             ext = band & (R > r_coast)
+            # A cliff the frame cuts through goes on past it. Shark Fin's right edge
+            # is open sea over 54% of its last 10 degrees and ends on a cliff (rock
+            # from 34 to 106 m in the last 3): the sea carried past the edge at
+            # every range drowned the cliff's outpainted continuation, and the
+            # sliver of it inside the frame, 4 to 11 m wide between two seas, went
+            # with it as an islet. Land the panorama shows past the edge, at the
+            # ranges where the last columns hold land and joined to them, stays.
+            end_cols = col_in_cone & (np.abs(az - edge_az) <= float(cfg.edge_end_deg))
+            if end_cols.any():
+                occ_end = occ[end_cols].any(axis=0)
+                occ_end[-2:] = False                    # the depth's ceiling is not a range
+                cut = band & occ_end[bin_of] & (region_map != water_idx) & (R > r_coast)
+                if cut.any():
+                    lab, _n = _label(cut)
+                    joined = np.unique(lab[cut & (rel <= 2.0)])
+                    joined = joined[joined > 0]
+                    cut = np.isin(lab, joined) if joined.size else np.zeros_like(cut)
+                if cut.any():
+                    ext &= ~cut
+                    notes.append(f"{'left' if sign < 0 else 'right'} edge cuts through land: {int(cut.sum())} cells of it "
+                                 f"past the edge kept out of the sea")
             planned |= ext
             arc = []
             for rel_d in np.linspace(0.0, float(cfg.extend_deg), 24):
@@ -374,6 +422,16 @@ def build_plan(
         planned = channel.copy()
         # Photographed water outside the channel (a basin, a backwater) stays.
         planned |= photographed_water
+        if cfg.river_keeps_outpainted:
+            # And so does the outpainted water outside the photograph (what does not
+            # join the river is dropped below, with every other stray body). Made
+            # bank, it was flat ground wearing the panorama's water: Paris had 2.26 M
+            # cells of it, a grey rippled quay 60 m wide to the right of the bridge
+            # with the channel's straight edge drawn across painted river.
+            kept = water_cells & ~in_cone & ~planned
+            if kept.any():
+                planned |= kept
+                notes.append(f"{int(kept.sum())} cells of outpainted water outside the channel kept")
         plan.channel = {"x_left": xl, "x_right": xr, "slope": slope, "offset": offset, "width": width,
                         "water_y": water_y, "bank_y": bank_y}
         notes.append(f"river {width:.0f} m wide, banks at x = {xl:.0f} / {xr:.0f} m, axis "
@@ -387,6 +445,22 @@ def build_plan(
         notes.append("lake: water bounded on every visible side, kept to the photographed extent")
     else:
         notes.append("no water in the photograph: none in the scene")
+
+    # ── the viewer's own footing is never water ────────────────────────────────
+    # Height Map raised a pedestal under a viewer who stands above the scene; the
+    # panorama under it is the outpainted nadir, and what that typed as water
+    # (Shark Fin: a 4 m blob two metres from the tripod) was "photographed water"
+    # here and was sunk to the sea, a pit to -13.5 m beside the camera with the
+    # water sheet in it.
+    if cfg.standing_radius_m > 0.0 and elevation is not None and plan.water_y is not None:
+        footing = (R <= float(cfg.standing_radius_m)) & np.isfinite(elevation) \
+            & (elevation > plan.water_y + float(cfg.bank_tolerance_m))
+        n_footing = int((footing & (planned | photographed_water)).sum())
+        if n_footing:
+            planned &= ~footing
+            photographed_water = photographed_water & ~footing
+            notes.append(f"{n_footing} cells of water on the viewer's pedestal (within "
+                         f"{cfg.standing_radius_m:.0f} m, above the water) made land")
 
     # ── water only as a continuation of photographed water ────────────────────
     if planned.any() and cfg.land_smooth_m > 0:

@@ -320,6 +320,11 @@ stages:
     # Tower 100; the tour boat 16, the near-left trees 38-46. Rainier keeps 7 trees.
     keep_far_objects: true
     far_depth_fraction: 0.5
+    # A tree, boat or structure under keep_small_max_deg tall and past this
+    # fraction of the range stays photographed too (Paris's right bank: plane
+    # trees at 42-48, moored barges at 35-47, all under 5 degrees).
+    keep_small_fraction: 0.3
+    keep_small_max_deg: 5.0
 
   - name: Panorama LoRA Correction
     stage: PanoramaLoraCorrectionStage
@@ -2228,6 +2233,14 @@ stages:
     # this is the RAW detected angle, Scene Generation's is the PLACED size, which
     # carries object_scale.py's per-run correction (4.45x on Rainier).
     min_mesh_angular_px: 90.0
+    # Beyond billboard_distance_m a subject this tall in the view is reconstructed all
+    # the same (Shark Fin's sea stack: 568 px at 60.1 m). Plants excluded.
+    far_mesh_angular_px: 270.0
+    # A reconstruction whose own camera pose is further than this from level is turned
+    # level (Shark Fin's rock lay flat on the ground); a rock is given at least 0.6 of
+    # its width or height in depth along the view (one photograph does not hold it).
+    level_tilted_meshes_deg: 35.0
+    min_view_depth_ratio: {rock: 0.6}
     viewer_px_per_degree: 34.0   # must match Scene Generation's value below
     billboard_top_k: 4       # curated crops per (class, bucket) billboard pool
     # Default reconstructor, plus per-class overrides. SAM3D bakes the photograph
@@ -2366,7 +2379,7 @@ stages:
     stage: SceneGenerationStage
     keys:
       panorama: panorama_sky
-    species_mesh_near_distance_m: 120.0  # a Species Assets mesh stays a mesh this far out (cards beyond); covers a 100 m world so a plan band of conifers is geometry, not khaki delit cards
+    species_mesh_near_distance_m: 400.0  # a Species Assets mesh stays a mesh this far out (cards beyond); the whole grid: a species tree is ~1,000 triangles and one mesh per bucket, so the far trees are geometry, not khaki delit cards
     # Scene Plan sizes as the height gate (docs/hybrid-scene-plan.md): a class the plan gives a
     # standing height for uses [size/tol, size*tol] instead of CLASS_HEIGHT_RANGE_M; a detection
     # outside it moves along its ray until it stands inside (at most to the furthest ground),
@@ -2762,12 +2775,27 @@ stages:
     # fraction of the object's own size, so a 0.35 m grass tuft's motion is
     # sub-pixel long before the 25 m ground cover reaches. 0 disables the gate.
     sway_max_distance_m: 8.0
+    # A mesh also sways out to this many times its own height (trees: an 18 m fir to
+    # 144 m), capped in distance and in number (nearest first); every one is a skinned
+    # renderer the client cannot instance.
+    sway_distance_per_height: 8.0
+    sway_large_max_distance_m: 150.0
+    sway_large_max_instances: 250
     # Final pass: annotates Scene Generation's already-placed objects with animated-
     # billboard video, sway parameters, or rigid-body physics handoff, based on the
     # classification above. Purely additive -- placement itself is unchanged.
     sway_frequency_scale: 0.5   # global multiplier on every sway frequency (measured
                                  # and default alike). Raise toward 1.0 for a windier
                                  # scene; lower for stiller air.
+
+  - name: Scene Graph
+    stage: SceneGraphStage
+    # The run's whole representation as one self-contained page (Scene Graph/scene_graph.html:
+    # graph, top-down map, photograph with detections, tables, raw documents), the graph it
+    # shows, and physical_properties.json (per model file: measured geometry; material, mass,
+    # friction and collider from class priors, marked "default" until something measures them).
+    # Reads the saved run, CPU only, a few seconds; a failure is a warning, never a failed run.
+    sample_points: 5000   # points sampled per model for the page's turntable (0: none)
 
   - name: Report
     stage: ReportGenerationStage

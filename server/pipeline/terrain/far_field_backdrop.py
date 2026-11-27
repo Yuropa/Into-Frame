@@ -24,6 +24,14 @@ stretching a skin between them. It is textured with the panorama itself and the
 client renders it unlit: it is a photograph of distant scenery with its own light
 in it, like the skybox it sits in front of.
 
+A canopy standing in front of a far landform (the firs under Rainier's summit)
+is a second layer of the same mesh. On one sheet the forest and the mountain
+behind it were a skin stretched between two depths with one picture on it: a
+step to the side slid the trees and there was no mountain behind them to show.
+The canopy keeps its own depth and its photographed pixels on a strip of its
+own; the sheet behind it is carried on at the landform's depth and painted with
+the landform's colours continued under the trees.
+
 Reads
   ContextKey.PANORAMA_TERRAIN          the object-removed panorama
   ContextKey.PANORAMA_DEPTH_METRIC     uncompressed calibrated depth
@@ -135,6 +143,11 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # normals estimated from km-scale depth made Rainier's summit bright and
         # blotchy where the photo has it in soft evening light.
         lit: bool = False,
+        canopy_layer: bool = True,
+        canopy_front_ratio: float = 0.7,
+        far_crest_m: float = 2000.0,
+        crest_flank_fraction: float = 0.33,
+        canopy_fill_dilate_px: int = 3,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Depth-map value beyond which a pixel belongs to the backdrop. 0 = the
@@ -213,6 +226,22 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # edge sits 0.14 deg under the horizon -- a pixel or two in the viewer.
         self.water_apron_open_water_m = float(water_apron_open_water_m)
         self.lit = bool(lit)
+        # Canopy (FOREST) under a landform's skyline run and nearer than
+        # canopy_front_ratio x what stands behind it becomes a layer of its own,
+        # and the sheet behind it takes the landform's depth and colours (see run).
+        self.canopy_layer = bool(canopy_layer)
+        self.canopy_front_ratio = float(canopy_front_ratio)
+        # A landform whose crest is kilometres away is read at its foot at the
+        # treeline's own distance (Panorama Depth Calibration lifts those pixels
+        # to just past the grid, 220 m on Rainier under a 6000 m summit), so half
+        # the mountain stood at the forest's radius and nothing separated the two.
+        # Where a column's crest is beyond far_crest_m, the landform's run down
+        # from its skyline stands no nearer than crest_flank_fraction of the crest.
+        self.far_crest_m = float(far_crest_m)
+        self.crest_flank_fraction = float(crest_flank_fraction)
+        # The repainted area reaches this far past the canopy's own pixels, so the
+        # dark rim the photograph has round every crown is not left on the sheet.
+        self.canopy_fill_dilate_px = max(0, int(canopy_fill_dilate_px))
 
 
 class FarFieldBackdropStage(PipelineStage):
@@ -383,6 +412,7 @@ class FarFieldBackdropStage(PipelineStage):
         y_water = None
         water_covered = np.zeros((H, W), dtype=bool)
         open_water_cols = None
+        river_reach = None
         water_mesh = context.input_mesh(ContextKey.WATER_MESH)
         if cfg.water_apron and water_mesh is not None and type_depth is not None:
             y_water = float(np.median(np.asarray(water_mesh.mesh.vertices, dtype=np.float64)[:, 1]))
@@ -416,6 +446,18 @@ class FarFieldBackdropStage(PipelineStage):
                     gained = sea_rows[:, None] & oc[None, :] & ~water_covered
                     if sky is not None:
                         gained &= ~sky
+                    if open_water_cols is None:
+                        river_reach = self._photographed_river_reach(
+                            context, types_full == int(RegionType.WATER), oc, sea_rows, t_plane_all)
+                        if river_reach is not None:
+                            beyond = t_plane_all[:, None] > river_reach[None, :]
+                            self.log_info(
+                                f"Far-field backdrop: inside the photograph the river ends where it was photographed to "
+                                f"({float(np.median(river_reach[np.isfinite(river_reach)])):.0f} m median over "
+                                f"{int(np.isfinite(river_reach).sum())} columns) -- {int((gained & beyond).sum())} px "
+                                f"above its far waterline stay with the shell"
+                            )
+                            gained &= ~beyond
                     water_covered |= gained
                     self.log_info(
                         f"Far-field backdrop: {'open water' if open_water_cols is not None else 'the river'} over "
@@ -508,6 +550,56 @@ class FarFieldBackdropStage(PipelineStage):
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
         if cfg.scale_m <= 0 and cfg.start_at_grid_edge:
             scale_m = 3.0 * float(start_radius)
+        # ── a canopy in front of a far landform: its own layer ────────────────
+        # depth_main is what the sheet stands at: the landform's own depth, floored
+        # where its crest is kilometres away, and carried on under the canopy that
+        # stands in front of it. The canopy's pixels keep their depth on a second
+        # set of vertices (below), so a step aside slides the trees over a mountain
+        # that is there behind them. Above the horizon only: below it a far pixel's
+        # ray meets the ground first and the shell leaves it to the skirt.
+        depth_main = depth
+        canopy_split = np.zeros((H, W), dtype=bool)
+        depth_canopy = None
+        if cfg.canopy_layer and type_depth is not None and far.any():
+            from scipy.ndimage import binary_closing, distance_transform_edt
+            types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+            forest = far & (types_full == int(RegionType.FOREST))
+            landform = far & np.isin(types_full, [int(RegionType.TERRAIN), int(RegionType.SNOW)])
+            if forest.any() and landform.any():
+                rows_idx = np.arange(H)[:, None]
+                cols_idx = np.arange(W)[None, :]
+                d_safe = np.where(np.isfinite(depth), depth, 0.0)
+                crest = np.where(landform, d_safe, 0.0).max(axis=0)
+                floor_col = np.where(crest >= cfg.far_crest_m, cfg.crest_flank_fraction * crest, 0.0)
+                # The landform's run down from its skyline, forest that is as far as
+                # the landform itself included (the wooded flank), specks bridged.
+                body = landform | (forest & (floor_col[None, :] > 0) & (d_safe >= floor_col[None, :]))
+                closed = binary_closing(body, structure=np.ones((9, 1), dtype=bool))
+                started = np.maximum.accumulate(closed, axis=0)
+                ended = np.maximum.accumulate(started & ~closed, axis=0)
+                top_run = closed & ~ended & far
+                lifted = top_run & (floor_col[None, :] > 0) & (d_safe < floor_col[None, :])
+                depth_main = np.where(lifted, floor_col[None, :], depth).astype(np.float32)
+                bottom = np.where(top_run, rows_idx, -1).max(axis=0)
+                cand = forest & ~top_run & (rows_idx > bottom[None, :]) & (bottom >= 0)[None, :] & (rows_idx < H // 2)
+                # What stands behind a canopy pixel: the nearest far pixel above it
+                # in its column that is not canopy.
+                src = np.maximum.accumulate(np.where(far & ~cand, rows_idx, -1), axis=0)
+                behind = np.where(src >= 0, depth_main[np.clip(src, 0, H - 1), cols_idx], 0.0)
+                canopy_split = cand & (src >= 0) & (d_safe < cfg.canopy_front_ratio * behind)
+                if canopy_split.any():
+                    depth_main = np.where(canopy_split, behind, depth_main).astype(np.float32)
+                    _, (ri, ci) = distance_transform_edt(~canopy_split, return_indices=True)
+                    depth_canopy = d_safe[ri, ci].astype(np.float32)
+                    self.log_info(
+                        f"Far-field backdrop: {int(canopy_split.sum())} px of canopy stand in front of a landform "
+                        f"(canopy {float(np.median(d_safe[canopy_split])):.0f} m, behind it "
+                        f"{float(np.median(behind[canopy_split])):.0f} m) -- a layer of their own; "
+                        f"{int(lifted.sum())} landform px under a crest beyond {cfg.far_crest_m:.0f} m stood "
+                        f"at {cfg.crest_flank_fraction:.2f} of the crest's depth"
+                    )
+                else:
+                    depth_main = depth
         self.advance_progress(task)
 
         # ── vertex grid ───────────────────────────────────────────────────────
@@ -515,7 +607,7 @@ class FarFieldBackdropStage(PipelineStage):
         rows = np.arange(0, H, s)
         cols = np.arange(0, W + 1, s)  # one extra column closes the wrap
         cols_w = cols % W
-        d_grid = depth[np.ix_(rows, cols_w)]
+        d_grid = depth_main[np.ix_(rows, cols_w)]
         far_grid = far[np.ix_(rows, cols_w)]
         # One cell of margin round the far region: a vertex is kept when any
         # neighbouring cell is far, so the mesh reaches past the silhouette and
@@ -700,7 +792,7 @@ class FarFieldBackdropStage(PipelineStage):
         if y_water is not None and water_covered.any():
             apron_faces = self._water_apron(
                 context, cfg, water_mesh, y_water, water_covered, t_plane_all, grid_half,
-                cols, W, foot, open_water_cols,
+                cols, W, foot, open_water_cols, river_reach,
             )
         valid = shell | skirt | curtain
         X, Y, Z = X2, Y2, Z2
@@ -749,6 +841,36 @@ class FarFieldBackdropStage(PipelineStage):
             return context
         self.advance_progress(task)
 
+        # ── the canopy layer: the same grid, at the canopy's own depth ────────
+        can_valid = np.zeros_like(valid)
+        can_vertices = np.zeros((0, 3))
+        can_faces = np.zeros((0, 3), dtype=np.int64)
+        if depth_canopy is not None:
+            # A cell with any canopy pixel in it, and one cell of margin for the
+            # full-resolution alpha to cut the crowns out of. The depth is the
+            # canopy's own carried outward, so a spire narrower than a cell does
+            # not lean back toward the mountain at its edges.
+            cells = maximum_filter(canopy_split.astype(np.uint8), size=(s, s), mode=("nearest", "wrap"))
+            can_valid = maximum_filter(cells[np.ix_(rows, cols_w)], size=3, mode="wrap").astype(bool)
+            rc = far_field_radius(depth_canopy[np.ix_(rows, cols_w)], start_m, cfg.far_m, scale_m, start_radius_m=start_radius)
+            Xc, Yc, Zc = rc * np.cos(LAT) * np.sin(LON), rc * np.sin(LAT), rc * np.cos(LAT) * np.cos(LON)
+            can_valid &= ~((np.abs(Xc) < grid_half) & (np.abs(Zc) < grid_half))
+            cid = np.full((nr, nc), -1, dtype=np.int64)
+            cid[can_valid] = np.arange(int(can_valid.sum())) + vertices.shape[0]
+            can_vertices = np.stack([Xc[can_valid], Yc[can_valid], Zc[can_valid]], axis=-1)
+            cf = []
+            for i in range(nr - 1):
+                v00, v01, v10, v11 = cid[i, :-1], cid[i, 1:], cid[i + 1, :-1], cid[i + 1, 1:]
+                d00, d01, d10, d11 = rc[i, :-1], rc[i, 1:], rc[i + 1, :-1], rc[i + 1, 1:]
+                t1 = (v00 >= 0) & (v10 >= 0) & (v11 >= 0) & ratio_ok(d00, d10) & ratio_ok(d10, d11) & ratio_ok(d00, d11)
+                t2 = (v00 >= 0) & (v11 >= 0) & (v01 >= 0) & ratio_ok(d00, d11) & ratio_ok(d11, d01) & ratio_ok(d00, d01)
+                cf.append(np.stack([v00[t1], v11[t1], v10[t1]], axis=-1))
+                cf.append(np.stack([v00[t2], v01[t2], v11[t2]], axis=-1))
+            can_faces = np.concatenate(cf, axis=0) if cf else can_faces
+            if can_faces.shape[0] == 0:
+                can_valid[:] = False
+                can_vertices = np.zeros((0, 3))
+
         # ── texture: the panorama rows the shell uses, alpha = far & not sky ──
         used_rows = rows[valid.any(axis=1)]
         row_min, row_max = int(max(0, used_rows.min() - s)), int(min(H - 1, used_rows.max() + s))
@@ -757,16 +879,57 @@ class FarFieldBackdropStage(PipelineStage):
         colour = context.input_panorama(ContextKey.PANORAMA_TERRAIN_DELIT) if cfg.lit else None
         if colour is None or (colour.width, colour.height) != (panorama.width, panorama.height):
             colour = panorama
-        rgb = np.asarray(colour.rgb(), dtype=np.uint8)[row_min:row_max + 1]
+        rgb_full = np.asarray(colour.rgb(), dtype=np.uint8)
+        rgb = rgb_full[row_min:row_max + 1]
         alpha = (far | skirt_full | curtain_full)[row_min:row_max + 1].astype(np.float32)
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
         # At the photograph's resolution where it was photographed (see
         # util.captured_cone.sharpen_strip): Rainier's snowfields were blocky.
         from util.captured_cone import sharpen_strip
-        texture = sharpen_strip(context, panorama, rgb, alpha, row_min, cfg.texture_max_width)
-        if texture is None:
-            texture = PILImage.fromarray(np.dstack([rgb, (alpha.clip(0, 1) * 255).astype(np.uint8)]), "RGBA")
+
+        def strip_texture(rgb_rows, alpha_rows, first_row, plain=None):
+            made = sharpen_strip(context, panorama, rgb_rows, alpha_rows, first_row, cfg.texture_max_width, plain=plain)
+            if made is None:
+                made = PILImage.fromarray(np.dstack([rgb_rows, (alpha_rows.clip(0, 1) * 255).astype(np.uint8)]), "RGBA")
+            return made
+
+        plain = None
+        if can_valid.any():
+            # Behind the canopy the sheet shows the landform continued: the
+            # canopy's pixels (and the rim round them) repainted from what
+            # surrounds them, and no photographed detail multiplied back in.
+            rgb, plain = self._paint_behind(rgb, canopy_split[row_min:row_max + 1],
+                                            (far & ~canopy_split)[row_min:row_max + 1], cfg.canopy_fill_dilate_px)
+        texture = strip_texture(rgb, alpha, row_min, plain)
+        main_px = texture.height
+        gutter_px = 0
+        can_row_min = can_row_max = 0
+        if can_valid.any():
+            can_rows = rows[can_valid.any(axis=1)]
+            can_row_min, can_row_max = int(max(row_min, can_rows.min() - s)), int(min(row_max, can_rows.max() + s))
+            # The canopy's layer covers everything the sheet behind it had
+            # repainted (the rim round the crowns included), so from the camera
+            # the two together are the photograph, pixel for pixel; a narrower
+            # cut-out left the repainted rim showing as a pale line round the
+            # forest. A light feather: a fir's tip is a few pixels wide.
+            can_alpha = plain[can_row_min - row_min:can_row_max + 1 - row_min].astype(np.float32)
+            if cfg.feather_px > 0:
+                can_alpha = np.maximum(can_alpha, gaussian_filter(can_alpha, sigma=0.5 * cfg.feather_px) * 2.0).clip(0, 1)
+            can_texture = strip_texture(rgb_full[can_row_min:can_row_max + 1], can_alpha, can_row_min)
+            if can_texture.width != texture.width:
+                can_texture = can_texture.resize(
+                    (texture.width, max(1, round(can_texture.height * texture.width / can_texture.width))), PILImage.LANCZOS)
+            # One texture, the canopy's strip under the sheet's, a transparent
+            # gutter between them carrying each strip's edge colours.
+            gutter_px = 16
+            a_main, a_can = np.asarray(texture), np.asarray(can_texture)
+            gut = np.concatenate([np.repeat(a_main[-1:], gutter_px // 2, axis=0),
+                                  np.repeat(a_can[:1], gutter_px - gutter_px // 2, axis=0)], axis=0).copy()
+            gut[..., 3] = 0
+            texture = PILImage.fromarray(np.concatenate([a_main, gut, a_can], axis=0), "RGBA")
+        can_px = texture.height - main_px - gutter_px
+        atlas_px = texture.height
         if texture.width > cfg.texture_max_width:
             scale = cfg.texture_max_width / texture.width
             texture = texture.resize((cfg.texture_max_width, max(1, int(texture.height * scale))), PILImage.LANCZOS)
@@ -774,10 +937,15 @@ class FarFieldBackdropStage(PipelineStage):
         ROW, COL = np.meshgrid(rows, cols, indexing="ij")
         # A curtain vertex sits on the ray to the grid's edge, between stride rows.
         ROW = np.where(np.isfinite(row_override), row_override, ROW.astype(np.float64))
+        ROWG, _ = np.meshgrid(rows, cols, indexing="ij")
+        y_main = (ROW[valid] - row_min) / max(strip_h - 1, 1) * (main_px - 1)
+        y_can = main_px + gutter_px + (ROWG[can_valid] - can_row_min) / max(can_row_max - can_row_min, 1) * (can_px - 1)
         uv = np.stack([
-            COL[valid] / W,
-            1.0 - (ROW[valid] - row_min) / max(strip_h - 1, 1),
+            np.concatenate([COL[valid], COL[can_valid]]) / W,
+            1.0 - np.concatenate([y_main, y_can]) / max(atlas_px - 1, 1),
         ], axis=-1)
+        vertices = np.concatenate([vertices, can_vertices], axis=0)
+        faces = np.concatenate([faces, can_faces], axis=0)
         inward = -vertices / np.linalg.norm(vertices, axis=-1, keepdims=True).clip(1e-6)
         # Lit by the client, so the normals carry the mountain's shape: the shell's
         # own surface normals (turned to face the camera), blended with the inward
@@ -809,6 +977,8 @@ class FarFieldBackdropStage(PipelineStage):
             "strip_rows": [row_min, row_max],
             "lit": cfg.lit,
             "water_apron_faces": int(apron_faces),
+            "canopy_faces": int(can_faces.shape[0]),
+            "canopy_px": int(canopy_split.sum()),
         }
         context.add_object(FAR_FIELD_SUMMARY_KEY, summary)
         self.log_info(
@@ -829,11 +999,51 @@ class FarFieldBackdropStage(PipelineStage):
         self.finish_progress(task)
         return context
 
+    def _photographed_river_reach(self, context: PipelineContext, water: np.ndarray, river_cols: np.ndarray,
+                                  sea_rows: np.ndarray, t_plane: np.ndarray) -> "np.ndarray | None":
+        """Per panorama column, how far out on the water plane the photographed river
+        reaches (inf outside the photograph and outside the river's azimuths).
+
+        A river's sectors are filled with the plane out to the shell because the
+        outpainted far river is not shell content. Inside the photograph the far
+        end of the river is the photograph's: Paris's far bank, its bridge and
+        the trees under the tower stand between the waterline (3 degrees under
+        the horizon, 200 m on the plane) and the horizon, and the plane carried
+        to the shell's foot at 500 m stood over them as a flat-topped blue slab
+        wherever the treeline had a gap. The reach is the plane's range at the
+        topmost water-typed row of the column, the median over 2 degrees of
+        columns (a boat or a bridge pier is not a bank)."""
+        from scipy.ndimage import median_filter
+        from util.captured_cone import captured_cone_from_context
+        H, W = water.shape
+        cone = captured_cone_from_context(context, W, H)
+        if cone is None:
+            return None
+        u0, u1 = cone.u_range
+        inside = np.zeros(W, dtype=bool)
+        inside[max(0, int(np.ceil(u0))): min(W, int(np.floor(u1)))] = True
+        inside &= river_cols
+        if not inside.any():
+            return None
+        below = water & sea_rows[:, None]
+        has = below.any(axis=0) & inside
+        if has.sum() < 8:
+            return None
+        top = np.where(has, below.argmax(axis=0), 0)
+        xs = np.flatnonzero(inside)
+        top_in = np.interp(xs, np.flatnonzero(has), top[has])
+        k = max(3, int(round(2.0 / 360.0 * W)) | 1)
+        top_in = median_filter(top_in, size=k, mode="nearest")
+        reach = np.full(W, np.inf, dtype=np.float64)
+        reach[xs] = t_plane[np.clip(np.rint(top_in).astype(np.int64), 0, H - 1)]
+        return reach
+
     def _water_apron(
         self, context: PipelineContext, cfg: FarFieldBackdropConfiguration, water_mesh,
         y_water: float, water_covered: np.ndarray, t_plane: np.ndarray, grid_half: float,
         cols: np.ndarray, W: int, foot: "np.ndarray | None",
         open_water_cols: "np.ndarray | None" = None,
+        river_reach: "np.ndarray | None" = None,
     ) -> int:
         """A flat ring at the water sheet's level from the grid's edge out to the
         shell's foot, in every vertex-column sector whose panorama pixels between
@@ -856,6 +1066,10 @@ class FarFieldBackdropStage(PipelineStage):
         r_out = np.full(len(cols), cfg.far_m, dtype=np.float64)
         if foot is not None:
             r_out = np.maximum(np.asarray(foot, dtype=np.float64), r_in * 1.05)
+        if river_reach is not None:
+            # A photographed river ends at its far waterline, not at the shell's
+            # foot behind the far bank (see _photographed_river_reach).
+            r_out = np.minimum(r_out, np.maximum(river_reach[cols_w], r_in * 1.05))
         n_open = 0
         if open_water_cols is not None and cfg.water_apron_open_water_m > cfg.far_m:
             # Open water reaches the horizon, whatever the shell does there.
@@ -925,6 +1139,55 @@ class FarFieldBackdropStage(PipelineStage):
         if self.temp is not None:
             apron.save(self.temp / "water_apron.glb")
         return int(faces.shape[0])
+
+    @staticmethod
+    def _paint_behind(rgb: np.ndarray, canopy: np.ndarray, source: np.ndarray, dilate_px: int) -> tuple[np.ndarray, np.ndarray]:
+        """The strip with the canopy's pixels repainted as the landform continued
+        under them, and the mask of what was repainted.
+
+        A fill from the surrounding pixels alone (OpenCV's Telea) is a smear: the
+        snow above the firs and the meadow below them drawn out into each other.
+        The band of landform just above the canopy's tips is carried down instead,
+        turned over and back again under the line of the tips (the upper envelope
+        of the repainted area, smoothed along the strip), so what shows between
+        two crowns after a step aside is the slope that stands above them at the
+        photograph's grain. A band and not the whole flank: turned over whole,
+        Rainier's snowfields a hundred rows up came down as white bars behind a
+        wooded ridge. The Telea fill carries the first few pixels inside the
+        area, where it is the continuation of the edge, and every pixel whose
+        source is not landform (`source`)."""
+        import cv2
+        from scipy.ndimage import binary_dilation, distance_transform_edt, gaussian_filter1d, minimum_filter1d
+        mask = binary_dilation(canopy, iterations=dilate_px) if dilate_px > 0 else canopy
+        if not mask.any():
+            return rgb, mask
+        h, w = mask.shape
+        r = np.flatnonzero(mask.any(axis=1))
+        r0, r1 = max(0, int(r.min()) - 16), min(h, int(r.max()) + 17)
+        out = np.ascontiguousarray(rgb).copy()
+        out[r0:r1] = cv2.inpaint(np.ascontiguousarray(out[r0:r1]), mask[r0:r1].astype(np.uint8) * 255, 5, cv2.INPAINT_TELEA)
+        has = mask.any(axis=0)
+        top = np.where(has, np.argmax(mask, axis=0), h).astype(np.float64)
+        span = 2 * max(8, w // 170) + 1
+        axis = minimum_filter1d(top, size=span, mode="wrap")
+        near = axis < h
+        if near.any():
+            # Columns with no canopy near them take the nearest column's line, so
+            # the smoothing below has no cliff to round off.
+            idx = distance_transform_edt(~near, return_distances=False, return_indices=True)[0]
+            axis = gaussian_filter1d(axis[idx], sigma=span / 6.0, mode="wrap")
+            rows = np.arange(h)[:, None]
+            cols = np.arange(w)[None, :]
+            band = max(12, h // 16)
+            below = np.maximum(rows - np.rint(axis[None, :]), 0).astype(np.int64) % (2 * band)
+            src = np.rint(axis[None, :]).astype(np.int64) - 1 - np.where(below < band, below, 2 * band - 1 - below)
+            ok = mask & (src >= 0) & (src < h)
+            ok &= (source & ~mask)[np.clip(src, 0, h - 1), cols]
+            weight = np.clip(distance_transform_edt(mask) / 6.0, 0.0, 1.0)
+            weight *= np.clip(2.0 * gaussian_filter(ok.astype(np.float32), sigma=2.0) - 1.0, 0.0, 1.0) * ok
+            mirrored = np.ascontiguousarray(rgb)[np.clip(src, 0, h - 1), cols].astype(np.float32)
+            out = (out * (1.0 - weight[..., None]) + mirrored * weight[..., None]).clip(0, 255).astype(np.uint8)
+        return out, mask
 
     @staticmethod
     def _kept_landmark_mask(context: PipelineContext, W: int, H: int) -> "np.ndarray | None":

@@ -302,6 +302,10 @@ def _reject_unreferenced_water(
 
     corrected = type_idx_map.copy()
     fallback = np.where(runnerup_type_idx_map == water, int(RegionType.GROUND), runnerup_type_idx_map)
+    # Where the photograph's own segmentation says snow, it is snow: Rainier's snow
+    # patch read as water once the flowers in front of it were painted out, and its
+    # runner-up there is ground, so the patch was textured as gravel.
+    fallback = np.where(reference == int(RegionType.SNOW), int(RegionType.SNOW), fallback)
     corrected[unreferenced] = fallback[unreferenced].astype(corrected.dtype)
     return corrected, unreferenced
 

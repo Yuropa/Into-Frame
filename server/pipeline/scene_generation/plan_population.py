@@ -9,6 +9,12 @@ width, lupine patchy at the lower right -- and the species layer knows which buc
 stands for which species. So the painted positions stay (they are a plausible
 meadow) and each one is re-dealt a species by the plan's density and where, and
 takes the species' size.
+
+A species grows in drifts (SpeciesDrifts). Dealt plant by plant, each one's
+neighbours were the meadow's mix whatever it was itself: of a Rainier lupine's
+five nearest plants 16% were lupine, the lupine's 11% share of the meadow, and
+the foreground read as a planted bed of evenly alternating colours where the
+photograph has a clump of paintbrush, a stand of lousewort, a patch of lupine.
 """
 from __future__ import annotations
 
@@ -27,6 +33,42 @@ def density_weight(word: Optional[str]) -> float:
         if key in w:
             return val
     return 0.3
+
+
+class SpeciesDrifts:
+    """A smooth field over the ground per species that multiplies its weight there:
+    a few plane waves of wavelength_m with directions and phases drawn from the
+    species' name and the seed, summed to unit variance, exp(strength * sum).
+    With strength 1 a species is e times as likely on a crest as on the mean and
+    1/e in a trough: patches a few metres across, shares of the whole kept (the
+    fields of different species are independent, their means are 1 in the log)."""
+
+    def __init__(self, seed: int, strength: float = 1.0, wavelength_m: tuple[float, float] = (2.5, 8.0), waves: int = 4):
+        self.seed = int(seed)
+        self.strength = float(strength)
+        self.wavelength_m = (float(wavelength_m[0]), float(wavelength_m[1]))
+        self.waves = int(waves)
+        self._params: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    def _of(self, name: str) -> tuple[np.ndarray, np.ndarray]:
+        if name not in self._params:
+            import zlib
+            rng = np.random.default_rng((self.seed, zlib.crc32(name.encode("utf-8"))))
+            lam = rng.uniform(*self.wavelength_m, size=self.waves)
+            ang = rng.uniform(0.0, 2.0 * math.pi, size=self.waves)
+            k = (2.0 * math.pi / lam)[:, None] * np.stack([np.cos(ang), np.sin(ang)], axis=1)
+            self._params[name] = (k, rng.uniform(0.0, 2.0 * math.pi, size=self.waves))
+        return self._params[name]
+
+    def factor(self, name: str, x: float, z: float) -> float:
+        if self.strength <= 0.0:
+            return 1.0
+        k, phase = self._of(str(name))
+        s = float(np.cos(k[:, 0] * x + k[:, 1] * z + phase).sum()) * math.sqrt(2.0 / self.waves)
+        return math.exp(self.strength * s)
+
+    def factors(self, species: list[dict], x: float, z: float) -> np.ndarray:
+        return np.array([self.factor(str(sp.get("name")), x, z) for sp in species], dtype=float)
 
 
 def zone_factor(where: Optional[str], bearing_frac: float, dist_m: float, near_m: float, off_zone: float = 0.25) -> float:
@@ -69,8 +111,14 @@ def relabel_population(
     near_m: float,
     rng: np.random.Generator,
     off_zone: float = 0.25,
+    drifts: Optional[SpeciesDrifts] = None,
+    jitter_m: float = 0.0,
 ) -> tuple[dict[int, dict], dict]:
     """Re-deal painted instances across the plan's species.
+
+    jitter_m moves each one up to that far from where it was painted: the painter's
+    positions sit on a grid (Rainier's meadow: a 0.21 m pitch, a third of the
+    cells taken), and from a metre above the ground the flowers stood in rows.
 
     painted: (index, metadata) of the class's painted instances.
     species: the plan's species entries of the class (name, density, where, size_m).
@@ -91,6 +139,8 @@ def relabel_population(
         wp = meta.get("world_position") or [0.0, 0.0, 0.0]
         bf, dist = bearing_frac_of(float(wp[0]), float(wp[2]))
         p = weights * np.array([zone_factor(sp.get("where"), bf, dist, near_m, off_zone) for sp in usable])
+        if drifts is not None:
+            p = p * drifts.factors(usable, float(wp[0]), float(wp[2]))
         if p.sum() <= 0:
             continue
         k = int(rng.choice(len(usable), p=p / p.sum()))
@@ -105,6 +155,9 @@ def relabel_population(
             "bucket": int(species_bucket[sp["name"]]), "world_height": new_h, "world_width": new_h * aspect,
             "plan_species": sp.get("name"), "source": "plan_population", "metric_size": True,
         })
+        if jitter_m > 0.0 and meta.get("world_position"):
+            r, a = jitter_m * math.sqrt(float(rng.uniform())), float(rng.uniform(0.0, 2.0 * math.pi))
+            new["world_position"] = [float(wp[0]) + r * math.cos(a), float(wp[1]), float(wp[2]) + r * math.sin(a)] + list(wp[3:])
         out[idx] = new
         summary["after"][sp.get("name")] = summary["after"].get(sp.get("name"), 0) + 1
     return out, summary
@@ -140,6 +193,7 @@ def fill_population(
     min_r: float = 0.7,
     min_spacing: float = 0.25,
     off_zone: float = 0.25,
+    drifts: Optional[SpeciesDrifts] = None,
 ) -> tuple[list[dict], dict]:
     """Instances that bring the foreground up to the plan's density.
 
@@ -195,6 +249,8 @@ def fill_population(
         if ok_ground is not None and not ok_ground(x, z):
             continue
         p = dens * np.array([zone_factor(sp.get("where"), bf, d, near_m, off_zone) for sp in usable])
+        if drifts is not None:
+            p = p * drifts.factors(usable, x, z)
         if p.sum() <= 0:
             continue
         sp = usable[int(rng.choice(len(usable), p=p / p.sum()))]

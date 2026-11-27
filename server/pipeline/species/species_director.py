@@ -12,6 +12,14 @@ over its length, the share of the plant's height the head takes, the whole plant
 width over its height, and its standing height. Species Assets passes those to the
 builder (docs/agentic-scene-graph-plan.md §13a, first-pass gates).
 
+Since v2 it also says what one head looks like, how many flowering stems stand in one
+clump, and where one clear head is in the photograph. The head's picture was painted
+from the species' name alone, and FLUX's Castilleja was a tight pink cone of buds, its
+pasqueflower seed head a white dandelion disc: the meadow stood full of flowers the
+photograph does not hold. The look goes into the painter's prompt and the boxed head is
+the picture it paints from (species/atlas.py); the stem count makes a clump of a plant
+that grows as one (the paintbrush stood as single stems on a grid).
+
 Cached in cache/species_director/ by (photo, species list, model). Without a key, with
 no_api, or past the spend cap the forms keep their built-in proportions.
 """
@@ -28,20 +36,25 @@ from PIL import Image, ImageDraw
 from pipeline.object_completion.asset_director import AssetDirector, _font
 
 _ROOT = Path(__file__).resolve().parents[3]
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2: look, stems, head_box
 
 SCHEMA: dict[str, Any] = {
     "type": "object", "additionalProperties": False, "required": ["species", "summary"],
     "properties": {
         "species": {"type": "array", "items": {
             "type": "object", "additionalProperties": False,
-            "required": ["n", "head_aspect", "head_fraction", "plant_aspect", "height_m", "seen", "why"],
+            "required": ["n", "head_aspect", "head_fraction", "plant_aspect", "height_m", "stems", "look", "head_box",
+                         "seen", "why"],
             "properties": {
                 "n": {"type": "integer", "description": "the species number"},
                 "head_aspect": {"type": "number", "description": "width of one flowering head (the spike, raceme, seed head or flower cluster on one stem) divided by its length along the stem, as photographed: a slender spike 0.15-0.3, a stout bracted head 0.5-0.8, a round head 1.0"},
                 "head_fraction": {"type": "number", "description": "the share of the plant's standing height that the flowering head takes, 0.05-0.7"},
                 "plant_aspect": {"type": "number", "description": "width of one whole plant with its leaves divided by its height, as photographed"},
                 "height_m": {"type": "number", "description": "standing height of a typical plant of this species here, in metres"},
+                "stems": {"type": "integer", "description": "how many flowering stems stand together in one plant or clump of this species as it grows here: 1 for a plant of single stems, up to 8 for a bunch"},
+                "look": {"type": "string", "description": "what ONE flowering head looks like, written for a painter who has never seen the species and will paint it alone on white: its outline (an egg, a ragged brush, a cone, a ball), what it is made of (bracts, florets, hairs) and how they sit (flaring, packed, shaggy, drooping), and its colours as photographed. One sentence under 40 words; no other plant, no background"},
+                "head_box": {"type": ["array", "null"], "items": {"type": "number"}, "minItems": 4, "maxItems": 4,
+                             "description": "[x, y, w, h] in fractions of the photograph, a tight box around ONE whole flowering head of this species: the clearest, largest and least hidden one, the head alone without the stem below it. null when no single head can be boxed"},
                 "seen": {"type": "string", "enum": ["measured", "partly", "not_seen"],
                          "description": "measured: read off plants visible in the photograph; partly: small or occluded, read with the species' usual build; not_seen: from the species alone"},
                 "why": {"type": "string", "description": "one sentence: which plants in the photograph the numbers were read from"},
@@ -56,7 +69,8 @@ ONE typical plant as it stands in this photograph: how wide its flowering head i
 much of the plant's height the head takes, how wide the whole plant is against its height, and its standing height.
 Read them off the plants you can see; where a species is too small or hidden to measure, use the species' real build
 and say so. The builder draws exactly these proportions, so a slender spike reported as stout fills the meadow with
-clubs. Call the tool once with one entry per number."""
+clubs. Each head is then painted from your words and from the one head you box, so box a head that shows the species
+well and describe what is there, not what a field guide says. Call the tool once with one entry per number."""
 
 
 def boxed_species(photo: Image.Image, species: list[dict]) -> Image.Image:
@@ -158,5 +172,20 @@ class SpeciesDirector(AssetDirector):
                  "plant_aspect": _clamp(s.get("plant_aspect"), 0.05, 2.0),
                  "height_m": _clamp(s.get("height_m"), 0.02, 120.0),
                  "seen": str(s.get("seen") or ""), "why": str(s.get("why") or "")}
+            try:
+                m["stems"] = min(max(int(s.get("stems") or 1), 1), 8)
+            except (TypeError, ValueError):
+                m["stems"] = 1
+            look = " ".join(str(s.get("look") or "").split()).rstrip(".")
+            if look:
+                m["look"] = look[:400]
+            box = s.get("head_box")
+            if isinstance(box, list) and len(box) == 4:
+                try:
+                    x, y, w, h = (float(v) for v in box)
+                except (TypeError, ValueError):
+                    x = y = w = h = -1.0
+                if 0.0 <= x < 1.0 and 0.0 <= y < 1.0 and 0.004 < w <= 1.0 and 0.004 < h <= 1.0:
+                    m["head_box"] = [round(x, 4), round(y, 4), round(min(w, 1.0 - x), 4), round(min(h, 1.0 - y), 4)]
             out[str(species[n].get("name"))] = m
         return out

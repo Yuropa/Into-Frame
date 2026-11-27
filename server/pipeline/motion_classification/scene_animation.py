@@ -7,6 +7,7 @@ import numpy as np
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage
 from pipeline.pipeline_context import PipelineContext, ContextKey
 from scene.object import ObjectType
+from pipeline.object_typing.categories import VEGETATION_CATEGORIES
 
 # Objects taller (footprint height / width) than this ratio get a capsule
 # collider instead of a box -- reads better for anything person/bird/bottle-shaped.
@@ -36,8 +37,22 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         default_sway_frequency_hz: float = 0.6,
         sway_frequency_scale: float = 0.5,
         sway_max_distance_m: float = 8.0,
+        sway_distance_per_height: float = 8.0,
+        sway_large_max_distance_m: float = 150.0,
+        sway_large_max_instances: int = 250,
+        collider_min_size_m: float = 1.0,
+        collider_max_instances: int = 32,
+        collider_max_faces: int = 600,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
+        # Collision proxies for the modelled things that stand still (a sea stack, a
+        # moored boat, a building): see _static_colliders. A model at least
+        # collider_min_size_m across as placed, placed at most collider_max_instances
+        # times, gets a geometry-only proxy of collider_max_faces triangles at most.
+        # collider_max_faces 0 turns it off.
+        self.collider_min_size_m = float(collider_min_size_m)
+        self.collider_max_instances = int(collider_max_instances)
+        self.collider_max_faces = int(collider_max_faces)
         # Fallback sway for a stationary mesh whose own instance was never tracked
         # in the generated video, so ObjectMotionClassificationStage recorded
         # "stationary" with no measured sway. That is the overwhelming majority of
@@ -66,6 +81,14 @@ class SceneAnimationConfiguration(PipelineStageConfiguration):
         # Radius beyond which a stationary mesh is left un-swayed -- see the
         # sway_limit block in run() for the per-frame cost this bounds. 0 disables.
         self.sway_max_distance_m = float(sway_max_distance_m)
+        # The radius grows with the object: a mesh sways out to this many times its own
+        # height (an 18 m tree to 144 m, a 0.4 m flower stays at the radius above), no
+        # further than sway_large_max_distance_m, and no more than
+        # sway_large_max_instances of them beyond the plain radius (nearest first) --
+        # each is one more skinned, un-instanced renderer on the client.
+        self.sway_distance_per_height = float(sway_distance_per_height)
+        self.sway_large_max_distance_m = float(sway_large_max_distance_m)
+        self.sway_large_max_instances = int(sway_large_max_instances)
         # A single wind direction for the whole scene reads more physically
         # plausible than each tree leaning its own random way -- fixed at
         # construction (derived from `seed` below when left None) so re-running
@@ -137,6 +160,40 @@ class SceneAnimationStage(PipelineStage):
             )
         swaying = 0
         sway_skipped = 0
+        sway_rigid = 0
+        # A tree's sway is seen from much further than a tuft's (the motion is a
+        # fraction of the object's size): with one radius for everything, 8 m, Paris's
+        # 35 mesh trees and every Rainier fir stood still. The objects that sway beyond
+        # the plain radius on their size are chosen first, nearest first, up to the cap.
+        heights: dict[str, float] = {}
+
+        def world_height(o) -> float:
+            if o.mesh not in heights:
+                mesh = context.input_mesh(o.mesh) if o.mesh else None
+                heights[o.mesh] = float(mesh.extents[1]) if mesh is not None else 0.0
+            return heights[o.mesh] * abs(float(o.scale["y"]))
+
+        def camera_distance(o) -> float:
+            return math.hypot(float(o.position["x"]) - camera_xz[0], float(o.position["z"]) - camera_xz[1])
+
+        sway_far: set = set()
+        if sway_limit > 0 and self.config.sway_distance_per_height > 0 and self.config.sway_large_max_instances > 0:
+            far = []
+            for o in scene.objects:
+                if o.source_index is None or o.type != ObjectType.MESH:
+                    continue
+                meta = context.input_object(f"metadata_{o.source_index}") or {}
+                if not meta.get("stationary") or meta.get("class") not in VEGETATION_CATEGORIES:
+                    continue
+                d = camera_distance(o)
+                if sway_limit < d <= min(self.config.sway_distance_per_height * world_height(o),
+                                         self.config.sway_large_max_distance_m):
+                    far.append((d, id(o)))
+            far.sort()
+            sway_far = {i for _d, i in far[: self.config.sway_large_max_instances]}
+            if far:
+                self.log_info(f"Sway: {len(sway_far)} of {len(far)} large instance(s) sway beyond {sway_limit:.0f} m "
+                              f"on their size (out to {far[len(sway_far) - 1][0]:.0f} m)")
 
         task = self.create_progress(len(scene.objects), "Animating scene objects…")
         for obj in scene.objects:
@@ -167,12 +224,16 @@ class SceneAnimationStage(PipelineStage):
                         obj.video_alpha = f"object_video_alpha_{video_idx}"
                         annotated += 1
                 elif obj.type == ObjectType.MESH:
+                    # Wind bends plants. A rock, a moored boat or a bench is "stationary"
+                    # too, and with sway parameters the client rocks it on its base
+                    # (Shark Fin's boulder carried them).
+                    if metadata.get("class") not in VEGETATION_CATEGORIES:
+                        sway_rigid += 1
+                        self.advance_progress(task)
+                        continue
                     if sway_limit > 0:
-                        distance = math.hypot(
-                            float(obj.position["x"]) - camera_xz[0],
-                            float(obj.position["z"]) - camera_xz[1],
-                        )
-                        if distance > sway_limit:
+                        distance = camera_distance(obj)
+                        if distance > sway_limit and id(obj) not in sway_far:
                             sway_skipped += 1
                             self.advance_progress(task)
                             continue
@@ -212,9 +273,17 @@ class SceneAnimationStage(PipelineStage):
             self.advance_progress(task)
         self.finish_progress(task)
 
+        if self.config.collider_max_faces > 0:
+            try:
+                self._static_colliders(context, scene)
+            except Exception as exc:  # the scene stands without them
+                self.log_warning(f"Static colliders not written ({type(exc).__name__}: {exc})")
+
         context.add_scene(ContextKey.SCENE, scene)
         context.add_object(ContextKey.SCENE_ANIMATION_COUNT, annotated)
         self.log_info(f"Annotated {annotated} scene object(s)")
+        if sway_rigid:
+            self.log_info(f"Sway: {sway_rigid} stationary mesh instance(s) that are not vegetation left rigid")
         if sway_skipped:
             self.log_info(
                 f"Sway: {swaying} instance(s) within {sway_limit:.0f} m, "
@@ -223,6 +292,92 @@ class SceneAnimationStage(PipelineStage):
                 f"per-frame sway updates on the client)"
             )
         return context
+
+    def _static_colliders(self, context: PipelineContext, scene) -> None:
+        """A collision proxy on every modelled object that stands still.
+
+        Only the terrain carried a collider: Shark Fin's sea stack is an 8,000 triangle
+        model 25 m across standing in the sea, and for the client's physics nothing was
+        there (a thrown object, the player and anything that later floats on the water
+        passed through it). Each such model gets `<mesh>_physics`, its own surface
+        welded and decimated to a few hundred triangles with no texture, in the model's
+        own frame, so the client's MeshCollider takes the object's position, rotation
+        and scale with it (SceneObject.physicsMesh, as the terrain's). Plants are left
+        out (they bend, and there are thousands), as are the environment's own meshes,
+        anything already handed to the rigid-body path, and models placed too often or
+        too small to be worth a MeshCollider each."""
+        import trimesh
+        from scene.mesh import Mesh
+        cfg: SceneAnimationConfiguration = self.config
+        environment = {"terrain", "water", "water_apron", "treeline", "backdrop"}
+        groups: dict[str, list] = {}
+        for obj in scene.objects:
+            if obj.type != ObjectType.MESH or not obj.mesh or obj.physics_mesh or obj.physics or obj.sway:
+                continue
+            if obj.name in environment or str(obj.name).startswith("formation_"):
+                continue
+            # The class: the detection's, an agent placement's own, and the model
+            # file's name (category_mesh_<class>_<n>) for a placement with neither.
+            classes = {str((getattr(obj, "agent", None) or {}).get("class") or "")}
+            if obj.source_index is not None:
+                classes.add(str((context.input_object(f"metadata_{obj.source_index}") or {}).get("class") or ""))
+            if str(obj.mesh).startswith("category_mesh_"):
+                classes.add(str(obj.mesh)[len("category_mesh_"):].rsplit("_", 1)[0])
+            if classes & set(VEGETATION_CATEGORIES):
+                continue
+            groups.setdefault(obj.mesh, []).append(obj)
+        written = []
+        for key, objs in groups.items():
+            if len(objs) > cfg.collider_max_instances:
+                continue
+            source = context.input_mesh(key)
+            if source is None:
+                continue
+            tm = source.mesh
+            extent = float(np.max(tm.extents)) if len(tm.vertices) else 0.0
+            largest = max(extent * max(abs(float(o.scale[a])) for a in ("x", "y", "z")) for o in objs)
+            if largest < cfg.collider_min_size_m:
+                continue
+            # A card is a picture of the thing, not its volume (Paris's landmark card,
+            # 209 m of flat quad, would have been a wall across the far bank).
+            if len(tm.vertices) and float(np.min(tm.extents)) < 0.02 * extent:
+                continue
+            proxy = trimesh.Trimesh(vertices=np.asarray(tm.vertices, dtype=np.float64),
+                                    faces=np.asarray(tm.faces, dtype=np.int64), process=False)
+            proxy.merge_vertices(merge_tex=True, merge_norm=True)   # a textured model's seams are split vertices
+            how = "its surface"
+            if len(proxy.faces) > cfg.collider_max_faces:
+                try:
+                    import open3d as o3d
+                    dense = o3d.geometry.TriangleMesh(o3d.utility.Vector3dVector(np.asarray(proxy.vertices)),
+                                                      o3d.utility.Vector3iVector(np.asarray(proxy.faces)))
+                    coarse = dense.simplify_quadric_decimation(cfg.collider_max_faces)
+                    coarse.remove_degenerate_triangles()
+                    coarse.remove_unreferenced_vertices()
+                    proxy = trimesh.Trimesh(vertices=np.asarray(coarse.vertices), faces=np.asarray(coarse.triangles), process=False)
+                    how = "its surface decimated"
+                except Exception:
+                    proxy = proxy.convex_hull
+                    how = "its convex hull"
+            if len(proxy.faces) < 4 or not np.all(np.isfinite(proxy.vertices)):
+                continue
+            # The proxy must stay the model's size: a decimation that pulled the
+            # silhouette in by a tenth would let things sink that far into the rock.
+            if np.any(np.abs(proxy.extents - tm.extents) > 0.1 * max(extent, 1e-9)):
+                proxy = trimesh.Trimesh(vertices=np.asarray(tm.vertices, dtype=np.float64),
+                                        faces=np.asarray(tm.faces, dtype=np.int64), process=False).convex_hull
+                how = "its convex hull"
+            physics_key = f"{key}_physics"
+            context.add_mesh(physics_key, Mesh(trimesh.Trimesh(vertices=np.asarray(proxy.vertices), faces=np.asarray(proxy.faces), process=False)))
+            for o in objs:
+                o.physics_mesh = physics_key
+            if self.temp is not None:
+                context.mesh(physics_key).save(self.temp / f"{physics_key}.glb")
+            written.append(f"{key} ({len(objs)} placed, {largest:.1f} m, {len(proxy.faces)} triangles of {how})")
+        if written:
+            self.log_info(f"Static colliders: {len(written)} model(s): " + "; ".join(written))
+        else:
+            self.log_info("Static colliders: no modelled object stands still at a size worth one")
 
     def has_expected_output(self, context: PipelineContext) -> bool:
         return context.object(ContextKey.SCENE_ANIMATION_COUNT) is not None

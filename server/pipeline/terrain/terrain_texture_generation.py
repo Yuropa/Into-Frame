@@ -97,7 +97,7 @@ _BASE_PROMPTS: dict[RegionType, str] = {
     # ground" under them (user, 2026-10-16 and again 2026-10-19).
     RegionType.VEGETATION: (
         "overhead macro photograph of bare meadow soil: dark brown crumbly earth, fine grit "
-        "and small pebbles, a sparse scatter of dry stems, no grass, no moss, no leaves"
+        "and small pebbles with a sparse scatter of dry stems, the soil exposed from edge to edge"
     ),
     RegionType.ROAD: (
         "macro close-up photograph of weathered coarse aggregate asphalt, embedded "
@@ -134,8 +134,8 @@ _NEAR_GROUND_SURFACES: dict[RegionType, str] = {
     # The floor under the meadow, for the same reason as _BASE_PROMPTS: the grass
     # stands on this plate as geometry.
     RegionType.VEGETATION: (
-        "the bare floor of a subalpine meadow, dark brown crumbly soil and fine grit with a "
-        "sparse scatter of dry stems, even and continuous, no grass, no moss, no leaves"
+        "the bare floor of a meadow, dark brown crumbly soil and fine grit with a "
+        "sparse scatter of dry stems, the soil exposed, even and continuous"
     ),
     RegionType.FOREST: (
         "an open forest floor, an even carpet of fallen needles, moss and low leafy plants, "
@@ -1447,8 +1447,7 @@ class TerrainTextureGenerationStage(PipelineStage):
 
     def _near_ground_prompt(self, context: PipelineContext, half: float, plate_half: float) -> str:
         """One aerial photograph of the ground: the surface sentence of the region
-        type that covers most of the plate, the others named as minor parts, and
-        the scene caption."""
+        type that covers most of the plate, the others named as minor parts."""
         region_depth = context.input_depth(ContextKey.REGION_MAP)
         ranked: list[tuple[RegionType, float]] = []
         if region_depth is not None:
@@ -1478,18 +1477,39 @@ class TerrainTextureGenerationStage(PipelineStage):
         surface = _URBAN_NEAR_GROUND_SURFACE if (dominant == RegionType.GROUND and urban) else _NEAR_GROUND_SURFACES[dominant]
         if minor:
             surface += ", with some " + " and ".join(minor)
-        scene = f" The place is: {str(caption).strip()}." if caption else ""
+        # A viewer who looks down on the scene stands on ground the photograph never
+        # shows: Height Map raised it, and the region types under it are the outpainted
+        # nadir's. The plan says what it is (Shark Fin: a bluff top of dry grass and dirt
+        # above the beach; the TERRAIN sentence paved it with cobbles).
+        params = context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {}
+        plan_obj = context.input_object(ContextKey.SCENE_PLAN) or {}
+        plan_body = plan_obj.get("plan") if isinstance(plan_obj, dict) and isinstance(plan_obj.get("plan"), dict) else {}
+        standing_on = str(((plan_body or {}).get("camera") or {}).get("standing_on") or "").strip().rstrip(".")
+        if not standing_on:
+            # A plan read before `standing_on` existed: what it says lies behind the
+            # camera starts with the ground the camera is on. Its first clause, cut
+            # before "and a ..." (a trail, a fence: one thing, which a tiled plate
+            # would repeat).
+            behind = str(((plan_body or {}).get("behind") or {}).get("text") or "").strip()
+            standing_on = re.split(r",|;|\.| and (?:a|an|the) ", behind, maxsplit=1)[0].strip()
+        if params.get("standing_pedestal") and standing_on and dominant != RegionType.WATER:
+            surface = standing_on + ", seen from far enough above that single stones and blades are too small to make out"
+            self.log_info(f"Near-ground plate: the viewer stands on raised ground; the plan's surface ({standing_on!r}) "
+                          f"replaces the {dominant.name} sentence")
+        # The prompt names the surface and nothing else. The caption used to follow it
+        # ("The place is: ...") with a list of what to leave out, and FLUX.1-dev drew
+        # both: the caption's subject and every thing the list named. Rainier's meadow
+        # floor came back strewn with maple leaves ("no leaves"), Shark Fin's ground
+        # with surf and red pebbles ("waves crashing", "no foam"), Paris's water with
+        # boats and a quay ("no boats, no shore"). The colours are the init image's.
         # "High-altitude aerial" sets the scale: asked for a close photograph of
         # ground, FLUX.1-dev draws metre-wide herbs and boulders whatever width
         # the prompt states.
         return (
             "flat overcast daylight: high-altitude aerial photograph straight down onto "
-            + surface + ", evenly spread across the whole frame with no focal point and nothing in the "
-            "centre." + scene
-            # A land plate must not pick up the sea the caption describes (Shark
-            # Fin's beach plate drew surf); a water plate is asked for the water.
-            + (" Dry ground only: no water, no waves, no foam, no shoreline in the frame."
-               if dominant != RegionType.WATER else " Still water seen from above: no boats, no shore in the frame.")
+            + surface + ", the same surface evenly spread from edge to edge of the frame."
+            + (" Dry land all the way to every edge."
+               if dominant != RegionType.WATER else " Open water all the way to every edge, its surface empty.")
             + " Diffuse even light, uniform exposure, photorealistic, sharp"
         )
 

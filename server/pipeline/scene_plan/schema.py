@@ -12,6 +12,12 @@ SCHEMA_VERSION = 2
 # the built-structure veto directly instead of being normalised from free text ("stone
 # arch bridge" token-matches "rock"). "environment" marks scenery that is not an object
 # (a summit, a glacier, a snow patch, a trail).
+# camera.standing_on (the surface under the tripod) was added without a new version: it is
+# optional, a plan read before it existed is still a whole plan, and without it the
+# near-ground plate takes the opening words of the plan's `behind` (what lies around the
+# viewer out of frame; terrain_texture_generation._near_ground_prompt). A photograph taken from a bluff
+# shows the beach below and never the bluff: the pipeline raised the viewer's footing and
+# paved it with that sentence (Shark Fin stood on a mound of cobbles).
 from pipeline.object_typing.categories import OBJECT_CATEGORIES
 
 CATEGORY_ENUM = sorted(OBJECT_CATEGORIES) + ["environment"]
@@ -53,6 +59,11 @@ PLAN_SCHEMA = {
             "height_m": _num,
             "pitch_deg": _num,
             "on_structure": {"type": ["string", "null"], "description": "bridge, balcony, slope, boat... or null"},
+            "standing_on": {"type": ["string", "null"],
+                            "description": "the surface directly under the camera as a material, in a few plain "
+                                           "words a texture could be painted from: 'dry grass and bare dirt', "
+                                           "'asphalt road deck', 'wet sand', 'meadow turf'. Usually out of frame: "
+                                           "infer it from the vantage and the place"},
         }, ["height_m", "pitch_deg"]),
         "sun": _claim({
             "azimuth_deg": _num, "elevation_deg": _num,
@@ -143,6 +154,10 @@ Landmarks, objects and species are also how the pipeline learns what to look for
 from the fixed list (what the pipeline can build; `environment` for scenery it cannot) and a `phrase` of 2-4 \
 plain words a detector would find it by. Name every visible structure, not only the famous one: a bridge, \
 the buildings behind a tree line, moored boats, a quay wall, each as its own entry with a count.
+
+The camera block is the vantage: its height, what it stands on (`on_structure`: a bluff top, a bridge, or null \
+for open ground) and the surface under the tripod (`standing_on`), which the photograph rarely shows and the \
+pipeline has to build when the view looks down on the scene.
 
 Be concrete and numeric. Ranges are not accepted; give the best single number and say the basis in `because`. \
 Species: name the plant as a botanist would, give its size, colours, form (spike, mat, tussock, conifer...), \

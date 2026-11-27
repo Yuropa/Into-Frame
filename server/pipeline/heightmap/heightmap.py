@@ -13,6 +13,36 @@ from util.depth_utils import Depth
 from util.panorama_utils import Panorama
 
 
+def frame_lower_edge(hfov_deg: float, vfov_deg: float, pitch_deg: float, step_deg: float = 0.5, samples: int = 801):
+    """The photographed frame's lower boundary seen from the eye: (azimuths, depressions),
+    both in radians, azimuth 0 at the photograph's centre, depression positive below the
+    horizon. The camera looks down by pitch_deg. A ground point at azimuth a is in the
+    frame only when it lies less steeply below the eye than the depression given for a
+    (and above the frame's upper boundary, which a pedestal under the feet never reaches).
+    """
+    th = np.tan(np.radians(hfov_deg) / 2.0)
+    tv = np.tan(np.radians(vfov_deg) / 2.0)
+    p = np.radians(pitch_deg)
+    t = np.linspace(-1.0, 1.0, samples)
+    # The bottom edge and the two sides, in camera coordinates (y up, z forward).
+    x = np.concatenate([t * th, np.full(samples, -th), np.full(samples, th)])
+    y = np.concatenate([np.full(samples, -tv), t * tv, t * tv])
+    yw = y * np.cos(p) - np.sin(p)
+    zw = y * np.sin(p) + np.cos(p)
+    az = np.arctan2(x, zw)
+    dep = -np.arctan2(yw, np.hypot(x, zw))
+    step = np.radians(step_deg)
+    lo, hi = float(az.min()), float(az.max())
+    edges = np.arange(lo, hi + step, step)
+    centres, lowest = [], []
+    for a0 in edges:
+        m = (az >= a0 - step / 2.0) & (az < a0 + step / 2.0)
+        if m.any():
+            centres.append(a0)
+            lowest.append(float(dep[m].max()))
+    return np.asarray(centres, dtype=np.float32), np.asarray(lowest, dtype=np.float32)
+
+
 class HeightMapConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -70,12 +100,16 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         viewer_eye_height_m: float = 1.7,
         standing_min_drop_m: float = 3.0,
         standing_pedestal_radius_m: float = 3.0,
+        standing_pedestal_clear_frame: bool = True,
+        standing_pedestal_clear_margin_deg: float = 3.0,
+        standing_pedestal_clear_feather_deg: float = 10.0,
         standing_ring_m: tuple[float, float] = (7.0, 10.0),
         near_drop_floor_m: float = 0.5,
         near_drop_slope: float = 0.05,
         near_drop_radius_m: float = 45.0,
         anchor_water_plane: bool = True,
         anchor_water_min_fraction: float = 0.02,
+        anchor_water_keep_above_eye: bool = True,
         bank_reach_m: float = 15.0,
         bank_max_rise_m: float = 6.0,
         level_ground_ring_m: tuple[float, float] = (6.0, 12.0),
@@ -258,6 +292,12 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         self.viewer_eye_height_m = float(viewer_eye_height_m)
         self.standing_min_drop_m = float(standing_min_drop_m)
         self.standing_pedestal_radius_m = float(standing_pedestal_radius_m)
+        # The pedestal stays out of the photograph: inside the frame's azimuths it is
+        # cut back under the frame's lower edge (plus the margin), feathered out over
+        # standing_pedestal_clear_feather_deg past the frame's sides.
+        self.standing_pedestal_clear_frame = bool(standing_pedestal_clear_frame)
+        self.standing_pedestal_clear_margin_deg = float(standing_pedestal_clear_margin_deg)
+        self.standing_pedestal_clear_feather_deg = float(standing_pedestal_clear_feather_deg)
         self.standing_ring_m = (float(standing_ring_m[0]), float(standing_ring_m[1]))
         # The ground within near_drop_radius_m may not fall below the camera's own
         # ground by more than near_drop_floor_m + near_drop_slope x distance. The
@@ -279,6 +319,10 @@ class HeightMapConfiguration(PipelineStageConfiguration):
         # waterline's flat-water distance -- a wall of that height.
         self.anchor_water_plane = bool(anchor_water_plane)
         self.anchor_water_min_fraction = float(anchor_water_min_fraction)
+        # The anchor's shift moves the ground plane to the camera's height: it is whole
+        # at the measured water level and below, and fades to nothing at eye level.
+        # What stands above the eye keeps the ray it was photographed along.
+        self.anchor_water_keep_above_eye = bool(anchor_water_keep_above_eye)
         self.bank_reach_m = float(bank_reach_m)
         self.bank_max_rise_m = float(bank_max_rise_m)
         self.level_ground_ring_m = (float(level_ground_ring_m[0]), float(level_ground_ring_m[1]))
@@ -356,9 +400,21 @@ class HeightMapStage(PipelineStage):
             self.log_info(f"Water plane anchor: {frac:.1%} of the grid is water — nothing to anchor to")
             return height
         y_w = -float(camera_height)
-        shift = y_w - float(np.median(height[water]))
-        out = np.where(np.isfinite(height), height + shift, height).astype(height.dtype)
+        y_measured = float(np.median(height[water]))
+        shift = y_w - y_measured
+        # The shift is the ground plane's error. What stands above the eye is seen
+        # along its own ray and has no such error to carry: lowered with the rest it
+        # sinks towards the horizon (Shark Fin, shifted -3.6 m: the left headland's
+        # crest, photographed 2 degrees above the horizon 145 m out, was put 0.6
+        # degrees above it and the cliff read as a low shelf).
+        kept_above = cfg.anchor_water_keep_above_eye and y_measured < -0.5
+        if kept_above:
+            weight = np.clip(np.nan_to_num(height, nan=0.0) / y_measured, 0.0, 1.0)
+        else:
+            weight = 1.0
+        out = np.where(np.isfinite(height), height + shift * weight, height).astype(height.dtype)
         out[water] = y_w
+        shifted = f"map shifted {shift:+.2f} m" + (" at the water, fading to nothing at eye level" if kept_above else "")
 
         # Bank rise per panorama column: waterline -> top of the wall.
         depth = None
@@ -417,14 +473,14 @@ class HeightMapStage(PipelineStage):
             near = land & (dist_w <= cfg.bank_reach_m)
             out[near] = np.maximum(out[near], target[near])
             self.log_info(
-                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m (map shifted {shift:+.2f} m); "
+                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m ({shifted}); "
                 f"banks within {cfg.bank_reach_m:.0f} m of the water rise {np.nanpercentile(rise_by_sector, 10):.1f}/"
                 f"{np.nanmedian(rise_by_sector):.1f}/{np.nanpercentile(rise_by_sector, 90):.1f} m (p10/50/90 over "
                 f"{int(good.sum())} of {sectors} azimuth sectors) above it, from the photographed waterline"
             )
         else:
             self.log_info(
-                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m (map shifted {shift:+.2f} m); "
+                f"Water plane anchor: {frac:.0%} of the grid is water, pinned to {y_w:.2f} m ({shifted}); "
                 "no measurable bank rise in the panorama"
             )
         # Land never sits under the water surface.
@@ -611,6 +667,7 @@ class HeightMapStage(PipelineStage):
                 np.asarray(region_type_mask), panorama_depth, camera_height, cfg,
             )
 
+        standing_pedestal = None
         if cfg.standing_viewer_prior and camera_estimate.get("source") == "photo":
             from pipeline.panorama_segmentation.panorama_region_result import RegionType as _RT
             n = cfg.grid_resolution
@@ -657,15 +714,46 @@ class HeightMapStage(PipelineStage):
                 sm = t * t * (3.0 - 2.0 * t)
                 measured = np.where(np.isfinite(height_array), height_array, ring_y)
                 raised = target * (1.0 - sm) + measured * sm
+                # The stand is under the photographer, not in the photograph: where the
+                # knoll would rise into the frame it is cut back to the frame's lower
+                # edge, so that side of it falls away as the bluff the photograph was
+                # taken from (Shark Fin: a 32 degree cone out to 19 m stood in the
+                # bottom quarter of the frame, a brown mound with the beach's picture
+                # stretched over it where the photograph has flat sand).
+                cleared = 0
+                if cfg.standing_pedestal_clear_frame:
+                    try:
+                        from util.captured_cone import captured_cone_from_context
+                        th_, tw_ = (np.asarray(region_type_mask).shape[:2] if region_type_mask is not None
+                                    else (cfg.grid_resolution // 2, cfg.grid_resolution))
+                        cone = captured_cone_from_context(context, int(tw_), int(th_))
+                    except Exception as exc:
+                        cone = None
+                        self.log_warning(f"Standing viewer: no captured cone ({type(exc).__name__}: {exc}); the pedestal is not cut back")
+                    if cone is not None:
+                        az_edge, dep_edge = frame_lower_edge(cone.hfov_deg, cone.vfov_deg, cone.pitch_deg)
+                        az = np.arctan2(xx, zz)
+                        dep = np.interp(az, az_edge, dep_edge)   # the end values beyond the frame's sides
+                        feather = np.radians(cfg.standing_pedestal_clear_feather_deg)
+                        outside = np.maximum(np.maximum(az_edge[0] - az, az - az_edge[-1]), 0.0)
+                        w = np.clip(1.0 - outside / max(feather, 1e-6), 0.0, 1.0)
+                        w = w * w * (3.0 - 2.0 * w)
+                        steep = np.clip(dep + np.radians(cfg.standing_pedestal_clear_margin_deg), 0.0, np.radians(85.0))
+                        cap = -rr * np.tan(steep)
+                        cut = np.minimum(raised, cap)
+                        cleared = int(((rr <= R1) & (w > 0.5) & (cut < raised) & (raised > measured)).sum())
+                        raised = (raised * (1.0 - w) + cut * w).astype(raised.dtype)
                 within = rr <= R1
                 lifted = within & (raised > measured)
                 height_array = np.where(lifted, raised, height_array).astype(height_array.dtype)
                 true_observed_array[within] = True
+                standing_pedestal = {"y": float(target), "flat_m": R0, "radius_m": float(R1)}
                 self.log_info(
                     f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out lies {ring_y:+.2f} m, {drop:.1f} m below eye "
                     f"height ({'%.0f%% water' % (100 * water_frac) if water_frac is not None else 'type unknown'}); "
                     f"a pedestal at {target:+.1f} m raised under the camera, flat to {R0:.0f} m and blended out by {R1:.0f} m "
-                    f"({int(lifted.sum()):,} cell(s) lifted)"
+                    f"({int(lifted.sum()):,} cell(s) lifted"
+                    + (f"; {cleared:,} cell(s) cut back to stay under the photographed frame" if cleared else "") + ")"
                 )
             elif np.isfinite(ring_y):
                 self.log_info(f"Standing viewer: the ground {r0:.0f}-{r1:.0f} m out lies {ring_y:+.2f} m, within {cfg.standing_min_drop_m:.0f} m of eye height")
@@ -748,6 +836,9 @@ class HeightMapStage(PipelineStage):
             "grid_resolution":     cfg.grid_resolution,
             "ground_y_max":        cfg.ground_y_max,
             "camera_height_meters": camera_height,
+            # The ground raised under a viewer who stands above the photographed scene
+            # (None when nothing was raised); the terrain plan keeps water off it.
+            "standing_pedestal":   standing_pedestal,
         })
 
         if self.temp is not None:

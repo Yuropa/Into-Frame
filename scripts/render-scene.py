@@ -217,8 +217,9 @@ def material_for(tm: trimesh.Trimesh, image: PILImage.Image | None = None, unlit
             from pyrender.constants import GLTF
             sampler = pyrender.Sampler(wrapS=GLTF.CLAMP_TO_EDGE, wrapT=GLTF.CLAMP_TO_EDGE)
         kwargs["baseColorTexture"] = pyrender.Texture(source=arr, source_channels="RGBA", sampler=sampler)
-        if gain != 1.0 and not unlit:
-            kwargs["baseColorFactor"] = [float(gain), float(gain), float(gain), 1.0]
+        rgb = [float(v) for v in gain] if isinstance(gain, (list, tuple)) else [float(gain)] * 3
+        if rgb != [1.0, 1.0, 1.0] and not unlit:
+            kwargs["baseColorFactor"] = [*rgb, 1.0]
         if unlit:
             # The photograph's own light is in the pixels: show them as emission
             # (a second Texture object; one shared between slots loses the cutout).
@@ -444,6 +445,58 @@ def baked_pano_uv_sampler(vertices: np.ndarray, uv: np.ndarray):
 
 # ── scene assembly ───────────────────────────────────────────────────────────────
 
+# --wireframe: the triangle edges drawn over the frame, one colour per kind of
+# geometry (the grass blades are left out: 60 000 tufts are a solid sheet of lines).
+WIRE_COLOURS = {
+    "terrain": (255, 255, 255),
+    "water": (0, 225, 255),
+    "backdrop": (255, 70, 230),
+    "formation": (120, 255, 90),
+    "object": (255, 225, 0),
+    "card": (255, 140, 0),
+    "billboard": (255, 60, 60),
+}
+
+
+def render_wire(renderer, ps, node_colours: dict) -> tuple[np.ndarray, np.ndarray]:
+    """The scene's triangle edges, each node in its flat colour, and their depth.
+    pyrender's segmentation pass gives the flat colours and skips the lights, but
+    fills the triangles and culls back faces whatever the flags say, so for this one
+    pass its polygon mode is lines and its culling is off."""
+    import pyrender.renderer as pr
+    from OpenGL import GL
+    real_mode, real_enable = pr.glPolygonMode, pr.glEnable
+    pr.glPolygonMode = lambda face, mode: real_mode(face, GL.GL_LINE)
+    pr.glEnable = lambda cap: GL.glDisable(cap) if cap == GL.GL_CULL_FACE else real_enable(cap)
+    try:
+        return renderer.render(ps, flags=pyrender.RenderFlags.SEG, seg_node_map=node_colours)
+    finally:
+        pr.glPolygonMode, pr.glEnable = real_mode, real_enable
+        GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+
+
+def wire_overlay(frame: np.ndarray, seg: np.ndarray, wire_depth: np.ndarray, depth: np.ndarray,
+                 alpha: float = 0.6, legend: bool = True) -> PILImage.Image:
+    """`frame` with the wireframe pass drawn over it. An edge is drawn where it is
+    the nearest surface: its depth is the solid pass's depth at that pixel (within
+    1%), or there is nothing solid there (the cut-out part of a card or billboard
+    quad, which is geometry all the same)."""
+    on = (wire_depth > 0.0) & ((depth <= 0.0) | (wire_depth <= depth * 1.01 + 0.02))
+    out = frame.astype(np.float32)
+    out[on] = out[on] * (1.0 - alpha) + seg[..., :3][on].astype(np.float32) * alpha
+    img = PILImage.fromarray(out.clip(0, 255).astype(np.uint8), "RGB")
+    if legend:
+        d = ImageDraw.Draw(img)
+        x, y = 8, img.height - 16
+        for name, colour in WIRE_COLOURS.items():
+            w = int(d.textlength(name)) + 22
+            d.rectangle((x - 3, y - 3, x + w - 6, y + 12), fill=(0, 0, 0))
+            d.rectangle((x, y + 1, x + 8, y + 9), fill=colour)
+            d.text((x + 12, y - 1), name, fill=(255, 255, 255))
+            x += w
+    return img
+
+
 class SceneBuilder:
     def __init__(self, context, scene: dict, args, log):
         self.context = context
@@ -452,6 +505,15 @@ class SceneBuilder:
         self.log = log
         self._trimesh_cache: dict[str, trimesh.Trimesh | None] = {}
         self._image_cache: dict[str, PILImage.Image | None] = {}
+
+    def _mesh_height(self, key) -> float:
+        """The Y extent of a mesh in its own units (1 when it cannot be read)."""
+        cache = self.__dict__.setdefault("_mesh_heights", {})
+        if key not in cache:
+            tm = self.trimesh_for(key) if key else None
+            h = float(tm.extents[1]) if tm is not None and len(tm.vertices) else 1.0
+            cache[key] = h if h > 1e-6 else 1.0
+        return cache[key]
 
     def trimesh_for(self, key: str) -> trimesh.Trimesh | None:
         if key not in self._trimesh_cache:
@@ -500,6 +562,8 @@ class SceneBuilder:
         from pipeline.pipeline_context import ContextKey
 
         ps = pyrender.Scene(bg_color=[0, 0, 0, 0], ambient_light=self._ambient())
+        self.wire_nodes = {}  # node -> line colour, for --wireframe
+        self.key_nodes = {}   # node -> (kind, key) of the placed objects, for the fit's object-id pass
         stats = {"instances": 0, "lod_mesh": 0, "lod_card": 0, "lod_billboard": 0, "billboards": 0, "env": 0, "skipped": 0}
         instances: dict[tuple, list[np.ndarray]] = {}
         env_names = {"terrain", "water", "water_apron", "treeline", "backdrop"}
@@ -521,7 +585,11 @@ class SceneBuilder:
             lods = o.get("lods") or []
             if lods:
                 dist = max(float(np.linalg.norm(np.asarray(pos) - camera_pos)), 0.1)
-                fraction = scl[1] / (dist * 2.0 * math.tan(vfov_rad / 2.0))
+                # The height on screen is the placed mesh's own: a species mesh is
+                # modelled in metres and placed at a scale near 1, and read as
+                # "scale.y metres tall" every tree in Paris drew as its card where
+                # the client (a LODGroup over the mesh's bounds) draws the mesh.
+                fraction = scl[1] * self._mesh_height(lods[0].get("mesh")) / (dist * 2.0 * math.tan(vfov_rad / 2.0))
                 chosen = lods[-1]
                 for level in lods:
                     if fraction >= float(level.get("screenHeight", 0.0)):
@@ -556,7 +624,10 @@ class SceneBuilder:
                 if tm is None:
                     stats["skipped"] += len(poses)
                     continue
-                mat = material_for(tm, unlit=kind == "mesh_unlit", gain=float(getattr(self.args, "object_gain", 1.0) or 1.0))
+                # One model's own colour gain (Exposure Fit's object_gains) stands in for the scene's.
+                own_gain = (getattr(self.args, "object_gains", None) or {}).get(key)
+                mat = material_for(tm, unlit=kind == "mesh_unlit",
+                                   gain=own_gain if own_gain else float(getattr(self.args, "object_gain", 1.0) or 1.0))
                 geom = to_gl(tm)
                 smooth = False
                 if key.endswith("_card"):
@@ -581,7 +652,10 @@ class SceneBuilder:
             pm = pyrender.Mesh.from_trimesh(geom, material=mat, poses=gl_poses, smooth=smooth)
             if kind in ("mesh", "mesh_unlit") and casts_no_shadow(key):
                 pm.no_shadow = True
-            ps.add(pm)
+            node = ps.add(pm)
+            wire_kind = "billboard" if kind == "billboard" else ("card" if "_card" in key else "object")
+            self.wire_nodes[node] = WIRE_COLOURS[wire_kind]
+            self.key_nodes[node] = (kind, key)
 
         # Environment meshes.
         terrain_pose = None
@@ -642,7 +716,10 @@ class SceneBuilder:
                 mat = material_for(tm, unlit=bool(o.get("unlit")) or os.environ.get("RENDER_UNLIT_ENV") == "1")
             else:
                 mat = material_for(tm)
-            ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))
+            node = ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))
+            wire_kind = ("terrain" if name == "terrain" else "water" if name in ("water", "water_apron")
+                         else "backdrop" if name in ("treeline", "backdrop") else "formation")
+            self.wire_nodes[node] = WIRE_COLOURS[wire_kind]
             stats["env"] += 1
 
         for plate_tm, plate_mat, gl_pose in getattr(self, "_plate_nodes", []):
@@ -1040,6 +1117,8 @@ def main() -> int:
                          "the ambient alone and by nothing (what Exposure Fit fits the light scales on)")
     ap.add_argument("--no-fit", action="store_true", help="ignore the run's Exposure Fit (render at the unfitted light scales)")
     ap.add_argument("--no-shadows", action="store_true")
+    ap.add_argument("--wireframe", action="store_true",
+                    help="also write each frame with the triangle edges over it (<view>_wire.png; --orbit: wire_NNNN.png and orbit_wire.mp4)")
     ap.add_argument("--sun-az-el", default=None, help="debug: aim the sun at 'az,el' degrees instead of the scene's direction")
     ap.add_argument("--save-depth", action="store_true", help="also write <view>_depth.npy (metres, 0 where only sky)")
     ap.add_argument("--pano-uv", choices=["baked", "analytic"], default="baked",
@@ -1071,12 +1150,17 @@ def main() -> int:
     fit = (scene.get("lighting") or {}).get("fit")
     fit_path = run_dir / "Exposure Fit" / "exposure_fit.json"
     args.ambient_tint, args.object_gain = None, 1.0
+    args.object_gains = {}
     if not args.no_fit:
         src = fit if fit else (json.loads(fit_path.read_text()) if fit_path.exists() else {})
         tint = src.get("ambient_tint")
         if isinstance(tint, (list, tuple)) and len(tint) == 3:
             args.ambient_tint = [float(v) for v in tint]
         args.object_gain = float(src.get("object_gain") or 1.0)
+        gains = src.get("object_gains")
+        args.object_gains = {str(k): [float(x) for x in v] for k, v in gains.items()} if isinstance(gains, dict) else {}
+        if args.object_gains:
+            log(f"exposure fit: {len(args.object_gains)} model(s) with a colour gain of their own")
         if args.ambient_tint or args.object_gain != 1.0:
             log(f"exposure fit: ambient tint {args.ambient_tint}, object albedo x{args.object_gain:.2f}")
         if fit:
@@ -1137,6 +1221,26 @@ def main() -> int:
                 np.save(out / f"photo_pass_{tag}.npy", (c_pass[..., :3].astype(np.float32) / 255.0).astype(np.float16))
             args.sun_scale, args.ambient = base_sun, base_amb
             log(f"photo: light passes written (sun, ambient, unlit)")
+            # Which placed model each pixel shows, for the fit of each model's own
+            # colour: the flat-colour pass, one colour per model, everything else
+            # black (drawn, so that it hides what stands behind it).
+            try:
+                keys = sorted({kk for kk in builder.key_nodes.values()})
+                index = {kk: i + 1 for i, kk in enumerate(keys)}
+                colours = {node: (0, 0, 0) for node in ps_pass.mesh_nodes}
+                for node, kk in builder.key_nodes.items():
+                    if node in colours:
+                        i = index[kk]
+                        colours[node] = (i & 255, (i >> 8) & 255, 255)
+                seg, _ = renderer.render(ps_pass, flags=pyrender.RenderFlags.SEG, seg_node_map=colours)
+                seg = np.asarray(seg)[..., :3].astype(np.int64)
+                ids = np.where(seg[..., 2] == 255, seg[..., 0] + (seg[..., 1] << 8), 0)
+                ids[ids > len(keys)] = 0
+                np.save(out / "photo_object_ids.npy", ids.astype(np.uint16))
+                (out / "photo_object_ids.json").write_text(json.dumps([list(kk) for kk in keys]))
+                log(f"photo: object-id pass written ({len(keys)} models, {int((ids > 0).sum())} px)")
+            except Exception as exc:  # the fit goes on without it
+                log(f"photo: no object-id pass ({type(exc).__name__}: {exc})")
         if view.startswith("orbit:") and orbit_ps is not None:
             # The turn keeps the camera where it is: one scene, built and uploaded once, and
             # only the camera's pose changes (a rebuild per frame cost 8-12 s of the frame).
@@ -1158,6 +1262,10 @@ def main() -> int:
             colour = np.where((depth <= 0.0)[..., None], bg, colour)
         img = PILImage.fromarray(colour, "RGB")
         img.save(out / f"{fname}.png")
+        if args.wireframe:
+            seg, wire_depth = render_wire(renderer, ps, builder.wire_nodes)
+            wname = f"wire_{vi:04d}" if view.startswith("orbit:") else f"{fname}_wire"
+            wire_overlay(colour, seg, wire_depth, depth).save(out / f"{wname}.png")
         if args.save_depth:
             np.save(out / f"{fname}_depth.npy", depth.astype(np.float16))
         if not view.startswith("orbit:"):
@@ -1170,6 +1278,10 @@ def main() -> int:
         frames = sorted(out.glob("orbit_*.png"))
         mp4 = encode_mp4(frames, out / "orbit.mp4", args.fps)
         log(f"orbit: {len(frames)} frames at {args.fps} fps -> {mp4}")
+        if args.wireframe:
+            frames = sorted(out.glob("wire_*.png"))
+            mp4 = encode_mp4(frames, out / "orbit_wire.mp4", args.fps)
+            log(f"orbit, wireframe: {len(frames)} frames at {args.fps} fps -> {mp4}")
 
     if "photo" in results and photo is not None:
         ph = photo.image.convert("RGB").resize((width, height), PILImage.LANCZOS)

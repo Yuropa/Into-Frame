@@ -195,6 +195,37 @@ def defringe_rgba(texture: PILImage.Image, passes: int = 2, light_margin: float 
     return PILImage.fromarray(rgba, "RGBA")
 
 
+def recolour_canvas_cast(texture: PILImage.Image, margin: float = 0.85) -> "tuple[PILImage.Image, int]":
+    """A cut-out plant whose pale, grey strands take the foliage's colour.
+
+    A reference view is drawn on a white canvas and matted; the strands of a
+    crown that are a pixel wide come out half canvas: opaque, paler than the
+    leaves and nearly grey. Scaled to the photographed tree's colour they turned
+    cyan (blue gained, red lost), an outline of light blue round every willow on
+    Paris's banks. Opaque pixels lighter than the crown's median and under
+    `margin` of its median saturation take the colour of the nearest pixel that
+    is neither, darkened to the crown's median brightness where that is lighter.
+    The trunk and the shade inside the crown are darker than the median and are
+    left alone. Returns (image, pixels recoloured)."""
+    from scipy.ndimage import distance_transform_edt
+    rgba = np.asarray(texture.convert("RGBA")).copy()
+    opaque = rgba[..., 3] > 127
+    if opaque.sum() < 64:
+        return texture, 0
+    rgb = rgba[..., :3].astype(np.float32)
+    hi, lo = rgb.max(axis=-1), rgb.min(axis=-1)
+    sat = (hi - lo) / np.maximum(hi, 1.0)
+    lum = rgb @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    med_sat, med_lum = float(np.median(sat[opaque])), float(np.median(lum[opaque]))
+    cast = opaque & (sat < margin * med_sat) & (lum > med_lum)
+    keep = opaque & ~cast
+    if not cast.any() or keep.sum() < 64:
+        return texture, 0
+    _, (iy, ix) = distance_transform_edt(~keep, return_indices=True)
+    rgba[..., :3] = np.where(cast[..., None], rgba[iy, ix, :3], rgba[..., :3])
+    return PILImage.fromarray(rgba, "RGBA"), int(cast.sum())
+
+
 def crossed_card_mesh(texture: PILImage.Image, plane_count: int = 3, aspect: "float | None" = None) -> Mesh:
     """A unit-height crossed-card mesh carrying `texture` on every plane.
 

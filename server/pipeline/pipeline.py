@@ -73,6 +73,7 @@ from pipeline.motion_classification.motion_classification import ObjectMotionCla
 from pipeline.motion_classification.category_mesh_rigging import CategoryMeshRiggingStage
 from pipeline.material_maps.material_maps import MaterialMapsStage
 from pipeline.motion_classification.scene_animation import SceneAnimationStage
+from pipeline.scene_graph.scene_graph_stage import SceneGraphStage
 from pipeline.skybox_inpainting.skybox_inpainting import SkyboxInpaintingStage
 from pipeline.report.report import ReportGenerationStage
 from pipeline.pipeline_stage import PipelineStageConfiguration, PipelineStage, SemanticKey, SemanticKeyName
@@ -402,6 +403,7 @@ STAGE_REGISTRY: dict[str, type[PipelineStage]] = {
     "CategoryMeshRiggingStage": CategoryMeshRiggingStage,
     "MaterialMapsStage": MaterialMapsStage,
     "SceneAnimationStage": SceneAnimationStage,
+    "SceneGraphStage": SceneGraphStage,
     "SkyboxInpaintingStage": SkyboxInpaintingStage,
     "ReportGenerationStage": ReportGenerationStage,
 }

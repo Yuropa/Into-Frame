@@ -36,7 +36,16 @@ _FOREGROUND_STRUCTURE_CATEGORIES = frozenset({
 # coherent crop. Left in the terrain plate, a boat was painted flat onto the
 # water under its own model (Paris: the tour boat and its crowd, seen again
 # from behind).
-_FOREGROUND_RIGID_CATEGORIES = frozenset({"boat", "ship", "car", "truck", "bus"})
+# A person is one too: left in the plate, the figure lies painted on the sand
+# at the feet of its own model.
+_FOREGROUND_RIGID_CATEGORIES = frozenset({"boat", "ship", "car", "truck", "bus", "person"})
+
+# A rock is reconstructed as its own 3D model too (ALWAYS_MESH_CATEGORIES). Left
+# in the terrain plate it is also a bump in the height map: Shark Fin's fin rock,
+# 17 degrees tall, stood as its model on a dark island of itself, 2.5 to 5 m out
+# of the sea, and a rock in the water is a flat picture of itself on the surface
+# under its model. Under landform_min_height_deg it is a pebble and stays ground.
+_FOREGROUND_LANDFORM_CATEGORIES = frozenset({"rock"})
 
 
 # Indices of occluder crops left in the terrain plate as backdrop (see keep_far_objects).
@@ -143,11 +152,26 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         # BACKDROP_KEPT_KEY so Scene Generation does not place them a second time.
         keep_far_objects: bool = True,
         far_depth_fraction: float = 0.95,
+        # A standing object small in the picture and well out in the depth map's
+        # range is backdrop too, though the depth model ranged it: Paris's right
+        # bank (plane trees 2 to 5 degrees tall at 42-48 of 100, moored barges at
+        # 35-47) was removed, repainted by ObjectClear as one smeared green mass,
+        # and the few crops worth a model came back as generic trees and 28 m
+        # boats standing in front of it. Below keep_small_max_deg of box height
+        # and past keep_small_fraction of the map's maximum they stay as
+        # photographed. 0 turns the rule off.
+        keep_small_fraction: float = 0.0,
+        keep_small_max_deg: float = 5.0,
+        # See _FOREGROUND_LANDFORM_CATEGORIES; 0 leaves every rock in the plate.
+        landform_min_height_deg: float = 1.0,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        self.landform_min_height_deg = float(landform_min_height_deg)
         self.keep_far_objects = bool(keep_far_objects)
         self.far_depth_fraction = float(far_depth_fraction)
+        self.keep_small_fraction = float(keep_small_fraction)
+        self.keep_small_max_deg = float(keep_small_max_deg)
         self.remove_near_field = bool(remove_near_field)
         self.foreground_distance_m = foreground_distance_m
         self.min_region_area_px = min_region_area_px
@@ -245,7 +269,7 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
             kept = getattr(self, "_kept_far", [])
             context.add_object(BACKDROP_KEPT_KEY, kept)
             if kept:
-                self.log_info(f"Kept {len(kept)} occluder(s) at the depth model's far clamp in the terrain plate "
+                self.log_info(f"Kept {len(kept)} occluder(s) at the depth model's far clamp, or small and far out, in the terrain plate "
                               f"(backdrop, not removed): {', '.join(sorted(set(self._kept_names)))}")
             if extracted_mask is not None:
                 near_mask = near_mask | extracted_mask
@@ -387,16 +411,26 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
         found = False
         self._kept_far, self._kept_names = [], []
         depth = getattr(self, "_depth_for_mask", None) if self.config.keep_far_objects else None
-        far_depth = None
+        far_depth = small_depth = None
         if depth is not None:
             finite = depth[np.isfinite(depth)]
             if finite.size:
                 far_depth = self.config.far_depth_fraction * float(finite.max())
+                if 0.0 < self.config.keep_small_fraction < self.config.far_depth_fraction:
+                    small_depth = self.config.keep_small_fraction * float(finite.max())
         for idx in range(object_count):
             metadata = context.input_object(f"metadata_{idx}") or {}
             object_class = metadata.get("class")
+            landform_box = metadata.get("box") if object_class in _FOREGROUND_LANDFORM_CATEGORIES else None
+            tall_landform = bool(
+                landform_box and self.config.landform_min_height_deg > 0
+                and float(landform_box[3]) * 180.0 / pano_h >= self.config.landform_min_height_deg)
+            # Marked by Inventory Review: a class the scene does without (people).
+            erase = bool(metadata.get("erase"))
             if (
-                object_class not in _FOREGROUND_VEGETATION_CATEGORIES
+                not tall_landform
+                and not erase
+                and object_class not in _FOREGROUND_VEGETATION_CATEGORIES
                 and object_class not in _FOREGROUND_STRUCTURE_CATEGORIES
                 and object_class not in _FOREGROUND_RIGID_CATEGORIES
                 # Folded into a carrier or a named landmark by Object Labeling
@@ -423,13 +457,17 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
             # see util/instance_merge.py) still pastes into the right place.
             cols = (x + np.arange(cw)) % pano_w
             rows = np.arange(y0, y1)
-            if far_depth is not None:
+            if far_depth is not None and not erase:
                 dh, dw = depth.shape
                 ry, rx = np.nonzero(crop_mask[y0 - y: y1 - y, :])
                 if ry.size:
                     d = depth[(rows[ry] * dh) // pano_h, (cols[rx] * dw) // pano_w]
                     d = d[np.isfinite(d)]
-                    if d.size and float(np.median(d)) >= far_depth:
+                    # Not a rock: left in the plate it is a bump in the height
+                    # map and a flat picture of itself on the water.
+                    small = (small_depth is not None and h * 180.0 / pano_h < self.config.keep_small_max_deg
+                             and object_class not in _FOREGROUND_LANDFORM_CATEGORIES)
+                    if d.size and float(np.median(d)) >= (small_depth if small else far_depth):
                         self._kept_far.append(idx)
                         self._kept_names.append(str(metadata.get("name") or object_class))
                         continue
