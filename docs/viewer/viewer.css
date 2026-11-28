@@ -1,0 +1,99 @@
+/* Into Frame scene viewer. The chrome follows the site (docs/css/style.css): a plain
+   navbar, Lato, one accent colour, light and dark from prefers-color-scheme. Every
+   colour and size is a token on :root. */
+:root {
+  --v-bg: #0e0d0b;              /* behind the canvas while a scene loads */
+  --v-bar: #ffffff;
+  --v-panel: rgba(255, 255, 255, 0.94);
+  --v-text: #24292f;
+  --v-text-2: #57606a;
+  --v-rule: #d0d7de;
+  --v-accent: #0a7d91;
+  --v-accent-soft: rgba(10, 125, 145, 0.08);
+  --v-error: #b42318;
+  --v-load-text: #c9d1d9;       /* the loading line sits on the dark canvas */
+  --v-font: Lato, "Open Sans", -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  --v-size: 14px;
+  --v-radius: 6px;
+  --v-gap: 8px;
+  --v-bar-h: 52px;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --v-bar: #14181e;
+    --v-panel: rgba(20, 24, 30, 0.94);
+    --v-text: #ced6dd;
+    --v-text-2: #9aa5b1;
+    --v-rule: #3a434e;
+    --v-accent: #3fb1c5;
+    --v-accent-soft: rgba(63, 177, 197, 0.12);
+    --v-error: #f08a7a;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; background: var(--v-bg); color: var(--v-text);
+  font-family: var(--v-font); font-size: var(--v-size); }
+#stage { position: fixed; inset: 0; touch-action: none; cursor: grab; }
+#stage:active { cursor: grabbing; }
+#stage canvas { display: block; width: 100%; height: 100%; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); }
+[hidden] { display: none !important; }
+
+/* The navbar: the site's, over the top edge of the scene. */
+.vbar { position: fixed; top: 0; left: 0; right: 0; z-index: 10; display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--v-gap); min-height: calc(var(--v-bar-h) + env(safe-area-inset-top, 0px));
+  padding: calc(var(--v-gap) + env(safe-area-inset-top, 0px)) max(16px, env(safe-area-inset-right, 0px)) var(--v-gap) max(16px, env(safe-area-inset-left, 0px));
+  background: var(--v-bar); border-bottom: 1px solid var(--v-rule); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06); }
+.vbar__crumbs { display: flex; align-items: baseline; gap: 6px; margin-right: 8px; white-space: nowrap; }
+.vbar__home { color: var(--v-text); text-decoration: none; font-weight: 700; font-size: 1.1em; }
+.vbar__home:hover { color: var(--v-accent); }
+.vbar__sep { color: var(--v-rule); }
+.vbar__here { color: var(--v-text-2); }
+.vbar__tools { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+.vbar select, .vbar button { font: inherit; color: var(--v-text); background: var(--v-bar); border: 1px solid var(--v-rule);
+  border-radius: var(--v-radius); padding: 5px 10px; cursor: pointer; }
+.vbar button:hover, .vbar select:hover { border-color: var(--v-accent); color: var(--v-accent); }
+.vbar button[aria-pressed="false"] { color: var(--v-text-2); }
+.vbar #btn-vr { background: var(--v-accent); border-color: var(--v-accent); color: var(--v-bar); }
+.vbar button:focus-visible, .vbar select:focus-visible { outline: 2px solid var(--v-accent); outline-offset: 1px; }
+
+.vpanel { position: fixed; top: calc(var(--v-bar-h) + 12px + env(safe-area-inset-top, 0px)); right: max(16px, env(safe-area-inset-right, 0px));
+  max-width: min(380px, calc(100vw - 32px)); padding: 14px 16px; z-index: 11; line-height: 1.55;
+  background: var(--v-panel); border: 1px solid var(--v-rule); border-radius: var(--v-radius); box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12); }
+.vpanel h2 { margin: 0 0 10px; font-size: 1.05em; font-weight: 700; padding-bottom: 6px; border-bottom: 1px solid var(--v-rule); }
+.vpanel dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; }
+.vpanel dt { font-weight: 700; color: var(--v-accent); }
+.vpanel dd { margin: 0; color: var(--v-text-2); }
+.vpanel__note { margin: 12px 0 0; padding: 8px 10px; color: var(--v-text); background: var(--v-accent-soft);
+  border-left: 3px solid var(--v-accent); border-radius: 0 var(--v-radius) var(--v-radius) 0; }
+.vpanel--error { left: 50%; right: auto; top: 40%; transform: translateX(-50%); border-color: var(--v-error); }
+.vpanel--error strong { color: var(--v-error); }
+
+.vload { position: fixed; left: 50%; bottom: 18%; transform: translateX(-50%); width: min(320px, 80vw); text-align: center; z-index: 9; }
+.vload p { margin: 0 0 8px; color: var(--v-load-text); }
+.vload__bar { height: 3px; background: rgba(255, 255, 255, 0.18); border-radius: 2px; overflow: hidden; }
+#loading-fill { height: 100%; width: 0; background: var(--v-accent); transition: width 0.2s; }
+
+.vinfo { position: fixed; left: max(16px, env(safe-area-inset-left, 0px)); bottom: calc(12px + env(safe-area-inset-bottom, 0px)); color: var(--v-text-2);
+  background: var(--v-panel); border: 1px solid var(--v-rule); border-radius: var(--v-radius); padding: 5px 10px; z-index: 8;
+  max-width: calc(100vw - 32px); font-size: 0.9em; }
+.vinfo:empty { display: none; }
+
+.vpad { position: fixed; left: 24px; bottom: calc(56px + env(safe-area-inset-bottom, 0px)); width: 110px; height: 110px;
+  border: 1px solid var(--v-rule); border-radius: 50%; background: var(--v-panel); z-index: 9; display: none; touch-action: none; opacity: 0.85; }
+.vpad__knob { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  border-radius: 50%; background: var(--v-accent-soft); border: 1px solid var(--v-accent); }
+@media (pointer: coarse) { .vpad { display: block; } .vinfo { bottom: calc(176px + env(safe-area-inset-bottom, 0px)); } }
+@media (max-width: 560px) {
+  .vbar { font-size: 13px; }
+  .vbar__here, .vbar__sep { display: none; }
+  .vbar select, .vbar button { padding: 4px 8px; }
+  /* the bar wraps to two rows here */
+  .vpanel { top: calc(96px + env(safe-area-inset-top, 0px)); }
+}
+
+/* ?ui=0: the scene alone (thumbnails, embeds). */
+.no-ui .vbar, .no-ui .vinfo, .no-ui .vpad, .no-ui .vpanel { display: none !important; }

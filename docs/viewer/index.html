@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Scene Viewer — Into Frame</title>
+  <meta name="description" content="Step into the scenes Into Frame built from single photographs: look around, walk a few metres, and watch the wind, water and boats move." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Lato:wght@400;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="viewer.css" />
+  <script>
+    // Screenshot test hook (?shot=1): hold the page's load event until the first
+    // frame of the loaded scene is drawn, so a headless screenshot shows it.
+    if (/[?&]shot=1/.test(location.search)) {
+      var hold = new Image();
+      hold.src = '/__hold?' + Date.now();
+      hold.style.display = 'none';
+      document.documentElement.appendChild(hold);
+    }
+  </script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div id="stage" aria-label="3D scene"></div>
+
+  <header class="vbar">
+    <nav class="vbar__crumbs" aria-label="Breadcrumb">
+      <a class="vbar__home" href="../">Into Frame</a><span class="vbar__sep" aria-hidden="true">/</span><span class="vbar__here">Viewer</span>
+    </nav>
+    <label class="vbar__pick">
+      <span class="sr-only">Scene</span>
+      <select id="scene-pick" aria-label="Scene">
+        <option value="paris">Paris</option>
+        <option value="shark-fin">Shark Fin</option>
+        <option value="mount-rainier">Mount Rainier</option>
+      </select>
+    </label>
+    <div class="vbar__tools">
+      <button id="btn-play" type="button" aria-pressed="true" title="Play or pause the motion (Space)">Pause</button>
+      <button id="btn-motion" type="button" aria-pressed="true" title="Turn the scene's motion on or off (M)">Motion on</button>
+      <button id="btn-reset" type="button" title="Back to the photograph's viewpoint (R)">Reset view</button>
+      <button id="btn-quality" type="button" title="Render resolution (Q)">Quality: auto</button>
+      <button id="btn-vr" type="button" title="View in a VR headset" hidden>Enter VR</button>
+      <button id="btn-help" type="button" aria-expanded="false" aria-controls="help" title="Controls (H)">?</button>
+    </div>
+  </header>
+
+  <section id="help" class="vpanel" hidden>
+    <h2>Controls</h2>
+    <dl>
+      <dt>Look</dt><dd>Drag with the mouse or a finger</dd>
+      <dt>Move</dt><dd>W A S D or the arrow keys; the pad at the bottom left on touch screens. You can walk a few metres around where the photograph was taken.</dd>
+      <dt>Motion</dt><dd>Space pauses, M turns motion off, R returns to the photograph's view</dd>
+      <dt>VR</dt><dd>With a headset: Enter VR; left stick walks, right stick turns in 30° steps</dd>
+    </dl>
+    <p class="vpanel__note">The view opens where the photograph was taken. Everything outside its frame was generated.</p>
+  </section>
+
+  <div id="loading" class="vload" role="status" aria-live="polite">
+    <p id="loading-text">Loading…</p>
+    <div class="vload__bar"><div id="loading-fill"></div></div>
+  </div>
+
+  <div id="error" class="vpanel vpanel--error" role="alert" hidden></div>
+
+  <div id="info" class="vinfo" aria-live="polite"></div>
+
+  <div id="pad" class="vpad" aria-hidden="true"><div class="vpad__knob"></div></div>
+
+  <script type="module" src="viewer.js"></script>
+</body>
+</html>

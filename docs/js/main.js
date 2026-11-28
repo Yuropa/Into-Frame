@@ -1,76 +1,33 @@
-/* ============================================================
-   INTO FRAME — Main JavaScript
-   ============================================================ */
-
+/* Into Frame site: the navbar's menu on narrow screens, and the sidebar's
+   current section highlighted while scrolling. */
 'use strict';
 
-/* ------------------------------------------------------------
-   Nav: add .scrolled class on scroll
-   ------------------------------------------------------------ */
-const nav = document.querySelector('.nav');
+const toggle = document.querySelector('.navbar__toggle');
+const links = document.getElementById('navbar-links');
 
-if (nav) {
-  const onScroll = () => {
-    nav.classList.toggle('scrolled', window.scrollY > 40);
-  };
-  window.addEventListener('scroll', onScroll, { passive: true });
-  onScroll(); // run once on load
+if (toggle && links) {
+  const close = () => { links.classList.remove('is-open'); toggle.setAttribute('aria-expanded', 'false'); };
+  toggle.addEventListener('click', () => {
+    const open = links.classList.toggle('is-open');
+    toggle.setAttribute('aria-expanded', String(open));
+  });
+  links.querySelectorAll('a').forEach((a) => a.addEventListener('click', close));
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
 }
 
+const heads = document.querySelectorAll('main h2[id]');
+const sideLinks = document.querySelectorAll('.sidebar a[href^="#"]');
 
-/* ------------------------------------------------------------
-   Mobile menu toggle
-   ------------------------------------------------------------ */
-const navToggle = document.querySelector('.nav__toggle');
-const navLinks  = document.querySelector('.nav__links');
-
-if (navToggle && navLinks) {
-  navToggle.addEventListener('click', () => {
-    const isOpen = navLinks.classList.toggle('nav__links--open');
-    navToggle.setAttribute('aria-expanded', isOpen);
-    document.body.style.overflow = isOpen ? 'hidden' : '';
-  });
-
-  // Close on link click
-  navLinks.querySelectorAll('.nav__link').forEach(link => {
-    link.addEventListener('click', () => {
-      navLinks.classList.remove('nav__links--open');
-      navToggle.setAttribute('aria-expanded', 'false');
-      document.body.style.overflow = '';
-    });
-  });
-
-  // Close on Escape
-  document.addEventListener('keydown', e => {
-    if (e.key === 'Escape' && navLinks.classList.contains('nav__links--open')) {
-      navLinks.classList.remove('nav__links--open');
-      navToggle.setAttribute('aria-expanded', 'false');
-      document.body.style.overflow = '';
-    }
-  });
-}
-
-
-/* ------------------------------------------------------------
-   Active nav link on scroll (intersection-based)
-   ------------------------------------------------------------ */
-const sections   = document.querySelectorAll('section[id]');
-const navAnchors = document.querySelectorAll('.nav__link[href^="#"]');
-
-if (sections.length && navAnchors.length && 'IntersectionObserver' in window) {
-  const sectionObserver = new IntersectionObserver(
-    (entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          const id = entry.target.getAttribute('id');
-          navAnchors.forEach(a => {
-            a.classList.toggle('nav__link--active', a.getAttribute('href') === `#${id}`);
-          });
-        }
-      });
-    },
-    { rootMargin: '-40% 0px -55%' }
-  );
-
-  sections.forEach(s => sectionObserver.observe(s));
+if (heads.length && sideLinks.length && 'IntersectionObserver' in window) {
+  const mark = (id) => sideLinks.forEach((a) => a.classList.toggle('is-active', a.getAttribute('href') === `#${id}`));
+  const seen = new Map();
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => seen.set(e.target.id, e.isIntersecting));
+    // The first heading on screen, or the last one scrolled past.
+    const onScreen = [...heads].find((h) => seen.get(h.id));
+    if (onScreen) { mark(onScreen.id); return; }
+    const past = [...heads].filter((h) => h.getBoundingClientRect().top < 0).pop();
+    if (past) mark(past.id);
+  }, { rootMargin: '0px 0px -60% 0px' });
+  heads.forEach((h) => io.observe(h));
 }

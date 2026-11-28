@@ -1,0 +1,78 @@
+{
+ "format": 1,
+ "name": "Shark Fin",
+ "slug": "shark-fin",
+ "run": "46158b35-a9ff-28fe-b8fc-968492bc78d1",
+ "round": "r2",
+ "built": "2026-11-27T18:30:35+00:00",
+ "camera": {
+  "position": [
+   -0.0056,
+   -0.0007,
+   0.0004
+  ],
+  "forward": [
+   0.000144,
+   -1.1e-05,
+   1.0
+  ],
+  "up": [
+   7.7e-05,
+   1.0,
+   1.1e-05
+  ],
+  "fovYDeg": 63.74,
+  "aspect": 1.5,
+  "eyeHeightM": 1.696,
+  "walkRadiusM": 3.0
+ },
+ "sky": {
+  "image": "sky.jpg",
+  "yawDeg": -0.00823904819790773,
+  "driftDegS": 0.015
+ },
+ "env": "env.glb",
+ "water": "water.glb",
+ "models": {
+  "category_mesh_rock_1": "models/category_mesh_rock_1.glb",
+  "crop_delit_86": "models/crop_delit_86.glb"
+ },
+ "instances": "instances.json",
+ "motion": {
+  "wind": {
+   "dir": [
+    -1.0,
+    0.000144
+   ],
+   "speedMs": 2.36,
+   "gustiness": 0.2
+  },
+  "water": {
+   "kind": "sea",
+   "flowPeriodS": 2.0,
+   "waveSpeedMs": 3.06,
+   "swellPeriodS": 9.0
+  },
+  "vegetation": {}
+ },
+ "light": {
+  "sunDir": [
+   -0.430474,
+   0.130101,
+   0.893177
+  ],
+  "sunColor": [
+   1.0,
+   0.2549,
+   0.0118
+  ],
+  "sunIntensity": 0.78,
+  "ambient": [
+   1.0257,
+   0.97769,
+   0.99828
+  ],
+  "exposure": 1.0
+ },
+ "bytes": 25358952
+}

@@ -4,6 +4,8 @@
 
 Upload a photo, painting, or any scene — and step inside it.
 
+**Project page:** [yuropa.github.io/Into-Frame](https://yuropa.github.io/Into-Frame/), including an [interactive viewer](https://yuropa.github.io/Into-Frame/viewer/) of the pipeline's latest scenes (Paris, Shark Fin, Mount Rainier) that you can walk around in a browser or in VR.
+
 ---
 
 ## How It Works

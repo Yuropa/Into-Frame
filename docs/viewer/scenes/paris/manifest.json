@@ -1,0 +1,107 @@
+{
+ "format": 1,
+ "name": "Paris",
+ "slug": "paris",
+ "run": "cdfd38e2-3d2a-8142-cf86-49c45eaf1227",
+ "round": "r2",
+ "built": "2026-11-27T18:30:20+00:00",
+ "camera": {
+  "position": [
+   -0.0144,
+   0.0017,
+   0.0003
+  ],
+  "forward": [
+   0.000601,
+   -8.8e-05,
+   1.0
+  ],
+  "up": [
+   -0.000104,
+   1.0,
+   8.9e-05
+  ],
+  "fovYDeg": 49.288,
+  "aspect": 1.5,
+  "eyeHeightM": 14.021,
+  "walkRadiusM": 3.0
+ },
+ "sky": {
+  "image": "sky.jpg",
+  "yawDeg": -0.03443102230376151,
+  "driftDegS": -0.015
+ },
+ "env": "env.glb",
+ "water": "water.glb",
+ "models": {
+  "structure_pullman_hotel_block": "models/structure_pullman_hotel_block.glb",
+  "category_mesh_tree_1": "models/category_mesh_tree_1.glb",
+  "category_mesh_tree_2": "models/category_mesh_tree_2.glb",
+  "category_mesh_boat_1": "models/category_mesh_boat_1.glb",
+  "landmark_card_6": "models/landmark_card_6.glb",
+  "category_mesh_tree_5_v1": "models/category_mesh_tree_5_v1.glb",
+  "category_mesh_boat_0": "models/category_mesh_boat_0.glb",
+  "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb",
+  "category_mesh_tree_1_v1": "models/category_mesh_tree_1_v1.glb",
+  "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb"
+ },
+ "instances": "instances.json",
+ "motion": {
+  "wind": {
+   "dir": [
+    0.836674,
+    0.547702
+   ],
+   "speedMs": 2.36,
+   "gustiness": 0.2
+  },
+  "water": {
+   "kind": "river",
+   "flowPeriodS": 2.0,
+   "waveSpeedMs": 3.0,
+   "swellPeriodS": 10.0
+  },
+  "vegetation": {
+   "category_mesh_tree_5": {
+    "amplitudeRad": 0.03491,
+    "frequencyHz": 0.5,
+    "heightM": 8.54
+   },
+   "category_mesh_tree_2": {
+    "amplitudeRad": 0.03491,
+    "frequencyHz": 0.5,
+    "heightM": 12.56
+   },
+   "category_mesh_tree_1": {
+    "amplitudeRad": 0.04363,
+    "frequencyHz": 0.5,
+    "heightM": 8.76
+   },
+   "category_mesh_tree_0": {
+    "amplitudeRad": 0.06981,
+    "frequencyHz": 0.4,
+    "heightM": 9.48
+   }
+  }
+ },
+ "light": {
+  "sunDir": [
+   -0.539108,
+   0.81915,
+   -0.195846
+  ],
+  "sunColor": [
+   1.0,
+   0.9961,
+   1.0
+  ],
+  "sunIntensity": 2.344,
+  "ambient": [
+   0.48504,
+   0.55818,
+   0.57599
+  ],
+  "exposure": 1.0
+ },
+ "bytes": 38899578
+}

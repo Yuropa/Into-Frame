@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
 
   <title>Into Frame — Generative AI 3D Environments</title>
   <meta name="description" content="Into Frame turns a single photograph into an inhabitable, physically grounded 3D environment: generative panorama outpainting, two-domain terrain reconstruction, per-object assets with motion, and estimated lighting, rendered in Unity at VR frame rates." />
@@ -14,209 +14,190 @@
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,300..500&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet" />
 
   <link rel="stylesheet" href="css/style.css" />
 </head>
 <body>
 
-  <header class="nav">
-    <div class="wrap nav__inner">
-      <a href="#" class="nav__logo">Into Frame</a>
-
-      <nav aria-label="Main navigation">
-        <ul class="nav__links" role="list">
-          <li><a href="#about"        class="nav__link">About</a></li>
-          <li><a href="#how"          class="nav__link">Method</a></li>
-          <li><a href="#gallery"      class="nav__link">Plates</a></li>
-          <li><a href="#architecture" class="nav__link">Architecture</a></li>
-          <li><a href="#team"         class="nav__link">Team</a></li>
-          <li><a href="#papers"       class="nav__link">Paper</a></li>
-        </ul>
-      </nav>
-
-      <button class="nav__toggle" aria-label="Open menu" aria-expanded="false">
-        <span></span><span></span><span></span>
-      </button>
+  <header class="navbar">
+    <div class="navbar__inner">
+      <a href="./" class="navbar__brand">Into Frame</a>
+      <button class="navbar__toggle" type="button" aria-label="Menu" aria-expanded="false" aria-controls="navbar-links">Menu</button>
+      <ul class="navbar__links" id="navbar-links" role="list">
+        <li><a href="viewer/">Viewer</a></li>
+        <li><a href="#method">Method</a></li>
+        <li><a href="#pipeline">Pipeline</a></li>
+        <li><a href="#docs">Design docs</a></li>
+        <li><a href="report.pdf">Paper</a></li>
+        <li><a href="https://github.com/Yuropa/Into-Frame">GitHub</a></li>
+      </ul>
     </div>
   </header>
 
+  <div class="layout">
+    <nav class="sidebar" aria-label="On this page">
+      <p class="sidebar__title">On this page</p>
+      <ul>
+          <li><a href="#about">About</a></li>
+          <li><a href="#method">Method</a></li>
+          <li><a href="#pipeline">Pipeline</a></li>
+          <li><a href="#viewer">Viewer</a></li>
+          <li><a href="#plates">Plates</a></li>
+          <li><a href="#architecture">Architecture</a></li>
+          <li><a href="#docs">Design docs</a></li>
+          <li><a href="#team">Team</a></li>
+          <li><a href="#paper">Paper</a></li>
+      </ul>
+    </nav>
 
-  <section class="hero">
-    <div class="wrap">
-      <p class="mono hero__eyebrow">Research project · École Polytechnique · 2026</p>
-      <h1 class="hero__title">Step inside<br><em>any image.</em></h1>
-      <p class="hero__lede">
+    <main class="content">
+      <h1>Into Frame</h1>
+      <p class="subtitle">Step inside any image.</p>
+      <p class="lead">
         Into Frame takes a single photograph and produces an inhabitable 3D
         environment: terrain you can walk on, objects that exist as individual
         simulated assets, ground cover that moves in the wind, and lighting
         estimated from the photo, running in Unity at VR frame rates.
       </p>
-      <p class="hero__actions">
-        <a href="report.pdf" class="link">Read the report&nbsp;→</a>
-        <a href="#how" class="link">How it works&nbsp;→</a>
-        <a href="https://github.com/Yuropa/Into-Frame" class="link">Code&nbsp;↗</a>
+      <p class="meta">Research project · École Polytechnique · 2026</p>
+      <div class="actions">
+        <a href="viewer/" class="btn btn--primary">Open the viewer</a>
+        <a href="report.pdf" class="btn">Read the report</a>
+        <a href="#method" class="btn">How it works</a>
+        <a href="https://github.com/Yuropa/Into-Frame" class="btn">Code on GitHub</a>
+      </div>
+
+      <div class="fig-row" style="margin-top:2rem">
+        <figure><img src="images/input.jpg" alt="Input photograph of Mount Rainier" /><figcaption>In: one photograph.</figcaption></figure>
+        <figure><img src="images/panorama.jpg" alt="360° panorama outpainted around the photograph" /><figcaption>Out: the sphere around it, then terrain, objects, light and motion.</figcaption></figure>
+      </div>
+
+      <section>
+      <h2 id="about">About<a class="headerlink" href="#about" aria-label="Link to this section">#</a></h2>
+      <p class="lead">
+        Into Frame explores how generative AI can turn a single photograph into a
+        spatially coherent, inhabitable 3D world: not a viewable but inert result,
+        but a place with discrete objects, moving vegetation and physically based light.
       </p>
-    </div>
+      <p>
+        The central design commitment is to reconstruct each part of the scene by a method
+        suited to its physical role rather than extracting everything from one representation.
+        Given one image, the system estimates <strong>metric depth</strong> with Depth Anything&nbsp;3
+        and outpaints a 360° panorama around the photograph with WorldGen. Objects are detected
+        on the photograph itself and labelled by a grounding model; the ground is projected into
+        a top-down <strong>height map</strong>, reconstructed with erosion where nothing was
+        observed, and textured from the photo's own material. Everything the depth models
+        cannot measure, such as the mountain that is really kilometres away, becomes a separate
+        far-field backdrop. Lighting is estimated from the photograph, and a generated video of
+        the scene drives motion classification and the skeletons that make vegetation sway.
+      </p>
+      <p>
+        The pipeline is 38 stages, fully <strong>YAML-configurable</strong>: each stage can be enabled or
+        disabled independently, every model parameter is a top-level option, outputs are cached
+        per stage, and any stage can be replayed against a cached run on its own.
+      </p>
+      </section>
 
-    <div class="wrap hero__pair">
-      <figure class="frame">
-        <div class="frame__mat"><img src="images/input.jpg" alt="Input photograph of Mount Rainier" /></div>
-        <figcaption class="mono">In — one photograph</figcaption>
-      </figure>
-      <span class="hero__arrow" aria-hidden="true">→</span>
-      <figure class="frame frame--wide">
-        <div class="frame__mat"><img src="images/panorama.jpg" alt="360° panorama outpainted around the photograph" /></div>
-        <figcaption class="mono">Out — the sphere around it, then terrain, objects, light and motion</figcaption>
-      </figure>
-    </div>
-  </section>
-
-
-  <section id="about" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>00</span> About</h2>
-      <div class="row__body prose">
-        <p class="prose__lead">
-          Into Frame explores how generative AI can turn a single photograph into a
-          spatially coherent, inhabitable 3D world: not a viewable but inert result,
-          but a place with discrete objects, moving vegetation and physically based light.
-        </p>
-        <p>
-          The central design commitment is to reconstruct each part of the scene by a method
-          suited to its physical role rather than extracting everything from one representation.
-          Given one image, the system estimates <strong>metric depth</strong> with Depth Anything&nbsp;3
-          and outpaints a 360° panorama around the photograph with WorldGen. Objects are detected
-          on the photograph itself and labelled by a grounding model; the ground is projected into
-          a top-down <strong>height map</strong>, reconstructed with erosion where nothing was
-          observed, and textured from the photo's own material. Everything the depth models
-          cannot measure, such as the mountain that is really kilometres away, becomes a separate
-          far-field backdrop. Lighting is estimated from the photograph, and a generated video of
-          the scene drives motion classification and the skeletons that make vegetation sway.
-        </p>
-        <p>
-          The pipeline is 38 stages, fully <strong>YAML-configurable</strong>: each stage can be enabled or
-          disabled independently, every model parameter is a top-level option, outputs are cached
-          per stage, and any stage can be replayed against a cached run on its own.
-        </p>
-      </div>
-    </div>
-  </section>
-
-
-  <section id="how" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>01</span> Method</h2>
-      <div class="row__body">
-        <p class="prose__lead">Five phases, 38 stages, from a flat photograph to an interactive 3D scene.</p>
-
-        <article class="stage">
-          <div class="stage__text">
-            <p class="mono stage__no">Phase 1</p>
-            <h3>Scene understanding</h3>
-            <p>A vision-language model captions the photograph, <strong>Depth Anything&nbsp;3</strong> estimates metric depth and camera intrinsics, and RAM++ tags what the scene contains. The tags become the vocabulary every later detector is prompted with, so a meadow is never asked whether it contains a bus.</p>
-          </div>
-          <figure class="fig"><img src="images/input.jpg" alt="Input photograph of Mount Rainier" loading="lazy" /><figcaption class="mono">Fig. 1 — Input photograph</figcaption></figure>
-        </article>
-
-        <article class="stage">
-          <div class="stage__text">
-            <p class="mono stage__no">Phase 2</p>
-            <h3>360° panorama</h3>
-            <p>The photograph is embedded at its true field of view and the rest of the sphere is outpainted by <strong>WorldGen</strong>. Objects that would stand in the terrain are removed from a copy of the panorama, the sky is completed with the sun placed where the estimated key light is, and a second depth model (Depth Any Panorama) is calibrated against the photo's metric depth.</p>
-          </div>
-          <figure class="fig"><img src="images/panorama.jpg" alt="Outpainted 360° panorama" loading="lazy" /><figcaption class="mono">Fig. 2 — Outpainted panorama</figcaption></figure>
-        </article>
-
-        <article class="stage">
-          <div class="stage__text">
-            <p class="mono stage__no">Phase 3</p>
-            <h3>Objects</h3>
-            <p>SAM2 segments the photograph at twice its resolution; <strong>Grounding DINO</strong>, prompted with the scene tags, labels each blob by containment. Blobs are clustered into visual variants, their spatial pattern is learned as a pair-correlation function and painted across the matching ground, grass is laid as cards, and each variant is reconstructed with SAM3D from a delit, super-resolved crop.</p>
-          </div>
-          <figure class="fig"><img src="images/detections.jpg" alt="Detected and labelled objects" loading="lazy" /><figcaption class="mono">Fig. 3 — Detections</figcaption></figure>
-        </article>
-
-        <article class="stage">
-          <div class="stage__text">
-            <p class="mono stage__no">Phase 4</p>
-            <h3>Terrain in two domains</h3>
-            <p>Ground pixels become a top-down height map that keeps each cell's observed panorama pixel; the unobserved remainder is reconstructed by a harmonic solve with fluvial erosion. The mesh is textured with the photo near the viewer, with real material tiles modulated by the photo's large-scale colour further out. Everything past the depth models' saturation, the distant mountain, is stood up as a separate <strong>far-field backdrop</strong> shell behind the grid.</p>
-          </div>
-          <figure class="fig"><img src="images/heightmap-reconstructed.jpg" alt="Reconstructed terrain height map" loading="lazy" /><figcaption class="mono">Fig. 4 — Reconstructed height map</figcaption></figure>
-        </article>
-
-        <article class="stage">
-          <div class="stage__text">
-            <p class="mono stage__no">Phase 5</p>
-            <h3>Scene, light and motion</h3>
-            <p>Every instance carries its reconstruction, a crossed card and a billboard as runtime LODs. Lighting is estimated from the photograph with LuxDiT and the skybox lights the scene. An <strong>LTX-2</strong> video generated from the panorama is tracked per object to classify motion, rig sway skeletons into the vegetation and hand moving objects to Unity's physics.</p>
-          </div>
-          <figure class="fig"><img src="images/rainier-scene.jpg" alt="The finished scene in Unity" loading="lazy" /><figcaption class="mono">Fig. 5 — The scene in Unity</figcaption></figure>
-        </article>
-
-        <figure class="fig fig--diagram">
-          <a href="pipeline-diagram.svg"><img src="pipeline-diagram.svg" alt="Into Frame pipeline overview: 38 stages in five phases" loading="lazy" /></a>
-          <figcaption class="mono">Fig. 6 — The full stage graph (opens the SVG)</figcaption>
-        </figure>
-      </div>
-    </div>
-  </section>
-
-
-  <section id="gallery" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>02</span> Plates</h2>
-      <div class="row__body">
-        <p class="prose__lead">Scenes generated from single photographs, and some of the intermediate representations along the way.</p>
-
-        <div class="plates">
-          <figure class="plate plate--wide"><img src="images/rainier-scene.jpg" alt="Mount Rainier scene in Unity" loading="lazy" /><figcaption class="mono">Plate 1 — Mount Rainier, in Unity</figcaption></figure>
-          <figure class="plate"><img src="images/paris-scene.jpg" alt="Paris scene in Unity" loading="lazy" /><figcaption class="mono">Plate 2 — Paris</figcaption></figure>
-          <figure class="plate"><img src="images/sharkfin-scene.jpg" alt="Shark Fin scene in Unity" loading="lazy" /><figcaption class="mono">Plate 3 — Shark Fin</figcaption></figure>
-          <figure class="plate"><img src="images/depth-calibrated.jpg" alt="Calibrated panorama depth" loading="lazy" /><figcaption class="mono">Plate 4 — Calibrated panorama depth</figcaption></figure>
-          <figure class="plate"><img src="images/regions.jpg" alt="Region segmentation" loading="lazy" /><figcaption class="mono">Plate 5 — Region segmentation</figcaption></figure>
+      <section>
+      <h2 id="method">Method<a class="headerlink" href="#method" aria-label="Link to this section">#</a></h2>
+      <p class="lead">Five phases, 38 stages, from a flat photograph to an interactive 3D scene.</p>
+      <div class="phase">
+        <div>
+          <p class="phase__no">Phase 1</p>
+          <h3>Scene understanding</h3>
+          <p>A vision-language model captions the photograph, <strong>Depth Anything&nbsp;3</strong> estimates metric depth and camera intrinsics, and RAM++ tags what the scene contains. The tags become the vocabulary every later detector is prompted with, so a meadow is never asked whether it contains a bus.</p>
         </div>
+        <figure><img src="images/input.jpg" alt="Input photograph of Mount Rainier" loading="lazy" /><figcaption>Fig. 1. Input photograph</figcaption></figure>
       </div>
-    </div>
-  </section>
+      <div class="phase">
+        <div>
+          <p class="phase__no">Phase 2</p>
+          <h3>360° panorama</h3>
+          <p>The photograph is embedded at its true field of view and the rest of the sphere is outpainted by <strong>WorldGen</strong>. Objects that would stand in the terrain are removed from a copy of the panorama, the sky is completed with the sun placed where the estimated key light is, and a second depth model (Depth Any Panorama) is calibrated against the photo's metric depth.</p>
+        </div>
+        <figure><img src="images/panorama.jpg" alt="Outpainted 360° panorama" loading="lazy" /><figcaption>Fig. 2. Outpainted panorama</figcaption></figure>
+      </div>
+      <div class="phase">
+        <div>
+          <p class="phase__no">Phase 3</p>
+          <h3>Objects</h3>
+          <p>SAM2 segments the photograph at twice its resolution; <strong>Grounding DINO</strong>, prompted with the scene tags, labels each blob by containment. Blobs are clustered into visual variants, their spatial pattern is learned as a pair-correlation function and painted across the matching ground, grass is laid as cards, and each variant is reconstructed with SAM3D from a delit, super-resolved crop.</p>
+        </div>
+        <figure><img src="images/detections.jpg" alt="Detected and labelled objects" loading="lazy" /><figcaption>Fig. 3. Detections</figcaption></figure>
+      </div>
+      <div class="phase">
+        <div>
+          <p class="phase__no">Phase 4</p>
+          <h3>Terrain in two domains</h3>
+          <p>Ground pixels become a top-down height map that keeps each cell's observed panorama pixel; the unobserved remainder is reconstructed by a harmonic solve with fluvial erosion. The mesh is textured with the photo near the viewer, with real material tiles modulated by the photo's large-scale colour further out. Everything past the depth models' saturation, the distant mountain, is stood up as a separate <strong>far-field backdrop</strong> shell behind the grid.</p>
+        </div>
+        <figure><img src="images/heightmap-reconstructed.jpg" alt="Reconstructed terrain height map" loading="lazy" /><figcaption>Fig. 4. Reconstructed height map</figcaption></figure>
+      </div>
+      <div class="phase">
+        <div>
+          <p class="phase__no">Phase 5</p>
+          <h3>Scene, light and motion</h3>
+          <p>Every instance carries its reconstruction, a crossed card and a billboard as runtime LODs. Lighting is estimated from the photograph with LuxDiT and the skybox lights the scene. An <strong>LTX-2</strong> video generated from the panorama is tracked per object to classify motion, rig sway skeletons into the vegetation and hand moving objects to Unity's physics.</p>
+        </div>
+        <figure><img src="images/rainier-scene.jpg" alt="The finished scene in Unity" loading="lazy" /><figcaption>Fig. 5. The scene in Unity</figcaption></figure>
+      </div>
+      </section>
 
+      <section>
+      <h2 id="pipeline">Pipeline<a class="headerlink" href="#pipeline" aria-label="Link to this section">#</a></h2>
+      <p>Every stage, in order, with the data each one hands to the next. The pipeline is configured in one <code>config.yaml</code>; any stage can be turned off or replayed against a cached run.</p>
+      <figure class="fig--diagram">
+        <a href="pipeline-diagram.svg"><img src="pipeline-diagram.svg" alt="Into Frame pipeline overview: 38 stages in five phases" loading="lazy" /></a>
+        <figcaption>The full stage graph (opens the SVG).</figcaption>
+      </figure>
+      </section>
 
-  <section id="architecture" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>03</span> Architecture</h2>
-      <div class="row__body">
-        <p class="prose__lead">Key design decisions that make the system practical to run and extend.</p>
+      <section>
+      <h2 id="viewer">Viewer<a class="headerlink" href="#viewer" aria-label="Link to this section">#</a></h2>
+      <p>Step into the scenes the pipeline built. Each opens where the photograph was taken; drag to look around, walk a few metres with <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>, and watch the wind, the water and the boats move. With a VR headset, choose <em>Enter VR</em>.</p>
+      <div class="cards">
+        <a class="card" href="viewer/#paris"><img src="images/viewer-paris.jpg" alt="Paris in the viewer" loading="lazy" /><div class="card__body"><p class="card__title">Paris</p><p class="card__text">The Seine below the Eiffel Tower</p></div></a>
+        <a class="card" href="viewer/#shark-fin"><img src="images/viewer-shark-fin.jpg" alt="Shark Fin in the viewer" loading="lazy" /><div class="card__body"><p class="card__title">Shark Fin</p><p class="card__text">A sea stack at dusk</p></div></a>
+        <a class="card" href="viewer/#mount-rainier"><img src="images/viewer-mount-rainier.jpg" alt="Mount Rainier in the viewer" loading="lazy" /><div class="card__body"><p class="card__title">Mount Rainier</p><p class="card__text">A wildflower meadow</p></div></a>
+      </div>
+      <p class="meta">The scenes are rebuilt from the pipeline's latest round; the bundle format is described in <a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/viewer/FORMAT.md">FORMAT.md</a>.</p>
+      </section>
 
-        <dl class="spec">
-          <div class="spec__row">
-            <dt class="mono">Two depth domains</dt>
-            <dd><h3>A near field and a far field</h3><p>Monocular depth models saturate at a few tens of metres. The terrain grid keeps only what was measured; everything in the saturated band is a separate backdrop shell at its own scale, rendered unlit like the sky it fronts. A mountain stops being a ring of rock at 30&nbsp;m.</p></dd>
-          </div>
-          <div class="spec__row">
-            <dt class="mono">One labeling model</dt>
-            <dd><h3>Grounding by containment</h3><p>A segmented blob takes the label of the detector box that covers it, with the detector's own score as its confidence, and stays unlabelled otherwise. One model and one threshold replaced a five-model chain of captions, CLIP prompts, fallbacks and verification passes.</p></dd>
-          </div>
-          <div class="spec__row">
-            <dt class="mono">Multi-process isolation</dt>
-            <dd><h3>Per-model conda environments</h3><p>Each heavy model runs in its own conda environment as a subprocess, talking to the pipeline over a Unix socket with a line-delimited JSON protocol. Dependency conflicts disappear and GPU memory is released between stages.</p></dd>
-          </div>
-          <div class="spec__row">
-            <dt class="mono">Configuration</dt>
-            <dd><h3>YAML-driven, cached, replayable</h3><p>The stage sequence and every parameter live in one <code>config.yaml</code>. Each stage caches its outputs, so a re-run resumes where the work changed, and <code>scripts/replay-stage.py</code> runs any single stage against a cached run for validation.</p></dd>
-          </div>
-          <div class="spec__row">
-            <dt class="mono">Lighting</dt>
-            <dd><h3>One sky</h3><p>The key light is estimated from the photograph, the sky is generated with its sun in that direction, and the Unity ambient probe is rendered from that same sky. Objects, terrain and far field are delit by shading only, so their colour is the photograph's.</p></dd>
-          </div>
-          <div class="spec__row">
-            <dt class="mono">Client</dt>
-            <dd><h3>Unity, URP, VR</h3><p>A Unity client streams the scene over WebSocket and HTTP: a splat terrain shader with stochastic tiling and a macro colour map, LOD groups per instance, wind sway on rigged meshes, physics handoff for moving objects, and water.</p></dd>
-          </div>
-        </dl>
+      <section>
+      <h2 id="plates">Plates<a class="headerlink" href="#plates" aria-label="Link to this section">#</a></h2>
+      <p>Scenes generated from single photographs, and some of the intermediate representations along the way.</p>
+      <div class="plates">
+        <figure class="wide"><img src="images/rainier-scene.jpg" alt="Mount Rainier scene in Unity" loading="lazy" /><figcaption>Plate 1. Mount Rainier, in Unity.</figcaption></figure>
+        <figure><img src="images/paris-scene.jpg" alt="Paris scene in Unity" loading="lazy" /><figcaption>Plate 2. Paris.</figcaption></figure>
+        <figure><img src="images/sharkfin-scene.jpg" alt="Shark Fin scene in Unity" loading="lazy" /><figcaption>Plate 3. Shark Fin.</figcaption></figure>
+        <figure><img src="images/depth-calibrated.jpg" alt="Calibrated panorama depth" loading="lazy" /><figcaption>Plate 4. Calibrated panorama depth.</figcaption></figure>
+        <figure><img src="images/regions.jpg" alt="Region segmentation" loading="lazy" /><figcaption>Plate 5. Region segmentation.</figcaption></figure>
+      </div>
+      </section>
 
-        <h3 class="subhead mono">Model stack</h3>
-        <table class="stack">
+      <section>
+      <h2 id="architecture">Architecture<a class="headerlink" href="#architecture" aria-label="Link to this section">#</a></h2>
+      <p>Key design decisions that make the system practical to run and extend.</p>
+      <dl class="deflist">
+        <dt>A near field and a far field<span>Two depth domains</span></dt>
+        <dd>Monocular depth models saturate at a few tens of metres. The terrain grid keeps only what was measured; everything in the saturated band is a separate backdrop shell at its own scale, rendered unlit like the sky it fronts. A mountain stops being a ring of rock at 30&nbsp;m.</dd>
+        <dt>Grounding by containment<span>One labeling model</span></dt>
+        <dd>A segmented blob takes the label of the detector box that covers it, with the detector's own score as its confidence, and stays unlabelled otherwise. One model and one threshold replaced a five-model chain of captions, CLIP prompts, fallbacks and verification passes.</dd>
+        <dt>Per-model conda environments<span>Multi-process isolation</span></dt>
+        <dd>Each heavy model runs in its own conda environment as a subprocess, talking to the pipeline over a Unix socket with a line-delimited JSON protocol. Dependency conflicts disappear and GPU memory is released between stages.</dd>
+        <dt>YAML-driven, cached, replayable<span>Configuration</span></dt>
+        <dd>The stage sequence and every parameter live in one <code>config.yaml</code>. Each stage caches its outputs, so a re-run resumes where the work changed, and <code>scripts/replay-stage.py</code> runs any single stage against a cached run for validation.</dd>
+        <dt>One sky<span>Lighting</span></dt>
+        <dd>The key light is estimated from the photograph, the sky is generated with its sun in that direction, and the Unity ambient probe is rendered from that same sky. Objects, terrain and far field are delit by shading only, so their colour is the photograph's.</dd>
+        <dt>Unity, URP, VR<span>Client</span></dt>
+        <dd>A Unity client streams the scene over WebSocket and HTTP: a splat terrain shader with stochastic tiling and a macro colour map, LOD groups per instance, wind sway on rigged meshes, physics handoff for moving objects, and water.</dd>
+      </dl>
+
+      <h3 id="model-stack">Model stack</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th scope="col">Role</th><th scope="col">Model</th><th scope="col">Used for</th></tr></thead>
           <tbody>
             <tr><th scope="row">Depth</th><td>Depth Anything 3</td><td>Metric monocular depth + intrinsics</td></tr>
             <tr><th scope="row">Panorama</th><td>WorldGen</td><td>360° outpainting on FLUX.1 Fill</td></tr>
@@ -231,56 +212,52 @@
           </tbody>
         </table>
       </div>
-    </div>
-  </section>
+      </section>
 
+      <section>
+      <h2 id="docs">Design docs<a class="headerlink" href="#docs" aria-label="Link to this section">#</a></h2>
+      <p>The working design documents, kept in the repository next to the code.</p>
+      <ul class="doclist" role="list">
+        <li><a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/animation-plan.md">Animation plan</a><p>Learning motion priors from generated video; rivers, boats, plants and sky that move.</p></li>
+        <li><a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/agentic-scene-graph-plan.md">Agents over a semantic scene graph</a><p>A proposal for editing and checking scenes through a typed scene graph.</p></li>
+        <li><a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/hybrid-scene-plan.md">Hybrid scene design, end to end</a><p>How the scene plan, priors and reconstruction fit together.</p></li>
+        <li><a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/terrain-splat-shader-spec.md">Terrain splat shader</a><p>The Unity terrain shader's implementation spec.</p></li>
+        <li><a href="https://github.com/Yuropa/Into-Frame/blob/main/docs/viewer/FORMAT.md">Web viewer bundle format</a><p>What the exporter writes and the viewer reads.</p></li>
+      </ul>
+      </section>
 
-  <section id="team" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>04</span> Team</h2>
-      <div class="row__body">
-        <ul class="people" role="list">
-          <li class="person">
-            <img src="images/joshua-ford.jpg" alt="Joshua Ford" />
-            <div>
-              <p class="person__name">Joshua Ford</p>
-              <p class="mono person__role">Author · École Polytechnique</p>
-            </div>
-          </li>
-          <li class="person">
-            <img src="images/marie-paule-cani.jpg" alt="Marie-Paule Cani" />
-            <div>
-              <p class="person__name">Marie-Paule Cani</p>
-              <p class="mono person__role">Advisor · École Polytechnique</p>
-            </div>
-          </li>
-        </ul>
+      <section>
+      <h2 id="team">Team<a class="headerlink" href="#team" aria-label="Link to this section">#</a></h2>
+      <ul class="people" role="list">
+        <li class="person">
+          <img src="images/joshua-ford.jpg" alt="Joshua Ford" />
+          <div><p><strong>Joshua Ford</strong></p><p class="person__role">Author · École Polytechnique</p></div>
+        </li>
+        <li class="person">
+          <img src="images/marie-paule-cani.jpg" alt="Marie-Paule Cani" />
+          <div><p><strong>Marie-Paule Cani</strong></p><p class="person__role">Advisor · École Polytechnique</p></div>
+        </li>
+      </ul>
+      </section>
+
+      <section>
+      <h2 id="paper">Paper<a class="headerlink" href="#paper" aria-label="Link to this section">#</a></h2>
+      <p class="meta">Technical report · 2026</p>
+      <h3>Jumping Into the Frame: Reconstructing Interactive, Physically-Grounded 3D Environments from a Single Image</h3>
+      <p>Joshua Ford. Advisor: Marie-Paule Cani. École Polytechnique.</p>
+      <div class="actions">
+        <a href="report.pdf" class="btn btn--primary">PDF</a>
+        <a href="https://github.com/Yuropa/Into-Frame" class="btn">Code on GitHub</a>
       </div>
-    </div>
-  </section>
-
-
-  <section id="papers" class="row">
-    <div class="wrap row__grid">
-      <h2 class="row__label mono"><span>05</span> Paper</h2>
-      <div class="row__body">
-        <p class="mono paper__kind">Technical report · 2026</p>
-        <h3 class="paper__title">Jumping Into the Frame: Reconstructing Interactive, Physically-Grounded 3D Environments from a Single Image</h3>
-        <p>Joshua Ford. Advisor: Marie-Paule Cani. École Polytechnique.</p>
-        <p class="hero__actions">
-          <a href="report.pdf" class="link">PDF&nbsp;→</a>
-          <a href="https://github.com/Yuropa/Into-Frame" class="link">Code on GitHub&nbsp;↗</a>
-        </p>
-        <p class="paper__note">Questions, collaborations, or want to try it on your own photographs? The code is open.</p>
-      </div>
-    </div>
-  </section>
-
+      <div class="admonition"><p>Questions, collaborations, or want to try it on your own photographs? The code is open.</p></div>
+      </section>
+    </main>
+  </div>
 
   <footer class="footer">
-    <div class="wrap footer__inner mono">
-      <span>Into Frame</span>
-      <span>© 2026</span>
+    <div class="footer__inner">
+      <span>Into Frame · © 2026</span>
+      <span><a href="https://github.com/Yuropa/Into-Frame">GitHub</a> · <a href="report.pdf">Report</a> · <a href="viewer/">Viewer</a></span>
     </div>
   </footer>
 
