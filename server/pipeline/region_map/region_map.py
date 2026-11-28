@@ -20,6 +20,10 @@ from util.panorama_utils import Panorama
 from util.projection_utils import grid_cell_panorama_uv
 
 
+
+# Context key: bool grid (as float) of the cells the river course turned from outpainted water to land.
+TERRAIN_PLAN_CONVERTED = "terrain_plan_converted"
+
 class RegionMapConfiguration(PipelineStageConfiguration):
     def __init__(
         self,
@@ -41,6 +45,12 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         open_water_bank_tolerance_m: float = 1.5,
         open_water_extend_deg: float = 60.0,
         terrain_plan: bool = True,
+        # Outside the photographed cone the map is the outpainted panorama projected
+        # radially, so classes run out from the camera in wedges (the star pattern):
+        # region_regularise.py remakes that part the way game map generators do. The
+        # cone, the camera's surroundings, water, roads and trails are kept exactly.
+        regularise_regions: bool = True,
+        regularise: "dict | None" = None,
         plan_prior: bool = True,
         plan_width_tolerance: float = 0.2,
         plan_edge_deg: float = 10.0,
@@ -102,6 +112,8 @@ class RegionMapConfiguration(PipelineStageConfiguration):
         # and the land cover by rule from the photographed cone and replaces the
         # two priors above; they remain the fallback when it is off.
         self.terrain_plan = bool(terrain_plan)
+        self.regularise_regions = bool(regularise_regions)
+        self.regularise = dict(regularise or {})
         self.plan_edge_deg = float(plan_edge_deg)
         self.plan_hole_m2 = float(plan_hole_m2)
         self.plan_land_smooth_m = float(plan_land_smooth_m)
@@ -589,10 +601,12 @@ class RegionMapStage(PipelineStage):
                 before = region_map.copy()
                 scene_plan = None
                 prior_width = None
+                water_kind = None
                 if cfg.plan_prior:
                     from pipeline.scene_plan import ScenePlan
                     scene_plan = ScenePlan.from_context(context)
                     if scene_plan is not None:
+                        water_kind = scene_plan.get("water.kind")
                         w = scene_plan.get("water.width_m")
                         if (scene_plan.evidence("water") == "visible" and scene_plan.get("water.kind") in ("river", "stream")
                                 and isinstance(w, (int, float)) and w > 0):
@@ -615,6 +629,7 @@ class RegionMapStage(PipelineStage):
                         land_smooth_m=cfg.plan_land_smooth_m,
                         smooth_min_distance_m=cfg.plan_smooth_min_distance_m,
                         prior_width_m=prior_width,
+                        water_kind_hint=str(water_kind).lower() if water_kind else None,
                         prior_width_tol=cfg.plan_width_tolerance,
                         standing_radius_m=float(((context.input_object(ContextKey.HEIGHT_MAP_PARAMS) or {})
                                                  .get("standing_pedestal") or {}).get("radius_m") or 0.0),
@@ -633,7 +648,13 @@ class RegionMapStage(PipelineStage):
                 if cell_elevation is not None:
                     context.add_depth(ContextKey.HEIGHT_MAP, Depth(cell_elevation))
                 context.add_object(ContextKey.TERRAIN_PLAN, plan.summary())
-                if plan.channel is not None:
+                # Land the river course made of outpainted water: Terrain Reconstruction
+                # holds it at the bank heights set here (its solve would otherwise ramp
+                # it down to the water), Terrain Texture Generation keeps the panorama's
+                # painted water off it.
+                if plan.converted is not None and plan.converted.any():
+                    context.add_depth(TERRAIN_PLAN_CONVERTED, Depth(plan.converted.astype(np.float32)))
+                if plan.channel is not None and plan.channel.get("x_left") is not None:
                     ch = plan.channel
                     river_channel = (ch["x_left"], ch["x_right"], cone.hfov_deg / 2.0 + 3.0, ch["slope"], ch["offset"], ch["width"])
                 # Which panorama columns end in water at the grid's edge, for the far field.
@@ -652,7 +673,7 @@ class RegionMapStage(PipelineStage):
                     ex = np.clip(((edge_r * np.sin(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
                     ez = np.clip(((edge_r * np.cos(lon_c)) + grid_m / 2.0) / cell_m, 0, res - 1).astype(np.int64)
                     ocean_cols |= region_map[ez, ex] == int(RegionType.WATER)
-                if plan.channel is not None and ocean_cols.any():
+                if plan.kind == "river" and ocean_cols.any():
                     # A river leaves the grid through its channel, which is not
                     # the sea reaching the horizon: carried out to 5 km by the
                     # far field's apron, Paris's Seine stood as a teal box over
@@ -686,6 +707,23 @@ class RegionMapStage(PipelineStage):
                 "columns": [int(c) for c in np.flatnonzero(ocean_cols)],
                 "open_water": bool(open_water),
             })
+        if cfg.regularise_regions:
+            from pipeline.region_map.region_regularise import RegulariseConfig, regularise
+            from util.captured_cone import captured_cone_from_context
+            reg_cone = captured_cone_from_context(context, type_idx_map.shape[1], type_idx_map.shape[0])
+            if reg_cone is None:
+                self.log_warning("Region regularisation: no photographed cone -- map left as projected")
+            else:
+                before_reg = region_map
+                region_map, reg_stats = regularise(region_map, grid_m, reg_cone.hfov_deg / 2.0,
+                                                   RegulariseConfig(**cfg.regularise), self.log_info)
+                context.add_object("region_regularisation", reg_stats)
+                if self.temp is not None:
+                    step = max(1, region_map.shape[0] // 1024)
+                    PILImage.fromarray(colorize_region_type_map(np.rint(before_reg[::step, ::step]).astype(np.uint8))).save(
+                        self.temp / "region_regularise_before.png")
+                    PILImage.fromarray(colorize_region_type_map(np.rint(region_map[::step, ::step]).astype(np.uint8))).save(
+                        self.temp / "region_regularise_after.png")
         context.add_depth(output_key, region_map.astype(np.float32))
         context.add_depth(ContextKey.REGION_MAP_CERTAINTY, Depth(certainty_array))
 

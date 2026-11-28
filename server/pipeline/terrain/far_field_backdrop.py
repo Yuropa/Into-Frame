@@ -121,6 +121,9 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         start_radius_m: float = 0.0,
         far_band_fraction: float = 0.9,
         close_px: int = 10,
+        close_other_px: int = 2,
+        removed_depth_behind: bool = True,
+        upright_gap_px: int = 24,
         stride_px: int = 8,
         max_depth_ratio: float = 1.8,
         feather_px: float = 3.0,
@@ -128,12 +131,17 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         min_faces: int = 50,
         min_upright_span_deg: float = 5.0,
         min_upright_height_m: float = 10.0,
+        flanked_landform_fraction: float = 0.7,
+        flanked_max_span_deg: float = 45.0,
+        skyline_rim_px: int = 8,
         skirt: bool = True,
         skirt_start_fraction: float = 0.9,
         skirt_sky_below_deg: float = 1.0,
         skirt_min_depth_fraction: float = 0.7,
         foot_curtain: bool = True,
         horizon_water_deg: float = 5.0,
+        rim_deg: float = 0.35,
+        rim_rest_fraction: float = 0.6,
         water_apron: bool = True,
         water_apron_min_fraction: float = 0.15,
         water_apron_radial_steps: int = 8,
@@ -171,6 +179,19 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         self.start_radius_m = float(start_radius_m)
         self.far_band_fraction = float(far_band_fraction)
         self.close_px = int(close_px)
+        # Beyond a built structure the closing bridges only a crown's own gaps:
+        # at close_px it filled the sky between neighbouring firs, and Rainier's
+        # far forest stood as flat-topped pale panels with the trees printed on.
+        self.close_other_px = max(0, int(close_other_px))
+        # The metric depth is the panorama's before Panorama Foreground Inpainting
+        # removed the objects lifted to 3D; under a removed object it is the
+        # object's, while the picture there is what stood behind it. Taken from
+        # the background beside it instead (see _depth_behind_removed).
+        self.removed_depth_behind = bool(removed_depth_behind)
+        # A gap in the far band at most this wide that holds something upright
+        # and not removed (a trunk the depth model put 15-35 m out) joins the
+        # shell; nothing else stands there and it showed as a white bar of sky.
+        self.upright_gap_px = max(0, int(upright_gap_px))
         self.far_m = float(far_m)
         self.scale_m = float(scale_m)
         # Vertex spacing in panorama pixels (8 on a 4096-wide panorama is 512x256
@@ -189,6 +210,27 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # orange pillar, Paris's row of tower blocks). 0 keeps every piece.
         self.min_upright_span_deg = float(min_upright_span_deg)
         self.min_upright_height_m = float(min_upright_height_m)
+        # A far piece of landform whose side runs on, at the same rows, into
+        # landform the depth map measured near is the top of a near landform whose
+        # depth saturated, not a distant one: Shark Fin's sunlit cliff top and the
+        # far end of its right-hand cliff were measured past 1 km over a few
+        # columns, stood on the shell at 280-500 m and showed above the terrain's
+        # cliff as rectangular notches and a rock floating over the horizon. A piece
+        # flanked so on at least this fraction of one side's rows, spanning less
+        # than flanked_max_span_deg of azimuth, is left to the terrain. A distant
+        # mountain's sides are sky or more far field. 0 keeps every piece.
+        self.flanked_landform_fraction = float(flanked_landform_fraction)
+        self.flanked_max_span_deg = float(flanked_max_span_deg)
+        # The same error along a near skyline: the depth model mixes the sky's
+        # depth into the top few pixels of a near cliff, and the shell stood that
+        # rim up 300 m out with the foot curtain hung from it to the grid's edge
+        # (Shark Fin's right-hand cliff: a rock floating over the horizon on a
+        # rectangle). Far landform pixels with sky at most this many pixels above
+        # them and near landform at most as many below are left to the terrain, and
+        # so are those with sky or water as near on one side and near landform on
+        # the other (the end of a cliff against the sea: Shark Fin's left headland
+        # left an orange speck on the horizon by the fin). 0 keeps them.
+        self.skyline_rim_px = int(skyline_rim_px)
         # Extend the ground from the grid's edge out to the shell (see run).
         self.skirt = bool(skirt)
         self.skirt_start_fraction = float(skirt_start_fraction)
@@ -207,6 +249,12 @@ class FarFieldBackdropConfiguration(PipelineStageConfiguration):
         # Water the panorama shows at or above the geometric horizon, up to this
         # many degrees, goes to the shell whatever its depth (see run).
         self.horizon_water_deg = float(horizon_water_deg)
+        # A piece above the horizon no thicker than rim_deg (in both directions)
+        # whose lowest pixels rest, over rim_rest_fraction of its width, on nearer
+        # content is that content's silhouette rim, read at the sky's distance by
+        # the depth model, not something far (see _silhouette_rims). 0 keeps them.
+        self.rim_deg = float(rim_deg)
+        self.rim_rest_fraction = float(rim_rest_fraction)
         # Water the panorama shows BELOW the horizon is the water sheet's, not the
         # shell's: a pixel of river whose ray meets the water plane short of far_m
         # is left off the shell and the skirt (both carried the Seine as a
@@ -274,6 +322,14 @@ class FarFieldBackdropStage(PipelineStage):
 
         W, H = panorama.width, panorama.height
         depth = self._fit(metric.depth, H, W, order=1)
+        if cfg.removed_depth_behind:
+            removed = context.input_image(ContextKey.PANORAMA_FOREGROUND_OCCLUDER_MASK)
+            if removed is not None:
+                removed = np.asarray(removed.image.convert("L").resize((W, H), PILImage.NEAREST)) > 127
+                if removed.any():
+                    depth = self._depth_behind_removed(depth, removed)
+                    self.log_info(f"Far-field backdrop: {int(removed.sum())} px of removed objects take the depth "
+                                  f"of what stands beside them (the picture there is what stood behind them)")
         sky = None
         if type_depth is not None:
             sky = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32) == int(RegionType.SKY)
@@ -346,6 +402,15 @@ class FarFieldBackdropStage(PipelineStage):
                 f"Far-field backdrop: {len(anchored) if anchored is not None else len(chains)} ridge chain(s) "
                 f"anchored in the terrain{columns}, {removed} terrain/snow px left to it"
             )
+        if type_depth is not None and far.any() and (cfg.flanked_landform_fraction > 0 or cfg.skyline_rim_px > 0):
+            dropped_px, pieces, rim = self._flanked_landform(far, depth, start_m, type_depth, sky, H, W)
+            if pieces or rim.any():
+                far &= ~(dropped_px | rim)
+                self.log_info(
+                    f"Far-field backdrop: {pieces} far landform piece(s) running on at their sides into near "
+                    f"landform ({int(dropped_px.sum())} px) and {int(rim.sum())} px of near skylines' rims left "
+                    f"to the terrain (a near cliff whose depth saturated)"
+                )
         # A built structure that reaches the far band goes to the shell whole. The
         # depth model reads a thin lattice against the sky at its surroundings'
         # distance: the Eiffel Tower measured 23-30 m over most of its height and
@@ -388,6 +453,45 @@ class FarFieldBackdropStage(PipelineStage):
                         f"Far-field backdrop: {touching.size} built structure(s) reach the far band; "
                         f"{int(whole.sum())} px of them moved to the shell whole"
                     )
+                # A structure left to the terrain keeps, above the horizon, only
+                # the rows the depth model put in the band: the top of an
+                # outpainted building against the sky. The terrain lays the rest
+                # flat on the ground, so the top stood alone over a strip of sky
+                # (Paris: roof lines and the upper storeys of the buildings round
+                # the far bank floated as pale bars and "a boat in the sky"). The
+                # structure's pixels above the horizon that touch its far top go
+                # to the shell with it, at that top's depth -- whole pieces, so a
+                # facade ends at its own edge, not where the band dipped below its
+                # roof. Only a structure standing at least half the band's start
+                # away: a near one's rim is the depth model's error, not its top.
+                above = np.zeros((H, W), dtype=bool)
+                above[: H // 2 + 1] = True
+                rest = built & above & ~far
+                tops = built & far
+                if rest.any() and tops.any():
+                    from scipy.ndimage import binary_dilation
+                    pieces, n_pieces = _label(rest, structure=np.ones((3, 3), dtype=bool))
+                    near_top = binary_dilation(tops, structure=np.ones((3, 3), dtype=bool)) & rest
+                    hit = np.unique(pieces[near_top])
+                    hit = hit[hit > 0]
+                    carried = np.zeros((H, W), dtype=bool)
+                    top_depth = float(np.median(depth[tops])) if tops.any() else depth_max
+                    for k in hit:
+                        piece = pieces == k
+                        d = depth[piece]
+                        d = d[np.isfinite(d)]
+                        if d.size == 0 or float(np.median(d)) < 0.5 * start_m:
+                            continue
+                        ring = binary_dilation(piece, structure=np.ones((3, 3), dtype=bool)) & tops
+                        dk = depth[ring]
+                        depth = np.where(piece, float(np.median(dk)) if dk.size else top_depth, depth)
+                        carried |= piece
+                    if carried.any():
+                        far |= carried
+                        self.log_info(
+                            f"Far-field backdrop: {int(carried.sum())} px of structures under their far tops "
+                            f"carried down to the horizon (a top over sky otherwise)"
+                        )
         # Water at or above the geometric horizon goes to the shell whatever its
         # depth. A flat water plane never rises above the horizon, so the water
         # mesh cannot show those rows; on Shark Fin the panorama's sea horizon sat
@@ -480,8 +584,18 @@ class FarFieldBackdropStage(PipelineStage):
         # panorama's own sky colour on the strip. Only sky-typed pixels are taken,
         # so real sky between two far things is never bridged.
         if cfg.close_px > 0 and far.any():
-            from scipy.ndimage import binary_closing
-            closed = binary_closing(far, iterations=cfg.close_px)
+            from scipy.ndimage import binary_closing, label as _label
+            closed = binary_closing(far, iterations=cfg.close_other_px) if cfg.close_other_px > 0 else far.copy()
+            if type_depth is not None:
+                # The full closing only round a built structure: what it bridges
+                # between two crowns is the sky between two trees.
+                types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+                lattice = binary_closing(far, iterations=cfg.close_px)
+                labels, _n = _label(lattice, structure=np.ones((3, 3), dtype=bool))
+                built_ids = np.unique(labels[far & (types_full == int(RegionType.BUILT))])
+                built_ids = built_ids[built_ids > 0]
+                if built_ids.size:
+                    closed |= lattice & np.isin(labels, built_ids)
             gained = closed & ~far
             if sky is not None:
                 gained &= sky
@@ -504,11 +618,20 @@ class FarFieldBackdropStage(PipelineStage):
             # neighbour is sky, whatever the inpainted texture was typed: a near
             # fir removed from against the sky left a faint grey-blue spire the
             # terrain regions typed terrain, which the shell then stood up as a
-            # flat-topped pale block at the horizon (Rainier band17).
+            # flat-topped pale block at the horizon (Rainier band17). Water too: the
+            # sea stack removed from Shark Fin's horizon left its pale ghost, typed
+            # terrain, standing as grey-blue bars beside the model.
             if occ.any():
                 from scipy.ndimage import distance_transform_edt
                 _, (ri, ci) = distance_transform_edt(occ, return_indices=True)
-                ghost |= far & occ & (types_full[ri, ci] == int(RegionType.SKY))
+                # ...above the skyline carried across the removed object only. A
+                # fir removed from in front of a hill had the sky for its nearest
+                # neighbour at its tip, and the whole crown left the shell with the
+                # hill behind it: arches cut into Rainier's far hills, and a ridge
+                # ending in a cliff where a tree had stood on it.
+                crest = self._crest_across(far & ~occ, far & occ)
+                above = np.arange(H)[:, None] < crest[None, :]
+                ghost |= far & occ & np.isin(types_full[ri, ci], [int(RegionType.SKY), int(RegionType.WATER)]) & above
             if ghost.any():
                 far &= ~ghost
                 self.log_info(f"Far-field backdrop: {int(ghost.sum())} px of removed objects left to their 3D models")
@@ -545,6 +668,24 @@ class FarFieldBackdropStage(PipelineStage):
             if taken:
                 far &= ~tl
                 self.log_info(f"Far-field backdrop: {taken} px left to the treeline backdrop")
+        if cfg.rim_deg > 0 and sky is not None and far.any():
+            rims = self._silhouette_rims(far, sky, cfg.rim_deg, cfg.rim_rest_fraction,
+                                         speck_px=cfg.stride_px * cfg.stride_px // 2)
+            if rims.any():
+                far &= ~rims
+                self.log_info(
+                    f"Far-field backdrop: {int(rims.sum())} px of silhouette rims above the horizon "
+                    f"(nearer content's edge at the sky's depth) and specks left off"
+                )
+        if cfg.upright_gap_px > 0 and far.any():
+            gap = self._upright_gaps(far, sky, occ, cfg.upright_gap_px)
+            if gap.any():
+                from scipy.ndimage import distance_transform_edt
+                _, (ri, ci) = distance_transform_edt(~far, return_indices=True)
+                depth = np.where(gap, depth[ri, ci], depth)
+                far |= gap
+                self.log_info(f"Far-field backdrop: {int(gap.sum())} px of upright gaps up to {cfg.upright_gap_px} px "
+                              f"wide in the far band joined to it at their neighbours' depth")
         non_sky = depth[np.isfinite(depth) & (~sky if sky is not None else True)]
         p995 = float(np.percentile(non_sky, 99.5)) if non_sky.size else start_m
         scale_m = cfg.scale_m if cfg.scale_m > 0 else max(p995 - start_m, 1.0)
@@ -640,6 +781,7 @@ class FarFieldBackdropStage(PipelineStage):
         # where their ray meets the ground at the grid edge's own height (per
         # azimuth), no farther out than the shell's foot in that column.
         skirt_full = np.zeros((H, W), dtype=bool)
+        open_sky = None
         foot = None
         X2, Y2, Z2 = X.copy(), Y.copy(), Z.copy()
         skirt = np.zeros_like(shell)
@@ -649,8 +791,20 @@ class FarFieldBackdropStage(PipelineStage):
             # Below the horizon nothing is sky: the distant water reflecting it is
             # typed SKY and punched holes in the skirt.
             sky_below = np.radians(cfg.skirt_sky_below_deg)
+            # ...but the sky itself can reach under the horizon: from a raised
+            # camera a low far skyline sits below it, and the open sky over it
+            # was laid on the skirt as a pale band at 300 m with a dark seam
+            # along its top (Paris, from the bridge: a line hanging over the far
+            # bank). Sky joined to the sky overhead is never ground; only
+            # patches cut off from it (a reflection in the water) are.
+            open_sky = np.zeros((H, W), dtype=bool)
+            if sky is not None:
+                from scipy.ndimage import label as _sky_label
+                sky_labels, _ = _sky_label(sky)
+                overhead = np.unique(sky_labels[: H // 4])
+                open_sky = np.isin(sky_labels, overhead[overhead > 0])
             not_sky_grid = ~sky[np.ix_(rows, cols_w)] if sky is not None else np.ones_like(shell)
-            not_sky_grid = not_sky_grid | (LAT < -sky_below)
+            not_sky_grid = not_sky_grid | ((LAT < -sky_below) & ~open_sky[np.ix_(rows, cols_w)])
             tan_down = np.tan(-LAT)
             with np.errstate(divide="ignore", invalid="ignore"):
                 t_hit = np.where((LAT < 0) & (edge_y[None, :] < 0), -edge_y[None, :] / tan_down, np.inf)
@@ -713,6 +867,7 @@ class FarFieldBackdropStage(PipelineStage):
                 skirt_full = np.isfinite(pt) & pbeyond & ~far
                 if sky is not None:
                     skirt_full &= ~sky | (plat < -sky_below)[:, None]
+                    skirt_full &= ~open_sky
                 skirt_full &= ~water_covered
                 if tl is not None:
                     skirt_full &= ~tl
@@ -776,6 +931,8 @@ class FarFieldBackdropStage(PipelineStage):
                 curtain_full = in_wedge & col_has[None, :] & ~far
                 if sky is not None:
                     curtain_full &= ~sky | (plat < -np.radians(cfg.skirt_sky_below_deg))[:, None]
+                    if open_sky is not None:
+                        curtain_full &= ~open_sky
                 if occ is not None:
                     curtain_full &= ~occ
                 curtain_full &= ~water_covered
@@ -1189,6 +1346,113 @@ class FarFieldBackdropStage(PipelineStage):
             out = (out * (1.0 - weight[..., None]) + mirrored * weight[..., None]).clip(0, 255).astype(np.uint8)
         return out, mask
 
+    def _flanked_landform(self, far: np.ndarray, depth: np.ndarray, start_m: float, type_depth, sky,
+                          H: int, W: int) -> tuple[np.ndarray, int, np.ndarray]:
+        """The far landform pieces flanked by near landform (see flanked_landform_fraction),
+        as a pixel mask, how many pieces, and the near skylines' rims (skyline_rim_px)."""
+        from scipy.ndimage import label as _label
+        cfg: FarFieldBackdropConfiguration = self.config
+        types_full = np.rint(self._fit(type_depth.depth, H, W, order=0)).astype(np.int32)
+        landform = np.isin(types_full, [int(RegionType.TERRAIN), int(RegionType.SNOW)])
+        near_land = landform & np.isfinite(depth) & (depth <= start_m)
+        if sky is not None:
+            near_land &= ~sky
+        far_land = far & landform
+        rim = np.zeros((H, W), dtype=bool)
+        if cfg.skyline_rim_px > 0 and sky is not None:
+            sky_above = np.zeros((H, W), dtype=bool)
+            near_below = np.zeros((H, W), dtype=bool)
+            for k in range(1, cfg.skyline_rim_px + 1):
+                sky_above[k:] |= sky[:-k]
+                near_below[:-k] |= near_land[k:]
+            rim = far_land & sky_above & near_below
+            open_ = sky | (types_full == int(RegionType.WATER))
+            open_l = np.zeros((H, W), dtype=bool)
+            open_r = np.zeros((H, W), dtype=bool)
+            near_l = np.zeros((H, W), dtype=bool)
+            near_r = np.zeros((H, W), dtype=bool)
+            for k in range(1, cfg.skyline_rim_px + 1):
+                open_l |= np.roll(open_, k, axis=1)
+                open_r |= np.roll(open_, -k, axis=1)
+                near_l |= np.roll(near_land, k, axis=1)
+                near_r |= np.roll(near_land, -k, axis=1)
+            rim |= far_land & ((open_l & near_r) | (open_r & near_l))
+            far_land &= ~rim
+        if cfg.flanked_landform_fraction <= 0:
+            return np.zeros((H, W), dtype=bool), 0, rim
+        labels, count = _label(far_land, structure=np.ones((3, 3), dtype=bool))
+        if count == 0:
+            return np.zeros((H, W), dtype=bool), 0, rim
+        # The side pixels of each piece's rows: in the piece, its horizontal
+        # neighbour (wrapping round the 360) not. Each counts as flanked when that
+        # neighbour, or the one past it, is near landform.
+        left_in = np.roll(labels, 1, axis=1)
+        right_in = np.roll(labels, -1, axis=1)
+        near_l = np.roll(near_land, 1, axis=1) | np.roll(near_land, 2, axis=1)
+        near_r = np.roll(near_land, -1, axis=1) | np.roll(near_land, -2, axis=1)
+        is_piece = labels > 0
+        left_edge = is_piece & (left_in != labels)
+        right_edge = is_piece & (right_in != labels)
+        n = count + 1
+        n_left = np.bincount(labels[left_edge], minlength=n)
+        n_right = np.bincount(labels[right_edge], minlength=n)
+        f_left = np.bincount(labels[left_edge & near_l], minlength=n) / np.maximum(n_left, 1)
+        f_right = np.bincount(labels[right_edge & near_r], minlength=n) / np.maximum(n_right, 1)
+        cols = np.where(is_piece)
+        occupied = np.zeros((n, W), dtype=bool)
+        occupied[labels[cols], cols[1]] = True
+        span_deg = occupied.sum(axis=1) * 360.0 / W
+        flanked = (np.maximum(f_left, f_right) >= cfg.flanked_landform_fraction) & (span_deg < cfg.flanked_max_span_deg)
+        flanked[0] = False
+        return flanked[labels], int(flanked.sum()), rim
+
+    @staticmethod
+    def _silhouette_rims(far: np.ndarray, sky: np.ndarray, rim_deg: float, rest_fraction: float,
+                         rim_span_deg: float = 8.0, speck_px: int = 0) -> np.ndarray:
+        """The pieces of `far` that are the silhouette rim of nearer content: above
+        the horizon, no thicker than rim_deg up or across (median run), their lowest
+        pixels resting on content that is neither far nor sky over rest_fraction of
+        their width, or narrower than rim_span_deg wherever they rest. The depth
+        model takes the sky's distance for the last pixels of a roof, a crown or a
+        crane against it; stood on the shell those pixels were pale or dark threads
+        hanging over the horizon (Paris's treeline and the roofs round its far
+        bank). A piece under speck_px pixels goes wherever it is: the shell meshes
+        on a stride grid, and a one-pixel speck stood a whole cell of it, its edge a
+        dark line along the far bank under the photographed skyline (Paris)."""
+        from scipy.ndimage import label, find_objects
+        H = far.shape[0]
+        rim_px = max(2, int(round(rim_deg / 180.0 * H)))
+        span_px = int(round(rim_span_deg / 180.0 * H))
+        labels, n = label(far, structure=np.ones((3, 3), dtype=bool))
+        drop = np.zeros(n + 1, dtype=bool)
+        sizes = np.bincount(labels.ravel(), minlength=n + 1)
+        for k, sl in enumerate(find_objects(labels), start=1):
+            if sl is None:
+                continue
+            if sizes[k] < speck_px:
+                drop[k] = True
+                continue
+            if sl[0].stop - 1 >= H // 2:
+                continue
+            m = labels[sl] == k
+            col_h = m.sum(axis=0)
+            row_w = m.sum(axis=1)
+            if min(float(np.median(col_h[col_h > 0])), float(np.median(row_w[row_w > 0]))) > rim_px:
+                continue
+            cols = np.flatnonzero(col_h)
+            low = sl[0].start + (m.shape[0] - 1 - np.argmax(m[::-1, cols], axis=0)) + 1
+            ok = low < H
+            if not ok.any():
+                continue
+            c = sl[1].start + cols[ok]
+            r = low[ok]
+            on_near = ~far[r, c] & ~sky[r, c]
+            # ...or short wherever it rests: a thread hanging over the sky (a cable,
+            # a contrail) is nothing the shell can stand either.
+            if float(on_near.mean()) >= rest_fraction or cols.size < span_px:
+                drop[k] = True
+        return drop[labels]
+
     @staticmethod
     def _kept_landmark_mask(context: PipelineContext, W: int, H: int) -> "np.ndarray | None":
         """Panorama pixels of named landmarks left in the terrain plate (the same
@@ -1245,6 +1509,74 @@ class FarFieldBackdropStage(PipelineStage):
         lon = (cols / W - 0.5) * 2.0 * np.pi
         cb = ((lon + np.pi) / (2 * np.pi) * bins).astype(int) % bins
         return heights[cb]
+
+    @staticmethod
+    def _depth_behind_removed(depth: np.ndarray, removed: np.ndarray) -> np.ndarray:
+        """`depth` with each removed pixel given the farther of the nearest kept
+        pixels left and right of it in its row: what stands behind an upright
+        object is at least as far as the farther of its two sides. A fir removed
+        from in front of a far hill kept its own 15-35 m, fell short of the far
+        band, and left its outline cut out of the hill (Rainier's arches)."""
+        H, W = depth.shape
+        cols = np.arange(W)[None, :]
+        kept_idx = np.where(~removed, cols, -1)
+        left = np.maximum.accumulate(kept_idx, axis=1)
+        right_rev = np.where(~removed[:, ::-1], cols, -1)
+        right = W - 1 - np.maximum.accumulate(right_rev, axis=1)[:, ::-1]
+        rows = np.arange(H)[:, None]
+        dl = np.where(left >= 0, depth[rows, np.clip(left, 0, W - 1)], -np.inf)
+        dr = np.where(right <= W - 1, depth[rows, np.clip(right, 0, W - 1)], -np.inf)
+        behind = np.maximum(dl, dr)
+        out = depth.copy()
+        take = removed & np.isfinite(behind)
+        out[take] = np.maximum(depth[take], behind[take])
+        return out
+
+    @staticmethod
+    def _crest_across(kept: np.ndarray, removed: np.ndarray) -> np.ndarray:
+        """Per column, the top row of the shell's skyline with the removed objects
+        taken out and the skyline carried across them: in a removed object's
+        columns, the line between the skyline just left and just right of it (its
+        own foot where one side has nothing). H where a column has no skyline."""
+        from scipy.ndimage import label as _label
+        H, W = kept.shape
+        top = np.where(kept.any(axis=0), np.argmax(kept, axis=0), H).astype(np.float64)
+        crest = top.copy()
+        labels, n = _label(removed.any(axis=0))
+        rows = np.arange(H)
+        for k in range(1, n + 1):
+            cs = np.flatnonzero(labels == k)
+            c0, c1 = int(cs[0]), int(cs[-1])
+            foot = float(np.max(np.where(removed[:, cs].any(axis=1), rows, 0)))
+            left = top[max(0, c0 - 4):c0]
+            right = top[c1 + 1:c1 + 5]
+            lv = float(np.min(left)) if left.size and np.min(left) < H else foot
+            rv = float(np.min(right)) if right.size and np.min(right) < H else foot
+            t = (cs - c0 + 1) / float(c1 - c0 + 2)
+            # The object's own surviving pixels (a hill seen beside its trunk)
+            # may stand higher than the line between its neighbours.
+            crest[cs] = np.minimum(lv + (rv - lv) * t, top[cs])
+        return crest
+
+    @staticmethod
+    def _upright_gaps(far: np.ndarray, sky: "np.ndarray | None", occ: "np.ndarray | None", width: int) -> np.ndarray:
+        """Pixels above the horizon, not far, not sky and not a removed object, in
+        a run along their row at most `width` px long with far pixels at both ends."""
+        H, W = far.shape
+        open_ = ~far
+        if sky is not None:
+            open_ &= ~sky
+        if occ is not None:
+            open_ &= ~occ
+        gap = np.zeros_like(far)
+        for r in np.flatnonzero(far[: H // 2 + 1].any(axis=1)):
+            idx = np.flatnonzero(far[r])
+            if idx.size < 2:
+                continue
+            for a, step in zip(idx[:-1], np.diff(idx)):
+                if 1 < step <= width + 1 and open_[r, a + 1:a + step].all():
+                    gap[r, a + 1:a + step] = True
+        return gap
 
     @staticmethod
     def _fit(array: np.ndarray, H: int, W: int, order: int) -> np.ndarray:

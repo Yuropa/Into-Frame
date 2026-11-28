@@ -1216,6 +1216,29 @@ class TerrainTextureGenerationStage(PipelineStage):
                 occluder_depth_ratio=cfg.panorama_occluder_depth_ratio,
                 water_hard_radius_m=cfg.panorama_water_hard_radius_m,
             )
+            # Land the river course made of outpainted water: the panorama there shows
+            # the water the outpainter drew, at any distance, so the layer stays off it
+            # and the land wears its own region's tiles like the ground beside it.
+            conv_depth = context.input_depth("terrain_plan_converted")
+            if conv_depth is not None:
+                conv = np.asarray(conv_depth.depth, dtype=np.float32)
+                conv = zoom(conv, (cfg.blend_map_size / conv.shape[0], cfg.blend_map_size / conv.shape[1]), order=1)
+                off = np.clip(gaussian_filter(conv, sigma=1.0) * 1.5, 0.0, 1.0).astype(np.float32)
+                if off.any():
+                    pano_weight = (pano_weight * (1.0 - off)).astype(np.float32)
+                    self.log_info(f"Panorama layer: off {(off > 0.5).mean() * 100:.1f}% of the map "
+                                  "(land the river course made of outpainted water)")
+            # Water the object removal painted over land: a boat moored against a quay
+            # is removed with the quay behind it, and the fill is water to the top of
+            # the wall, which the terrain pass types as the ground around it (see
+            # _removal_water). The layer would lay that water flat on the bank.
+            gate = self._land_showing_water(context, height_map_depth.depth, half, cfg.blend_map_size,
+                                            panorama_terrain.width, panorama_terrain.height)
+            if gate is not None and gate.any():
+                off = np.clip(gaussian_filter(gate.astype(np.float32), sigma=1.0) * 1.5, 0.0, 1.0).astype(np.float32)
+                pano_weight = (pano_weight * (1.0 - off)).astype(np.float32)
+                self.log_info(f"Panorama layer: off {(off > 0.5).mean() * 100:.2f}% of the map (land whose pixel is "
+                              "the water an object removal painted over it)")
             self.log_info(
                 f"Panorama layer: mean weight {pano_weight.mean():.2f}, "
                 f"coverage {(pano_weight > 0.1).mean() * 100:.0f}%"
@@ -1513,6 +1536,55 @@ class TerrainTextureGenerationStage(PipelineStage):
             + " Diffuse even light, uniform exposure, photorealistic, sharp"
         )
 
+    def _removal_water(self, context: PipelineContext, width: int, height: int,
+                       removal_only: bool = True) -> "Optional[np.ndarray]":
+        """Panorama pixels (height, width) the terrain pass's raw segmentation reads as
+        water -- only those inside the object removal's mask, dilated a few pixels,
+        when removal_only. The resolved terrain typing retypes a removed object's
+        area to its surroundings ("Removed-object areas ... retyped"), so where the
+        removal filled a moored boat's place with water up over the quay, that water
+        is typed ground; the raw reading still calls it water."""
+        raw = context.input_depth(ContextKey.PANORAMA_REGION_TYPE_MAP_RAW_TERRAIN)
+        if raw is None:
+            return None
+        r = np.asarray(raw.depth)
+        if r.shape != (height, width):
+            r = np.asarray(PIL.Image.fromarray(np.rint(r).astype(np.uint8)).resize((width, height), PIL.Image.NEAREST))
+        water = np.rint(r).astype(np.int32) == int(RegionType.WATER)
+        if not removal_only:
+            return water
+        mask = context.input_image(ContextKey.PANORAMA_FOREGROUND_MASK)
+        if mask is None:
+            return None
+        from scipy.ndimage import binary_dilation
+        removed = np.asarray(mask.image.convert("L").resize((width, height), PIL.Image.NEAREST)) > 127
+        removed = binary_dilation(removed, iterations=4)
+        return water & removed
+
+    def _land_showing_water(self, context: PipelineContext, height_map: np.ndarray, half: float, size: int,
+                            width: int, height: int) -> "Optional[np.ndarray]":
+        """(size, size) bool over the terrain grid (row 0 at Z = -half): land texels whose
+        panorama pixel is water an object removal painted (_removal_water)."""
+        water = self._removal_water(context, width, height, removal_only=True)
+        region_depth = context.input_depth(ContextKey.REGION_MAP)
+        if water is None or region_depth is None or not water.any():
+            return None
+        from scipy.ndimage import map_coordinates as _map, zoom as _zoom
+        ys, xs = np.mgrid[0:size, 0:size].astype(np.float64)
+        Z = ys / size * (2.0 * half) - half
+        X = xs / size * (2.0 * half) - half
+        hm_h, hm_w = height_map.shape
+        Y = np.nan_to_num(_map(height_map, [((Z + half) / (2.0 * half) * (hm_h - 1)).clip(0, hm_h - 1),
+                                            ((X + half) / (2.0 * half) * (hm_w - 1)).clip(0, hm_w - 1)],
+                               order=1, mode="nearest"), nan=0.0)
+        lat = np.arctan2(Y, np.hypot(X, Z).clip(1e-6))
+        lon = np.arctan2(X, Z)
+        pu = np.clip(np.rint((lon + np.pi) / (2.0 * np.pi) * (width - 1)).astype(np.int64), 0, width - 1)
+        pv = np.clip(np.rint((0.5 - lat / np.pi) * (height - 1)).astype(np.int64), 0, height - 1)
+        rm = region_depth.depth
+        region = np.rint(_zoom(np.asarray(rm, dtype=np.float32), (size / rm.shape[0], size / rm.shape[1]), order=0)).astype(np.int32)
+        return water[pv, pu] & (region != int(RegionType.WATER))
+
     def _macro_map(
         self, panorama, height_map: np.ndarray, half: float,
         cfg: "TerrainTextureGenerationConfiguration", context: PipelineContext,
@@ -1537,12 +1609,55 @@ class TerrainTextureGenerationStage(PipelineStage):
             panorama, height_map, half, cfg.macro_map_size, type_map, depth, region_map,
             max_texel_m=cfg.macro_max_texel_m, depth_tolerance=cfg.macro_depth_tolerance,
             blur_texels=cfg.macro_blur_texels, near_depth_tolerance=cfg.macro_depth_near_tolerance,
+            water_shown=self._removal_water(context, panorama.width, panorama.height, removal_only=False),
         )
         self.log_info(
             f"Macro colour map: {valid.mean():.1%} of texels are a sound projection of the photograph "
             f"(pixel shows a surface, depth agrees, footprint ≤ {cfg.macro_max_texel_m:.2f} m); the rest filled "
             f"per region type from them"
         )
+        conv_depth = context.input_depth("terrain_plan_converted")
+        if conv_depth is not None and region_map is not None:
+            # Land the river course made of outpainted water projects the water the
+            # outpainter painted there; it takes the colour of the sound land beside
+            # it instead (never the river's, never another converted texel). The
+            # nearest sound texel alone smeared one colour across the strip (a pale
+            # slab beside the photographed bank); the land is mirrored across its
+            # edge instead, so the strip carries its neighbour's own mottling, of
+            # the same region type where the mirror allows.
+            from scipy.ndimage import distance_transform_edt
+            size = canvas.shape[:2]
+            conv = np.asarray(PIL.Image.fromarray((np.asarray(conv_depth.depth) > 0.5).astype(np.uint8) * 255).resize(
+                (size[1], size[0]), PIL.Image.NEAREST)) > 127
+            rm_c = np.asarray(PIL.Image.fromarray(np.rint(region_map).astype(np.uint8)).resize((size[1], size[0]), PIL.Image.NEAREST))
+            donors = np.asarray(valid, dtype=bool) & ~conv & (rm_c != int(RegionType.WATER))
+            if conv.any() and donors.any():
+                _, (iy, ix) = distance_transform_edt(~donors, return_indices=True)
+                yy, xx = np.nonzero(conv)
+                qy, qx = iy[yy, xx], ix[yy, xx]
+                sy, sx = qy.copy(), qx.copy()
+                todo = np.ones(len(yy), dtype=bool)
+                mirrored = 0
+                for same_type in (True, False):
+                    for k in (1.0, 0.7, 0.4, 0.2):
+                        my = np.rint(qy + k * (qy - yy)).astype(np.int64)
+                        mx = np.rint(qx + k * (qx - xx)).astype(np.int64)
+                        inside = (my >= 0) & (my < size[0]) & (mx >= 0) & (mx < size[1])
+                        my_c, mx_c = my.clip(0, size[0] - 1), mx.clip(0, size[1] - 1)
+                        ok = todo & inside & donors[my_c, mx_c]
+                        if same_type:
+                            ok &= rm_c[my_c, mx_c] == rm_c[yy, xx]
+                        sy[ok], sx[ok] = my_c[ok], mx_c[ok]
+                        mirrored += int(ok.sum())
+                        todo &= ~ok
+                canvas = canvas.copy()
+                canvas[yy, xx] = canvas[sy, sx]
+                # Soften the mirror's texel steps inside the strip only.
+                soft = np.stack([gaussian_filter(canvas[..., c], sigma=1.0) for c in range(3)], axis=-1)
+                canvas[conv] = soft[conv]
+                self.log_info(f"Macro colour map: {conv.mean():.1%} of texels (land the river course made of "
+                              f"outpainted water) mirrored from the sound land beside it "
+                              f"({mirrored / max(len(yy), 1):.0%} mirrored, the rest from the nearest sound texel)")
         if self.temp is not None:
             PIL.Image.fromarray((valid * 255).astype(np.uint8)).save(self.temp / "macro_valid.png")
         if region_map is not None and cfg.macro_vegetation_chroma < 1.0:

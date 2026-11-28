@@ -21,11 +21,14 @@ land cover with rules a cartographer would apply:
     photograph that looks out over open water, along the coast's direction there,
     whatever the outpainter put beyond that edge. An edge that ends on land (a
     headland filling the frame's side) is not extended: the land goes on.
-  * A RIVER is a channel of constant width along its fitted axis through the
-    whole grid, with continuous banks. Outside the photograph the outpainted water
-    that joins it stays water: the ground there wears the panorama, and a bank that
-    wears painted water reads as water the scene failed to find. Inside the
-    photograph water outside the channel is what the photograph shows.
+  * A RIVER runs through the scene as one course (river_course.py): the reach the
+    photograph shows, carried from each place it leaves the photograph to the
+    grid's edge with a limited bend, at the photographed width. Outside the
+    photograph the outpainter's water is only a hint of the way: Paris's Seine grew
+    arms either side of the bridge and a bay behind the viewer, a river looping back
+    on itself, and those are bank. Inside the photograph the water is what the
+    photograph shows. When the rule cannot read a river with confidence it leaves
+    the map to the straight channel below and says why.
   * Water that the photograph did not show exists only as a continuation of water
     it did: any outpainted water body not connected to photographed water is
     land. Small land islets inside a water body are water.
@@ -45,6 +48,7 @@ import numpy as np
 from PIL import Image as PILImage, ImageDraw
 
 from pipeline.panorama_segmentation.panorama_region_result import RegionType, colorize_region_type_map
+from pipeline.region_map.river_course import rebuild_river
 
 _GROUND_TYPES = (
     int(RegionType.TERRAIN), int(RegionType.GROUND), int(RegionType.VEGETATION), int(RegionType.BUILT),
@@ -64,6 +68,8 @@ class TerrainPlan:
     channel: Optional[dict] = None
     hfov_deg: float = 0.0
     width_prior: Optional[dict] = None       # Scene Plan river width: measured / plan / used
+    converted: Optional[np.ndarray] = None   # bool (res, res): outpainted water the river course made land
+    bank_profile: Optional[list] = None      # [(distance from the waterline m, height above the water m)], photographed
 
     def summary(self) -> dict:
         return {
@@ -74,6 +80,7 @@ class TerrainPlan:
             "coast_lines": [[list(p) for p in line] for line in self.coast_lines],
             "channel": self.channel,
             "width_prior": self.width_prior,
+            "bank_profile": self.bank_profile,
         }
 
 
@@ -90,7 +97,9 @@ class PlanConfig:
     smooth_min_distance_m: float = 20.0    # the near field keeps its photographed detail
     prior_width_m: Optional[float] = None  # Scene Plan: the photographed river's width when both banks are visible
     prior_width_tol: float = 0.2           # the fitted width is moved inside this fraction of it
-    river_keeps_outpainted: bool = True    # outpainted water joined to the channel stays water
+    river_keeps_outpainted: bool = True    # outpainted water joined to the channel stays water (when the course rule declines)
+    river_course: bool = True              # rebuild a river as one course through the scene (river_course.py)
+    water_kind_hint: Optional[str] = None  # the Scene Plan's water.kind (river / lake / sea ...), when there is one
     standing_radius_m: float = 0.0         # Height Map's pedestal under the viewer reaches this far (0: none)
 
 
@@ -177,6 +186,54 @@ def _nearest_land_fill(region_map, cells):
     _, (iy, ix) = distance_transform_edt(~land, return_indices=True)
     region_map[cells] = region_map[iy[cells], ix[cells]]
     return region_map
+
+
+def _own_side_land_fill(region_map, cells, water):
+    """Retype `cells` to the nearest land type ON THEIR OWN SIDE of the water (the dry
+    ground they are joined to without crossing it), never sky or OTHER: what the
+    outpainter called water beside a quay is that quay's ground, not the far bank's
+    and not an unclassified grey."""
+    from scipy.ndimage import distance_transform_edt, label as _label
+    bad = (int(RegionType.WATER), int(RegionType.SKY), int(RegionType.OTHER))
+    donor = ~np.isin(region_map, bad) & ~cells & ~water
+    lab, n = _label(~water)
+    for k in np.unique(lab[cells]):
+        if k == 0:
+            continue
+        side = lab == k
+        here = cells & side
+        d = donor & side
+        if not d.any():
+            continue
+        _, (iy, ix) = distance_transform_edt(~d, return_indices=True)
+        region_map[here] = region_map[iy[here], ix[here]]
+    rest = cells & np.isin(region_map, bad)
+    if rest.any():
+        region_map = _nearest_land_fill(region_map, rest)
+    return region_map
+
+
+def _bank_profile(elevation, water, in_cone, water_y, cell_m, reach_m=15.0, min_cells=200):
+    """The photographed banks' cross-profile: median height above the water at each
+    metre of distance from the waterline, over photographed land within `reach_m` of
+    it, made non-decreasing (a bank rises from the water). None without enough
+    photographed bank to measure. Paris's quays come out as a wall: ~2.7 m at 1 m."""
+    from scipy.ndimage import distance_transform_edt
+    d = distance_transform_edt(~water) * cell_m
+    land = in_cone & ~water & np.isfinite(elevation) & (d > 0) & (d <= reach_m)
+    if int(land.sum()) < min_cells:
+        return None
+    rise = elevation[land] - float(water_y)
+    dist = d[land]
+    prof = []
+    for k in range(int(np.ceil(reach_m))):
+        sel = (dist > k) & (dist <= k + 1)
+        if int(sel.sum()) >= 20:
+            prof.append((k + 0.5, float(np.median(rise[sel]))))
+    if len(prof) < 3:
+        return None
+    hs = np.maximum.accumulate(np.maximum([h for _, h in prof], 0.0))
+    return [(dk, float(h)) for (dk, _), h in zip(prof, hs)]
 
 
 def _fit_river(water, axis, half_deg, cell_m, grid_m):
@@ -287,6 +344,7 @@ def build_plan(
     new_elev = elevation.copy() if elevation is not None else None
     notes: list[str] = []
     plan = TerrainPlan(kind="none", water_y=None, water=np.zeros_like(photographed_water), hfov_deg=float(cone_hfov_deg))
+    river_course_used = False
 
     # Shore points for the drawing: nearest water per column, in world xz.
     sc = np.flatnonzero(col_in_cone & np.isfinite(r_shore))
@@ -434,6 +492,20 @@ def build_plan(
                 notes.append(f"{int(kept.sum())} cells of outpainted water outside the channel kept")
         plan.channel = {"x_left": xl, "x_right": xr, "slope": slope, "offset": offset, "width": width,
                         "water_y": water_y, "bank_y": bank_y}
+        if cfg.river_course:
+            # On the water assembled so far (the fitted channel, the photographed water,
+            # the outpainted water joined to it): the projected map's own photographed
+            # water is ragged where boats were removed and the far bank reflects.
+            course = rebuild_river(planned, in_cone, cell_m, cfg.water_kind_hint, log=log)
+            if course.decided == "river":
+                planned = course.water
+                river_course_used = True
+                notes[:] = [nt for nt in notes if "outside the channel kept" not in nt]
+                plan.channel["course"] = {"width": course.width_m, "exits": course.exits, "courses": course.courses}
+                notes.append(f"one course through the scene, {course.width_m:.0f} m wide, from {len(course.exits)} "
+                             f"exit(s) of the photographed reach (outpainted water off it made land)")
+            else:
+                notes.append(f"course rule declined ({course.reason}); straight channel kept")
         notes.append(f"river {width:.0f} m wide, banks at x = {xl:.0f} / {xr:.0f} m, axis "
                      f"{np.degrees(np.arctan(slope)):+.0f} deg, {nb} range bands within {spread:.0f} m")
 
@@ -442,7 +514,23 @@ def build_plan(
         wv = elevation[photographed_water] if elevation is not None else np.zeros(0)
         wv = wv[np.isfinite(wv)]
         plan.water_y = float(np.median(wv)) if wv.size else None
-        notes.append("lake: water bounded on every visible side, kept to the photographed extent")
+        course = None
+        if cfg.river_course and cfg.water_kind_hint in ("river", "stream", "canal"):
+            # The along-view fit reads a river whose banks run away from the camera;
+            # one crossing the view, running diagonally or bending is the course
+            # rule's, when the Scene Plan says the water is a river.
+            course = rebuild_river(region_map == water_idx, in_cone, cell_m, cfg.water_kind_hint, log=log)
+        if course is not None and course.decided == "river":
+            plan.kind = "river"
+            planned = course.water
+            river_course_used = True
+            plan.channel = {"water_y": plan.water_y, "bank_y": None,
+                            "course": {"width": course.width_m, "exits": course.exits, "courses": course.courses}}
+            notes.append(f"river (Scene Plan) the along-view fit could not read: one course, {course.width_m:.0f} m wide, "
+                         f"from {len(course.exits)} exit(s) of the photographed reach")
+        else:
+            notes.append("lake: water bounded on every visible side, kept to the photographed extent"
+                         + (f" (course rule declined: {course.reason})" if course is not None else ""))
     else:
         notes.append("no water in the photograph: none in the scene")
 
@@ -494,7 +582,7 @@ def build_plan(
     dropped = (region_map == water_idx) & ~planned
     added = planned & (region_map != water_idx)
     if dropped.any():
-        out = _nearest_land_fill(out, dropped)
+        out = _own_side_land_fill(out, dropped, planned) if river_course_used else _nearest_land_fill(out, dropped)
     out[planned] = water_idx
     if new_elev is not None and plan.water_y is not None:
         # A body of water is one plane: every planned cell lies on it (the
@@ -506,8 +594,35 @@ def build_plan(
             bank = plan.channel["bank_y"] if (plan.channel and plan.channel.get("bank_y") is not None) else None
             if bank is None:
                 bank = plan.water_y + float(cfg.bank_tolerance_m)
-            new_elev[dropped] = np.maximum(np.nan_to_num(new_elev[dropped], nan=bank), bank)
+            # At the height of the land beside it, not one flat at the bank's median: a
+            # whole outpainted arm made land (Paris's, 60 m across) otherwise stood as a
+            # level apron cut into the quays and streets around it.
+            from scipy.ndimage import distance_transform_edt
+            land = ~planned & ~dropped & np.isfinite(new_elev) & (region_map != water_idx)
+            beside = new_elev[dropped]
+            if land.any():
+                _, (iy, ix) = distance_transform_edt(~land, return_indices=True)
+                beside = new_elev[iy[dropped], ix[dropped]]
+            beside = np.maximum(np.nan_to_num(beside, nan=bank), bank)
+            profile = _bank_profile(elevation, region_map == water_idx, in_cone, plan.water_y, cell_m) \
+                if (river_course_used and elevation is not None) else None
+            if profile is not None:
+                # The new waterline's bank takes the photographed banks' own cross-
+                # profile (a stone quay is a wall, a natural bank a slope), scaled
+                # to end at the height of the land beside it.
+                plan.bank_profile = [(round(dk, 1), round(h, 2)) for dk, h in profile]
+                dk = np.array([0.0] + [p[0] for p in profile]); hk = np.array([0.0] + [p[1] for p in profile])
+                top = max(float(hk[-1]), 1e-3)
+                dist = distance_transform_edt(~planned)[dropped] * cell_m
+                frac = np.clip(np.interp(dist, dk, hk) / top, 0.0, 1.0)
+                new_elev[dropped] = plan.water_y + frac * (beside - plan.water_y)
+                notes.append("new banks shaped like the photographed ones: "
+                             + ", ".join(f"{h:.1f} m at {d:.0f} m" for d, h in profile[:4]))
+            else:
+                new_elev[dropped] = beside
     plan.water = planned
+    if river_course_used and dropped.any():
+        plan.converted = dropped
     notes.append(f"{int(added.sum())} cells of water added, {int(dropped.sum())} of outpainted water made land")
 
     # ── land cover in regions, not slivers ────────────────────────────────────
@@ -541,7 +656,13 @@ def draw_plan(region_map: np.ndarray, plan: TerrainPlan, grid_m: float, size: in
         d.line([c, to_px(L * np.sin(a), L * np.cos(a))], fill=(255, 255, 255), width=2)
     for line in plan.coast_lines:
         d.line([to_px(x, z) for x, z in line], fill=(255, 40, 40), width=2)
-    if plan.channel:
+    if plan.channel and (plan.channel.get("course") or {}).get("courses"):
+        for line in plan.channel["course"]["courses"]:
+            d.line([to_px(x, z) for x, z in line], fill=(0, 255, 255), width=3)
+        for x, z, tx, tz in plan.channel["course"].get("exits", []):
+            px, pz = to_px(x, z)
+            d.ellipse([px - 5, pz - 5, px + 5, pz + 5], outline=(0, 255, 255), width=2)
+    elif plan.channel and plan.channel.get("x_left") is not None:
         ch = plan.channel
         for off in (ch["x_left"], ch["x_right"]):
             zs = np.array([-grid_m / 2.0, grid_m / 2.0])

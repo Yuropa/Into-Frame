@@ -402,7 +402,19 @@ def fit_class_colour_gains(photo: np.ndarray, sun: np.ndarray, amb: np.ndarray, 
         m = binary_erosion(np.isin(ids, wanted), iterations=1) & lit
         if int(m.sum()) < min_px:
             continue
-        out[cls] = {**_colour_gain(photo, l_unlit, lit_part, m, gain_range), "models": sorted(k for k in members if k in index)}
+        g = _colour_gain(photo, l_unlit, lit_part, m, gain_range)
+        # The rule fit_object_colour_gains keeps for one model holds for a class: the
+        # same end of the range on all three channels is other pixels. Paris r3b's
+        # plane trees, set on the land the river course made and in front of the
+        # pale quay and sky, were measured on 2142 px the photograph has at
+        # 0.74/0.77/0.66 and took x2.5 x2.5 x2.5: every tree model of the scene
+        # rendered lime green.
+        for end in gain_range:
+            if all(abs(v - end) < 1e-3 for v in g["gain"]):
+                g["rejected"] = g["gain"]
+                g["gain"] = [1.0, 1.0, 1.0]
+                g["render_after"] = g["render_before"]
+        out[cls] = {**g, "models": sorted(k for k in members if k in index)}
     return out
 
 
@@ -633,6 +645,11 @@ class ExposureFitStage(PipelineStage):
                             float(fit["sun_scale"]), float(fit["ambient_scale"]), fit.get("ambient_tint"),
                             tuple(cfg.class_colour_gain_range), cfg.min_class_px)
                         for c, v in class_gains.items():
+                            if v.get("rejected"):
+                                self.log_info(f"  no colour gain for the {len(classes[c])} {c} model(s): x{v['rejected']} on "
+                                              f"{v['n_px']} px is the end of the range on every channel (photograph {v['photo']}, "
+                                              f"render {v['render_before']}): those pixels are not the class's")
+                                continue
                             # Every model of the class takes it, seen in the photo view or not
                             # (a variant, a far level of detail): they are one population.
                             for key in classes[c]:

@@ -81,6 +81,12 @@ class Object3D():
         # then on. None when not applicable.
         self.physics: Optional[dict] = None
 
+        # How the object moves at runtime, set by SceneMotionStage: {"type":
+        # "floating_underway", "speedMs", "path": [[x, z], ...], "yawOffsetDeg", "bob":
+        # {...}} or {"type": "floating_moored", "bob": {...}}. Plants carry none of
+        # their own: they sway by kind (scene.motion["vegetation"]). None when static.
+        self.motion: Optional[dict] = None
+
         # Runtime level-of-detail alternatives for a mesh instance, nearest first:
         # [{"mesh": key or "", "texture": key or "", "scale": vec3, "position": vec3,
         #   "screenHeight": float}, ...]. `scale`/`position` are LOCAL to this
@@ -128,6 +134,8 @@ class Object3D():
             data["physics"] = self.physics
         if self.physics_mesh:
             data["physicsMesh"] = self.physics_mesh
+        if self.motion is not None:
+            data["motion"] = self.motion
         if self.lods:
             data["lods"] = self.lods
         if self.unlit:
@@ -175,6 +183,7 @@ class Object3D():
         obj.sway = data.get("sway")
         obj.physics = data.get("physics")
         obj.physics_mesh = data.get("physicsMesh", "")
+        obj.motion = data.get("motion")
         obj.lods = list(data.get("lods") or [])
         obj.unlit = bool(data.get("unlit", False))
         obj.agent = data.get("agent")

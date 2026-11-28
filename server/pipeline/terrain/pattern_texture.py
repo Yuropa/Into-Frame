@@ -575,6 +575,7 @@ def bake_projected_colour(
     blur_texels: float = 1.0,
     near_vegetation_m: float = 8.0,
     near_depth_tolerance: "float | None" = None,
+    water_shown: "np.ndarray | None" = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """The photograph projected onto the terrain where that projection is sound,
     and filled from itself everywhere else.
@@ -628,6 +629,17 @@ def bake_projected_colour(
         rh0, rw0 = region_map.shape
         region0 = np.rint(_zoom(region_map.astype(np.float32), (S / rh0, S / rw0), order=0)).astype(np.int32)
         valid &= ~((shown == int(RegionType.WATER)) & (region0 != int(RegionType.WATER)))
+        # `water_shown` (panorama space, optional): pixels another reading of the
+        # picture calls water although type_map does not. Where object removal took a
+        # boat moored against a quay, the fill painted water up over the quay, and the
+        # terrain pass's typing, which takes a removed object's area from its
+        # surroundings, calls it ground: Paris r3b's right bank came out pale blue
+        # over 6.5k macro texels 40-100 m off, and the per-type fill spread it further.
+        if water_shown is not None:
+            wh, ww = water_shown.shape
+            wu = np.clip(np.rint(pu / max(W - 1, 1) * (ww - 1)).astype(np.int64), 0, ww - 1)
+            wv = np.clip(np.rint(pv / max(H - 1, 1) * (wh - 1)).astype(np.int64), 0, wh - 1)
+            valid &= ~(np.asarray(water_shown, dtype=bool)[wv, wu] & (region0 != int(RegionType.WATER)))
     # A meadow is upright too: a 0.5 m plant at 20 m from a 1 m camera smears
     # plant_height * d / camera_height = 10 m along its ray, so beyond
     # near_vegetation_m the meadow's pixels are not a sound projection either

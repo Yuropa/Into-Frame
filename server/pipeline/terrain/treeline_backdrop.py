@@ -71,6 +71,7 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         texture_max_width: int = 8192,
         max_silhouette_slope: float = 1.0,
         silhouette_gap_px: int = 48,
+        ground_reach_deg: float = 3.0,
     ):
         super().__init__(name, device, torch_dtype, log, keys, seed=seed)
         # Canopy closer than this is placed as individual instances by the object
@@ -111,6 +112,11 @@ class TreelineBackdropConfiguration(PipelineStageConfiguration):
         # panorama pixels; 0 disables.
         self.max_silhouette_slope = float(max_silhouette_slope)
         self.silhouette_gap_px = int(silhouette_gap_px)
+        # A quad whose canopy ends above the ground under it is carried down to
+        # that ground, at most ground_reach_deg, wearing the panorama's own pixels
+        # there (the bank, the quay under the trees). 0 leaves the base where the
+        # canopy ends.
+        self.ground_reach_deg = float(ground_reach_deg)
 
 
 class TreelineBackdropStage(PipelineStage):
@@ -219,6 +225,33 @@ class TreelineBackdropStage(PipelineStage):
                 if d.size < 2:
                     continue
                 lo, hi = np.percentile(d, [10, 90])
+                if lo > 0 and hi / lo > cfg.max_depth_spread:
+                    # A canopy whose depth runs wider than a band at its fringes (sky
+                    # between the leaves, the bank under it) is still a canopy: keep
+                    # its longest stretch within the spread of its median rather than
+                    # dropping the column. Dropped whole, a crown on the spread's edge
+                    # (Paris r3b: 96-152 m at the photo's left edge, 1.58 against 1.6)
+                    # cut seven bins out of the band, a notched gap at the frame.
+                    dr = depth[run, c]
+                    med = float(np.median(d))
+                    k = math.sqrt(cfg.max_depth_spread)
+                    inside = np.isfinite(dr) & (dr >= med / k) & (dr <= med * k)
+                    best_seg, cur = (0, -1), None
+                    for i, ok in enumerate(inside):
+                        if ok:
+                            cur = i if cur is None else cur
+                            if i - cur > best_seg[1] - best_seg[0]:
+                                best_seg = (cur, i)
+                        else:
+                            cur = None
+                    if best_seg[1] - best_seg[0] + 1 < 2:
+                        continue
+                    run = run[best_seg[0]:best_seg[1] + 1]
+                    d = depth[run, c]
+                    d = d[np.isfinite(d) & (d > 0)]
+                    if d.size < 2:
+                        continue
+                    lo, hi = np.percentile(d, [10, 90])
                 if lo <= 0 or hi / lo > cfg.max_depth_spread:
                     continue
                 median = float(np.median(d))
@@ -276,6 +309,7 @@ class TreelineBackdropStage(PipelineStage):
         # full rerun: two bins at the photo's centre ramping 62 -> 45 m drew a dark
         # V in front of the forest).
         if cfg.min_group_bins > 1:
+            groups = []
             b = 0
             while b < n_bins:
                 if bins[b] is None:
@@ -289,10 +323,29 @@ class TreelineBackdropStage(PipelineStage):
                        and abs(bins[e + 1]["depth"] - bins[e]["depth"])
                        <= cfg.max_bin_depth_jump * min(bins[e + 1]["depth"], bins[e]["depth"])):
                     e += 1
-                if e - b + 1 < cfg.min_group_bins:
-                    for k in range(b, e + 1):
-                        bins[k] = None
+                groups.append((b, e))
                 b = e + 1
+            long_bins = {k for g0, g1 in groups if g1 - g0 + 1 >= cfg.min_group_bins for k in range(g0, g1 + 1)}
+            bridged = 0
+            for g0, g1 in groups:
+                if g1 - g0 + 1 >= cfg.min_group_bins:
+                    continue
+                # A short run with the band on both sides of it is part of the
+                # band, its depth off by a jump: dropped, it left a hole the sky
+                # showed through (Paris: two full bins at 187-190 m between runs of
+                # the far bank's planes, a pale slot in the treeline). It stands at
+                # the depths of the band either side, so it cannot fold.
+                if g0 - 1 in long_bins and g1 + 1 in long_bins:
+                    d0, d1 = bins[g0 - 1]["depth"], bins[g1 + 1]["depth"]
+                    for k in range(g0, g1 + 1):
+                        t = (k - (g0 - 1)) / float(g1 + 1 - (g0 - 1))
+                        bins[k]["depth"] = d0 + (d1 - d0) * t
+                    bridged += g1 - g0 + 1
+                    continue
+                for k in range(g0, g1 + 1):
+                    bins[k] = None
+            if bridged:
+                self.log_info(f"Treeline backdrop: {bridged} bin(s) between runs of the band kept at the band's depth")
         found = [b for b in bins if b is not None]
         if len(found) < cfg.min_bins:
             self.log_info(
@@ -303,6 +356,28 @@ class TreelineBackdropStage(PipelineStage):
             self.finish_progress(task)
             return context
 
+        # The canopy's base stands where the run test ended it, a degree or two
+        # over the ground under it at that distance (the lift logged above), and
+        # nothing between the two draws: Far Field Backdrop leaves the treeline's
+        # pixels to it, and the terrain stops at the grid's edge, so a pale bar of
+        # sky ran under the far bank's trees all round Paris. Each quad reaches
+        # down to its ground line, carrying the panorama's pixels there.
+        ground_row = {}
+        if ground is not None and cfg.ground_reach_deg > 0:
+            reach_rows = cfg.ground_reach_deg / 180.0 * H
+            for b, entry in enumerate(bins):
+                if entry is None:
+                    continue
+                lon = (0.5 * (entry["c0"] + entry["c1"]) / W - 0.5) * 2.0 * math.pi
+                base_lat = (H / 2.0 - entry["bottom"]) * row_angle
+                horiz = entry["depth"] * math.cos(base_lat)
+                g_lat = math.atan2(ground(horiz * math.sin(lon), horiz * math.cos(lon)), horiz)
+                g_row = H / 2.0 - g_lat / row_angle
+                if entry["bottom"] < g_row <= entry["bottom"] + reach_rows:
+                    ground_row[b] = g_row
+                    entry["bottom"] = float(g_row)
+            if ground_row:
+                self.log_info(f"Treeline backdrop: {len(ground_row)} quad(s) carried down to the ground under them")
         row_min = int(max(0, math.floor(min(b["top"] for b in found)) - 4))
         row_max = int(min(H - 1, math.ceil(max(b["bottom"] for b in found)) + 4))
         strip_h = row_max - row_min + 1
@@ -320,11 +395,24 @@ class TreelineBackdropStage(PipelineStage):
         canopy_luma = float(rgb[vegetation].reshape(-1, 3).astype(np.float64).mean()) if vegetation.any() else 0.0
         rgb = rgb[row_min:row_max + 1]
         alpha = np.zeros((strip_h, W), dtype=np.float32)
+        # Only the columns a quad stands in: the canopy of a dropped bin is not
+        # drawn here, and the mask below tells Far Field Backdrop what is, or the
+        # shell leaves those pixels off too and the sky shows through both.
+        drawn = np.zeros(W, dtype=bool)
+        for entry in found:
+            drawn[entry["c0"]:entry["c1"]] = True
         for c in range(W):
-            if top[c] >= 0:
+            if top[c] >= 0 and drawn[c]:
                 alpha[top[c] - row_min:bottom[c] - row_min + 1, c] = 1.0
         alpha *= vegetation[row_min:row_max + 1].astype(np.float32)
         alpha = self._drop_fragments(alpha, rgb, canopy_luma)
+        for b, g_row in ground_row.items():
+            entry = bins[b]
+            for c in range(entry["c0"], entry["c1"]):
+                col = alpha[:, c]
+                lit = np.flatnonzero(col > 0.5)
+                if lit.size:
+                    col[lit[-1]:min(strip_h, int(math.ceil(g_row)) - row_min + 1)] = 1.0
         if cfg.feather_px > 0:
             alpha = gaussian_filter(alpha, sigma=cfg.feather_px)
         # At the photograph's resolution where it was photographed (see
@@ -513,13 +601,30 @@ class TreelineBackdropStage(PipelineStage):
             if e - c < gap_px and c > 0 and e < W:
                 filled[c:e] = 0.5 * (h[c - 1] + h[e])
             c = e
+        # The envelope rises from each gap as a rounded shoulder, the outline of a
+        # crown seen side-on, not a straight ramp: at a fixed slope every band end
+        # was a 45-degree cut through the canopy, read as a wedge (Paris's banks
+        # outside the photograph). `slope` sets how far from the gap the shoulder
+        # starts: a column d columns in may stand sqrt(d (2 h - d)) rows of its own
+        # height h, i.e. a quarter circle of radius h / slope.
         tiled = np.concatenate([filled, filled, filled])
-        env = tiled.copy()
         n = tiled.shape[0]
-        for i in range(1, n):
-            env[i] = min(env[i], env[i - 1] + slope)
-        for i in range(n - 2, -1, -1):
-            env[i] = min(env[i], env[i + 1] + slope)
+        gap = tiled <= 0
+        dist = np.full(n, np.inf)
+        last = -np.inf
+        for i in range(n):
+            if gap[i]:
+                last = i
+            dist[i] = i - last
+        last = np.inf
+        for i in range(n - 1, -1, -1):
+            if gap[i]:
+                last = i
+            dist[i] = min(dist[i], last - i)
+        radius = tiled / max(slope, 1e-6)
+        d = np.minimum(dist * 1.0, radius)
+        env = np.where(dist >= radius, np.inf,
+                       slope * np.sqrt(np.clip(d * (2.0 * radius - d), 0.0, None)))
         env = env[W:2 * W]
         new_h = np.minimum(h, env)
         lowered = have & (new_h < h - 0.5)

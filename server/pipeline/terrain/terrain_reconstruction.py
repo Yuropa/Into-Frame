@@ -817,6 +817,26 @@ class TerrainReconstructionStage(PipelineStage):
                 else:
                     plan_water = None
 
+        # ── Land the river course made of outpainted water ───────────────────
+        # Region Map gave it the photographed banks' profile up to the height of the
+        # land beside it. Left free, the solve interpolated it between the pinned
+        # water plane and that land: on Paris a grey ramp from the quays down into
+        # the river where the outpainter had drawn a bay. Held where the plan put it.
+        converted = None
+        conv_depth = context.input_depth("terrain_plan_converted")
+        if conv_depth is not None:
+            conv = np.asarray(conv_depth.depth, dtype=np.float32)
+            if conv.shape != (H, W):
+                conv = nd_zoom(conv, (H / conv.shape[0], W / conv.shape[1]), order=0)
+            converted = (conv > 0.5) & np.isfinite(heightmap)
+            if converted.any():
+                conv_s = TerrainReconstructionStage._downsample_observed_max(converted, H_s, W_s)
+                fixed_mask[conv_s] = True
+                fixed_elev[conv_s] = hm_s[conv_s]
+                self.log_info(f"River course banks: {int(conv_s.sum())} solve node(s) held at the planned bank heights")
+            else:
+                converted = None
+
         self.log_info(
             f"Terrain reconstruction: {n_rivers} river(s), {n_water} water chain(s); "
             f"{int(fixed_mask.sum())} / {H_s * W_s} nodes fixed"
@@ -1062,6 +1082,9 @@ class TerrainReconstructionStage(PipelineStage):
                 f"Planned water: {int(plan_water.sum())} cell(s) ({water_area_m2:.0f} m2) set to the plane {y_w:+.2f} m; "
                 f"{sunk_n} land cell(s) within {band_m:.0f} m raised to {bank_y:+.2f} m"
             )
+        if converted is not None:
+            # At full resolution, after everything above: the quay's step stays a step.
+            new_hm[converted] = heightmap[converted]
 
         context.add_depth(ContextKey.HEIGHT_MAP, Depth(new_hm))
 

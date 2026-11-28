@@ -454,6 +454,19 @@ class TerrainNoiseRefinementStage(PipelineStage):
                 f"toward measured elevation"
             )
 
+        # Land the river course made of outpainted water keeps the bank Terrain
+        # Reconstruction handed on: road grading and erosion run over it as over any
+        # land, and on Paris they graded the new quay's edge down into the river.
+        conv_depth = context.input_depth("terrain_plan_converted")
+        if conv_depth is not None:
+            conv = np.asarray(conv_depth.depth, dtype=np.float32)
+            if conv.shape != terrain.shape:
+                conv = nd_zoom(conv, (terrain.shape[0] / conv.shape[0], terrain.shape[1] / conv.shape[1]), order=0)
+            held = (conv > 0.5) & np.isfinite(original_terrain)
+            if held.any():
+                terrain = np.where(held, original_terrain, terrain)
+                self.log_info(f"River course banks: {int(held.sum())} cell(s) kept at their planned heights")
+
         # After the observed-cell restore above: the measured heights under a lake are
         # the reflection's, and restoring them would tilt the lake again.
         region_depth = context.input_depth(ContextKey.REGION_MAP)

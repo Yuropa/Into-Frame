@@ -2788,6 +2788,20 @@ stages:
                                  # and default alike). Raise toward 1.0 for a windier
                                  # scene; lower for stiller air.
 
+  - name: Scene Motion
+    stage: SceneMotionStage
+    # How the built scene moves at runtime (pipeline/scene_motion): the water's flow field
+    # (a river's current along its course, a sea's swell toward the shore) as a flow map,
+    # boats underway along the current's lines and every boat bobbing, each kind of plant's
+    # sway, wind and cloud drift. Directions and speeds from the video's measurements and
+    # the Motion Director's reading of the photograph, held to physical ranges; the
+    # geometry says where. Played by the client and by render-scene.py --animate.
+    river_speed_m_s: 0.6        # mid-channel current when nothing says otherwise
+    boat_speed_range_m_s: [1.0, 5.0]
+    path_length_m: 800.0        # how far along the river an underway boat's course is traced
+    director_model: anthropic:claude-sonnet-5-5
+    director_max_usd: 0.3
+
   - name: Scene Graph
     stage: SceneGraphStage
     # The run's whole representation as one self-contained page (Scene Graph/scene_graph.html:

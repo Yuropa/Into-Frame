@@ -162,6 +162,12 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         # photographed. 0 turns the rule off.
         keep_small_fraction: float = 0.0,
         keep_small_max_deg: float = 5.0,
+        # Things that move are never left painted in: a boat kept in the plate cannot
+        # sail (Paris's moored barges and the tour boats up the river stayed pictures on
+        # the water). The small-and-far rule above passes them over; past the depth
+        # map's far clamp they stay, as there is no ground out there to stand them on.
+        keep_small_exempt_classes: tuple = ("boat", "ship", "car", "truck", "bus", "bicycle", "motorcycle",
+                                            "animal", "bird", "horse", "cow", "sheep", "dog"),
         # See _FOREGROUND_LANDFORM_CATEGORIES; 0 leaves every rock in the plate.
         landform_min_height_deg: float = 1.0,
         **kwargs,
@@ -172,6 +178,7 @@ class PanoramaForegroundInpaintingConfiguration(PipelineStageConfiguration):
         self.far_depth_fraction = float(far_depth_fraction)
         self.keep_small_fraction = float(keep_small_fraction)
         self.keep_small_max_deg = float(keep_small_max_deg)
+        self.keep_small_exempt_classes = frozenset(str(c) for c in (keep_small_exempt_classes or ()))
         self.remove_near_field = bool(remove_near_field)
         self.foreground_distance_m = foreground_distance_m
         self.min_region_area_px = min_region_area_px
@@ -466,7 +473,8 @@ class PanoramaForegroundInpaintingStage(PipelineStage):
                     # Not a rock: left in the plate it is a bump in the height
                     # map and a flat picture of itself on the water.
                     small = (small_depth is not None and h * 180.0 / pano_h < self.config.keep_small_max_deg
-                             and object_class not in _FOREGROUND_LANDFORM_CATEGORIES)
+                             and object_class not in _FOREGROUND_LANDFORM_CATEGORIES
+                             and object_class not in self.config.keep_small_exempt_classes)
                     if d.size and float(np.median(d)) >= (small_depth if small else far_depth):
                         self._kept_far.append(idx)
                         self._kept_names.append(str(metadata.get("name") or object_class))

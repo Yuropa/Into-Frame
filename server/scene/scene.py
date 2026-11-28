@@ -23,6 +23,9 @@ class Scene:
         # Haze for the client's fog (pipeline/lighting/exposure_fit.py): the plan's
         # haze distances and the skybox's own horizon colour.
         self.atmosphere = None  # Optional[dict]
+        # Runtime motion (pipeline/scene_motion): wind, the water's flow map, the
+        # sky's drift and each kind of plant's sway. Objects carry their own.
+        self.motion = None  # Optional[dict]
 
     def add_object(self, object: Object3D):
         self.objects.append(object)
@@ -44,6 +47,7 @@ class Scene:
             "lighting":       self.lighting.encode() if self.lighting is not None else None,
             "grassField":     self.grass_field,
             "atmosphere":     self.atmosphere,
+            "motion":         self.motion,
         }
 
     @classmethod
@@ -66,4 +70,5 @@ class Scene:
         obj.lighting        = SceneLighting.decode(lighting_data) if lighting_data else None
         obj.grass_field     = data.get("grassField")
         obj.atmosphere      = data.get("atmosphere")
+        obj.motion          = data.get("motion")
         return obj
