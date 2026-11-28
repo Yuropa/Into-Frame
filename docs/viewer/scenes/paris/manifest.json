@@ -3,8 +3,8 @@
  "name": "Paris",
  "slug": "paris",
  "run": "cdfd38e2-3d2a-8142-cf86-49c45eaf1227",
- "round": "r2",
- "built": "2026-11-27T18:30:20+00:00",
+ "round": "r3",
+ "built": "2026-11-28T02:56:58+00:00",
  "camera": {
   "position": [
    -0.0144,
@@ -23,7 +23,7 @@
   ],
   "fovYDeg": 49.288,
   "aspect": 1.5,
-  "eyeHeightM": 14.021,
+  "eyeHeightM": 13.525,
   "walkRadiusM": 3.0
  },
  "sky": {
@@ -34,23 +34,25 @@
  "env": "env.glb",
  "water": "water.glb",
  "models": {
+  "category_mesh_tree_0": "models/category_mesh_tree_0.glb",
+  "category_mesh_boat_0": "models/category_mesh_boat_0.glb",
+  "category_mesh_tree_2": "models/category_mesh_tree_2.glb",
+  "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb",
+  "category_mesh_tree_1_v1": "models/category_mesh_tree_1_v1.glb",
   "structure_pullman_hotel_block": "models/structure_pullman_hotel_block.glb",
   "category_mesh_tree_1": "models/category_mesh_tree_1.glb",
-  "category_mesh_tree_2": "models/category_mesh_tree_2.glb",
   "category_mesh_boat_1": "models/category_mesh_boat_1.glb",
-  "landmark_card_6": "models/landmark_card_6.glb",
   "category_mesh_tree_5_v1": "models/category_mesh_tree_5_v1.glb",
-  "category_mesh_boat_0": "models/category_mesh_boat_0.glb",
-  "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb",
-  "category_mesh_tree_1_v1": "models/category_mesh_tree_1_v1.glb",
-  "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb"
+  "landmark_card_6": "models/landmark_card_6.glb",
+  "category_mesh_tree_3": "models/category_mesh_tree_3.glb",
+  "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb"
  },
  "instances": "instances.json",
  "motion": {
   "wind": {
    "dir": [
-    0.836674,
-    0.547702
+    0.690029,
+    0.723782
    ],
    "speedMs": 2.36,
    "gustiness": 0.2
@@ -63,45 +65,50 @@
   },
   "vegetation": {
    "category_mesh_tree_5": {
-    "amplitudeRad": 0.03491,
-    "frequencyHz": 0.5,
-    "heightM": 8.54
+    "amplitudeRad": 0.05236,
+    "frequencyHz": 0.45,
+    "heightM": 7.83
    },
    "category_mesh_tree_2": {
-    "amplitudeRad": 0.03491,
-    "frequencyHz": 0.5,
-    "heightM": 12.56
+    "amplitudeRad": 0.05236,
+    "frequencyHz": 0.45,
+    "heightM": 12.35
    },
    "category_mesh_tree_1": {
-    "amplitudeRad": 0.04363,
-    "frequencyHz": 0.5,
-    "heightM": 8.76
+    "amplitudeRad": 0.05236,
+    "frequencyHz": 0.45,
+    "heightM": 6.49
    },
    "category_mesh_tree_0": {
-    "amplitudeRad": 0.06981,
-    "frequencyHz": 0.4,
-    "heightM": 9.48
+    "amplitudeRad": 0.05236,
+    "frequencyHz": 0.45,
+    "heightM": 8.53
+   },
+   "category_mesh_tree_3": {
+    "amplitudeRad": 0.05236,
+    "frequencyHz": 0.45,
+    "heightM": 17.2
    }
   }
  },
  "light": {
   "sunDir": [
-   -0.539108,
-   0.81915,
-   -0.195846
+   -0.756097,
+   0.59221,
+   -0.278576
   ],
   "sunColor": [
    1.0,
-   0.9961,
-   1.0
+   0.9725,
+   0.9412
   ],
-  "sunIntensity": 2.344,
+  "sunIntensity": 0.216,
   "ambient": [
-   0.48504,
-   0.55818,
-   0.57599
+   1.62762,
+   1.71943,
+   1.78691
   ],
   "exposure": 1.0
  },
- "bytes": 38899578
+ "bytes": 37217220
 }

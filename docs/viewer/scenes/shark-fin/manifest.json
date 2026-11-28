@@ -3,8 +3,8 @@
  "name": "Shark Fin",
  "slug": "shark-fin",
  "run": "46158b35-a9ff-28fe-b8fc-968492bc78d1",
- "round": "r2",
- "built": "2026-11-27T18:30:35+00:00",
+ "round": "r3",
+ "built": "2026-11-28T03:00:05+00:00",
  "camera": {
   "position": [
    -0.0056,
@@ -23,7 +23,7 @@
   ],
   "fovYDeg": 63.74,
   "aspect": 1.5,
-  "eyeHeightM": 1.696,
+  "eyeHeightM": 2.038,
   "walkRadiusM": 3.0
  },
  "sky": {
@@ -50,7 +50,7 @@
   "water": {
    "kind": "sea",
    "flowPeriodS": 2.0,
-   "waveSpeedMs": 3.06,
+   "waveSpeedMs": 3.0,
    "swellPeriodS": 9.0
   },
   "vegetation": {}
@@ -66,13 +66,13 @@
    0.2549,
    0.0118
   ],
-  "sunIntensity": 0.78,
+  "sunIntensity": 0.96,
   "ambient": [
-   1.0257,
-   0.97769,
-   0.99828
+   1.05197,
+   0.97147,
+   1.02435
   ],
   "exposure": 1.0
  },
- "bytes": 25358952
+ "bytes": 25445545
 }
