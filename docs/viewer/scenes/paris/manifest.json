@@ -3,8 +3,8 @@
  "name": "Paris",
  "slug": "paris",
  "run": "cdfd38e2-3d2a-8142-cf86-49c45eaf1227",
- "round": "r3",
- "built": "2026-11-28T02:56:58+00:00",
+ "round": "r4",
+ "built": "2026-11-28T03:28:50+00:00",
  "camera": {
   "position": [
    -0.0144,
@@ -29,30 +29,30 @@
  "sky": {
   "image": "sky.jpg",
   "yawDeg": -0.03443102230376151,
-  "driftDegS": -0.015
+  "driftDegS": 0.08
  },
  "env": "env.glb",
  "water": "water.glb",
  "models": {
-  "category_mesh_tree_0": "models/category_mesh_tree_0.glb",
+  "category_mesh_tree_1_v1": "models/category_mesh_tree_1_v1.glb",
+  "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb",
   "category_mesh_boat_0": "models/category_mesh_boat_0.glb",
   "category_mesh_tree_2": "models/category_mesh_tree_2.glb",
-  "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb",
-  "category_mesh_tree_1_v1": "models/category_mesh_tree_1_v1.glb",
+  "category_mesh_tree_0": "models/category_mesh_tree_0.glb",
   "structure_pullman_hotel_block": "models/structure_pullman_hotel_block.glb",
+  "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb",
   "category_mesh_tree_1": "models/category_mesh_tree_1.glb",
-  "category_mesh_boat_1": "models/category_mesh_boat_1.glb",
-  "category_mesh_tree_5_v1": "models/category_mesh_tree_5_v1.glb",
   "landmark_card_6": "models/landmark_card_6.glb",
+  "category_mesh_boat_1": "models/category_mesh_boat_1.glb",
   "category_mesh_tree_3": "models/category_mesh_tree_3.glb",
-  "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb"
+  "category_mesh_tree_5_v1": "models/category_mesh_tree_5_v1.glb"
  },
  "instances": "instances.json",
  "motion": {
   "wind": {
    "dir": [
-    0.690029,
-    0.723782
+    -1.0,
+    0.000601
    ],
    "speedMs": 2.36,
    "gustiness": 0.2
@@ -65,28 +65,28 @@
   },
   "vegetation": {
    "category_mesh_tree_5": {
-    "amplitudeRad": 0.05236,
-    "frequencyHz": 0.45,
+    "amplitudeRad": 0.08046,
+    "frequencyHz": 0.4,
     "heightM": 7.83
    },
    "category_mesh_tree_2": {
-    "amplitudeRad": 0.05236,
-    "frequencyHz": 0.45,
+    "amplitudeRad": 0.04835,
+    "frequencyHz": 0.5,
     "heightM": 12.35
    },
    "category_mesh_tree_1": {
-    "amplitudeRad": 0.05236,
-    "frequencyHz": 0.45,
+    "amplitudeRad": 0.05637,
+    "frequencyHz": 0.6,
     "heightM": 6.49
    },
    "category_mesh_tree_0": {
-    "amplitudeRad": 0.05236,
-    "frequencyHz": 0.45,
+    "amplitudeRad": 0.05637,
+    "frequencyHz": 0.55,
     "heightM": 8.53
    },
    "category_mesh_tree_3": {
-    "amplitudeRad": 0.05236,
-    "frequencyHz": 0.45,
+    "amplitudeRad": 0.04032,
+    "frequencyHz": 0.4,
     "heightM": 17.2
    }
   }
@@ -110,5 +110,5 @@
   ],
   "exposure": 1.0
  },
- "bytes": 37217220
+ "bytes": 36196217
 }

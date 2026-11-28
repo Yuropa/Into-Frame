@@ -14,6 +14,7 @@ render-scene shows. Everything is in the GL frame render-scene draws in (X negat
 from __future__ import annotations
 
 import argparse
+import os
 import datetime
 import importlib.util
 import io
@@ -34,11 +35,8 @@ sys.path.insert(0, str(ROOT / "server"))
 
 
 def _renderer():
-    """render-scene.py as a module: the staged copy (scratch/r3/next) while there is one --
-    it runs ahead of the installed script -- the installed one otherwise."""
-    path = ROOT / "scratch" / "r3" / "next" / "render-scene.py"
-    if not path.is_file():
-        path = ROOT / "scripts" / "render-scene.py"
+    """render-scene.py as a module (RENDER_SCENE names another copy, for a staged one)."""
+    path = Path(os.environ.get("RENDER_SCENE") or ROOT / "scripts" / "render-scene.py")
     spec = importlib.util.spec_from_file_location("render_scene", path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules["render_scene"] = mod
@@ -395,6 +393,9 @@ def main() -> int:
             if mm.get("bob"):
                 mm["bob"]["rollDeg"] = -float(mm["bob"].get("rollDeg", 0.0))
             mm.pop("why", None)
+            # The hull's size for its wake (water.glsl).
+            mm["lengthM"] = round(float(mm.pop("_length", 10.0)), 2)
+            mm["beamM"] = round(float(mm.pop("_beam", 3.0)), 2)
             movers.append({"key": key, "base": {"position": [-mpos[0], mpos[1], mpos[2]],
                                                 "rotationDeg": [mrot[0], -mrot[1], -mrot[2]], "scale": list(mscl)},
                            "motion": mm})
@@ -424,17 +425,14 @@ def main() -> int:
         if kind == "water" and (prim.texcoord_1 is not None or "water" in env_counts.get(len(prim.positions), [])) and water is None:
             water = GLB(args.max_texture)
             extra = {}
-            if prim.texcoord_1 is not None:
-                # v runs the other way in glTF (see _attrs), so does its velocity.
-                extra["_FLOW"] = water.accessor(np.asarray(prim.texcoord_1, dtype=np.float32) * np.array([1.0, -1.0], dtype=np.float32), "VEC2")
-            if prim.texcoord_1 is not None and prim.color_0 is not None:
-                extra["_SHORE"] = water.accessor(np.asarray(prim.color_0, dtype=np.float32)[:, 0] * 400.0, "SCALAR")
             wk = (motion.get("water") or {}).get("kind") or "river"
             ip = _indexed(prim, keep_normals=False)
-            if extra:      # the welded vertices' own flow and shore distance
-                extra = {"_FLOW": water.accessor(np.asarray(ip.texcoord_1, dtype=np.float32) * np.array([1.0, -1.0], dtype=np.float32), "VEC2")}
-                if ip.color_0 is not None:
-                    extra["_SHORE"] = water.accessor(np.asarray(ip.color_0, dtype=np.float32)[:, 0] * 400.0, "SCALAR")
+            if ip.color_0 is not None and ip.texcoord_1 is not None:
+                # The welded vertices' distance to the shore (m) and current (m/s, the
+                # bundle's x and z), as render-scene packs them in COLOR_0 for water.glsl.
+                c0 = np.asarray(ip.color_0, dtype=np.float32)
+                extra = {"_SHORE": water.accessor(c0[:, 0] * 400.0, "SCALAR"),
+                         "_CURRENT": water.accessor(np.ascontiguousarray((c0[:, 1:3] - 0.5) * 4.0), "VEC2")}
             water.node(water.mesh(_attrs(water, ip, extra=extra, normals=False), ip.indices,
                                   water.material(_mat_desc(prim.material, max_size=args.env_texture)), "water"),
                        "water", pose, {"role": "water", "kind": wk})

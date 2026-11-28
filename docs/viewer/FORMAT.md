@@ -93,22 +93,23 @@ carried out under the discarded texels, so filtering and mipmaps do not draw a d
 The water sheet (one node, `extras: {"role": "water", "kind": "river" | "sea"}`), unlit, its
 texture the photographed water. Attributes beyond POSITION / NORMAL / TEXCOORD_0:
 
-- `_FLOW` (VEC2 float): the flow's velocity **in TEXCOORD_0 units per second**.
-- `_SHORE` (SCALAR float): metres from the vertex to the nearest shore.
+- `_CURRENT` (VEC2 float): the current in m/s (x, z of the bundle's frame); at sea the swell's
+  direction toward the shore at a slow drift (0.15 of the field's unit speed).
+- `_SHORE` (SCALAR float): metres from the vertex to the nearest dry ground.
 
-A viewer animating it does what render-scene's shader does (period P = `motion.water.flowPeriodS`):
+A viewer animating it runs `docs/viewer/water.glsl`, the same code render-scene's shader runs:
+it defines `water_colour(uv, worldPos, cameraPos, current, shore, isSea, t, wind, surf, boatA,
+boatB, sunDir, sunColour)` given a host function `vec3 water_tex(vec2 uv, float mipBias)` that
+samples the water's texture in linear RGB. `wind` = (dir.x, dir.z, speedMs, 25); `surf` =
+(`motion.water.waveSpeedMs`, `swellPeriodS`); `boatA` / `boatB` are mat4s whose column i is
+the i-th boat underway (up to four): (x, z, heading x, heading z) and (`lengthM`, `beamM`,
+`speedMs`, 1), zero for none. The photograph stays put; the shader lays a moving surface over
+it (current-borne ripples, wind waves, the swell and surf at sea, the boats' wakes and bow
+waves). The texture has the photographed wakes of the boats underway already painted out.
 
-```
-p0 = fract(t / P); p1 = fract(t / P + 0.5)
-a = tex(uv - flow * (p0 - 0.5) * P); b = tex(uv - flow * (p1 - 0.5) * P)
-c = mix(b, a, 1 - |2 p0 - 1|)
-sea only (surf): wavelength = waveSpeedMs * swellPeriodS
-  ph = 2 pi (shore / wavelength + t / swellPeriodS); crest = (0.5 + 0.5 sin ph)^8
-  zone = smoothstep(70, 4, shore); swash = smoothstep(6, 0, shore) (0.5 + 0.5 sin(ph - 1.2))
-  c = mix(c, vec3(0.85, 0.87, 0.9) * max(luma(c) * 2.2, 0.35), clamp(crest zone 0.75 + swash 0.35, 0, 0.85))
-```
-
-Both attributes are absent when the scene has no flow field.
+Both attributes are absent when the scene has no flow field (bundles before round 4 carried
+`_FLOW`, the flow in uv per second, instead of `_CURRENT`; a viewer treats a missing `_CURRENT`
+as still water).
 
 ## models/<key>.glb
 
@@ -141,7 +142,11 @@ f = clamp(h / heightM, 0, 1.5); s = dot(origin.xz, wind.dir)
 gust = 1 - g + g (0.5 + 0.5 sin(2 pi (s - wind.speedMs t) / 25))         // g = wind.gustiness
 osc = sin(2 pi frequencyHz t + hashPhase(origin.xz))
 bend = amplitudeRad gust (0.45 + 0.55 osc)
-off = wind.dir * bend * f^2 * heightM;  p.xz += off;  p.y -= 0.5 |off|^2 / max(h, 0.1)
+off = wind.dir * bend * f^2 * heightM
+flutter (leaves, across the wind, per vertex): lp = hashPhase(vertex position)
+  off += perp(wind.dir) * amplitudeRad 0.22 gust f^2 heightM
+         * sin(2 pi 3.1 frequencyHz t + lp) (0.6 + 0.4 sin(2 pi 0.7 frequencyHz t + 1.7 lp))
+p.xz += off;  p.y -= 0.5 |off|^2 / max(h, 0.1)
 ```
 
 **Movers** are posed each frame from `base` and `motion`. The pose's matrix is
@@ -149,8 +154,9 @@ off = wind.dir * bend * f^2 * heightM;  p.xz += off;  p.y -= 0.5 |off|^2 / max(h
 Euler order `'YXZ'`), all in the GL frame (the server's yaw and roll are negated). `motion`:
 
 - `{"type": "floating_moored", "bob": B}`: position and rotation stay at `base`, plus the bob.
-- `{"type": "floating_underway", "speedMs", "path": [[x, z], ...] (GL frame), "yawOffsetDeg", "bob": B}`:
-  the boat is at arc length `min(speedMs t, path length)` along `path`; its yaw is
+- `{"type": "floating_underway", "speedMs", "path": [[x, z], ...] (GL frame), "yawOffsetDeg", "bob": B,
+  "lengthM", "beamM"}`: the boat is at arc length `min(speedMs t, path length)` along `path`
+  (the viewer sails it again after a 20 s pause; render-scene's clips are shorter); its yaw is
   `degrees(atan2(tangent.x, tangent.z)) + yawOffsetDeg` (both in the GL frame), its y `base.y`.
 - The bob `B = {"heaveM", "rollDeg", "pitchDeg", "periodS", "phase"}` with `w = 2 pi / periodS`:
   `y += heaveM sin(w t + phase)`, `rotation.z += rollDeg sin(w t + phase + 1.3)`,

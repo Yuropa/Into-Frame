@@ -45,7 +45,9 @@ _STIFFNESS = {
     "herb":      {"amplitude": (4.0, 20.0), "frequency": (0.6, 2.0), "default": (9.0, 1.1)},
     "grass":     {"amplitude": (5.0, 25.0), "frequency": (0.8, 2.5), "default": (12.0, 1.4)},
 }
-_CLOUD_SPEED = {"still": 0.0, "slow": 0.015, "moderate": 0.04, "fast": 0.1}   # degrees of sky per second
+# Degrees of sky per second: clouds 1.5-4 km off moving at 5-20 m/s cross 0.1-0.4 deg/s
+# (0.015, the old "slow", was 0.15 deg in a 10 s clip: still to the eye).
+_CLOUD_SPEED = {"still": 0.03, "slow": 0.08, "moderate": 0.15, "fast": 0.3}
 
 
 def _clamp(v, lo, hi, default):
@@ -264,7 +266,7 @@ class SceneMotionStage(PipelineStage):
         clouds = reading.get("clouds") or {}
         cdir = world_dir(str(clouds.get("drift_toward"))) if clouds else None
         cdir = wdir if cdir is None else cdir
-        motion["sky"] = {"directionDeg": yaw_of(cdir), "angularSpeedDegS": _CLOUD_SPEED.get(str(clouds.get("speed")), 0.015)}
+        motion["sky"] = {"directionDeg": yaw_of(cdir), "angularSpeedDegS": _CLOUD_SPEED.get(str(clouds.get("speed")), _CLOUD_SPEED["slow"])}
 
         # ── boats ───────────────────────────────────────────────────────────
         said = {int(b.get("id", -1)): b for b in (reading.get("boats") or []) if isinstance(b, dict)}
@@ -306,6 +308,15 @@ class SceneMotionStage(PipelineStage):
                     berth = self._berth(o, context.input_mesh(o.mesh), flow, bank, water_y)
                     if berth:
                         self.log_info(f"  {o.name} (#{o.source_index}): moored {berth}")
+                        # Exposure Fit measured the model's own colour gain on the pixels it
+                        # covered where it stood; moved or turned, those are other pixels
+                        # (Paris's houseboat took the quay's blue-less gain onto the water
+                        # and rendered as a yellow ghost).
+                        fit = getattr(scene.lighting, "fit", None) if scene.lighting is not None else None
+                        gains = fit.get("object_gains") if isinstance(fit, dict) else None
+                        if isinstance(gains, dict) and o.mesh in gains:
+                            gains.pop(o.mesh)
+                            self.log_info(f"  {o.name}: its own colour gain dropped (measured before the berth)")
                 moored += 1
                 self.log_info(f"  {o.name} (#{o.source_index}, {L:.0f} m): {role if role != 'underway' else 'afloat'}, bobbing")
             o.motion = entry
@@ -318,10 +329,22 @@ class SceneMotionStage(PipelineStage):
             stiff = str(r.get("stiffness") or ("conifer" if "conifer" in str(p["name"]).lower() or "fir" in str(p["name"]).lower()
                                                else "broadleaf" if p["class"] == "tree" else "herb"))
             rng = _STIFFNESS.get(stiff, _STIFFNESS["herb"])
+            # The bend grows with the wind (a stem's drag goes with the wind speed squared,
+            # its bend about linearly over this range): the stiffness class's own default
+            # is for a light breeze, ~3 m/s. Near the ground there is nearly always some air
+            # moving (a calm reading still sways a meadow a little): 2 m/s at least.
+            gain = _clamp(0.45 + max(wind_speed, 2.0) / 5.0, 0.5, 1.6, 1.0)
+            amp = _clamp(r.get("amplitude_deg"), *rng["amplitude"], rng["default"][0])
             veg[k] = {"stiffness": stiff,
-                      "amplitudeDeg": round(_clamp(r.get("amplitude_deg"), *rng["amplitude"], rng["default"][0]), 2),
+                      "amplitudeDeg": round(_clamp(amp * gain, *rng["amplitude"], amp), 2),
                       "frequencyHz": round(_clamp(r.get("frequency_hz"), *rng["frequency"], rng["default"][1]), 3),
                       "heightM": round(p["height_m"], 2)}
+        if getattr(scene, "grass_field", None):
+            # The grass field (one merged field of blades, no kind of its own): grass's class.
+            rng = _STIFFNESS["grass"]
+            gain = _clamp(0.45 + max(wind_speed, 2.0) / 5.0, 0.5, 1.6, 1.0)
+            veg["grass_field"] = {"stiffness": "grass", "amplitudeDeg": round(_clamp(rng["default"][0] * gain, *rng["amplitude"], rng["default"][0]), 2),
+                                  "frequencyHz": rng["default"][1], "heightM": 0.0}
         if veg:
             motion["vegetation"] = veg
         scene.motion = motion

@@ -121,44 +121,39 @@ def cutout_shader_dir() -> str:
         text = text.replace(brdf, brdf + "\n        if (veg) { res = c_diff * radiance * clamp(dot(n, l) * 0.5 + 0.5, 0.0, 1.0); }")
     else:
         print("warning: pyrender's mesh.frag changed; the vegetation wrap-lighting patch did not apply", flush=True)
-    # Water carried along its flow (--animate): the photographed water is sampled twice,
-    # each copy advected by the flow's velocity in UV (TEXCOORD_1) over a cycle half a
-    # period apart from the other, and the two cross-faded so neither is seen when it
-    # jumps back (the usual flow-map trick: the texture moves, never stretches).
-    # Flagged by an emissive blue a hair over 1 (material_for's unlit factor is 1).
+    # Water in motion (--animate): docs/viewer/water.glsl, the same code the web viewer runs.
+    # The photographed water stays put and a moving surface is laid over it (current-borne
+    # ripples, wind waves, the swell and its surf at sea, the boats' wakes). Flagged by an
+    # emissive blue a hair over 1 (material_for's unlit factor is 1): 1.0004 a river or
+    # lake, 1.0009 the sea. Its COLOR_0 carries data, not a tint: r the distance to the
+    # shore / 400 m, g and b the current in m/s (world x, z) / 4 + 0.5.
     emis = "    emissive *= srgb_to_linear(texture(material.emissive_texture, uv_0)).rgb;"
-    if emis in text:
-        text = text.replace("uniform vec3 ambient_light;", "uniform vec3 ambient_light;\nuniform float anim_time;\nuniform float flow_period;\nuniform vec2 surf;")
-        # Flagged water is drawn from its photograph; its COLOR_0 carries data (the
-        # distance to the shore for the surf), not a tint.
+    if emis in text and "void main()" in text:
+        text = text.replace("uniform vec3 ambient_light;", "uniform vec3 ambient_light;\nuniform float anim_time;\nuniform float flow_period;\n"
+                            "uniform vec2 surf;\nuniform vec4 wind;\nuniform mat4 boat_a;\nuniform mat4 boat_b;")
         text = text.replace("    color *= color_multiplier;", "    if (!(material.emissive_factor.b > 1.0002 && material.emissive_factor.b < 1.0012)) color *= color_multiplier;")
-        text = text.replace(emis, "#ifdef TEXCOORD_1_LOC\n"
+        glsl = (ROOT / "docs" / "viewer" / "water.glsl").read_text()
+        text = text.replace("void main()", "#ifdef HAS_EMISSIVE_TEX\n"
+                            "vec3 water_tex(vec2 uv, float bias) { return srgb_to_linear(texture(material.emissive_texture, uv, bias)).rgb; }\n"
+                            + glsl + "\n#endif\n\nvoid main()", 1)
+        text = text.replace(emis, "#ifdef COLOR_0_LOC\n"
                             "    if (material.emissive_factor.b > 1.0002 && material.emissive_factor.b < 1.0012) {\n"
-                            "        float p0 = fract(anim_time / flow_period);\n"
-                            "        float p1 = fract(anim_time / flow_period + 0.5);\n"
-                            "        vec3 wa = srgb_to_linear(texture(material.emissive_texture, uv_0 - uv_1 * (p0 - 0.5) * flow_period)).rgb;\n"
-                            "        vec3 wb = srgb_to_linear(texture(material.emissive_texture, uv_0 - uv_1 * (p1 - 0.5) * flow_period)).rgb;\n"
-                            "        emissive *= mix(wb, wa, 1.0 - abs(2.0 * p0 - 1.0));\n"
-                            "#ifdef COLOR_0_LOC\n"
-                            "        if (material.emissive_factor.b > 1.0006) {\n"
-                            "            float shore = color_multiplier.r * 400.0;\n"
-                            "            float wavelength = max(surf.x * surf.y, 1.0);\n"
-                            "            float ph = 6.2831853 * (shore / wavelength + anim_time / max(surf.y, 0.5));\n"
-                            "            float crest = pow(0.5 + 0.5 * sin(ph), 8.0);\n"
-                            "            float zone = smoothstep(70.0, 4.0, shore);\n"
-                            "            float swash = smoothstep(6.0, 0.0, shore) * (0.5 + 0.5 * sin(ph - 1.2));\n"
-                            "            emissive = mix(emissive, vec3(0.85, 0.87, 0.9) * max(dot(emissive, vec3(0.33)) * 2.2, 0.35), clamp(crest * zone * 0.75 + swash * 0.35, 0.0, 0.85));\n"
-                            "        }\n"
-                            "#endif\n"
+                            "        vec3 sun_l = vec3(0.0, 1.0, 0.0);\n"
+                            "        vec3 sun_c = vec3(1.0);\n"
+                            "        if (n_directional_lights > 0) { sun_l = normalize(-directional_lights[0].direction); sun_c = directional_lights[0].color; }\n"
+                            "        emissive *= water_colour(uv_0, frag_position, cam_pos, (color_multiplier.gb - 0.5) * 4.0,\n"
+                            "                                 color_multiplier.r * 400.0, material.emissive_factor.b > 1.0006 ? 1.0 : 0.0,\n"
+                            "                                 anim_time, wind, surf, boat_a, boat_b, sun_l, sun_c);\n"
                             "    } else {\n" + emis + "\n    }\n#else\n" + emis + "\n#endif")
     else:
-        print("warning: pyrender's mesh.frag changed; the water flow patch did not apply", flush=True)
+        print("warning: pyrender's mesh.frag changed; the water animation patch did not apply", flush=True)
     frag.write_text(text)
     # Plants bend in the wind (--animate): every vertex above its instance's origin is
     # pushed downwind by the bend angle times its height (quadratic up the stem, so the
     # base stays put), the angle swinging about a downwind lean at the kind's rate and
     # swelling as gusts run across the scene at the wind's speed; the vertex drops a
-    # little so the stem keeps its length. Off unless the primitive sets sway_on.
+    # little so the stem keeps its length; leaves flutter across the wind on their own
+    # phases on top. Off unless the primitive sets sway_on.
     vert = dst / "mesh.vert"
     vt = vert.read_text()
     vmark = "    gl_Position = P * V * M * inst_m * vec4(position, 1);\n    frag_position = vec3(M * inst_m * vec4(position, 1.0));"
@@ -169,6 +164,17 @@ def cutout_shader_dir() -> str:
         vec4 base = M * inst_m * vec4(0.0, 0.0, 0.0, 1.0);
         float h = max(wp.y - base.y, 0.0);
         float tall = max(sway.z, 0.05);
+#ifdef TEXCOORD_0_LOC
+#ifdef TEXCOORD_1_LOC
+        if (sway_on > 1.5) {
+            // A merged field of blades: each vertex carries its blade's root (TEXCOORD_0,
+            // x z) and its height above it and the blade's height (TEXCOORD_1).
+            base = M * inst_m * vec4(texcoord_0.x, 0.0, texcoord_0.y, 1.0);
+            h = texcoord_1.x;
+            tall = max(texcoord_1.y, 0.03);
+        }
+#endif
+#endif
         float f = clamp(h / tall, 0.0, 1.5);
         float s = dot(base.xz, wind.xy);
         float gust = 1.0 - sway.w + sway.w * (0.5 + 0.5 * sin(6.2831853 * (s - wind.z * anim_time) / max(wind.w, 1.0)));
@@ -176,6 +182,11 @@ def cutout_shader_dir() -> str:
         float osc = sin(6.2831853 * sway.y * anim_time + ph);
         float bend = sway.x * gust * (0.45 + 0.55 * osc);
         vec2 off = wind.xy * bend * f * f * tall;
+        // Leaves and petals flutter across the wind, each on its own phase, faster than
+        // the stem's swing and stronger in the gusts.
+        float lp = fract(sin(dot(position.xz + position.yy, vec2(41.3, 289.1))) * 9871.0) * 6.2831853;
+        float fl = sin(6.2831853 * sway.y * 3.1 * anim_time + lp) * (0.6 + 0.4 * sin(6.2831853 * sway.y * 0.7 * anim_time + lp * 1.7));
+        off += vec2(-wind.y, wind.x) * sway.x * 0.22 * fl * gust * f * f * tall;
         wp.xz += off;
         wp.y -= 0.5 * dot(off, off) / max(h, 0.1);
     }
@@ -189,7 +200,8 @@ def cutout_shader_dir() -> str:
 
 # The animation clock and the per-primitive sway the patched shaders read; set by
 # main() for --animate (anim_time stays 0 and nothing sways otherwise).
-ANIM = {"time": 0.0, "wind": (0.0, 1.0, 2.0, 30.0), "flow_period": 2.0, "surf": (3.0, 10.0)}
+ANIM = {"time": 0.0, "wind": (0.0, 1.0, 2.0, 30.0), "flow_period": 2.0, "surf": (3.0, 10.0),
+        "boat_a": np.zeros((4, 4), dtype=np.float32), "boat_b": np.zeros((4, 4), dtype=np.float32)}
 
 
 def _patch_anim_uniforms() -> None:
@@ -204,9 +216,12 @@ def _patch_anim_uniforms() -> None:
         sw = getattr(primitive, "_sway", None)
         for name, value in (("anim_time", float(ANIM["time"])), ("flow_period", float(ANIM["flow_period"])),
                             ("surf", np.asarray(ANIM["surf"], dtype=np.float32)),
-                            ("sway_on", 1.0 if sw is not None else 0.0),
+                            ("sway_on", float(getattr(primitive, "_sway_mode", 1.0)) if sw is not None else 0.0),
                             ("sway", np.asarray(sw if sw is not None else (0.0, 0.0, 1.0, 0.0), dtype=np.float32)),
-                            ("wind", np.asarray(ANIM["wind"], dtype=np.float32))):
+                            ("wind", np.asarray(ANIM["wind"], dtype=np.float32)),
+                            # Four boats' wakes, one per column (set_uniform transposes).
+                            ("boat_a", np.ascontiguousarray(np.asarray(ANIM["boat_a"], dtype=np.float32).T)),
+                            ("boat_b", np.ascontiguousarray(np.asarray(ANIM["boat_b"], dtype=np.float32).T))):
             try:
                 program.set_uniform(name, value)
             except ValueError:
@@ -726,7 +741,7 @@ class SceneBuilder:
                 self.log(f"  missing mesh {key}")
         return self._trimesh_cache[key]
 
-    def _water_photo(self, key: str, tm: trimesh.Trimesh, colour) -> tuple | None:
+    def _water_photo(self, key: str, tm: trimesh.Trimesh, colour, pose: np.ndarray | None = None) -> tuple | None:
         """The water sheet wearing the photographed water (server:
         pipeline.terrain.water_photo): the mesh's TEXCOORD_1 samples the object-free
         panorama. Its alpha is 1 where the photograph shows water; elsewhere its RGB is
@@ -747,11 +762,101 @@ class SceneBuilder:
             if tex is None:
                 tex = self.image_for("water_photo_texture")
             self._water_photo_tex = tex.convert("RGB") if tex is not None else None
+            if self._water_photo_tex is not None and pose is not None and getattr(self.args, "animate", 0):
+                self._water_photo_tex = self._erase_photographed_wakes(self._water_photo_tex, tm, np.asarray(uv), pose)
         if self._water_photo_tex is None:
             return None
         out = trimesh.Trimesh(vertices=np.asarray(tm.vertices), faces=np.asarray(tm.faces), process=False)
         out.visual = trimesh.visual.TextureVisuals(uv=np.asarray(uv, dtype=np.float64))
         return out, material_for(out, image=self._water_photo_tex, unlit=True, roughness=1.0)
+
+    def _erase_photographed_wakes(self, tex: PILImage.Image, tm: trimesh.Trimesh, uv: np.ndarray, pose: np.ndarray) -> PILImage.Image:
+        """--animate: a boat underway leaves its photographed wake behind as it moves
+        on (the white water behind Paris's tour boat stayed where the photograph has it
+        while the boat sailed off). Where each boat underway lay when photographed --
+        its hull and a wedge behind it, six lengths long -- the photographed water's
+        foam (texels well above the water's own brightness there) is painted over from
+        the water around it; water.glsl draws the wake with the boat."""
+        under = [m for (_n, _p, _r, _s, m) in self.mover_nodes if m.get("type") == "floating_underway" and m.get("path")]
+        if not under:
+            return tex
+        try:
+            import cv2
+            from scipy.interpolate import LinearNDInterpolator
+        except ImportError as exc:
+            self.log(f"  animate: photographed wakes kept ({exc})")
+            return tex
+        arr = np.asarray(tex.convert("RGB"))
+        H, W = arr.shape[:2]
+        # Each texel's place on the water: the sheet's ground plan interpolated over its uv,
+        # at half resolution over the texels the sheet covers.
+        v = (np.c_[np.asarray(tm.vertices), np.ones(len(tm.vertices))] @ pose.T)[:, [0, 2]]
+        px = np.stack([uv[:, 0] * W, (1.0 - uv[:, 1]) * H], axis=-1)
+        _, first = np.unique(np.round(px, 2), axis=0, return_index=True)
+        try:
+            to_world = LinearNDInterpolator(px[first], v[first])
+        except Exception as exc:
+            self.log(f"  animate: photographed wakes kept ({type(exc).__name__}: {exc})")
+            return tex
+        x0, y0 = np.floor(px.min(axis=0)).astype(int).clip(0)
+        x1, y1 = np.ceil(px.max(axis=0)).astype(int)
+        x1, y1 = min(x1, W), min(y1, H)
+        gx, gy = np.meshgrid(np.arange(x0, x1, 2) + 1.0, np.arange(y0, y1, 2) + 1.0)
+        world = to_world(np.stack([gx.ravel(), gy.ravel()], axis=-1))
+        inside = np.zeros(len(world), dtype=bool)
+        for m in under:
+            path = np.asarray(m["path"], dtype=np.float64)
+            h = path[1] - path[0]
+            h /= max(float(np.linalg.norm(h)), 1e-9)
+            L, B = float(m.get("_length", 10.0)), float(m.get("_beam", 3.0))
+            q = world - path[0]
+            s = -(q @ h)                                   # metres behind the boat's centre
+            d = np.abs(q @ np.array([-h[1], h[0]]))
+            inside |= np.isfinite(s) & (s > -0.6 * L) & (s < 6.5 * L) & (d < 0.5 * B + 2.5 + 0.36 * np.maximum(s - 0.5 * L, 0.0))
+        small = inside.reshape(gx.shape).astype(np.uint8)
+        mask = np.zeros((H, W), dtype=np.uint8)
+        mask[y0:y0 + 2 * small.shape[0]:2, x0:x0 + 2 * small.shape[1]:2] = small
+        mask = cv2.dilate(mask, np.ones((3, 3), np.uint8))
+        if not mask.any():
+            return tex
+        # Foam: bright, colourless, and well above the water around it.
+        lum = arr.astype(np.float32) @ np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+        # The water's own level around each texel (a median over ~160 texels, so a patch of
+        # white water does not raise its own reference).
+        small_l = cv2.resize(np.clip(lum, 0, 255).astype(np.uint8), (W // 4, H // 4), interpolation=cv2.INTER_AREA)
+        around = cv2.resize(cv2.medianBlur(small_l, 41), (W, H), interpolation=cv2.INTER_LINEAR).astype(np.float32)
+        sat = arr.max(axis=-1).astype(np.float32) - arr.min(axis=-1).astype(np.float32)
+        # Spray is fine specks: judged on the texels' neighbourhood as well as their own.
+        lum_b = cv2.GaussianBlur(lum, (0, 0), 2.0)
+        foam = ((mask > 0) & ((lum > around + 14.0) | (lum_b > around + 7.0)) & (sat < 0.4 * lum + 10.0)).astype(np.uint8)
+        # White water comes in patches; a ripple's glint is a speck.
+        foam = cv2.morphologyEx(foam, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        n, lab, st, _ = cv2.connectedComponentsWithStats(foam, connectivity=8)
+        keep = np.zeros(n, dtype=bool)
+        keep[1:] = st[1:, cv2.CC_STAT_AREA] >= 15
+        foam = cv2.dilate(keep[lab].astype(np.uint8), np.ones((11, 11), np.uint8))
+        if foam.sum() == 0:
+            return tex
+        # Filled with the water beside it on the same row (the same distance from the
+        # camera, so the same scale of ripple), the nearest shift whose texels are clean;
+        # what no shift reaches is inpainted. The seams are feathered.
+        fill = arr.astype(np.float32).copy()
+        todo = foam > 0
+        for shift in (90, -90, 180, -180, 270, -270, 360, -360):
+            src_bad = np.roll(foam, -shift, axis=1) > 0
+            take = todo & ~src_bad
+            if take.any():
+                fill[take] = np.roll(arr, -shift, axis=1)[take]
+                todo &= ~take
+            if not todo.any():
+                break
+        if todo.any():
+            fill = np.where(todo[..., None], cv2.inpaint(np.ascontiguousarray(arr), todo.astype(np.uint8), 9, cv2.INPAINT_TELEA), fill)
+        wgt = cv2.GaussianBlur(foam.astype(np.float32), (0, 0), 2.0)[..., None]
+        wgt = np.maximum(wgt, foam[..., None].astype(np.float32))
+        out = np.clip(arr.astype(np.float32) * (1.0 - wgt) + fill * wgt, 0, 255).astype(np.uint8)
+        self.log(f"  animate: photographed wake of {len(under)} boat(s) underway painted over ({int(foam.sum())} texels)")
+        return PILImage.fromarray(out, "RGB")
 
     def _water_flow_uv(self, tm: trimesh.Trimesh, pose: np.ndarray) -> np.ndarray | None:
         """The water's flow (Scene Motion's flow field) as a velocity in the photo layer's
@@ -784,6 +889,19 @@ class SceneBuilder:
             flow = flow * 0.15
         return np.einsum("nij,nj->ni", Jv, flow)
 
+    def _water_current(self, tm: trimesh.Trimesh, pose: np.ndarray) -> np.ndarray:
+        """The current at each water vertex in m/s (server x, z): the flow field; at sea
+        the swell's direction at a slow drift (water.glsl takes its direction for the
+        fronts and its speed for the ripples it carries)."""
+        ff = getattr(self, "_flow_field", None)
+        if ff is None:
+            return np.zeros((len(tm.vertices), 2))
+        v = (np.c_[np.asarray(tm.vertices), np.ones(len(tm.vertices))] @ pose.T)[:, [0, 2]]
+        flow = np.asarray(ff.sample(v[:, 0], v[:, 1]), dtype=np.float64)
+        if ((self.scene.get("motion") or {}).get("water") or {}).get("kind") == "sea":
+            flow = flow * 0.15
+        return np.clip(flow, -1.99, 1.99)
+
     def _shore_distance(self, tm: trimesh.Trimesh, pose: np.ndarray) -> np.ndarray:
         """Metres from each water vertex to the nearest dry cell of the flow field's grid
         (the surf breaks there); far (400) without a field."""
@@ -801,7 +919,11 @@ class SceneBuilder:
     def pose_movers(self, ps: pyrender.Scene, t: float) -> None:
         """Each moving object's pose at time t: an underway boat at speed along its course
         (arc length on the path, the course's heading plus the angle it was placed at),
-        every boat heaving, rolling and pitching on its own period."""
+        every boat heaving, rolling and pitching on its own period. The boats underway
+        also set the wake uniforms (water.glsl): where each is and which way it heads."""
+        boat_a = np.zeros((4, 4), dtype=np.float32)
+        boat_b = np.zeros((4, 4), dtype=np.float32)
+        n_wakes = 0
         for node, pos, rot, scl, m in self.mover_nodes:
             x, y, z = pos
             yaw = rot[1]
@@ -815,6 +937,12 @@ class SceneBuilder:
                 x, z = path[i] + a * (path[i + 1] - path[i])
                 tan = path[i + 1] - path[i]
                 yaw = math.degrees(math.atan2(tan[0], tan[1])) + float(m.get("yawOffsetDeg", 0.0))
+                if n_wakes < 4 and d < float(cum[-1]):
+                    h = tan / max(float(np.linalg.norm(tan)), 1e-9)
+                    # The renderer's frame mirrors x.
+                    boat_a[n_wakes] = (-x, z, -h[0], h[1])
+                    boat_b[n_wakes] = (m.get("_length", 10.0), m.get("_beam", 3.0), float(m.get("speedMs", 2.0)), 1.0)
+                    n_wakes += 1
             b = m.get("bob") or {}
             w = 2.0 * math.pi / max(float(b.get("periodS", 3.0)), 0.5)
             ph = float(b.get("phase", 0.0))
@@ -822,6 +950,7 @@ class SceneBuilder:
             roll = float(b.get("rollDeg", 0.0)) * math.sin(w * t + ph + 1.3)
             pitch = float(b.get("pitchDeg", 0.0)) * math.sin(w * 0.8 * t + ph + 0.4)
             ps.set_pose(node, _MIRROR @ transform((x, y, z), (rot[0] + pitch, yaw, rot[2] + roll), scl) @ _MIRROR)
+        ANIM["boat_a"], ANIM["boat_b"] = boat_a, boat_b
 
     def image_for(self, key: str) -> PILImage.Image | None:
         if key not in self._image_cache:
@@ -838,6 +967,7 @@ class SceneBuilder:
         self.wire_nodes = {}  # node -> line colour, for --wireframe
         self.key_nodes = {}   # node -> (kind, key) of the placed objects, for the fit's object-id pass
         self.movers, self.mover_nodes = [], []
+        self.anim_tags = {}   # node -> "water" | "veg" (the --anim-masks labels; movers from mover_nodes)
         self.terrain_steep = None  # per terrain face: drawn by the wall mesh (see steep_faces)
         stats = {"instances": 0, "lod_mesh": 0, "lod_card": 0, "lod_billboard": 0, "billboards": 0, "env": 0, "skipped": 0}
         instances: dict[tuple, list[np.ndarray]] = {}
@@ -940,6 +1070,8 @@ class SceneBuilder:
                                   float(veg.get("heightM", 0.0)) or max(self._mesh_height(key) * float(np.median([p[1, 1] for p in poses])), 0.3),
                                   float((self.scene.get("motion") or {}).get("wind", {}).get("gustiness", 0.4)))
             node = ps.add(pm)
+            if veg:
+                self.anim_tags[node] = "veg"
             wire_kind = "billboard" if kind == "billboard" else ("card" if "_card" in key else "object")
             self.wire_nodes[node] = WIRE_COLOURS[wire_kind]
             self.key_nodes[node] = (kind, key)
@@ -954,6 +1086,8 @@ class SceneBuilder:
                           pose=_MIRROR @ transform(pos, rot, scl) @ _MIRROR)
             self.wire_nodes[node] = WIRE_COLOURS["object"]
             self.key_nodes[node] = ("mesh", key)
+            ext = np.asarray(tm.extents, dtype=np.float64) * np.abs(np.asarray(scl, dtype=np.float64))
+            motion = dict(motion, _length=float(max(ext[0], ext[2])), _beam=float(min(ext[0], ext[2])))
             self.mover_nodes.append((node, pos, rot, scl, motion))
 
         # Environment meshes.
@@ -1012,24 +1146,29 @@ class SceneBuilder:
                     f = np.asarray(factor, dtype=np.float64).ravel()
                     colour = list(f / 255.0 if f.max() > 1.0 else f)
                     colour[3] = 0.90
-                photo = None if os.environ.get("RENDER_WATER_FLAT") == "1" else self._water_photo(key, tm, colour)
+                photo = None if os.environ.get("RENDER_WATER_FLAT") == "1" else self._water_photo(key, tm, colour, pose if name == "water" else None)
                 if photo is not None:
                     tm, mat = photo
                     flowing = self._water_flow_uv(tm, pose) if getattr(self.args, "animate", 0) and name == "water" else None
+                    if flowing is None and getattr(self.args, "animate", 0) and name == "water":
+                        # Still water (a lake, or no flow field): the wind's ripples alone.
+                        flowing = np.zeros((len(tm.vertices), 2))
                     if flowing is not None:
                         g = to_gl(tm)
                         sea = ((self.scene.get("motion") or {}).get("water") or {}).get("kind") == "sea"
                         mat.emissiveFactor = [1.0, 1.0, 1.0009 if sea else 1.0004]
                         shore = self._shore_distance(tm, pose)
+                        cur = self._water_current(tm, pose)
                         node = ps.add(pyrender.Mesh(primitives=[pyrender.Primitive(
                             positions=np.asarray(g.vertices, dtype=np.float32),
                             normals=np.asarray(g.vertex_normals, dtype=np.float32),
                             texcoord_0=np.asarray(tm.visual.uv, dtype=np.float32),
                             texcoord_1=flowing.astype(np.float32),
-                            color_0=np.stack([shore / 400.0, np.zeros_like(shore), np.zeros_like(shore), np.ones_like(shore)], axis=-1).astype(np.float32),
+                            color_0=np.stack([shore / 400.0, -cur[:, 0] / 4.0 + 0.5, cur[:, 1] / 4.0 + 0.5, np.ones_like(shore)], axis=-1).astype(np.float32),
                             indices=np.asarray(g.faces, dtype=np.uint32), material=mat)]),
                             pose=_MIRROR @ pose @ _MIRROR)
                         self.wire_nodes[node] = WIRE_COLOURS["water"]
+                        self.anim_tags[node] = "water"
                         stats["env"] += 1
                         continue
                 else:
@@ -1041,6 +1180,8 @@ class SceneBuilder:
             else:
                 mat = material_for(tm)
             node = ps.add(pyrender.Mesh.from_trimesh(to_gl(tm), material=mat, poses=np.array([_MIRROR @ pose @ _MIRROR]), smooth=False))
+            if name in ("water", "water_apron"):
+                self.anim_tags[node] = "water"
             wire_kind = ("terrain" if name == "terrain" else "water" if name in ("water", "water_apron")
                          else "backdrop" if name in ("treeline", "backdrop") else "formation")
             self.wire_nodes[node] = WIRE_COLOURS[wire_kind]
@@ -1074,16 +1215,28 @@ class SceneBuilder:
             grass = self._grass_field_mesh()
             if grass is not None:
                 g = to_gl(grass)
+                blade = grass.metadata["blade"]
+                gveg = ((self.scene.get("motion") or {}).get("vegetation") or {}).get("grass_field") if getattr(self.args, "animate", 0) else None
                 gm = pyrender.Mesh(primitives=[pyrender.Primitive(
                     positions=np.asarray(g.vertices, dtype=np.float32),
                     normals=np.asarray(g.vertex_normals, dtype=np.float32),
                     color_0=grass.metadata["colour"],
+                    # For the sway: the blade's root (the renderer's frame mirrors x) and heights.
+                    texcoord_0=np.stack([-blade[:, 0], blade[:, 1]], axis=-1) if gveg else None,
+                    texcoord_1=blade[:, 2:4] if gveg else None,
                     indices=np.asarray(g.faces, dtype=np.uint32),
                     material=pyrender.MetallicRoughnessMaterial(
                         baseColorFactor=[1.0, 1.0, 1.0, 1.0], metallicFactor=0.0, roughnessFactor=0.9, doubleSided=True),
                 )])
                 gm.no_shadow = True
-                ps.add(gm, pose=_MIRROR @ terrain_pose @ _MIRROR)
+                if gveg:
+                    gp = gm.primitives[0]
+                    gp._sway = (math.radians(float(gveg.get("amplitudeDeg", 12.0))), float(gveg.get("frequencyHz", 1.4)), 0.3,
+                                float((self.scene.get("motion") or {}).get("wind", {}).get("gustiness", 0.4)))
+                    gp._sway_mode = 2.0
+                gnode = ps.add(gm, pose=_MIRROR @ terrain_pose @ _MIRROR)
+                if gveg:
+                    self.anim_tags[gnode] = "veg"
                 stats["grass_tufts"] = int(grass.metadata["tufts"])
         self._add_sun(ps)
         return ps, stats
@@ -1132,7 +1285,7 @@ class SceneBuilder:
         y = hm[hr, hc]
         heights = float(field["maxHeightMeters"]) * d[pr, pc, 1] * (0.8 + 0.4 * rng.random(len(x)))
         blades = int(field.get("bladesPerTuft", 7)); width = float(field.get("bladeWidthMeters", 0.012))
-        V, F, C = [], [], []
+        V, F, C, R = [], [], [], []      # R: each vertex's blade root (x, z), height above it, blade height
         seg = 4
         for k in range(len(x)):
             h = max(float(heights[k]), 0.04)
@@ -1149,6 +1302,7 @@ class SceneBuilder:
                     ctr = root + np.array([0.0, t * bh, 0.0]) + face * lean * t * t
                     hw = 0.5 * w * (1 - 0.85 * t)
                     V.append(ctr - side * hw); V.append(ctr + side * hw)
+                    R.append((root[0], root[2], t * bh, bh)); R.append((root[0], root[2], t * bh, bh))
                     col_t = np.clip(base_col * (0.6 + 0.7 * t), 0, 1)  # GrassBlades.shader root 0.6, tip 1.3
                     C.append(col_t); C.append(col_t)
                 for sgi in range(seg):
@@ -1161,6 +1315,7 @@ class SceneBuilder:
         tm.vertex_normals = up
         col4 = np.concatenate([np.asarray(C, dtype=np.float32) ** 2.2, np.ones((len(C), 1), np.float32)], axis=1)
         tm.metadata["colour"] = col4
+        tm.metadata["blade"] = np.asarray(R, dtype=np.float32)
         tm.metadata["tufts"] = len(x)
         self.log(f"  grass: {len(x)} tufts from the grass field")
         self._grass_cache = tm
@@ -1491,6 +1646,33 @@ def render_sky(sky_img: PILImage.Image, yaw_deg: float, Rv: np.ndarray, width: i
     return out.clip(0, 255).astype(np.uint8)
 
 
+def expected_water_velocity(builder, depth: np.ndarray, water: np.ndarray, Rv: np.ndarray, pos: np.ndarray,
+                            fx: float, fy: float, cx: float, cy: float) -> np.ndarray:
+    """--anim-masks: the screen velocity (px/s, [H, W, 2]) the water's flow field gives each
+    water pixel: the pixel's world point (from the depth) moved one second along the field,
+    projected back. Zero off the water or without a field."""
+    H, W = depth.shape
+    out = np.zeros((H, W, 2), dtype=np.float32)
+    ff = getattr(builder, "_flow_field", None)
+    if ff is None or not water.any():
+        return out
+    i, j = np.nonzero(water)
+    z = depth[i, j].astype(np.float64)
+    cam = np.stack([(j + 0.5 - cx) / fx * z, -(i + 0.5 - cy) / fy * z, z], axis=-1)   # right, up, forward
+    world = pos[None, :] + cam @ Rv.T                                                   # server frame
+    vel = ff.sample(world[:, 0], world[:, 2])
+    moved = world.copy()
+    moved[:, 0] += vel[:, 0]
+    moved[:, 2] += vel[:, 1]
+    c2 = (moved - pos[None, :]) @ Rv
+    ok = c2[:, 2] > 0.1
+    u2 = np.where(ok, c2[:, 0] / np.maximum(c2[:, 2], 0.1) * fx + cx, j + 0.5)
+    v2 = np.where(ok, -c2[:, 1] / np.maximum(c2[:, 2], 0.1) * fy + cy, i + 0.5)
+    out[i, j, 0] = u2 - (j + 0.5)
+    out[i, j, 1] = v2 - (i + 0.5)
+    return out
+
+
 # ── main ─────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
@@ -1509,6 +1691,9 @@ def main() -> int:
     ap.add_argument("--animate", type=float, default=0.0,
                     help="render this many seconds of the scene's motion (scene.json 'motion': plants in the wind, "
                          "boats on the water, the water's flow, the sky's drift) from the capture camera -> animate.mp4")
+    ap.add_argument("--anim-masks", action="store_true",
+                    help="--animate: also write anim_masks.npz (per-frame labels: 0 sky, 1 water, 2 vegetation, "
+                         "3 other, 10+k mover k; and the water's expected screen velocity) for scratch/r4/anim/metrics.py")
     ap.add_argument("--resume", action="store_true", help="--orbit: keep the frames already in --out and render the rest")
     ap.add_argument("--flat-terrain", action="store_true", help="debug: terrain as flat grey facets, no texture")
     ap.add_argument("--no-pbr-maps", action="store_true", help="ignore normal/occlusion/metallic-roughness textures on assets")
@@ -1633,6 +1818,13 @@ def main() -> int:
         ps, stats = builder.build(pos, vfov)
         ps.add(pyrender.IntrinsicsCamera(fx=fx, fy=fy, cx=cx, cy=cy, znear=0.05, zfar=zfar), pose=gl_camera_pose(Rv, pos))
         log(f"animate: {frames} frames, {len(builder.mover_nodes)} moving object(s), sky {sky_rate:+.3f} deg/s; {stats}")
+        mask_frames = []
+        if args.anim_masks:
+            seg_map = {n: (3, 0, 0) for n in ps.mesh_nodes}
+            for n, tag in builder.anim_tags.items():
+                seg_map[n] = (1, 0, 0) if tag == "water" else (2, 0, 0)
+            for k, (n, *_rest) in enumerate(builder.mover_nodes):
+                seg_map[n] = (10 + k, 0, 0)
         for i in range(frames):
             tt = i / float(args.fps)
             ANIM["time"] = tt
@@ -1654,12 +1846,22 @@ def main() -> int:
                 bg = render_sky(sky.image, yaw + sky_rate * tt, Rv, width, height, fx, fy, cx, cy).astype(np.float32)
                 colour = np.where(open_sky[..., None], bg, colour + (1.0 - coverage) * bg)
             colour = colour.clip(0, 255).astype(np.uint8)
+            if args.anim_masks:
+                seg, _ = renderer.render(ps, flags=pyrender.RenderFlags.SEG, seg_node_map=seg_map)
+                lab = np.asarray(seg)[..., 0].astype(np.uint8)
+                lab[depth <= 0.0] = 0
+                mask_frames.append(lab)
+                if i == 0:
+                    water_vel = expected_water_velocity(builder, depth, lab == 1, Rv, pos, fx, fy, cx, cy)
             PILImage.fromarray(colour, "RGB").save(out / f"anim_{i:04d}.png")
             if i < 2 or i % 48 == 0:
                 log(f"anim_{i:04d}: t={tt:.2f} s")
         sys.path.insert(0, str(ROOT / "scripts"))
         from frames_to_mp4 import encode as encode_mp4
         mp4 = encode_mp4(sorted(out.glob("anim_*.png")), out / "animate.mp4", args.fps)
+        if args.anim_masks:
+            np.savez_compressed(out / "anim_masks.npz", labels=np.stack(mask_frames), water_vel=water_vel, fps=args.fps,
+                                movers=np.array(len(builder.mover_nodes)))
         log(f"animate: {frames} frames at {args.fps} fps -> {mp4}")
         renderer.delete()
         log(f"done in {time.time() - t0:.1f} s")

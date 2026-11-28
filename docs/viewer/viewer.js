@@ -6,6 +6,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 
 const SCENES = { 'paris': 'Paris', 'shark-fin': 'Shark Fin', 'mount-rainier': 'Mount Rainier' };
+// The animated water's shader, shared with scripts/render-scene.py --animate.
+const WATER_GLSL = fetch(new URL('water.glsl', import.meta.url)).then((r) => (r.ok ? r.text() : null)).catch(() => null);
 const params = new URLSearchParams(location.search);
 const SHOT = params.get('shot') === '1';
 const $ = (id) => document.getElementById(id);
@@ -58,6 +60,11 @@ const U = {
   wind: { value: new THREE.Vector4(0, 1, 2, 25) },       // dir.x, dir.z, speed m/s, gust wavelength m
   flowPeriod: { value: 2.0 },
   surf: { value: new THREE.Vector2(3.0, 10.0) },          // wave speed m/s, period s
+  // Up to four boats' wakes, one per column: (x, z, heading x, heading z), (length, beam, speed, on).
+  boatA: { value: new THREE.Matrix4().set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) },
+  boatB: { value: new THREE.Matrix4().set(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) },
+  sunL: { value: new THREE.Vector3(0, 1, 0) },            // toward the sun
+  sunC: { value: new THREE.Vector3(1, 1, 1) },
 };
 
 let scene, camera, state = null, loadToken = 0;
@@ -144,7 +151,7 @@ async function loadScene(slug) {
     s.add(env.scene);
     if (manifest.water) {
       const water = await loadGLB(base + manifest.water, bump('water'));
-      prepareWater(water.scene, st);
+      prepareWater(water.scene, st, await WATER_GLSL);
       s.add(water.scene);
     }
     const instances = await fetchJSON(base + (manifest.instances || 'instances.json'));
@@ -269,46 +276,37 @@ function prepareEnv(root, st) {
 }
 
 // ── water ───────────────────────────────────────────────────────────────────
-// The photographed water advected along its flow (_FLOW, uv per second), two copies half a
-// period apart cross-faded; at sea, surf bands run to the shore (_SHORE, metres).
-function prepareWater(root, st) {
+// water.glsl over the photographed water: the photograph stays put and a moving surface is
+// laid over it (current-borne ripples, wind waves, the swell and its surf at sea, the boats'
+// wakes); _CURRENT is the current (m/s, x z), _SHORE the distance to dry ground (m).
+function prepareWater(root, st, glsl) {
   root.traverse((o) => {
     if (!o.isMesh) return;
     const geo = o.geometry;
     const kind = roleOf(o).kind || (o.userData && o.userData.kind) || (st.manifest.motion?.water?.kind) || 'river';
-    const flow = geo.attributes._flow;
-    const shore = geo.attributes._shore;
     const m = unlitFrom(o.material, { side: THREE.DoubleSide });
-    if (!flow) { o.material = m; return; }
-    if (!shore) geo.setAttribute('_shore', new THREE.BufferAttribute(new Float32Array(geo.attributes.position.count).fill(400), 1));
+    if (!glsl || !m.map) { o.material = m; return; }
+    const n = geo.attributes.position.count;
+    if (!geo.attributes._shore) geo.setAttribute('_shore', new THREE.BufferAttribute(new Float32Array(n).fill(400), 1));
+    if (!geo.attributes._current) geo.setAttribute('_current', new THREE.BufferAttribute(new Float32Array(2 * n), 2));
     m.onBeforeCompile = (sh) => {
-      sh.uniforms.animTime = U.animTime; sh.uniforms.flowPeriod = U.flowPeriod; sh.uniforms.surf = U.surf;
+      for (const k of ['animTime', 'wind', 'surf', 'boatA', 'boatB', 'sunL', 'sunC']) sh.uniforms[k] = U[k];
       sh.uniforms.isSea = { value: kind === 'sea' ? 1 : 0 };
       sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nattribute vec2 _flow; attribute float _shore; varying vec2 vFlow; varying float vShore;')
-        .replace('#include <uv_vertex>', '#include <uv_vertex>\nvFlow = _flow; vShore = _shore;');
+        .replace('#include <common>', '#include <common>\nattribute vec2 _current; attribute float _shore; varying vec2 vCurrent; varying float vShore; varying vec3 vWPos;')
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvCurrent = _current; vShore = _shore; vWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
       sh.fragmentShader = sh.fragmentShader
-        .replace('#include <common>', '#include <common>\nuniform float animTime; uniform float flowPeriod; uniform vec2 surf; uniform float isSea; varying vec2 vFlow; varying float vShore;')
+        .replace('#include <common>', '#include <common>\nuniform float animTime; uniform vec4 wind; uniform vec2 surf; uniform mat4 boatA; uniform mat4 boatB;\n'
+                 + 'uniform vec3 sunL; uniform vec3 sunC; uniform float isSea; varying vec2 vCurrent; varying float vShore; varying vec3 vWPos;')
+        .replace('#include <map_pars_fragment>', '#include <map_pars_fragment>\n'
+                 + 'vec3 water_tex(vec2 uv, float bias) { return texture(map, uv, bias).rgb; }\n' + glsl)
         .replace('#include <map_fragment>', `
           #ifdef USE_MAP
-            float p0 = fract(animTime / flowPeriod);
-            float p1 = fract(animTime / flowPeriod + 0.5);
-            vec4 wa = texture2D(map, vMapUv - vFlow * (p0 - 0.5) * flowPeriod);
-            vec4 wb = texture2D(map, vMapUv - vFlow * (p1 - 0.5) * flowPeriod);
-            vec4 sampledDiffuseColor = mix(wb, wa, 1.0 - abs(2.0 * p0 - 1.0));
-            if (isSea > 0.5) {
-              float wavelength = max(surf.x * surf.y, 1.0);
-              float ph = 6.2831853 * (vShore / wavelength + animTime / max(surf.y, 0.5));
-              float crest = pow(0.5 + 0.5 * sin(ph), 8.0);
-              float zone = smoothstep(70.0, 4.0, vShore);
-              float swash = smoothstep(6.0, 0.0, vShore) * (0.5 + 0.5 * sin(ph - 1.2));
-              vec3 lit = sampledDiffuseColor.rgb;
-              sampledDiffuseColor.rgb = mix(lit, vec3(0.85, 0.87, 0.9) * max(dot(lit, vec3(0.33)) * 2.2, 0.35),
-                                            clamp(crest * zone * 0.75 + swash * 0.35, 0.0, 0.85));
-            }
-            diffuseColor *= sampledDiffuseColor;
+            diffuseColor.rgb *= water_colour(vMapUv, vWPos, cameraPosition, vCurrent, vShore, isSea, animTime,
+                                             wind, surf, boatA, boatB, normalize(sunL), sunC);
           #endif`);
     };
+    m.customProgramCacheKey = () => `water-${kind}`;
     o.material = m;
   });
 }
@@ -360,6 +358,10 @@ function swayMaterial(m, sway) {
           float osc = sin(6.2831853 * sway.y * animTime + ph);
           float bend = sway.x * gust * (0.45 + 0.55 * osc);
           vec2 off = wind.xy * bend * f * f * tall;
+          // Leaves flutter across the wind on their own phases (as render-scene.py).
+          float lp = fract(sin(dot(position.xz + position.yy, vec2(41.3, 289.1))) * 9871.0) * 6.2831853;
+          float fl = sin(6.2831853 * sway.y * 3.1 * animTime + lp) * (0.6 + 0.4 * sin(6.2831853 * sway.y * 0.7 * animTime + lp * 1.7));
+          off += vec2(-wind.y, wind.x) * sway.x * 0.22 * fl * gust * f * f * tall;
           swWorld.xz += off;
           swWorld.y -= 0.5 * dot(off, off) / max(h, 0.1);
         }
@@ -439,12 +441,19 @@ function placeMovers(s, models, movers, st) {
 }
 
 function poseMovers(t) {
+  const A = U.boatA.value.elements, B = U.boatB.value.elements;
+  A.fill(0); B.fill(0);
+  let wakes = 0;
   for (const mv of state.movers) {
     const { motion, base, holder } = mv;
     let x = base.pos.x, z = base.pos.z, yaw = base.rot[1];
     if (mv.path) {
+      // The course is sailed once, then again after a pause (the boat out of sight).
       const L = mv.cum[mv.cum.length - 1];
-      const d = Math.min((motion.speedMs || 2) * t, L);
+      const sp = motion.speedMs || 2;
+      const lap = L / sp + 20;
+      const d = Math.min(sp * (t % lap), L);
+      holder.visible = d < L;
       let i = 0;
       while (i < mv.cum.length - 2 && mv.cum[i + 1] < d) i++;
       const seg = Math.max(mv.cum[i + 1] - mv.cum[i], 1e-6);
@@ -453,6 +462,13 @@ function poseMovers(t) {
       x = a.x + f * (c.x - a.x);
       z = a.y + f * (c.y - a.y);
       yaw = Math.atan2(c.x - a.x, c.y - a.y) + THREE.MathUtils.degToRad(motion.yawOffsetDeg || 0);
+      if (holder.visible && wakes < 4) {
+        const hl = Math.hypot(c.x - a.x, c.y - a.y) || 1;
+        const k = 4 * wakes;      // Matrix4.elements is a plain array, column-major
+        A[k] = x; A[k + 1] = z; A[k + 2] = (c.x - a.x) / hl; A[k + 3] = (c.y - a.y) / hl;
+        B[k] = motion.lengthM || 10; B[k + 1] = motion.beamM || 3; B[k + 2] = sp; B[k + 3] = 1;
+        wakes++;
+      }
     }
     const bob = motion.bob || {};
     const w = 2 * Math.PI / Math.max(bob.periodS || 3, 0.5);
@@ -490,6 +506,9 @@ function setupMotion(motion) {
   U.wind.value.set(dir.x, dir.y, Math.max(w.speedMs || 2, 0.5), 25);
   const wa = motion.water || {};
   U.flowPeriod.value = wa.flowPeriodS || 2.0;
+  const L = state?.manifest?.light || {};
+  U.sunL.value.fromArray(L.sunDir || [0.4, 0.8, 0.3]).normalize();
+  U.sunC.value.fromArray(L.sunColor || [1, 0.97, 0.92]);
   U.surf.value.set(wa.waveSpeedMs || 3.0, wa.swellPeriodS || 10.0);
 }
 

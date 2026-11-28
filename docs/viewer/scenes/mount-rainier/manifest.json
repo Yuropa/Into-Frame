@@ -3,8 +3,8 @@
  "name": "Mount Rainier",
  "slug": "mount-rainier",
  "run": "0bc34849-eb4d-e372-bc30-97d7d11064f0",
- "round": "r3",
- "built": "2026-11-28T03:04:01+00:00",
+ "round": "r4",
+ "built": "2026-11-28T03:54:35+00:00",
  "camera": {
   "position": [
    0.003,
@@ -29,35 +29,35 @@
  "sky": {
   "image": "sky.jpg",
   "yawDeg": -0.08133374032558675,
-  "driftDegS": 0.0
+  "driftDegS": 0.03
  },
  "env": "env.glb",
  "water": null,
  "models": {
+  "category_mesh_flower_0_card": "models/category_mesh_flower_0_card.glb",
+  "category_mesh_flower_4_v1": "models/category_mesh_flower_4_v1.glb",
+  "category_mesh_flower_6": "models/category_mesh_flower_6.glb",
+  "category_mesh_flower_0_v1": "models/category_mesh_flower_0_v1.glb",
+  "category_mesh_flower_1": "models/category_mesh_flower_1.glb",
   "category_mesh_flower_4_v2": "models/category_mesh_flower_4_v2.glb",
-  "category_mesh_flower_4": "models/category_mesh_flower_4.glb",
-  "category_mesh_flower_1_v2": "models/category_mesh_flower_1_v2.glb",
   "category_mesh_tree_2_v1": "models/category_mesh_tree_2_v1.glb",
-  "category_mesh_flower_3_v2": "models/category_mesh_flower_3_v2.glb",
+  "category_mesh_flower_1_v1": "models/category_mesh_flower_1_v1.glb",
+  "category_mesh_flower_6_v2": "models/category_mesh_flower_6_v2.glb",
+  "category_mesh_flower_1_v2": "models/category_mesh_flower_1_v2.glb",
+  "category_mesh_flower_4": "models/category_mesh_flower_4.glb",
+  "category_mesh_flower_0_v2": "models/category_mesh_flower_0_v2.glb",
+  "category_mesh_flower_6_v1": "models/category_mesh_flower_6_v1.glb",
+  "category_mesh_tree_1": "models/category_mesh_tree_1.glb",
+  "category_mesh_flower_0": "models/category_mesh_flower_0.glb",
   "category_mesh_flower_3": "models/category_mesh_flower_3.glb",
   "category_mesh_tree_0": "models/category_mesh_tree_0.glb",
-  "category_mesh_flower_5": "models/category_mesh_flower_5.glb",
-  "category_mesh_flower_6": "models/category_mesh_flower_6.glb",
-  "category_mesh_flower_0_v2": "models/category_mesh_flower_0_v2.glb",
-  "category_mesh_flower_3_v1": "models/category_mesh_flower_3_v1.glb",
-  "category_mesh_flower_6_v2": "models/category_mesh_flower_6_v2.glb",
-  "category_mesh_flower_0": "models/category_mesh_flower_0.glb",
-  "category_mesh_flower_1": "models/category_mesh_flower_1.glb",
-  "category_mesh_tree_1": "models/category_mesh_tree_1.glb",
   "category_mesh_tree_0_v1": "models/category_mesh_tree_0_v1.glb",
-  "category_mesh_flower_4_v1": "models/category_mesh_flower_4_v1.glb",
-  "category_mesh_flower_0_v1": "models/category_mesh_flower_0_v1.glb",
-  "category_mesh_flower_6_v1": "models/category_mesh_flower_6_v1.glb",
-  "category_mesh_flower_5_v2": "models/category_mesh_flower_5_v2.glb",
+  "category_mesh_tree_2": "models/category_mesh_tree_2.glb",
+  "category_mesh_flower_5": "models/category_mesh_flower_5.glb",
+  "category_mesh_flower_3_v2": "models/category_mesh_flower_3_v2.glb",
+  "category_mesh_flower_3_v1": "models/category_mesh_flower_3_v1.glb",
   "category_mesh_flower_5_v1": "models/category_mesh_flower_5_v1.glb",
-  "category_mesh_flower_0_card": "models/category_mesh_flower_0_card.glb",
-  "category_mesh_flower_1_v1": "models/category_mesh_flower_1_v1.glb",
-  "category_mesh_tree_2": "models/category_mesh_tree_2.glb"
+  "category_mesh_flower_5_v2": "models/category_mesh_flower_5_v2.glb"
  },
  "instances": "instances.json",
  "motion": {
@@ -72,49 +72,54 @@
   "water": null,
   "vegetation": {
    "category_mesh_flower_3": {
-    "amplitudeRad": 0.12217,
+    "amplitudeRad": 0.10385,
     "frequencyHz": 1.0,
     "heightM": 0.65
    },
    "category_mesh_flower_0": {
-    "amplitudeRad": 0.15708,
+    "amplitudeRad": 0.13352,
     "frequencyHz": 1.3,
     "heightM": 0.35
    },
    "category_mesh_flower_4": {
-    "amplitudeRad": 0.12217,
+    "amplitudeRad": 0.10385,
     "frequencyHz": 1.0,
     "heightM": 0.52
    },
    "category_mesh_tree_2": {
-    "amplitudeRad": 0.01745,
+    "amplitudeRad": 0.01484,
     "frequencyHz": 0.3,
     "heightM": 9.0
    },
    "category_mesh_tree_0": {
-    "amplitudeRad": 0.01745,
+    "amplitudeRad": 0.01484,
     "frequencyHz": 0.3,
     "heightM": 9.38
    },
    "category_mesh_tree_1": {
-    "amplitudeRad": 0.02094,
+    "amplitudeRad": 0.0178,
     "frequencyHz": 0.3,
     "heightM": 9.0
    },
    "category_mesh_flower_1": {
-    "amplitudeRad": 0.13963,
+    "amplitudeRad": 0.11868,
     "frequencyHz": 1.2,
     "heightM": 0.4
    },
    "category_mesh_flower_6": {
-    "amplitudeRad": 0.13963,
+    "amplitudeRad": 0.11868,
     "frequencyHz": 1.2,
     "heightM": 0.39
    },
    "category_mesh_flower_5": {
-    "amplitudeRad": 0.12217,
+    "amplitudeRad": 0.10385,
     "frequencyHz": 1.1,
     "heightM": 0.46
+   },
+   "grass_field": {
+    "amplitudeRad": 0.17802,
+    "frequencyHz": 1.4,
+    "heightM": 0.0
    }
   }
  },
@@ -137,5 +142,5 @@
   ],
   "exposure": 1.0
  },
- "bytes": 28764283
+ "bytes": 28764299
 }
